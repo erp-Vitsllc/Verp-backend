@@ -608,13 +608,11 @@ export async function completeTireChangeService(asset, serviceId, serviceUpdates
     const { wf, bindActive } = getWorkflowContextForService(asset, serviceId);
     if (!wf || !isTireChangeWorkflow(wf, service)) throw new Error('Not a tire change workflow.');
     const stage = String(wf.stage || '').toLowerCase();
-    const { SHOP_SERVICE_SCHEDULED_STAGE, isShopServiceLive } = await import('./vehicleShopServiceScheduled.js');
-    const mayComplete =
-        stage === TIRE_CHANGE_STAGE.ADMIN_RETURN ||
-        stage === 'pending_admin' ||
-        (stage === SHOP_SERVICE_SCHEDULED_STAGE && isShopServiceLive(asset, service));
-    if (!mayComplete) {
-        throw new Error('Return details can only be completed at the final admin step.');
+    const { shopServiceCompleteAllowed } = await import('./vehicleShopServiceScheduled.js');
+    if (!shopServiceCompleteAllowed(asset, service, wf)) {
+        throw new Error(
+            'Complete Service unlocks after Schedule is submitted and Accounts Approve (when required).',
+        );
     }
 
     const allowed = await actorMayManageTireChangeRequest(req.user, asset);
@@ -670,11 +668,11 @@ export async function completeTireChangeService(asset, serviceId, serviceUpdates
         linkPath,
         dashboardMeta,
         appendActivity: appendTireChangeActivity,
+        reqUser: req.user,
     });
 
-    // Vehicle Damage fines are created after Zoho bill success (Make Payment), not on Complete.
-
-    // Admin Officer create-track stays open until Zoho / Billed (Make Payment).
+    // Vehicle Damage fines are created on Complete Service (before Accounts / Zoho).
+    // Admin Officer inbox clears on Complete — Make Payment / Zoho is Accounts-only.
 
     return asset;
 }

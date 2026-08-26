@@ -1,7 +1,13 @@
 import express from 'express';
 import { protect } from '../middleware/authMiddleware.js';
 import { checkPermission } from '../middleware/permissionMiddleware.js';
-import { getEmployeeLeaveDirectory } from '../controllers/leaveController.js';
+import { getEmployeeLeaveDirectory, getLeaveCalendar } from '../controllers/leaveController.js';
+import {
+    applyLeaveRange,
+    decideLeavePendingRequest,
+    getLeavePendingRequests,
+    getLeaveTeamTrack,
+} from '../controllers/leave/leaveDashboardData.js';
 import {
     getEmployeeAttendanceProfile,
     getEmployeeAttendanceProfileAccess,
@@ -15,6 +21,31 @@ router.get(
     '/employees',
     checkPermission('hrm_leave', 'view'),
     getEmployeeLeaveDirectory,
+);
+router.get(
+    '/calendar',
+    checkPermission('hrm_leave', 'view'),
+    getLeaveCalendar,
+);
+router.get(
+    '/pending-requests',
+    checkPermission('hrm_leave', 'view'),
+    getLeavePendingRequests,
+);
+router.post(
+    '/pending-requests/decide',
+    checkPermission('hrm_leave', 'view'),
+    decideLeavePendingRequest,
+);
+router.post(
+    '/apply',
+    checkPermission('hrm_leave', 'view'),
+    applyLeaveRange,
+);
+router.get(
+    '/team-track',
+    checkPermission('hrm_leave', 'view'),
+    getLeaveTeamTrack,
 );
 router.get('/employees/:id/attendance-profile/access', getEmployeeAttendanceProfileAccess);
 router.get('/employees/:id/attendance-profile', getEmployeeAttendanceProfile);

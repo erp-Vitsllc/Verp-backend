@@ -164,7 +164,26 @@ router.get("/request-loan", (req, res) => {
 
 import { getDashboardStats } from "../controllers/stats/getDashboardStats.js";
 import { getPayrollDashboard } from "../controllers/employee/getPayrollDashboard.js";
-import { getPayrollSettings, savePayrollSettings } from "../controllers/employee/payrollSettingsController.js";
+import { getSalaryRegister, deleteSalaryRegisterMonth, restoreSalaryRegisterMonths, sendPayrollBlockerReminders, createSalaryMonthPayment } from "../controllers/employee/getSalaryRegister.js";
+import { getPayrollSettings, savePayrollSettings, getGroupPayrollSettings, saveGroupPayrollSettings } from "../controllers/employee/payrollSettingsController.js";
+import {
+    getSalaryEnrollOptions,
+    createSalaryEnrollment,
+    getSalaryEnrollmentPolicy,
+    updateSalaryEnrollmentPolicy,
+} from "../controllers/employee/salaryEnrollmentController.js";
+import {
+    getSalaryHistoricalProfile,
+    saveSalaryHistoricalProfile,
+    createSalaryHistoricalProfile,
+    approveSalaryHistoricalProfile,
+    rejectSalaryHistoricalProfile,
+    verifySalaryHistoricalProfile,
+    returnSalaryHistoricalProfile,
+    reopenSalaryHistoricalProfile,
+    getSalaryHistoricalAudit,
+} from "../controllers/employee/salaryHistoricalProfileController.js";
+import { getPendingSalaryDashboardInbox } from "../controllers/employee/getPendingSalaryDashboardInbox.js";
 import { getUserActivityStats } from "../controllers/stats/getUserActivityStats.js";
 import { deleteDashboardAction } from "../controllers/stats/deleteDashboardAction.js";
 import { deleteProfileActivationDashboardByRequest } from "../controllers/stats/deleteProfileActivationDashboardByRequest.js";
@@ -203,6 +222,182 @@ router.get(
     getPayrollDashboard,
 );
 router.get(
+    "/salary-register",
+    checkAnyModulePermission([
+        ['hrm_salary', 'view'],
+        ['hrm_employees_view_salary', 'view'],
+    ]),
+    getSalaryRegister,
+);
+router.get(
+    "/salary-register/:monthKey",
+    checkAnyModulePermission([
+        ['hrm_salary', 'view'],
+        ['hrm_employees_view_salary', 'view'],
+    ]),
+    getSalaryRegister,
+);
+router.post(
+    "/salary-register/:monthKey/blockers/remind",
+    checkAnyModulePermission([
+        ['hrm_salary', 'edit'],
+        ['hrm_salary', 'view'],
+        ['hrm_employees_view_salary', 'edit'],
+        ['hrm_employees_view_salary', 'view'],
+    ]),
+    sendPayrollBlockerReminders,
+);
+router.post(
+    "/salary-register/:monthKey/payments",
+    checkAnyModulePermission([
+        ['hrm_salary', 'edit'],
+        ['hrm_salary', 'view'],
+        ['hrm_employees_view_salary', 'edit'],
+        ['hrm_employees_view_salary', 'view'],
+    ]),
+    createSalaryMonthPayment,
+);
+router.delete(
+    "/salary-register/:monthKey",
+    checkAnyModulePermission([
+        ['hrm_salary', 'edit'],
+        ['hrm_salary', 'view'],
+        ['hrm_employees_view_salary', 'edit'],
+        ['hrm_employees_view_salary', 'view'],
+    ]),
+    deleteSalaryRegisterMonth,
+);
+router.post(
+    "/salary-register/restore",
+    checkAnyModulePermission([
+        ['hrm_salary', 'edit'],
+        ['hrm_salary', 'view'],
+        ['hrm_employees_view_salary', 'edit'],
+        ['hrm_employees_view_salary', 'view'],
+    ]),
+    restoreSalaryRegisterMonths,
+);
+router.get(
+    "/salary-enroll/options",
+    checkAnyModulePermission([
+        ['hrm_salary', 'view'],
+        ['hrm_employees_view_salary', 'view'],
+    ]),
+    getSalaryEnrollOptions,
+);
+router.get(
+    "/salary-enroll/pending-inbox",
+    checkAnyModulePermission([
+        ['hrm_salary', 'view'],
+        ['hrm_employees_view_salary', 'view'],
+    ]),
+    getPendingSalaryDashboardInbox,
+);
+router.post(
+    "/salary-enroll",
+    checkAnyModulePermission([
+        ['hrm_salary', 'edit'],
+        ['hrm_salary', 'view'],
+        ['hrm_employees_view_salary', 'edit'],
+        ['hrm_employees_view_salary', 'view'],
+    ]),
+    createSalaryEnrollment,
+);
+router.get(
+    "/salary-enroll/:employeeId/policy",
+    checkAnyModulePermission([
+        ['hrm_salary', 'view'],
+        ['hrm_employees_view_salary', 'view'],
+    ]),
+    getSalaryEnrollmentPolicy,
+);
+router.put(
+    "/salary-enroll/:employeeId/policy",
+    checkAnyModulePermission([
+        ['hrm_salary', 'edit'],
+        ['hrm_salary', 'view'],
+        ['hrm_employees_view_salary', 'edit'],
+        ['hrm_employees_view_salary', 'view'],
+    ]),
+    updateSalaryEnrollmentPolicy,
+);
+router.get(
+    "/salary-enroll/:employeeId/historical",
+    checkAnyModulePermission([
+        ['hrm_salary', 'view'],
+        ['hrm_employees_view_salary', 'view'],
+    ]),
+    getSalaryHistoricalProfile,
+);
+router.get(
+    "/salary-enroll/:employeeId/historical/audit",
+    checkAnyModulePermission([
+        ['hrm_salary', 'view'],
+        ['hrm_employees_view_salary', 'view'],
+    ]),
+    getSalaryHistoricalAudit,
+);
+router.put(
+    "/salary-enroll/:employeeId/historical",
+    checkAnyModulePermission([
+        ['hrm_salary', 'edit'],
+        ['hrm_employees_view_salary', 'edit'],
+    ]),
+    saveSalaryHistoricalProfile,
+);
+router.post(
+    "/salary-enroll/:employeeId/historical/verify",
+    checkAnyModulePermission([
+        ['hrm_salary', 'edit'],
+        ['hrm_employees_view_salary', 'edit'],
+    ]),
+    verifySalaryHistoricalProfile,
+);
+router.post(
+    "/salary-enroll/:employeeId/historical/return",
+    checkAnyModulePermission([
+        ['hrm_salary', 'edit'],
+        ['hrm_employees_view_salary', 'edit'],
+    ]),
+    returnSalaryHistoricalProfile,
+);
+router.post(
+    "/salary-enroll/:employeeId/historical/reopen",
+    checkAnyModulePermission([
+        ['hrm_salary', 'edit'],
+        ['hrm_employees_view_salary', 'edit'],
+    ]),
+    reopenSalaryHistoricalProfile,
+);
+router.post(
+    "/salary-enroll/:employeeId/historical/create",
+    checkAnyModulePermission([
+        ['hrm_salary', 'edit'],
+        ['hrm_employees_view_salary', 'edit'],
+    ]),
+    createSalaryHistoricalProfile,
+);
+router.post(
+    "/salary-enroll/:employeeId/historical/approve",
+    checkAnyModulePermission([
+        ['hrm_salary', 'view'],
+        ['hrm_salary', 'edit'],
+        ['hrm_employees_view_salary', 'view'],
+        ['hrm_employees_view_salary', 'edit'],
+    ]),
+    approveSalaryHistoricalProfile,
+);
+router.post(
+    "/salary-enroll/:employeeId/historical/reject",
+    checkAnyModulePermission([
+        ['hrm_salary', 'view'],
+        ['hrm_salary', 'edit'],
+        ['hrm_employees_view_salary', 'view'],
+        ['hrm_employees_view_salary', 'edit'],
+    ]),
+    rejectSalaryHistoricalProfile,
+);
+router.get(
     "/payroll-settings",
     checkAnyModulePermission([
         ['hrm_salary', 'view'],
@@ -219,6 +414,24 @@ router.put(
         ['hrm_employees_view_salary', 'view'],
     ]),
     savePayrollSettings,
+);
+router.get(
+    "/payroll-settings/group/:locationKey",
+    checkAnyModulePermission([
+        ['hrm_salary', 'view'],
+        ['hrm_employees_view_salary', 'view'],
+    ]),
+    getGroupPayrollSettings,
+);
+router.put(
+    "/payroll-settings/group/:locationKey",
+    checkAnyModulePermission([
+        ['hrm_salary', 'edit'],
+        ['hrm_salary', 'view'],
+        ['hrm_employees_view_salary', 'edit'],
+        ['hrm_employees_view_salary', 'view'],
+    ]),
+    saveGroupPayrollSettings,
 );
 
 // Dashboard Stats - requires view permission (General HR view)

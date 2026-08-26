@@ -256,8 +256,10 @@ export async function closeOilServicePendingDashboardActions(
     const idsToClose = pendingRows
         .filter((row) => {
             const meta = parseOilServiceDashboardMeta(row.extra3);
-            // Admin Officer create-track: close when service work is done (billing is Accounts-only).
-            if (meta?.adminOfficerServiceTrack) return false;
+            if (meta?.adminOfficerServiceTrack) {
+                if (!targetServiceId) return true;
+                return String(meta.serviceRecordId || '') === targetServiceId;
+            }
             if (!targetServiceId) return true;
             if (!meta?.serviceRecordId) return true;
             if (String(meta.serviceRecordId) !== targetServiceId) return false;
@@ -1876,7 +1878,7 @@ export async function submitOilServiceAssignment(asset, serviceId, req) {
     const startLabel = startD.toISOString().slice(0, 10);
 
     // Formal scheduled letter when Admin completes Schedule/Reschedule (cash + warranty).
-    // TO assigned · CC Admin + HR + Accounts + driven-by — not after Accounts approval.
+    // TO only: assigned user (or primary reportee if no user account). No CC.
     await sendVehicleServiceScheduledNotificationEmail({
         asset: populated,
         remark,
@@ -1942,11 +1944,21 @@ function oilServiceEndDateReached(asset, service) {
     return endUtc != null && today != null && today >= endUtc;
 }
 
-/** Complete Service: On Service required (cash also needs schedule once + Accounts quote). */
+/** Complete Service: Schedule submitted once + Accounts (cash). Does not wait for start date. */
 function oilServiceCompleteAllowed(asset, service) {
-    if (!isOilServiceLive(asset, service)) return false;
     const remark = parseOilServiceRemark(service);
     if (String(remark.requestStatus || '').toLowerCase() !== 'submitted') return false;
+    if (!isOilScheduleFieldsComplete(remark)) return false;
+    const scheduleSubmitted =
+        ['submitted', 'resubmitted'].includes(
+            String(remark.scheduleSubmitStatus || '')
+                .trim()
+                .toLowerCase(),
+        ) ||
+        Boolean(String(remark.scheduleSubmittedAt || '').trim()) ||
+        Boolean(String(remark.garageSubmittedByName || '').trim()) ||
+        Boolean(String(remark.oilServiceScheduledAt || '').trim());
+    if (!scheduleSubmitted) return false;
     if (isOilServiceCashPayment(remark) && !String(remark.accountsQuoteApprovedAt || '').trim()) {
         return false;
     }
@@ -1965,7 +1977,7 @@ export async function saveOilServiceDetailsDraft(asset, serviceId, serviceUpdate
     }
     if (!oilServiceCompleteAllowed(asset, service)) {
         throw new Error(
-            'Complete Service unlocks on On Service after Schedule (at least once) and Accounts Approve (cash).',
+            'Complete Service unlocks after Schedule is submitted (at least once) and Accounts Approve (cash).',
         );
     }
 
@@ -2000,7 +2012,7 @@ export async function submitOilServiceDetails(asset, serviceId, serviceUpdates, 
     }
     if (!oilServiceCompleteAllowed(asset, service)) {
         throw new Error(
-            'Complete Service unlocks on On Service after Schedule (at least once) and Accounts Approve (cash).',
+            'Complete Service unlocks after Schedule is submitted (at least once) and Accounts Approve (cash).',
         );
     }
 

@@ -7,7 +7,7 @@ import {
 /**
  * Routes fine-approved notifications to the correct email + PDF pipeline.
  * Loss & Damage asset fines use the Asset Loss Fine Report PDF module.
- * Garage Vehicle Damage fines (auto-approved after Zoho bill) use the confirmed email.
+ * Garage Vehicle Damage fines (auto-approved on service completion) use the confirmed email.
  */
 export async function dispatchFineApprovedNotification(
     fine,

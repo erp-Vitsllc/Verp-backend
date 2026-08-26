@@ -5,9 +5,10 @@ import {
     getActiveEmployeesByStaffType,
     holidayAppliesToList,
     holidayAppliesToStaff,
-    normalizeAppliesToInput,
-    normalizeStaffType,
+    isLegacyCompanyWideAppliesTo,
+    resolveAppliesToInput,
 } from '../utils/workingTimeHelpers.js';
+import { listActiveWorkLocations } from '../utils/workLocationHelpers.js';
 
 function isValidDateKey(value) {
     return typeof value === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(value);
@@ -16,12 +17,25 @@ function isValidDateKey(value) {
 const PROTECT_FROM_HOLIDAY_OVERWRITE = new Set([
     'on_leave',
     'sick_leave',
+    'compoff_leave',
     'authorized_leave',
     'unauthorized_leave',
 ]);
 
+async function expandStaffTypesForHolidayMark(staffTypes) {
+    const types = Array.isArray(staffTypes) && staffTypes.length ? [...staffTypes] : ['office', 'site'];
+    const locations = await listActiveWorkLocations();
+    const customKeys = locations
+        .map((loc) => loc.key)
+        .filter((key) => key !== 'office' && key !== 'site');
+    if (isLegacyCompanyWideAppliesTo(types) && customKeys.length) {
+        return [...new Set([...types, ...customKeys])];
+    }
+    return types;
+}
+
 async function markHolidayAttendance(date, name, staffTypes, markedBy) {
-    const types = Array.isArray(staffTypes) && staffTypes.length ? staffTypes : ['office', 'site'];
+    const types = await expandStaffTypesForHolidayMark(staffTypes);
     let markedCount = 0;
 
     for (const staffType of types) {
@@ -76,7 +90,7 @@ async function markHolidayAttendance(date, name, staffTypes, markedBy) {
 }
 
 async function clearHolidayAttendance(date, staffTypes) {
-    const types = Array.isArray(staffTypes) && staffTypes.length ? staffTypes : ['office', 'site'];
+    const types = await expandStaffTypesForHolidayMark(staffTypes);
     let cleared = 0;
 
     for (const staffType of types) {
@@ -119,9 +133,11 @@ function eachDateKeyInclusive(from, to) {
     return keys;
 }
 
-function scopeLabel(types) {
-    if (!types?.length || types.length === 2) return 'Office and Site';
-    return types[0] === 'site' ? 'Site' : 'Office';
+async function scopeLabel(types) {
+    const locations = await listActiveWorkLocations();
+    const labelByKey = Object.fromEntries(locations.map((loc) => [loc.key, loc.label]));
+    if (!types?.length || types.length >= locations.length) return 'all work locations';
+    return types.map((key) => labelByKey[key] || key).join(' and ');
 }
 
 async function upsertHolidayOnDate({
@@ -142,9 +158,7 @@ async function upsertHolidayOnDate({
         if (!toAdd.length) {
             return { status: 'exists', holiday: existing, markedCount: 0 };
         }
-        const merged = ['office', 'site'].filter(
-            (key) => current.includes(key) || toAdd.includes(key),
-        );
+        const merged = [...new Set([...current, ...toAdd])];
         const holiday = await Holiday.findOneAndUpdate(
             { date },
             { $set: { appliesTo: merged } },
@@ -190,9 +204,8 @@ export async function listHolidays(req, res) {
 
         let holidays = await Holiday.find(filter).sort({ date: 1 }).lean();
         const staffRaw = String(req.query.staffType || '').trim().toLowerCase();
-        if (staffRaw === 'office' || staffRaw === 'site' || staffRaw === 'staff') {
-            const staffType = normalizeStaffType(staffRaw === 'staff' ? 'site' : staffRaw);
-            holidays = holidays.filter((h) => holidayAppliesToStaff(h, staffType));
+        if (staffRaw) {
+            holidays = holidays.filter((h) => holidayAppliesToStaff(h, staffRaw));
         }
 
         const list = holidays.map(serializeHoliday);
@@ -217,7 +230,7 @@ export async function createHoliday(req, res) {
         const toRaw = String(req.body?.toDate || '').trim();
         const toDate = isValidDateKey(toRaw) ? toRaw : fromDate;
         const name = String(req.body?.name || '').trim();
-        const appliesTo = normalizeAppliesToInput(req.body?.appliesTo);
+        const appliesTo = await resolveAppliesToInput(req.body?.appliesTo);
         const sourceRaw = String(req.body?.sourceDate || '').trim();
         const sourceDate = isValidDateKey(sourceRaw) ? sourceRaw : fromDate;
         const note = String(req.body?.note || '').trim();
@@ -265,16 +278,17 @@ export async function createHoliday(req, res) {
             return res.status(400).json({
                 message:
                     dates.length === 1
-                        ? `This holiday date is already added for ${scopeLabel(appliesTo)}.`
-                        : `These dates are already added for ${scopeLabel(appliesTo)}.`,
+                        ? `This holiday date is already added for ${await scopeLabel(appliesTo)}.`
+                        : `These dates are already added for ${await scopeLabel(appliesTo)}.`,
                 holidays: already.map(serializeHoliday),
             });
         }
 
         const dayLabel = dates.length === 1 ? dates[0] : `${fromDate} to ${toDate}`;
         const status = created.length ? 201 : 200;
+        const appliesLabel = await scopeLabel(appliesTo);
         return res.status(status).json({
-            message: `Holiday added for ${scopeLabel(appliesTo)} (${dayLabel}).`,
+            message: `Holiday added for ${appliesLabel} (${dayLabel}).`,
             holiday: serializeHoliday(created[0] || merged[0]),
             holidays: [...created, ...merged].map(serializeHoliday),
             markedCount,
@@ -300,13 +314,22 @@ export async function deleteHoliday(req, res) {
             return res.status(400).json({ message: 'Valid date (yyyy-MM-dd) is required.' });
         }
 
-        const scope = normalizeAppliesToInput(req.query.appliesTo || req.body?.appliesTo);
+        const scope = await resolveAppliesToInput(req.query.appliesTo || req.body?.appliesTo, {
+            emptyMeansAll: false,
+        });
+        if (!scope.length) {
+            return res.status(400).json({ message: 'Work location group is required.' });
+        }
         const existing = await Holiday.findOne({ date }).lean();
         if (!existing) {
             return res.status(404).json({ message: 'Holiday not found.' });
         }
 
-        const current = holidayAppliesToList(existing);
+        const currentRaw = holidayAppliesToList(existing);
+        const locations = await listActiveWorkLocations();
+        const current = isLegacyCompanyWideAppliesTo(currentRaw)
+            ? locations.map((loc) => loc.key)
+            : currentRaw;
         const removing = scope.filter((t) => current.includes(t));
         if (!removing.length) {
             return res.status(400).json({
@@ -336,7 +359,7 @@ export async function deleteHoliday(req, res) {
             console.error('[deleteHoliday] weekly-off restore failed:', syncErr);
         }
 
-        const removedLabel = removing.map((t) => (t === 'site' ? 'Site' : 'Office')).join(' & ');
+        const removedLabel = await scopeLabel(removing);
         return res.status(200).json({
             message: remaining.length
                 ? `Holiday removed from ${removedLabel}.`

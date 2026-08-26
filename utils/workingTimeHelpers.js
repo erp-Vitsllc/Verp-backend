@@ -2,6 +2,11 @@ import WorkingTime from '../models/WorkingTime.js';
 import Attendance from '../models/Attendance.js';
 import EmployeeBasic from '../models/EmployeeBasic.js';
 import Holiday from '../models/Holiday.js';
+import {
+    listActiveWorkLocations,
+    normalizeStaffTypeKey,
+    staffTypeMongoClause,
+} from './workLocationHelpers.js';
 
 export const WEEKDAY_KEYS = [
     'sunday',
@@ -14,42 +19,104 @@ export const WEEKDAY_KEYS = [
 ];
 
 export function normalizeStaffType(value) {
-    return String(value || '').trim().toLowerCase() === 'site' ? 'site' : 'office';
+    return normalizeStaffTypeKey(value);
+}
+
+function extraSchedulesFromDoc(doc) {
+    const raw = doc?.extra;
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return {};
+    return raw;
+}
+
+export function getWeekForStaffType(workingTime, staffType) {
+    const key = normalizeStaffType(staffType);
+    if (key === 'site') {
+        return workingTime?.site && typeof workingTime.site === 'object'
+            ? workingTime.site
+            : defaultWeek();
+    }
+    if (key === 'office') {
+        return workingTime?.office && typeof workingTime.office === 'object'
+            ? workingTime.office
+            : defaultWeek();
+    }
+    const extra = extraSchedulesFromDoc(workingTime);
+    if (extra[key] && typeof extra[key] === 'object') return extra[key];
+    return workingTime?.office && typeof workingTime.office === 'object'
+        ? workingTime.office
+        : defaultWeek();
 }
 
 /** Legacy holidays with no appliesTo count as both Office and Site. */
 export function holidayAppliesToList(holiday) {
     const raw = holiday?.appliesTo;
     if (!Array.isArray(raw) || raw.length === 0) return ['office', 'site'];
-    const set = new Set(
-        raw.map((v) => (String(v).trim().toLowerCase() === 'site' ? 'site' : 'office')),
+    return [...new Set(
+        raw.map((v) => {
+            const key = String(v || '').trim().toLowerCase();
+            if (key === 'staff') return 'site';
+            return key;
+        }).filter(Boolean),
+    )];
+}
+
+/** Office+Site with no custom keys = company-wide holiday from before extra locations. */
+export function isLegacyCompanyWideAppliesTo(list) {
+    const keys = Array.isArray(list) ? list : [];
+    return (
+        keys.includes('office') &&
+        keys.includes('site') &&
+        keys.every((key) => key === 'office' || key === 'site')
     );
-    return ['office', 'site'].filter((key) => set.has(key));
 }
 
 export function holidayAppliesToStaff(holiday, staffType) {
     if (!holiday) return false;
-    return holidayAppliesToList(holiday).includes(normalizeStaffType(staffType));
+    const wanted = normalizeStaffType(staffType);
+    const list = holidayAppliesToList(holiday);
+    if (list.includes(wanted)) return true;
+    return isLegacyCompanyWideAppliesTo(list);
 }
 
-/** Body/query: both | office | site | staff | string[] */
+/** Body/query: both | all | office | site | staff | location-key | string[] */
 export function normalizeAppliesToInput(value) {
     if (Array.isArray(value)) {
-        const set = new Set(
+        const list = [...new Set(
             value.map((v) => {
                 const key = String(v || '').trim().toLowerCase();
-                if (key === 'site' || key === 'staff') return 'site';
-                if (key === 'office') return 'office';
-                return '';
+                if (key === 'staff') return 'site';
+                return key;
             }).filter(Boolean),
-        );
-        const list = ['office', 'site'].filter((key) => set.has(key));
+        )];
         return list.length ? list : ['office', 'site'];
     }
     const key = String(value || '').trim().toLowerCase();
     if (key === 'office') return ['office'];
     if (key === 'site' || key === 'staff') return ['site'];
+    if (key && key !== 'both' && key !== 'all') return [key];
     return ['office', 'site'];
+}
+
+/** Expands both/all to every active work location. */
+export async function resolveAppliesToInput(value, { emptyMeansAll = true } = {}) {
+    const locations = await listActiveWorkLocations();
+    const allKeys = locations.map((row) => row.key);
+    const fallback = allKeys.length ? allKeys : ['office', 'site'];
+    const tokens = Array.isArray(value) ? value : [value];
+    const wantsAll = tokens.some((token) => {
+        const key = String(token || '').trim().toLowerCase();
+        if (!key) return emptyMeansAll;
+        return key === 'both' || key === 'all';
+    });
+    if (wantsAll) return fallback;
+    const list = [...new Set(
+        tokens.map((token) => {
+            const key = String(token || '').trim().toLowerCase();
+            if (key === 'staff') return 'site';
+            return key;
+        }).filter(Boolean),
+    )];
+    return list.length ? list : fallback;
 }
 
 export function weekdayKeyFromDateKey(dateKey) {
@@ -144,6 +211,7 @@ export function getScheduledPunchMinutes(week, dateKey) {
 const PUNCH_RULE_SKIP_KEYS = new Set([
     'on_leave',
     'sick_leave',
+    'compoff_leave',
     'authorized_leave',
     'unauthorized_leave',
     'holiday',
@@ -260,22 +328,16 @@ export async function loadWorkingTimeDoc() {
     return {
         site: doc.site && typeof doc.site === 'object' ? doc.site : defaultWeek(),
         office: doc.office && typeof doc.office === 'object' ? doc.office : defaultWeek(),
+        extra: extraSchedulesFromDoc(doc),
     };
 }
 
 export async function getActiveEmployeesByStaffType(staffType) {
     const wanted = normalizeStaffType(staffType);
-    const filter = { profileStatus: 'active' };
-    if (wanted === 'site') {
-        filter.staffType = 'site';
-    } else {
-        filter.$or = [
-            { staffType: 'office' },
-            { staffType: { $exists: false } },
-            { staffType: null },
-            { staffType: '' },
-        ];
-    }
+    const filter = {
+        profileStatus: 'active',
+        ...staffTypeMongoClause(wanted),
+    };
     return EmployeeBasic.find(filter)
         .select('_id employeeId firstName lastName staffType')
         .lean();
@@ -306,7 +368,7 @@ export async function syncWeeklyOffAttendanceMarks({
 } = {}) {
     const workingTime =
         siteWeek && officeWeek
-            ? { site: siteWeek, office: officeWeek }
+            ? { site: siteWeek, office: officeWeek, extra: options.extra || {} }
             : await loadWorkingTimeDoc();
 
     const fromKey = String(from || '').trim();
@@ -328,15 +390,17 @@ export async function syncWeeklyOffAttendanceMarks({
                 .map((h) => h.date),
         );
 
-    const [siteEmployees, officeEmployees] = await Promise.all([
-        getActiveEmployeesByStaffType('site'),
-        getActiveEmployeesByStaffType('office'),
-    ]);
-
-    const groups = [
-        { staffType: 'site', week: workingTime.site, employees: siteEmployees },
-        { staffType: 'office', week: workingTime.office, employees: officeEmployees },
-    ];
+    const locations = await listActiveWorkLocations();
+    const groups = [];
+    for (const loc of locations) {
+        const employees = await getActiveEmployeesByStaffType(loc.key);
+        groups.push({
+            staffType: loc.key,
+            label: loc.label,
+            week: getWeekForStaffType(workingTime, loc.key),
+            employees,
+        });
+    }
 
     const dateKeys = eachDateKey(fromKey, toKey);
     let upserted = 0;
@@ -389,7 +453,7 @@ export async function syncWeeklyOffAttendanceMarks({
                                     employeeName,
                                     statusKey: 'weekly_off',
                                     statusLabel: 'Off Day',
-                                    reason: `Weekly off — ${group.staffType === 'site' ? 'Site' : 'Office'} schedule`,
+                                    reason: `Weekly off — ${group.label || group.staffType} schedule`,
                                     timeIn: '',
                                     timeOut: '',
                                     attachmentName: '',
@@ -442,6 +506,7 @@ export async function syncWeeklyOffFromToday(options = {}) {
         to,
         siteWeek: options.siteWeek,
         officeWeek: options.officeWeek,
+        extra: options.extra,
         updatedBy: options.updatedBy || null,
     });
 }

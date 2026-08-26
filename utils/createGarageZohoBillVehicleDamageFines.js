@@ -1,14 +1,16 @@
 /**
- * After garage Zoho bill(s) succeed (Tire / Mechanical / Body / Accident),
- * create Vehicle Damage fine(s) from each bill's billingPayables.
+ * Vehicle Damage fines for shop services (Tire / Mechanical / Body / Accident).
+ *
+ * Fines are created when Complete Service marks the visit complete — not after Zoho bill.
+ * Payables come from HR pay split (employeeLiabilityRows) or saved billingPayables.
  *
  * - 1 payable party → individual fine
  * - 2+ payable parties → group fine (shared base id with -A/-B…)
- * - Accident multi-bill → one fine (group or individual) per successful Zoho bill
  * - Defaults: payableDuration = 1, monthStart = current YYYY-MM
  * - Workflow: HR/Accounts/Management auto-approved (tracker fully checked)
- * - Company party → fineStatus Paid (settled with Zoho bill)
  * - Employee party → fineStatus Approved, paidAmount 0 (still owes on profile)
+ * - Company-only payable → no fine created
+ * - Split or employee-only → fine created for employee share only
  */
 
 import EmployeeBasic from '../models/EmployeeBasic.js';
@@ -85,9 +87,9 @@ async function resolveAutoApprovedWorkflow(hrHOD) {
     return {
         submittedTo: hrUser?._id || null,
         workflow: [
-            step('HR', hrUser?._id, 'Auto-approved after Zoho bill billed'),
-            step('Accounts', accountsUser?._id, 'Auto-approved after Zoho bill billed'),
-            step('Management', hrUser?._id || accountsUser?._id, 'Auto-approved after Zoho bill billed'),
+            step('HR', hrUser?._id, 'Auto-approved after service completion'),
+            step('Accounts', accountsUser?._id, 'Auto-approved after service completion'),
+            step('Management', hrUser?._id || accountsUser?._id, 'Auto-approved after service completion'),
         ],
     };
 }
@@ -123,6 +125,139 @@ export function resolveFinePartiesFromBillingPayables(lines = []) {
         });
     }
     return parties;
+}
+
+function resolveServicePaymentByMode(remark = {}) {
+    const raw = String(remark.paymentByMode || remark.liableOn || '').toLowerCase().trim();
+    if (raw === 'person' || raw === 'employee') return 'person';
+    if (raw === 'split' || raw === 'both') return 'split';
+    if (raw === 'company') return 'company';
+
+    const companyPay = money(remark.hrReviewCompanyPay ?? remark.companyPayAmount);
+    const employeePay = money(remark.hrReviewEmployeePay ?? remark.employeePayAmount);
+    const empRows = Array.isArray(remark.employeeLiabilityRows) ? remark.employeeLiabilityRows : [];
+    const hasEmployeeRows = empRows.some((row) => money(row?.paidAmount) > 0);
+
+    if (hasEmployeeRows || employeePay > 0) {
+        return companyPay > 0 ? 'split' : 'person';
+    }
+    return 'company';
+}
+
+/**
+ * Fine-eligible parties: employee share only when payable by Employee or Both (split).
+ * Company-only liability never creates a fine.
+ */
+export function resolveEmployeeFinePartiesForService(remark = {}, service = {}) {
+    const mode = resolveServicePaymentByMode(remark);
+    if (mode === 'company') return [];
+
+    const payables = resolveServiceCompletionBillingPayables(remark, service);
+    const employeePayables = payables.filter((row) => !isCompanyPayableLine(row));
+    return resolveFinePartiesFromBillingPayables(employeePayables);
+}
+
+function resolveServiceCompletionBillingPayables(remark = {}, service = {}) {
+    const mode = resolveServicePaymentByMode(remark);
+    if (mode === 'company') return [];
+
+    const existingLines = Array.isArray(remark.billingPayables) ? remark.billingPayables : [];
+    if (existingLines.some((row) => money(row?.amount) > 0)) {
+        return existingLines.filter((row) => money(row?.amount) > 0);
+    }
+
+    const lines = [];
+    const companyPay = money(remark.hrReviewCompanyPay ?? remark.companyPayAmount);
+    const includeCompany = companyPay > 0 && mode === 'split';
+
+    if (includeCompany) {
+        const label =
+            String(remark.companyPayPartyName || remark.companyName || 'Company').trim() || 'Company';
+        lines.push({
+            partyType: 'company',
+            partyName: label,
+            description: label,
+            amount: companyPay,
+        });
+    }
+
+    const empSource =
+        Array.isArray(remark.hrReviewEmployeeRows) && remark.hrReviewEmployeeRows.length
+            ? remark.hrReviewEmployeeRows
+            : Array.isArray(remark.employeeLiabilityRows)
+              ? remark.employeeLiabilityRows
+              : [];
+
+    if (mode !== 'company') {
+        for (const row of empSource) {
+            const amount = money(row?.paidAmount);
+            if (!(amount > 0)) continue;
+            lines.push({
+                partyType: 'employee',
+                partyName: String(row?.employeeName || row?.name || 'Employee').trim() || 'Employee',
+                description: String(row?.employeeName || row?.name || 'Employee').trim() || 'Employee',
+                employeeId: String(row?.employeeId || '').trim(),
+                amount,
+            });
+        }
+    }
+
+    if (lines.length) return lines;
+
+    const company = money(remark.hrReviewCompanyPay ?? remark.companyPayAmount);
+    const employee = money(remark.hrReviewEmployeePay ?? remark.employeePayAmount);
+    const splitSum = company + employee;
+    const total =
+        money(remark.billingTotalAmount) ||
+        money(remark.garageBillAmount) ||
+        money(remark.hrReviewApprovedAmount) ||
+        money(remark.estimatedCost) ||
+        money(remark.approvedAmount) ||
+        money(remark.totalServiceCharge) ||
+        money(service?.value) ||
+        (splitSum > 0 ? splitSum : 0);
+
+    if (total > 0 && mode === 'split') {
+        const label =
+            String(remark.companyPayPartyName || remark.companyName || 'Company').trim() || 'Company';
+        return [
+            {
+                partyType: 'company',
+                partyName: label,
+                description: label,
+                amount: total,
+            },
+        ];
+    }
+
+    return [];
+}
+
+async function dispatchVehicleDamageFineNotifications(created = [], reqUser = null) {
+    const reqLike = reqUser ? { user: reqUser } : null;
+    const groupEmployeeParties = [];
+    for (const fine of created) {
+        const parties = Array.isArray(fine.assignedEmployees) ? fine.assignedEmployees : [];
+        for (const party of parties) {
+            if (!isCompanyFineParty(party)) groupEmployeeParties.push(party);
+        }
+    }
+    for (const fine of created) {
+        const parties = Array.isArray(fine.assignedEmployees) ? fine.assignedEmployees : [];
+        const employeeParties = parties.filter((p) => !isCompanyFineParty(p));
+        if (!employeeParties.length) continue;
+        try {
+            await dispatchFineApprovedNotification(fine, employeeParties, reqLike, {
+                ccAssignedEmployees: groupEmployeeParties,
+            });
+        } catch (err) {
+            console.error(
+                '[VehicleServiceFine] Fine approved email failed for',
+                fine.fineId,
+                err?.message || err,
+            );
+        }
+    }
 }
 
 /**
@@ -196,10 +331,17 @@ async function createFineGroupForBillUnit({
     reqUser,
     hrHOD,
     monthStart,
+    settlementContext = 'service_completion',
 }) {
-    const parties = resolveFinePartiesFromBillingPayables(unit.billingPayables);
+    const mode = resolveServicePaymentByMode(remark);
+    if (mode === 'company') {
+        return { created: [], skipped: true, reason: 'company_only_liability' };
+    }
+
+    let parties = resolveFinePartiesFromBillingPayables(unit.billingPayables);
+    parties = parties.filter((party) => !party.isCompany);
     if (!parties.length) {
-        return { created: [], skipped: true, reason: 'no_payable_parties' };
+        return { created: [], skipped: true, reason: 'no_employee_liability' };
     }
 
     const isGroup = parties.length > 1;
@@ -208,14 +350,18 @@ async function createFineGroupForBillUnit({
     const monthLabel = currentMonthLabel(monthStart);
     const now = new Date();
     const costBit = unit.costLabel ? ` — ${unit.costLabel}` : '';
-    const billBit = unit.zohoBillNumber
-        ? ` (Zoho ${unit.zohoBillNumber})`
-        : unit.zohoBillId
-          ? ` (Zoho ${unit.zohoBillId})`
-          : '';
+    const billBit =
+        settlementContext === 'zoho_bill'
+            ? unit.zohoBillNumber
+                ? ` (Zoho ${unit.zohoBillNumber})`
+                : unit.zohoBillId
+                  ? ` (Zoho ${unit.zohoBillId})`
+                  : ''
+            : '';
     const description = `${serviceTypeLabel} Vehicle Damage${costBit}${billBit} — ${
         asset.assetId || asset.name || 'Vehicle'
     } — ${monthLabel}`;
+    const atCompletion = settlementContext === 'service_completion';
 
     const created = [];
     let companyObjectId = null;
@@ -288,11 +434,10 @@ async function createFineGroupForBillUnit({
             }
         }
 
-        // Company share settled by Zoho bill → Paid.
-        // Employee share stays unpaid (Approved) so it shows as owed on their profile.
         const isCompanyParty = Boolean(party.isCompany);
-        const fineStatus = isCompanyParty ? 'Paid' : 'Approved';
-        const paidAmount = isCompanyParty ? party.amount : 0;
+        const fineStatus =
+            isCompanyParty && !atCompletion ? 'Paid' : 'Approved';
+        const paidAmount = isCompanyParty && !atCompletion ? party.amount : 0;
 
         const finePayload = {
             fineId: `${baseFineId}${partySuffix(i, parties.length)}`,
@@ -325,12 +470,16 @@ async function createFineGroupForBillUnit({
             awardedDate: now,
             approvedDate: now,
             remarks: isCompanyParty
-                ? `${serviceTypeLabel} company liability settled with Zoho bill${
-                      unit.zohoBillId ? ` ${unit.zohoBillId}` : ''
-                  } — auto-marked Paid`
-                : `${serviceTypeLabel} employee liability from Zoho bill${
-                      unit.zohoBillId ? ` ${unit.zohoBillId}` : ''
-                  } — approved, awaiting employee payment`,
+                ? atCompletion
+                    ? `${serviceTypeLabel} company liability — service completed`
+                    : `${serviceTypeLabel} company liability settled with Zoho bill${
+                          unit.zohoBillId ? ` ${unit.zohoBillId}` : ''
+                      } — auto-marked Paid`
+                : atCompletion
+                  ? `${serviceTypeLabel} employee liability — service completed, awaiting payment`
+                  : `${serviceTypeLabel} employee liability from Zoho bill${
+                        unit.zohoBillId ? ` ${unit.zohoBillId}` : ''
+                    } — approved, awaiting employee payment`,
             category: 'Damage',
             subCategory: 'Vehicle Damage',
             vehicleId: asset.assetId || '',
@@ -356,8 +505,124 @@ async function createFineGroupForBillUnit({
 }
 
 /**
- * Create Vehicle Damage fines for successful Zoho garage bills.
- * Idempotent per zohoBillId (tracked on service remark.zohoBillVehicleDamageFines).
+ * Create Vehicle Damage fines when Complete Service marks the visit complete.
+ * Idempotent via remark.vehicleDamageFinesCreatedAt.
+ */
+export async function createVehicleServiceCompletionDamageFines({
+    asset,
+    service,
+    reqUser = null,
+    serviceTypeLabel = '',
+    appendActivity = null,
+} = {}) {
+    const label = String(serviceTypeLabel || service?.serviceType || '').trim();
+    if (!SUPPORTED_LABELS.has(label)) {
+        return { ok: true, skipped: true, created: [], message: 'Service type not eligible.' };
+    }
+    if (!asset || !service) {
+        return { ok: false, created: [], message: 'Asset and service are required.' };
+    }
+
+    const remark = parseRemark(service);
+    if (String(remark.vehicleDamageFinesCreatedAt || '').trim()) {
+        return {
+            ok: true,
+            skipped: true,
+            created: [],
+            message: 'Vehicle Damage fines already created for this service.',
+        };
+    }
+
+    const paymentMode = resolveServicePaymentByMode(remark);
+    if (paymentMode === 'company') {
+        return {
+            ok: true,
+            skipped: true,
+            created: [],
+            message: 'Company-only payment — no fines to create.',
+        };
+    }
+
+    const parties = resolveEmployeeFinePartiesForService(remark, service);
+    if (!parties.length) {
+        return {
+            ok: true,
+            skipped: true,
+            created: [],
+            message: 'No employee liability — no fines to create.',
+        };
+    }
+
+    const payables = resolveServiceCompletionBillingPayables(remark, service).filter(
+        (row) => !isCompanyPayableLine(row),
+    );
+    const hrHOD = await getDepartmentHOD('hr');
+    const monthStart = currentMonthStart();
+    const unit = {
+        key: 'service_completion',
+        garageName: String(remark.garageName || remark.vendorName || '').trim(),
+        billingPayables: payables,
+    };
+
+    let allCreated = [];
+    try {
+        const result = await createFineGroupForBillUnit({
+            asset,
+            service,
+            remark,
+            unit,
+            serviceTypeLabel: label,
+            reqUser,
+            hrHOD,
+            monthStart,
+            settlementContext: 'service_completion',
+        });
+        allCreated = result.created || [];
+    } catch (err) {
+        console.error(
+            '[VehicleServiceFine] Vehicle Damage fine failed on service completion:',
+            err?.message || err,
+        );
+        return {
+            ok: false,
+            created: [],
+            message: err?.message || 'Vehicle Damage fine create failed',
+        };
+    }
+
+    if (allCreated.length) {
+        remark.vehicleDamageFinesCreatedAt = new Date().toISOString();
+        remark.serviceCompletionVehicleDamageFineIds = allCreated.map((f) => f.fineId);
+        service.remark = JSON.stringify(remark);
+        asset.markModified('services');
+
+        if (typeof appendActivity === 'function') {
+            appendActivity(service, {
+                type: 'vehicle_damage_fines_created',
+                byName: reqUser?.name || '',
+                note:
+                    allCreated.length === 1
+                        ? `Vehicle Damage fine created (${allCreated[0].fineId})`
+                        : `Vehicle Damage fine(s) created (${allCreated.length})`,
+            });
+        }
+
+        await dispatchVehicleDamageFineNotifications(allCreated, reqUser);
+    }
+
+    return {
+        ok: true,
+        created: allCreated,
+        count: allCreated.length,
+        message: allCreated.length
+            ? `Created ${allCreated.length} Vehicle Damage fine(s) on service completion.`
+            : 'No Vehicle Damage fines created from pay split.',
+    };
+}
+
+/**
+ * Legacy: Zoho-bill-triggered fines. Skipped when fines were already created at Complete Service.
+ * @deprecated Fines are created at Complete Service; kept for idempotent retries only.
  */
 export async function createGarageZohoBillVehicleDamageFines({
     asset,
@@ -374,6 +639,15 @@ export async function createGarageZohoBillVehicleDamageFines({
     }
 
     const remark = parseRemark(service);
+    if (String(remark.vehicleDamageFinesCreatedAt || '').trim()) {
+        return {
+            ok: true,
+            skipped: true,
+            created: [],
+            message: 'Vehicle Damage fines already created at service completion.',
+        };
+    }
+
     const units = resolveZohoBillFineUnits(remark, label);
     if (!units.length) {
         return {
@@ -402,6 +676,7 @@ export async function createGarageZohoBillVehicleDamageFines({
                 reqUser,
                 hrHOD,
                 monthStart,
+                settlementContext: 'zoho_bill',
             });
             if (result.created?.length) {
                 allCreated.push(...result.created);
@@ -435,31 +710,7 @@ export async function createGarageZohoBillVehicleDamageFines({
         asset.markModified('services');
     }
 
-    // Notify each fined employee; CC all co-assigned employees + HR + Admin.
-    const reqLike = reqUser ? { user: reqUser } : null;
-    const groupEmployeeParties = [];
-    for (const fine of allCreated) {
-        const parties = Array.isArray(fine.assignedEmployees) ? fine.assignedEmployees : [];
-        for (const party of parties) {
-            if (!isCompanyFineParty(party)) groupEmployeeParties.push(party);
-        }
-    }
-    for (const fine of allCreated) {
-        const parties = Array.isArray(fine.assignedEmployees) ? fine.assignedEmployees : [];
-        const employeeParties = parties.filter((p) => !isCompanyFineParty(p));
-        if (!employeeParties.length) continue;
-        try {
-            await dispatchFineApprovedNotification(fine, employeeParties, reqLike, {
-                ccAssignedEmployees: groupEmployeeParties,
-            });
-        } catch (err) {
-            console.error(
-                '[GarageZohoFine] Fine approved email failed for',
-                fine.fineId,
-                err?.message || err,
-            );
-        }
-    }
+    await dispatchVehicleDamageFineNotifications(allCreated, reqUser);
 
     return {
         ok: true,

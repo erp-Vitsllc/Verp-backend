@@ -268,7 +268,11 @@ import {
 } from '../utils/cleanupAssetDashboardActions.js';
 import { isAcceptedAssignmentOutcomeNotification } from '../utils/isAcceptedAssignmentOutcomeNotification.js';
 import { listPendingHubInboxItems } from '../utils/employeeHubRequestInbox.js';
-import { notifyAdminOfficerOnVehicleServiceCreated } from '../utils/vehicleServiceAdminOfficerNotification.js';
+import {
+    notifyAdminOfficerOnVehicleServiceCreated,
+    healDuplicateAdminVehicleServiceInboxRows,
+    isVehicleServiceAccountsBillingNotification,
+} from '../utils/vehicleServiceAdminOfficerNotification.js';
 import {
     isPendingVehicleService,
     countVehicleServicePendingCompleted,
@@ -7551,6 +7555,7 @@ export const assignAssetItem = async (req, res) => {
                                 ? buildHandoverAssignDetailsUrl(item._id, fleetHandoverHistoryId)
                                 : null,
                         stageLabel: fleetVehicle ? 'Target User / Admin Officer' : null,
+                        dedupeEvent: fleetHandoverHistoryId ? `handover-${fleetHandoverHistoryId}` : '',
                     });
 
                     if (fleetVehicle && fleetHandoverHistoryId) {
@@ -13753,7 +13758,7 @@ export const addAssetService = async (req, res) => {
                         serviceType,
                         requestedByName: creatorName,
                         sendEmail: !creatorIsAdminOfficer,
-                        notifyAssignee: true,
+                        notifyAssignee: false,
                         event: 'created',
                         serviceReqNo: lastServiceDoc.serviceReqNo || '',
                     });
@@ -14158,7 +14163,7 @@ export const updateAssetServiceDraft = async (req, res) => {
                         serviceType: 'Oil Service',
                         requestedByName: creatorName,
                         sendEmail: !creatorIsAdminOfficer,
-                        notifyAssignee: true,
+                        notifyAssignee: false,
                         event: 'initiated',
                         serviceReqNo: asset.services?.id?.(serviceId)?.serviceReqNo || '',
                     });
@@ -14266,7 +14271,7 @@ export const submitAssetServiceDraft = async (req, res) => {
                     serviceType: service.serviceType,
                     requestedByName: requesterName,
                     sendEmail: !initiatorIsAdminOfficer,
-                    notifyAssignee: true,
+                    notifyAssignee: false,
                     event: 'initiated',
                     serviceReqNo: service.serviceReqNo || '',
                 });
@@ -19457,6 +19462,9 @@ export const getPendingAssetDashboardInbox = async (req, res) => {
                 /* keep flowchart-only detection */
             }
         }
+        if (scope === 'vehicle' && isAdminOfficerHolder) {
+            await healDuplicateAdminVehicleServiceInboxRows().catch(() => {});
+        }
         if (isHrRoleHolder) {
             // Fleet / vehicle HR tasks — only for vehicle/all scopes (fleet Approvals flood tools limit(200)).
             if (scope !== 'tools') {
@@ -20246,6 +20254,15 @@ export const getPendingAssetDashboardInbox = async (req, res) => {
             assignmentInboxSeen.add(assetKey);
             return true;
         });
+
+        // Admin Officer: never show Accounts Make Payment / Zoho pending (Accounts flowchart only).
+        if (isAdminOfficerHolder && !isAccountsRoleHolder) {
+            items = items.filter(
+                (row) =>
+                    row.requestType !== 'Vehicle Service Request' ||
+                    !isVehicleServiceAccountsBillingNotification(row),
+            );
+        }
 
         const hubItems = await listPendingHubInboxItems({
             assigneeIds: relevantIds,

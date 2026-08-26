@@ -6,6 +6,7 @@ import { sendVehicleServiceScheduledNotificationEmail } from './sendVehicleServi
 import { sendVehicleServiceCompletedNotificationEmail } from './sendVehicleServiceCompletedNotificationEmail.js';
 import { syncDashboardAction } from './syncDashboard.js';
 import { applyVehicleServiceNotificationCopy } from './vehicleServiceNotificationCopy.js';
+import { refreshAdminOfficerServiceTrack } from './vehicleServiceAdminOfficerNotification.js';
 import { applyServiceActiveState } from './assetOperationalFlags.js';
 import { getWorkflowContextForService } from './vehicleServiceWorkflowResolve.js';
 
@@ -14,6 +15,23 @@ export const SHOP_SERVICE_PENDING_BILLING = 'pending_billing';
 export const SHOP_SERVICE_BILLED = 'billed';
 
 export const SHOP_SERVICE_TYPE_LABELS = ['Tire Change', 'Mechanical Work', 'Body Work', 'Accident Repair'];
+
+/** Tag shop-service dashboard meta so Accounts inbox can find Make Payment rows. */
+export function withShopAccountsBillingDashboardMeta(dashboardMeta, serviceType = '') {
+    try {
+        const meta =
+            typeof dashboardMeta === 'object' && dashboardMeta !== null
+                ? { ...dashboardMeta }
+                : JSON.parse(String(dashboardMeta || '{}'));
+        return JSON.stringify({
+            ...meta,
+            serviceType: meta.serviceType || String(serviceType || '').trim(),
+            accountsStage: 'accounts_payment',
+        });
+    } catch {
+        return String(dashboardMeta || '');
+    }
+}
 
 function parseRemark(service) {
     try {
@@ -260,23 +278,21 @@ async function notifyShopServiceScheduled({
         }).catch(() => {});
     }
 
-    // Keep Admin Officer dashboard task for the scheduled window.
+    // Keep Admin Officer dashboard task for the scheduled window (single track row).
     if (adminOfficer?._id) {
         const copy = await applyVehicleServiceNotificationCopy({
             recipient: adminOfficer,
             serviceType: serviceTypeLabel,
             pendingStage: isLiveAlready ? 'On Service' : 'Ready to Service',
         });
-        await syncDashboardAction({
-            requestId: asset._id,
-            requestType: 'Vehicle Service Request',
-            status: 'Pending',
-            assignedTo: adminOfficer._id,
-            subjectEmployee: asset.assignedTo,
+        await refreshAdminOfficerServiceTrack({
+            asset,
+            serviceRecordId,
+            serviceType: serviceTypeLabel,
+            pendingStage: isLiveAlready ? 'On Service' : 'Ready to Service',
             requestedByName: copy.actionLabel,
-            extra1: copy.extra1,
-            extra2: copy.extra2,
-            extra3: dashboardMeta,
+            sendEmail: false,
+            serviceReqNo: resolveServiceReqNo(service, remark),
         });
     }
 
@@ -562,7 +578,7 @@ export async function maybeAdvanceShopToScheduledAfterGarageIfAccountsDone(
 
 /**
  * Formal "Vehicle Service Scheduled Notification" after Admin completes Schedule / Reschedule.
- * TO assigned · CC Admin Officer + HR + Accounts + driven-by.
+ * TO only: assigned user (primary reportee if no user account). No CC.
  * (Not sent after Accounts approval.)
  */
 export async function sendFormalVehicleServiceScheduledAfterAdminSchedule({
@@ -665,6 +681,41 @@ export function isShopServiceLive(asset, service) {
     return Boolean(wf.shopServiceLiveAt);
 }
 
+/** Admin submitted Schedule/Reschedule at least once (garage + dates). */
+export function isShopGarageScheduleSubmitted(service, wf = null) {
+    const remark = parseRemark(service);
+    const scheduleStatus = String(remark.scheduleSubmitStatus || '')
+        .trim()
+        .toLowerCase();
+    return Boolean(
+        wf?.garageSubmittedAt ||
+            String(remark.garageSubmittedByName || '').trim() ||
+            scheduleStatus === 'submitted' ||
+            scheduleStatus === 'resubmitted' ||
+            String(remark.scheduleSubmittedAt || '').trim(),
+    );
+}
+
+/** Complete Service unlocks after Schedule submit + Accounts (not when start date is reached). */
+export function shopServiceCompleteAllowed(asset, service, wf) {
+    const stage = String(wf?.stage || '').toLowerCase();
+    const remark = parseRemark(service);
+    const garageSubmitted = isShopGarageScheduleSubmitted(service, wf);
+    const skipHrAccounts = shopServiceSkipsHrAndAccounts(remark);
+    const accountsApproved = Boolean(
+        String(remark.accountsQuoteApprovedAt || '').trim() ||
+            String(remark.accountsGarageApprovedAt || '').trim() ||
+            String(remark.accountsApprovedAt || '').trim(),
+    );
+
+    if (stage === 'pending_admin_return' || stage === 'pending_admin') return true;
+    if (stage === SHOP_SERVICE_SCHEDULED_STAGE && garageSubmitted) {
+        if (skipHrAccounts) return true;
+        return accountsApproved;
+    }
+    return false;
+}
+
 /**
  * After Garage is submitted (or legacy Accounts garage approve) — move to scheduled_service (NO Zoho here).
  * Zoho billing happens after End Service / complete → Accounts billing → billed.
@@ -751,27 +802,17 @@ export async function advanceShopServiceToScheduledAfterAccountsApprove(
                 serviceType: serviceTypeLabel || 'Service',
                 pendingStage: 'Schedule',
             });
-            await syncDashboardAction({
-                requestId: asset._id,
-                requestType: 'Vehicle Service Request',
-                status: 'Pending',
-                assignedTo: adminOfficer._id,
-                subjectEmployee: populated?.assignedTo,
+            await refreshAdminOfficerServiceTrack({
+                asset,
+                serviceRecordId,
+                serviceType: serviceTypeLabel || 'Service',
+                pendingStage: 'Schedule',
                 requestedByName: adminCopy.actionLabel,
-                extra1: adminCopy.extra1,
-                extra2: adminCopy.extra2,
-                extra3: dashboardMeta || '',
-            });
-            await sendVehicleServiceWorkflowEmail({
-                recipient: adminOfficer,
-                asset: populated || asset,
-                stageLabel: adminCopy.stageLabel,
-                actionLabel: adminCopy.actionLabel,
+                sendEmail: true,
+                serviceReqNo: resolveServiceReqNo(service, remark),
                 detailLine: adminCopy.detailLine,
                 detailRows: buildShopScheduleEmailDetailRows(remark, serviceTypeLabel || 'Vehicle Service'),
-                serviceReqNo: resolveServiceReqNo(service, remark),
-                linkPath: linkPath || undefined,
-            }).catch(() => {});
+            });
         }
 
         return {
@@ -973,6 +1014,7 @@ export async function routeShopServiceToBillingAfterComplete(
         linkPath,
         dashboardMeta,
         appendActivity,
+        reqUser = null,
     } = {},
 ) {
     const service = asset.services?.id?.(serviceId);
@@ -994,6 +1036,24 @@ export async function routeShopServiceToBillingAfterComplete(
             byName: actorName,
             note: `${serviceTypeLabel || 'Service'} complete — sent to Accounts for Zoho billing`,
         });
+    }
+
+    try {
+        const { createVehicleServiceCompletionDamageFines } = await import(
+            './createGarageZohoBillVehicleDamageFines.js'
+        );
+        await createVehicleServiceCompletionDamageFines({
+            asset,
+            service,
+            reqUser,
+            serviceTypeLabel,
+            appendActivity,
+        });
+    } catch (fineErr) {
+        console.error(
+            '[VehicleServiceFine] post-complete Vehicle Damage create failed:',
+            fineErr?.message || fineErr,
+        );
     }
 
     wf.stage = SHOP_SERVICE_PENDING_BILLING;
@@ -1047,7 +1107,7 @@ export async function routeShopServiceToBillingAfterComplete(
         requestedByName: actorName || '',
         extra1: accountsCopy.extra1,
         extra2: accountsCopy.extra2,
-        extra3: dashboardMeta || '',
+        extra3: withShopAccountsBillingDashboardMeta(dashboardMeta, serviceTypeLabel),
     });
 
     // Oil parity: Accounts Make Payment email (recipient + stageLabel + detail rows).
@@ -1133,29 +1193,6 @@ export async function advanceShopBillingAfterAccountsApprove(
         );
     }
 
-    // Vehicle Damage fine(s) from bill payables — only after Zoho success.
-    let vehicleDamageFineSync = null;
-    try {
-        const { createGarageZohoBillVehicleDamageFines } = await import(
-            './createGarageZohoBillVehicleDamageFines.js'
-        );
-        vehicleDamageFineSync = await createGarageZohoBillVehicleDamageFines({
-            asset,
-            service,
-            reqUser,
-            serviceTypeLabel,
-        });
-    } catch (fineErr) {
-        console.error(
-            '[GarageZohoFine] post-bill Vehicle Damage create failed:',
-            fineErr?.message || fineErr,
-        );
-        vehicleDamageFineSync = {
-            ok: false,
-            message: fineErr?.message || 'Vehicle Damage fine create failed',
-        };
-    }
-
     const remark = parseRemark(service);
     remark.workflowStage = SHOP_SERVICE_BILLED;
     remark.billingStatus = 'billed';
@@ -1174,15 +1211,6 @@ export async function advanceShopBillingAfterAccountsApprove(
             byName: actorName,
             note: zohoBillSync.message || 'Zoho bill created — Billed',
         });
-        if (vehicleDamageFineSync?.count > 0) {
-            appendActivity(service, {
-                type: 'vehicle_damage_fines_created',
-                byName: actorName,
-                note:
-                    vehicleDamageFineSync.message ||
-                    `Vehicle Damage fine(s) created (${vehicleDamageFineSync.count})`,
-            });
-        }
     }
 
     wf.stage = SHOP_SERVICE_BILLED;
@@ -1258,5 +1286,5 @@ export async function advanceShopBillingAfterAccountsApprove(
         console.error('[ShopService] Post-billed completion email failed:', err?.message || err);
     }
 
-    return { asset, zohoBillSync, vehicleDamageFineSync };
+    return { asset, zohoBillSync };
 }

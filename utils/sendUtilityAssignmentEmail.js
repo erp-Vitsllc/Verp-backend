@@ -9,6 +9,10 @@ import {
     getFallbackEmailNote,
     resolveEmployeeEmail,
 } from './resolveEmployeeEmail.js';
+import {
+    buildEmailDedupeKey,
+    sendErpEmail,
+} from './emailDispatch.js';
 
 function createTransport() {
     const emailUser = process.env.EMAIL_USER;
@@ -96,7 +100,7 @@ async function resolvePartyEmail({ type, id, name }) {
 }
 
 async function collectHrAndAdminOfficerEmails() {
-    const emails = new Set();
+    const emails = [];
     const [hr, adminOfficer] = await Promise.all([
         getDepartmentHOD('hr'),
         getDepartmentHOD('admincontroller'),
@@ -104,9 +108,9 @@ async function collectHrAndAdminOfficerEmails() {
     for (const emp of [hr, adminOfficer]) {
         if (!emp) continue;
         const { email } = resolveEmployeeEmail(emp);
-        if (email) emails.add(email);
+        if (email) emails.push(email);
     }
-    return [...emails];
+    return emails;
 }
 
 function buildAssignmentHtml({
@@ -138,7 +142,7 @@ function buildAssignmentHtml({
                     </div>
                     <div style="text-align:center; margin-top:28px;">
                         <a href="${buttonUrl}" style="display:inline-block; background:#0d9488; color:#fff; text-decoration:none; padding:12px 28px; border-radius:8px; font-weight:600;">
-                            Open in VERP
+                            Open in ERP
                         </a>
                     </div>
                 </div>
@@ -148,8 +152,7 @@ function buildAssignmentHtml({
 
 /**
  * Notify parties when a utility entry is assigned / reassigned / returned.
- * Always emails flowchart HR + Admin Officer.
- * Assign/reassign also emails the assignment target (employee or company).
+ * One email: TO = assignee (or Admin Officer on return), CC = HR + Admin Officer stakeholders.
  */
 export async function sendUtilityAssignmentEmail({
     entry,
@@ -170,8 +173,9 @@ export async function sendUtilityAssignmentEmail({
         const normalizedAction = normalizeAction(action, isReassign);
         const labels = actionLabels(normalizedAction);
         const summary = entrySummaryLines(entry);
+        const entryId = String(entry.id || entry._id || '');
         const frontendUrl = emailFrontendUrl();
-        const detailsPath = `/HRM/Asset/UtilityBills/details/${encodeURIComponent(String(entry.id || entry._id || ''))}`;
+        const detailsPath = `/HRM/Asset/UtilityBills/details/${encodeURIComponent(entryId)}`;
         const buttonUrl = `${frontendUrl}${detailsPath}`;
 
         const nextName = String(assignedToName || '').trim() || 'assignee';
@@ -184,7 +188,10 @@ export async function sendUtilityAssignmentEmail({
             assigneeLine = `from <strong>${prevName}</strong> to <strong>${nextName}</strong>`;
         }
 
-        const sentTo = new Set();
+        const stakeholderEmails = await collectHrAndAdminOfficerEmails();
+        let primaryTo = null;
+        let greetName = 'there';
+        let fallbackNoteHtml = '';
 
         if (normalizedAction !== 'return') {
             const target = await resolvePartyEmail({
@@ -193,56 +200,65 @@ export async function sendUtilityAssignmentEmail({
                 name: assignedToName,
             });
             if (target?.email) {
-                await transporter.sendMail({
-                    from: process.env.EMAIL_USER,
-                    to: target.email,
-                    subject: `${summary.type} ${labels.subjectVerb}: ${target.subjectTarget}`,
-                    html: buildAssignmentHtml({
-                        greetName: target.greetName,
-                        fallbackNoteHtml: target.fallbackNoteHtml,
-                        summary,
-                        labels,
-                        assigneeLine,
-                        buttonUrl,
-                    }),
-                });
-                sentTo.add(target.email);
-                console.log(
-                    `[UtilityAssignmentEmail] Sent ${labels.lower} notice to assignee ${target.email}`,
-                );
-            } else if (String(assignedToId || '').trim()) {
-                console.warn(
-                    `[UtilityAssignmentEmail] No email for assignee ${assignedToId} — skip target notice.`,
-                );
+                primaryTo = target.email;
+                greetName = target.greetName;
+                fallbackNoteHtml = target.fallbackNoteHtml;
             }
         }
 
-        const stakeholderEmails = await collectHrAndAdminOfficerEmails();
-        for (const email of stakeholderEmails) {
-            if (sentTo.has(email)) continue;
-            await transporter.sendMail({
-                from: process.env.EMAIL_USER,
-                to: email,
-                subject: `${summary.type} ${labels.subjectVerb}${
-                    normalizedAction === 'return' ? '' : `: ${nextName}`
-                }`,
-                html: buildAssignmentHtml({
-                    greetName: 'there',
-                    summary,
-                    labels,
-                    assigneeLine,
-                    buttonUrl,
-                }),
-            });
-            sentTo.add(email);
-            console.log(
-                `[UtilityAssignmentEmail] Sent ${labels.lower} notice to HR/Admin Officer ${email}`,
-            );
+        if (!primaryTo) {
+            const adminOfficer = await getDepartmentHOD('admincontroller');
+            const { email } = resolveEmployeeEmail(adminOfficer || {});
+            primaryTo = email;
+            greetName = adminOfficer
+                ? employeeDisplayName(adminOfficer)
+                : 'there';
         }
 
-        if (!sentTo.size) {
+        if (!primaryTo) {
             console.warn(
                 '[UtilityAssignmentEmail] No recipients resolved (assignee / HR / Admin Officer).',
+            );
+            return;
+        }
+
+        const cc = stakeholderEmails.filter(
+            (e) => e.toLowerCase() !== primaryTo.toLowerCase(),
+        );
+
+        const subjectTarget =
+            normalizedAction === 'return' ? summary.type : nextName;
+        const subject = `${labels.subjectVerb}: ${summary.type} — ${subjectTarget}`;
+
+        const result = await sendErpEmail({
+            transporter,
+            from: process.env.EMAIL_USER,
+            to: primaryTo,
+            cc,
+            subject,
+            html: buildAssignmentHtml({
+                greetName,
+                fallbackNoteHtml,
+                summary,
+                labels,
+                assigneeLine,
+                buttonUrl,
+            }),
+            dedupeKey: buildEmailDedupeKey([
+                'UtilityAssignment',
+                entryId,
+                normalizedAction,
+                assignedToId || 'none',
+            ]),
+            module: 'Utility',
+            emailType: `assignment_${normalizedAction}`,
+            recordId: entryId,
+            metadata: { subjectCategory: 'information' },
+        });
+
+        if (result.sent) {
+            console.log(
+                `[UtilityAssignmentEmail] Sent ${labels.lower} notice (TO: ${primaryTo}, CC: ${cc.length})`,
             );
         }
     } catch (err) {

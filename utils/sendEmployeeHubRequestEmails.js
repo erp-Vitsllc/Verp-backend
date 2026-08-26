@@ -2,6 +2,10 @@ import nodemailer from 'nodemailer';
 import { emailFrontendUrl } from './resolveFrontendBaseUrl.js';
 import { resolveEmployeeEmail } from './resolveEmployeeEmail.js';
 import { HUB_KIND_LABEL } from './employeeHubRequestTypes.js';
+import {
+    buildEmailDedupeKey,
+    sendErpEmail,
+} from './emailDispatch.js';
 
 function createTransport() {
     const emailUser =
@@ -72,46 +76,39 @@ export async function sendEmployeeHubRequestEmails({
         const label = hubLabel(kind, assetType);
         const empName = personName(employee);
         const mgrName = personName(manager);
+        const empId = employee?.employeeId || '—';
         const url = dashboardUrl(requestId, employee?._id);
         const desc = String(description || '').trim();
         const attach = String(attachmentName || '').trim();
 
         const { email: managerTo } = resolveEmployeeEmail(manager || {});
-        const { email: employeeTo } = resolveEmployeeEmail(employee || {});
 
         const sharedBody = `
-            <p><strong>${empName}</strong> submitted a <strong>${label}</strong> request to <strong>${mgrName}</strong>.</p>
+            <p><strong>${empName}</strong> (${empId}) submitted a <strong>${label}</strong> request.</p>
+            <p><strong>Action required from:</strong> ${mgrName}</p>
             ${desc ? `<p style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;padding:12px;white-space:pre-wrap;">${desc}</p>` : ''}
             ${attach ? `<p>Attachment: ${attach}</p>` : ''}
+            <p>Review and respond in the ERP dashboard.</p>
         `;
 
         if (managerTo) {
-            await mail.transporter.sendMail({
+            await sendErpEmail({
+                transporter: mail.transporter,
                 from: `"VeRP System" <${mail.from}>`,
                 to: managerTo,
                 subject: `${label} request from ${empName}`,
                 html: wrapHtml({
                     accent: '#2563eb',
                     title: `${label} request`,
-                    body: `${sharedBody}<p>Open the dashboard to accept or reject this request.</p>`,
+                    body: sharedBody,
                     buttonUrl: url,
-                    buttonLabel: 'Review request',
+                    buttonLabel: 'Review in ERP',
                 }),
-            });
-        }
-
-        if (employeeTo) {
-            await mail.transporter.sendMail({
-                from: `"VeRP System" <${mail.from}>`,
-                to: employeeTo,
-                subject: `Your ${label} request was sent to ${mgrName}`,
-                html: wrapHtml({
-                    accent: '#2563eb',
-                    title: `${label} request sent`,
-                    body: `${sharedBody}<p>You will get another email when ${mgrName} accepts or rejects it.</p>`,
-                    buttonUrl: url,
-                    buttonLabel: 'Open dashboard',
-                }),
+                dedupeKey: buildEmailDedupeKey(['EmployeeHub', requestId, kind, 'submitted']),
+                module: 'EmployeeHub',
+                emailType: 'submitted',
+                recordId: String(requestId || ''),
+                metadata: { subjectCategory: 'action' },
             });
         }
     } catch (error) {
@@ -128,6 +125,7 @@ export async function sendEmployeeHubDecisionEmails({
     description = '',
     decisionNote = '',
     requestId,
+    actorEmail = '',
 }) {
     try {
         const mail = createTransport();
@@ -135,6 +133,7 @@ export async function sendEmployeeHubDecisionEmails({
         const label = hubLabel(kind, assetType);
         const empName = personName(employee);
         const mgrName = personName(manager);
+        const empId = employee?.employeeId || '—';
         const approved = String(decision || '') === 'Approved';
         const url = dashboardUrl(requestId, employee?._id);
         const note = String(decisionNote || '').trim();
@@ -142,13 +141,16 @@ export async function sendEmployeeHubDecisionEmails({
         const accent = approved ? '#059669' : '#e11d48';
         const verb = approved ? 'approved' : 'rejected';
 
-        const { email: managerTo } = resolveEmployeeEmail(manager || {});
         const { email: employeeTo } = resolveEmployeeEmail(employee || {});
+        const { email: managerEmail } = resolveEmployeeEmail(manager || {});
+        const performerEmail = actorEmail || managerEmail;
 
         const body = `
-            <p><strong>${mgrName}</strong> ${verb} the <strong>${label}</strong> request from <strong>${empName}</strong>.</p>
+            <p><strong>${mgrName}</strong> ${verb} your <strong>${label}</strong> request.</p>
+            <p><strong>Employee:</strong> ${empName} (${empId})</p>
             ${desc ? `<p style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;padding:12px;white-space:pre-wrap;">${desc}</p>` : ''}
             ${note ? `<p>Note: ${note}</p>` : ''}
+            <p style="color:#64748b;font-size:14px;">No further action is required from you unless noted above.</p>
         `;
 
         const html = wrapHtml({
@@ -156,16 +158,29 @@ export async function sendEmployeeHubDecisionEmails({
             title: `${label} request ${verb}`,
             body,
             buttonUrl: url,
-            buttonLabel: 'Open dashboard',
+            buttonLabel: 'Open in ERP',
         });
         const subject = `${label} request ${verb}: ${empName}`;
 
-        for (const to of [managerTo, employeeTo].filter(Boolean)) {
-            await mail.transporter.sendMail({
+        if (employeeTo) {
+            await sendErpEmail({
+                transporter: mail.transporter,
                 from: `"VeRP System" <${mail.from}>`,
-                to,
+                to: employeeTo,
                 subject,
                 html,
+                dedupeKey: buildEmailDedupeKey([
+                    'EmployeeHub',
+                    requestId,
+                    kind,
+                    'decision',
+                    decision,
+                ]),
+                actorEmail: performerEmail,
+                module: 'EmployeeHub',
+                emailType: 'decision',
+                recordId: String(requestId || ''),
+                metadata: { subjectCategory: 'completed' },
             });
         }
     } catch (error) {

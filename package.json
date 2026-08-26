@@ -4,7 +4,8 @@
   "description": "",
   "main": "index.js",
   "scripts": {
-    "snyk-test": "snyk test",
+    "test": "node --test utils/salaryHistoricalCalculations.test.js",
+    "test:historical-salary": "node --test utils/salaryHistoricalCalculations.test.js",
     "start": "node index.js",
     "dev": "nodemon index.js",
     "prod": "node index.js",

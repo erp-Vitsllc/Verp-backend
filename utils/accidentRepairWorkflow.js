@@ -681,7 +681,11 @@ export async function createAccidentRepairEmployeeFines(asset, service, reqUser)
     return created;
 }
 
-async function completeAccidentRepairWithoutZohoBilling(asset, serviceId, { actorName, wf, bindActive }) {
+async function completeAccidentRepairWithoutZohoBilling(
+    asset,
+    serviceId,
+    { actorName, wf, bindActive, reqUser = null },
+) {
     const service = asset.services?.id?.(serviceId);
     if (!service) throw new Error('Service record not found');
     const remark = parseRemark(service);
@@ -697,6 +701,24 @@ async function completeAccidentRepairWithoutZohoBilling(asset, serviceId, { acto
         byName: actorName,
         note: 'Accident repair complete — other party damage (no Zoho bill)',
     });
+
+    try {
+        const { createVehicleServiceCompletionDamageFines } = await import(
+            './createGarageZohoBillVehicleDamageFines.js'
+        );
+        await createVehicleServiceCompletionDamageFines({
+            asset,
+            service,
+            reqUser,
+            serviceTypeLabel: 'Accident Repair',
+            appendActivity: appendAccidentRepairActivity,
+        });
+    } catch (fineErr) {
+        console.error(
+            '[AccidentRepair] Vehicle Damage fine on complete failed:',
+            fineErr?.message || fineErr,
+        );
+    }
 
     wf.stage = ACCIDENT_REPAIR_STAGE.COMPLETE;
     wf.serviceWorkCompleted = true;
@@ -812,13 +834,11 @@ export async function completeAccidentRepairService(asset, serviceId, serviceUpd
     const { wf, bindActive } = getWorkflowContextForService(asset, serviceId);
     if (!wf || !isAccidentRepairWorkflow(wf, service)) throw new Error('Not an accident repair workflow.');
     const stage = String(wf.stage || '').toLowerCase();
-    const { SHOP_SERVICE_SCHEDULED_STAGE, isShopServiceLive } = await import('./vehicleShopServiceScheduled.js');
-    const mayComplete =
-        stage === ACCIDENT_REPAIR_STAGE.ADMIN_RETURN ||
-        stage === 'pending_admin' ||
-        (stage === SHOP_SERVICE_SCHEDULED_STAGE && isShopServiceLive(asset, service));
-    if (!mayComplete) {
-        throw new Error('Return details can only be completed at the final admin step.');
+    const { shopServiceCompleteAllowed } = await import('./vehicleShopServiceScheduled.js');
+    if (!shopServiceCompleteAllowed(asset, service, wf)) {
+        throw new Error(
+            'Complete Service unlocks after Schedule is submitted and Accounts Approve (when required).',
+        );
     }
     if (stage === 'pending_admin') {
         wf.stage = ACCIDENT_REPAIR_STAGE.ADMIN_RETURN;
@@ -883,6 +903,7 @@ export async function completeAccidentRepairService(asset, serviceId, serviceUpd
             actorName,
             wf,
             bindActive,
+            reqUser: req.user,
         });
     } else {
         const { routeShopServiceToBillingAfterComplete } = await import('./vehicleShopServiceScheduled.js');
@@ -892,6 +913,7 @@ export async function completeAccidentRepairService(asset, serviceId, serviceUpd
             linkPath: `/HRM/Asset/Vehicle/details/${asset._id}/accident-repair/${serviceId}`,
             dashboardMeta: accidentRepairDashboardMeta(asset, serviceId),
             appendActivity: appendAccidentRepairActivity,
+            reqUser: req.user,
         });
     }
 
@@ -905,8 +927,8 @@ export async function completeAccidentRepairService(asset, serviceId, serviceUpd
         });
     }
 
-    // Vehicle Damage fines are created after Zoho bill success (Make Payment), not on Complete.
-    // Other-party damage skips Zoho — no bill, no post-bill fines.
+    // Vehicle Damage fines are created on Complete Service (before Accounts / Zoho).
+    // Other-party damage skips Zoho — fines still created when employee liability applies.
 
     const populated = await AssetItem.findById(asset._id)
         .populate({

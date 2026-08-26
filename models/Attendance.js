@@ -5,6 +5,7 @@ const ATTENDANCE_STATUS_KEYS = [
     'on_office',
     'on_leave',
     'sick_leave',
+    'compoff_leave',
     'authorized_leave',
     'unauthorized_leave',
     'late_arrived',

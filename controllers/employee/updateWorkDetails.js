@@ -12,6 +12,7 @@ import { isJwtSystemSuperUser } from "../../utils/systemSuperUser.js";
 import { resolveEmployeeProfileStatusWrite } from "../../utils/employeeProfileStatusLock.js";
 import { isLeftUserStatus } from "../../utils/applyEmployeeLeftUserStatus.js";
 import { closePendingProbationChangeTasks } from "../../utils/sendProbationWorkflowEmail.js";
+import { resolveStoredStaffType } from "../../utils/workLocationHelpers.js";
 
 export const updateWorkDetails = async (req, res) => {
     try {
@@ -167,10 +168,11 @@ export const updateWorkDetails = async (req, res) => {
         }
 
         if (updatePayload.staffType !== undefined) {
-            const nextStaffType = String(updatePayload.staffType || "")
-                .trim()
-                .toLowerCase();
-            updatePayload.staffType = nextStaffType === "site" ? "site" : "office";
+            const nextStaffType = await resolveStoredStaffType(updatePayload.staffType);
+            if (!nextStaffType) {
+                return res.status(400).json({ message: "Select a valid work location." });
+            }
+            updatePayload.staffType = nextStaffType;
         }
 
         // Contract joining date is set from the first visa issue date only — not editable here.
@@ -224,7 +226,7 @@ export const updateWorkDetails = async (req, res) => {
                 dateOfJoining: employee.dateOfJoining || null,
                 companyEmail: employee.companyEmail || "",
                 enablePortalAccess: employee.enablePortalAccess,
-                staffType: employee.staffType === "site" ? "site" : "office",
+                staffType: employee.staffType || "office",
                 profileStatus: employee.profileStatus,
                 profileApprovalStatus: employee.profileApprovalStatus,
             },

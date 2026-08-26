@@ -25,29 +25,6 @@ export async function retryVehicleGarageZohoBill(
     const allMultiDone =
         multiBills.length > 0 && multiBills.every((b) => String(b?.zohoBillId || '').trim());
     if (allMultiDone || (String(remark.zohoBillId || '').trim() && !multiBills.length)) {
-        // Still try fines for any bill that got Zoho id but never got a fine stamp.
-        try {
-            const { createGarageZohoBillVehicleDamageFines } = await import(
-                './createGarageZohoBillVehicleDamageFines.js'
-            );
-            const label =
-                String(serviceTypeLabel || '').trim() ||
-                String(service.serviceType || asset?.activeServiceWorkflow?.serviceTypeLabel || '').trim() ||
-                'Vehicle Service';
-            await createGarageZohoBillVehicleDamageFines({
-                asset,
-                service,
-                reqUser,
-                serviceTypeLabel: label,
-            });
-            asset.markModified('services');
-            await asset.save();
-        } catch (fineErr) {
-            console.error(
-                '[GarageZohoFine] retry (already billed) Vehicle Damage failed:',
-                fineErr?.message || fineErr,
-            );
-        }
         return {
             ok: true,
             skipped: true,
@@ -83,29 +60,6 @@ export async function retryVehicleGarageZohoBill(
         serviceTypeLabel: label,
         organizationId: String(remark.zohoOrganizationId || '').trim(),
     });
-
-    if (result?.ok) {
-        try {
-            const { createGarageZohoBillVehicleDamageFines } = await import(
-                './createGarageZohoBillVehicleDamageFines.js'
-            );
-            result.vehicleDamageFineSync = await createGarageZohoBillVehicleDamageFines({
-                asset,
-                service,
-                reqUser,
-                serviceTypeLabel: label,
-            });
-        } catch (fineErr) {
-            console.error(
-                '[GarageZohoFine] retry Vehicle Damage create failed:',
-                fineErr?.message || fineErr,
-            );
-            result.vehicleDamageFineSync = {
-                ok: false,
-                message: fineErr?.message || 'Vehicle Damage fine create failed',
-            };
-        }
-    }
 
     asset.markModified('services');
     await asset.save();

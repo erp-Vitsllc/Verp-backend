@@ -13,6 +13,7 @@ import {
     holidayAppliesToStaff,
     loadWorkingTimeDoc,
     normalizeStaffType,
+    getWeekForStaffType,
 } from './workingTimeHelpers.js';
 import {
     isCompanyShellEmployee,
@@ -37,6 +38,7 @@ const PROTECTED_NO_PUNCH_KEYS = new Set([
     'weekly_off',
     'on_leave',
     'sick_leave',
+    'compoff_leave',
     'authorized_leave',
     'work_from_home',
 ]);
@@ -134,7 +136,7 @@ export async function processAttendanceDailyRoutine() {
             if (isCompanyShellEmployee(emp)) continue;
             const employeeMongoId = String(emp._id);
             const staffType = normalizeStaffType(emp.staffType);
-            const week = staffType === 'site' ? workingTime.site : workingTime.office;
+            const week = getWeekForStaffType(workingTime, staffType);
 
             if ((isHoliday && holidayAppliesToStaff(holidayDoc, staffType)) || isWeekOffForStaff(week, yesterdayKey)) {
                 continue;

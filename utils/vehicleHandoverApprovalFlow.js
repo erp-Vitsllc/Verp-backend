@@ -1168,6 +1168,7 @@ export async function notifyHandoverStageEmail({
         notificationContext: 'assignment',
         detailsPath,
         stageLabel,
+        dedupeEvent: historyId ? `handover-${historyId}` : '',
     }).catch(() => null);
 }
 

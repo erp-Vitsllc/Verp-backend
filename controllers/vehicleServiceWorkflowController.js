@@ -1140,38 +1140,6 @@ export async function maybeStartVehicleServiceWorkflow(asset, { serviceRecordId,
             });
         }
 
-        if (
-            isShopQuoteService &&
-            adminOfficer?._id &&
-            (!hr?._id || String(adminOfficer._id) !== String(hr._id))
-        ) {
-            const adminCopy = await applyVehicleServiceNotificationCopy({
-                recipient: adminOfficer,
-                serviceType: serviceType || 'Service',
-                pendingStage: accidentOtherParty ? 'Schedule' : 'Schedule',
-            });
-            await syncDashboardAction({
-                requestId: asset._id,
-                requestType: 'Vehicle Service Request',
-                status: 'Pending',
-                assignedTo: adminOfficer._id,
-                subjectEmployee: subjectEmp,
-                subjectName: asset.name || asset.assetId || 'Vehicle',
-                requestedByName: requesterName,
-                extra1: adminCopy.extra1,
-                extra2: adminCopy.extra2,
-                extra3: vehicleServiceDashboardMeta(asset, serviceRecordId, serviceType),
-            });
-            await sendWorkflowEmailWithConsole({
-                recipient: adminOfficer,
-                asset,
-                stageLabel: adminCopy.stageLabel,
-                actionLabel: adminCopy.actionLabel,
-                detailLine: adminCopy.detailLine,
-                linkPath: detailsPath,
-            });
-        }
-
         persistWorkflowSnapshotToServiceSubdoc(asset);
         asset.markModified('activeServiceWorkflow');
         await asset.save();

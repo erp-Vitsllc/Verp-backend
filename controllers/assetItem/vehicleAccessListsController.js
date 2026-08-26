@@ -2,7 +2,10 @@ import mongoose from 'mongoose';
 import AssetItem from '../../models/AssetItem.js';
 import AssetHistory from '../../models/AssetHistory.js';
 import { buildFleetVehicleMongoScope } from '../../utils/fleetVehicleAssetId.js';
-import { isPendingVehicleService } from '../../utils/vehicleServicePendingStatus.js';
+import {
+    countVehicleServicePendingCompleted,
+    isPendingVehicleService,
+} from '../../utils/vehicleServicePendingStatus.js';
 
 const SERVICE_TYPES = [
     'Oil Service',
@@ -205,23 +208,42 @@ async function loadFleetVehicles(req, select, populate = []) {
  * GET /api/AssetItem/vehicle-access-services?type=Oil Service
  * Vehicles with services of that type — same payload shape the details Service tab builders use.
  */
+function vehicleHasCompletedService(asset) {
+    return Number(countVehicleServicePendingCompleted(asset).completedServiceCount || 0) > 0;
+}
+
 export const getVehicleAccessServices = async (req, res) => {
     try {
         const type = String(req.query.type || '').trim();
+        const status = String(req.query.status || '').trim().toLowerCase();
         if (type && !SERVICE_TYPES.includes(type)) {
             return res.status(400).json({ message: 'Unknown service type.' });
         }
 
         const vehicles = await loadFleetVehicles(
             req,
-            'assetId name plateEmirate plateNumber currentKilometer oilChangeDate activeServiceWorkflow vehicleProfileActivationStatus services',
+            'assetId name plateEmirate plateNumber currentKilometer oilChangeDate activeServiceWorkflow vehicleProfileActivationStatus assignedTo assignedCompany services',
+            [{ path: 'assignedTo', select: 'firstName lastName employeeId' }, { path: 'assignedCompany', select: 'name nickName companyShortName companyName' }],
         );
+
+        if (status === 'not-yet') {
+            const items = vehicles.filter((v) => !vehicleHasCompletedService(v));
+            return res.json({
+                items,
+                status: 'not-yet',
+                total: items.length,
+            });
+        }
 
         if (!type) {
             const counts = Object.fromEntries(SERVICE_TYPES.map((t) => [t, 0]));
             let pendingTotal = 0;
             let completedTotal = 0;
+            let notYetTotal = 0;
             for (const v of vehicles) {
+                if (!vehicleHasCompletedService(v)) {
+                    notYetTotal += 1;
+                }
                 for (const s of v.services || []) {
                     const key = serviceTypeKey(s);
                     if (counts[key] == null) continue;
@@ -238,6 +260,7 @@ export const getVehicleAccessServices = async (req, res) => {
                 total: pendingTotal,
                 pendingTotal,
                 completedTotal,
+                notYetTotal,
             });
         }
 

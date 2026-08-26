@@ -2,6 +2,7 @@ import mongoose from 'mongoose';
 import Attendance, { ATTENDANCE_STATUS_KEYS } from '../models/Attendance.js';
 import EmployeeBasic from '../models/EmployeeBasic.js';
 import Holiday from '../models/Holiday.js';
+import SalaryEnrollment from '../models/SalaryEnrollment.js';
 import { getScheduledEmailTimeZone, getZonedParts } from '../utils/scheduleDailyAtMidnight.js';
 import {
     getOffWeekdayKeys,
@@ -11,9 +12,11 @@ import {
     holidayAppliesToStaff,
     loadWorkingTimeDoc,
     normalizeStaffType,
+    getWeekForStaffType,
     resolveStatusFromPunches,
     weekdayKeyFromDateKey,
 } from '../utils/workingTimeHelpers.js';
+import { staffTypeMongoClause } from '../utils/workLocationHelpers.js';
 import { syncDashboardAction } from '../utils/syncDashboard.js';
 import {
     sendAttendanceLeaveRequestEmail,
@@ -30,6 +33,7 @@ const LEAVE_REQUEST_STATUS_KEYS = new Set([
     'unauthorized_leave',
     'authorized_leave',
     'sick_leave',
+    'compoff_leave',
     'on_leave',
 ]);
 
@@ -41,6 +45,7 @@ const REPORTEE_APPROVE_LEAVE_KEYS = new Set([
     'unauthorized_leave',
     'authorized_leave',
     'sick_leave',
+    'compoff_leave',
 ]);
 
 const YELLOW_REQUEST_STATUS_KEYS = new Set(['late_arrived', 'early_go', 'mispunch']);
@@ -51,6 +56,7 @@ const LEAVE_STATUS_LABELS = {
     unauthorized_leave: 'Unauthorized Leave',
     authorized_leave: 'Authorized Leave',
     sick_leave: 'Sick Leave',
+    compoff_leave: 'Comp Off Leave',
     on_leave: 'On Leave',
     on_office: 'Present',
     work_from_home: 'Work from home',
@@ -167,6 +173,25 @@ async function loadHolidaySet(fromKey, toKey, staffType = null) {
 function getDubaiClockTime(date = new Date()) {
     const p = getZonedParts(date, getScheduledEmailTimeZone());
     return `${String(p.hour).padStart(2, '0')}:${String(p.minute).padStart(2, '0')}:${String(p.second).padStart(2, '0')}`;
+}
+
+const SALARY_ENROLL_REQUIRED =
+    'Enroll to salary first. Attendance, check-in/out, and leave unlock after Enroll Status is Enrolled.';
+
+/** Enroll Status = Enrolled when a SalaryEnrollment row exists for the employee. */
+async function isSalaryEnrolled(employee) {
+    const employeeId = String(employee?.employeeId || '').trim();
+    if (!employeeId) return false;
+    return Boolean(await SalaryEnrollment.exists({ employeeId }));
+}
+
+async function rejectIfNotSalaryEnrolled(res, employee) {
+    if (await isSalaryEnrolled(employee)) return false;
+    res.status(403).json({
+        message: SALARY_ENROLL_REQUIRED,
+        salaryEnrolled: false,
+    });
+    return true;
 }
 
 async function resolveLinkedEmployee(req) {
@@ -341,6 +366,7 @@ function buildDayStatsFromRecords(records, totalStaff = 0, { isWeeklyOffDay = fa
         on_office: 0,
         on_leave: 0,
         sick_leave: 0,
+        compoff_leave: 0,
         authorized_leave: 0,
         work_from_home: 0,
         late_arrived: 0,
@@ -392,9 +418,9 @@ function buildDayStatsFromRecords(records, totalStaff = 0, { isWeeklyOffDay = fa
 
 function resolveStaffTypeFilter(raw) {
     const value = String(raw || '').trim().toLowerCase();
-    if (value === 'site') return 'site';
-    if (value === 'office') return 'office';
-    return null;
+    if (!value || value === 'all') return null;
+    if (value === 'staff') return 'site';
+    return normalizeStaffType(value);
 }
 
 /** Holiday / weekly off do not need HR approval queue. */
@@ -410,18 +436,8 @@ async function getActiveEmployeeIdsByStaffType(staffType) {
     const filter = {
         profileStatus: 'active',
         ...REAL_EMPLOYEE_MONGO_FILTER,
+        ...staffTypeMongoClause(staffType),
     };
-    if (staffType === 'site') {
-        filter.staffType = 'site';
-    } else if (staffType === 'office') {
-        // Default missing staffType to office so existing employees stay on Office tab.
-        filter.$or = [
-            { staffType: 'office' },
-            { staffType: { $exists: false } },
-            { staffType: null },
-            { staffType: '' },
-        ];
-    }
     const rows = await EmployeeBasic.find(filter).select('_id').lean();
     return rows.map((r) => String(r._id));
 }
@@ -456,15 +472,8 @@ export async function getAttendanceMarkRoster(req, res) {
             ...REAL_EMPLOYEE_MONGO_FILTER,
         };
 
-        if (staffType === 'site') {
-            filter.staffType = 'site';
-        } else if (staffType === 'office') {
-            filter.$or = [
-                { staffType: 'office' },
-                { staffType: { $exists: false } },
-                { staffType: null },
-                { staffType: '' },
-            ];
+        if (staffType) {
+            Object.assign(filter, staffTypeMongoClause(staffType));
         }
 
         const rows = await EmployeeBasic.find(filter)
@@ -585,7 +594,7 @@ export async function getAttendanceCalendarSummary(req, res) {
         ]);
 
         const staffIdSet = staffIds ? new Set(staffIds) : null;
-        const scheduleWeek = staffType === 'site' ? workingTime.site : workingTime.office;
+        const scheduleWeek = getWeekForStaffType(workingTime, staffType);
 
         const byDate = new Map();
         for (const row of records) {
@@ -721,7 +730,7 @@ export async function markAttendance(req, res) {
                     .lean();
                 const staffType = normalizeStaffType(emp?.staffType);
                 const workingTime = await loadWorkingTimeDoc();
-                const week = staffType === 'site' ? workingTime.site : workingTime.office;
+                const week = getWeekForStaffType(workingTime, staffType);
                 const schedule = getScheduledPunchMinutes(week, date);
                 const resolved = resolveStatusFromPunches({
                     timeIn,
@@ -844,6 +853,28 @@ export async function getMyAttendanceMonth(req, res) {
         const isSelf = Boolean(self) && employeeMongoId === String(self._id);
         const staffType = normalizeStaffType(employee.staffType);
 
+        if (!(await isSalaryEnrolled(employee))) {
+            return res.status(200).json({
+                message: SALARY_ENROLL_REQUIRED,
+                salaryEnrolled: false,
+                month: `${year}-${String(monthNum).padStart(2, '0')}`,
+                from,
+                to,
+                today: todayKey,
+                isSelf,
+                employee: {
+                    id: employeeMongoId,
+                    employeeId: employee.employeeId,
+                    name: [employee.firstName, employee.lastName].filter(Boolean).join(' ').trim(),
+                    staffType,
+                },
+                offWeekdays: [],
+                workingTime: { site: {}, office: {}, extra: {} },
+                records: [],
+                todayRecord: null,
+            });
+        }
+
         const [records, workingTime] = await Promise.all([
             Attendance.find({
                 employeeMongoId,
@@ -852,12 +883,13 @@ export async function getMyAttendanceMonth(req, res) {
             loadWorkingTimeDoc(),
         ]);
 
-        const scheduleWeek = staffType === 'site' ? workingTime.site : workingTime.office;
+        const scheduleWeek = getWeekForStaffType(workingTime, staffType);
         const offWeekdays = getOffWeekdayKeys(scheduleWeek);
         const todayRecord = records.find((r) => r.date === todayKey) || null;
 
         return res.status(200).json({
             message: 'Attendance fetched successfully',
+            salaryEnrolled: true,
             month: `${year}-${String(monthNum).padStart(2, '0')}`,
             from,
             to,
@@ -873,6 +905,7 @@ export async function getMyAttendanceMonth(req, res) {
             workingTime: {
                 site: workingTime.site,
                 office: workingTime.office,
+                extra: workingTime.extra || {},
             },
             records,
             todayRecord,
@@ -886,6 +919,7 @@ export async function getMyAttendanceMonth(req, res) {
 const YEAR_SUMMARY_KEYS = [
     'on_leave',
     'sick_leave',
+    'compoff_leave',
     'authorized_leave',
     'unauthorized_leave',
     'work_from_home',
@@ -962,6 +996,33 @@ export async function getMyAttendanceYearSummary(req, res) {
             to = `${year}-12-31`;
         }
 
+        if (!(await isSalaryEnrolled(self))) {
+            const counts = emptyYearCounts();
+            counts.authorized_leave_paid = 0;
+            counts.authorized_leave_unpaid = 0;
+            counts.not_marked = 0;
+            counts.absent = 0;
+            return res.status(200).json({
+                message: SALARY_ENROLL_REQUIRED,
+                salaryEnrolled: false,
+                year,
+                month: monthNum ? `${year}-${String(monthNum).padStart(2, '0')}` : '',
+                from,
+                to,
+                counts,
+                leaveTotal: 0,
+                presentDays: 0,
+                absentDays: 0,
+                absentAuth: 0,
+                absentSick: 0,
+                absentUnauthorized: 0,
+                workingDays: 0,
+                holidayCount: 0,
+                weeklyOffCount: 0,
+                lastAnnualLeaveDate: '',
+            });
+        }
+
         const counts = emptyYearCounts();
         counts.authorized_leave_paid = 0;
         counts.authorized_leave_unpaid = 0;
@@ -1009,7 +1070,7 @@ export async function getMyAttendanceYearSummary(req, res) {
         }
 
         const staffType = normalizeStaffType(employee?.staffType || self.staffType);
-        const scheduleWeek = staffType === 'site' ? workingTime.site : workingTime.office;
+        const scheduleWeek = getWeekForStaffType(workingTime, staffType);
         const offWeekdays = new Set(getOffWeekdayKeys(scheduleWeek));
         const holidaySet = new Set(
             (holidayRows || [])
@@ -1027,17 +1088,20 @@ export async function getMyAttendanceYearSummary(req, res) {
             counts.mispunch;
         const absentAuth = counts.authorized_leave;
         const absentSick = counts.sick_leave;
+        const absentCompoff = counts.compoff_leave;
         const absentUnauthorized = counts.unauthorized_leave;
-        const absentDays = absentAuth + absentSick + absentUnauthorized;
+        const absentDays = absentAuth + absentSick + absentCompoff + absentUnauthorized;
 
         const leaveTotal =
             counts.on_leave +
             counts.sick_leave +
+            counts.compoff_leave +
             counts.authorized_leave +
             counts.unauthorized_leave;
 
         return res.status(200).json({
             message: 'Year summary fetched successfully',
+            salaryEnrolled: true,
             year,
             month: monthNum ? `${year}-${String(monthNum).padStart(2, '0')}` : '',
             from,
@@ -1163,6 +1227,8 @@ export async function checkInMyAttendance(req, res) {
         }
 
         const { employee } = resolved;
+        if (await rejectIfNotSalaryEnrolled(res, employee)) return;
+
         const date = getDubaiDateKey();
         const timeIn = getDubaiClockTime();
         const employeeMongoId = String(employee._id);
@@ -1183,7 +1249,7 @@ export async function checkInMyAttendance(req, res) {
         try {
             const staffType = normalizeStaffType(employee.staffType);
             const workingTime = await loadWorkingTimeDoc();
-            const week = staffType === 'site' ? workingTime.site : workingTime.office;
+            const week = getWeekForStaffType(workingTime, staffType);
             const { startMinutes, isOffDay } = getScheduledPunchMinutes(week, date);
             const actualMinutes = clockTimeToMinutes(timeIn);
             if (!isOffDay && startMinutes != null && actualMinutes != null) {
@@ -1247,6 +1313,8 @@ export async function checkOutMyAttendance(req, res) {
         }
 
         const { employee } = resolved;
+        if (await rejectIfNotSalaryEnrolled(res, employee)) return;
+
         const date = getDubaiDateKey();
         const timeOut = getDubaiClockTime();
         const employeeMongoId = String(employee._id);
@@ -1273,7 +1341,7 @@ export async function checkOutMyAttendance(req, res) {
         try {
             const staffType = normalizeStaffType(employee.staffType);
             const workingTime = await loadWorkingTimeDoc();
-            const week = staffType === 'site' ? workingTime.site : workingTime.office;
+            const week = getWeekForStaffType(workingTime, staffType);
             const { endMinutes, isOffDay } = getScheduledPunchMinutes(week, date);
             const actualOut = clockTimeToMinutes(timeOut);
             if (!isOffDay && endMinutes != null && actualOut != null && actualOut < endMinutes) {
@@ -1422,7 +1490,7 @@ export async function markTeamAttendance(req, res) {
             try {
                 const staffType = normalizeStaffType(emp.staffType);
                 const workingTime = await loadWorkingTimeDoc();
-                const week = staffType === 'site' ? workingTime.site : workingTime.office;
+                const week = getWeekForStaffType(workingTime, staffType);
                 const schedule = getScheduledPunchMinutes(week, date);
                 const resolved = resolveStatusFromPunches({
                     timeIn,
@@ -1667,6 +1735,7 @@ export async function requestAttendanceLeave(req, res) {
         if (!self) {
             return res.status(404).json({ message: 'No linked employee profile found for this user.' });
         }
+        if (await rejectIfNotSalaryEnrolled(res, self)) return;
 
         const date = String(req.body?.date || '').trim();
         const requestedStatusKey = String(req.body?.requestedStatusKey || '').trim();
@@ -1811,6 +1880,7 @@ export async function requestAttendanceYellow(req, res) {
         if (!self) {
             return res.status(404).json({ message: 'No linked employee profile found for this user.' });
         }
+        if (await rejectIfNotSalaryEnrolled(res, self)) return;
 
         const date = String(req.body?.date || '').trim();
         const reason = String(req.body?.reason || '').trim();
@@ -1994,6 +2064,7 @@ export async function requestAttendanceFuture(req, res) {
         if (!self) {
             return res.status(404).json({ message: 'No linked employee profile found for this user.' });
         }
+        if (await rejectIfNotSalaryEnrolled(res, self)) return;
 
         const fromDate = String(req.body?.fromDate || req.body?.date || '').trim();
         const toDate = String(req.body?.toDate || fromDate).trim();
@@ -2054,7 +2125,7 @@ export async function requestAttendanceFuture(req, res) {
 
         const staffType = normalizeStaffType(employee.staffType);
         const workingTime = await loadWorkingTimeDoc();
-        const scheduleWeek = staffType === 'site' ? workingTime.site : workingTime.office;
+        const scheduleWeek = getWeekForStaffType(workingTime, staffType);
         const offWeekdays = new Set(getOffWeekdayKeys(scheduleWeek));
         const holidaySet = await loadHolidaySet(todayKey, toDate, staffType);
         const firstEligible = firstEligibleAdvanceRequestDate(todayKey, holidaySet, offWeekdays);
@@ -2271,7 +2342,7 @@ export async function decideAttendanceLeaveRequest(req, res) {
     }
 }
 
-async function decideLeaveRequestInternal({
+export async function decideLeaveRequestInternal({
     attendanceId,
     date,
     employeeMongoId,
@@ -2279,6 +2350,7 @@ async function decideLeaveRequestInternal({
     approvedStatusKey = '',
     leavePayType = '',
     actor,
+    hrBypass = false,
 }) {
     let record = null;
     if (attendanceId && mongoose.Types.ObjectId.isValid(attendanceId)) {
@@ -2294,7 +2366,7 @@ async function decideLeaveRequestInternal({
         return { ok: false, status: 400, message: 'No pending leave request for this day.' };
     }
 
-    const allowed = await isEmployeeInTeamTree(actor._id, record.employeeMongoId);
+    const allowed = hrBypass || (await isEmployeeInTeamTree(actor._id, record.employeeMongoId));
     if (!allowed) {
         return {
             ok: false,

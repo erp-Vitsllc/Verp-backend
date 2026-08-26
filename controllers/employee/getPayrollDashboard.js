@@ -20,6 +20,7 @@ import {
     clockTimeToMinutes,
     getScheduledPunchMinutes,
     loadWorkingTimeDoc,
+    getWeekForStaffType,
 } from '../../utils/workingTimeHelpers.js';
 
 const MONTH_LABELS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
@@ -31,7 +32,14 @@ const APPROVED_LOAN_STATUSES = ['Approved', 'Pending Payment to Employee', 'Paid
 const APPROVED_FINE_STATUSES = ['Approved', 'Active', 'Paid', 'Completed'];
 const LEAVE_STATUS_KEYS = ['authorized_leave', 'unauthorized_leave', 'sick_leave'];
 const UPCOMING_LEAVE_STATUS_KEYS = [...LEAVE_STATUS_KEYS, 'on_leave'];
-const AVATAR_COLORS = ['#7C3AED', '#0B8A80', '#1D5FDB', '#C98A0A', '#D13E38', '#4F6B82'];
+const AVATAR_TONES = [
+    { bg: '#EDE9FE', fg: '#6D28D9' },
+    { bg: '#DBEAFE', fg: '#1D4ED8' },
+    { bg: '#FCE7F3', fg: '#BE185D' },
+    { bg: '#D1FAE5', fg: '#047857' },
+    { bg: '#FFEDD5', fg: '#C2410C' },
+    { bg: '#E0E7FF', fg: '#4338CA' },
+];
 const PENDING_ADVANCE_STATUSES = ['Pending', 'Pending HR', 'Pending Accounts', 'Pending Authorization'];
 
 function money(value) {
@@ -487,11 +495,11 @@ function nameInitials(name) {
     return letters || '?';
 }
 
-function avatarColor(seed) {
+function avatarTone(seed) {
     const text = String(seed || '');
     let hash = 0;
     for (let i = 0; i < text.length; i += 1) hash = (hash * 31 + text.charCodeAt(i)) >>> 0;
-    return AVATAR_COLORS[hash % AVATAR_COLORS.length];
+    return AVATAR_TONES[hash % AVATAR_TONES.length];
 }
 
 function nextBirthdayKey(dateOfBirth, dubai) {
@@ -627,8 +635,9 @@ async function buildPayrollInsightLists({ scopedEmployees, scopedMongoIds, scope
             const nextDate = nextBirthdayKey(row.dateOfBirth, dubai);
             if (!nextDate) return null;
             const inDays = daysBetweenKeys(todayKey, nextDate);
-            if (inDays == null || inDays < 0 || inDays > 30) return null;
+            if (inDays == null || inDays < 0) return null;
             const name = employeeDisplayName(emp) || emp.employeeId;
+            const tone = avatarTone(emp.employeeId || name);
             return {
                 employeeId: emp.employeeId,
                 name,
@@ -636,12 +645,14 @@ async function buildPayrollInsightLists({ scopedEmployees, scopedMongoIds, scope
                 date: formatDayMon(nextDate),
                 dateKey: nextDate,
                 initials: nameInitials(name),
-                color: avatarColor(emp.employeeId || name),
+                avatarBg: tone.bg,
+                avatarFg: tone.fg,
+                color: tone.bg,
             };
         })
         .filter(Boolean)
         .sort((a, b) => String(a.dateKey).localeCompare(String(b.dateKey)))
-        .slice(0, 4)
+        .slice(0, 5)
         .map(({ dateKey, ...rest }) => rest);
 
     const sortedLeave = [...(leaveRows || [])].sort((a, b) => {
@@ -1003,8 +1014,7 @@ export const getPayrollDashboard = async (req, res) => {
                 if (idx < 0 || idx > 11) continue;
                 const salaryDoc = salaryByCode.get(String(emp.employeeId || '').trim());
                 const monthlySalary = salaryAmountForMonth(salaryDoc, ym);
-                const week =
-                    normalizeStaffType(emp.staffType) === 'site' ? workingTime.site : workingTime.office;
+                const week = getWeekForStaffType(workingTime, emp.staffType);
                 overtimeMonthlyAmounts[idx] += overtimeAmountForPunch({
                     timeIn: punch.timeIn,
                     timeOut: punch.timeOut,

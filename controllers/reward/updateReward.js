@@ -9,7 +9,8 @@ import { getDepartmentHOD } from "../../utils/getDepartmentHOD.js";
 import { sendHODAuthorizationEmail } from "../../utils/sendHODAuthorizationEmail.js";
 import { generatePdf } from "../../utils/generatePdf.js";
 import { ensureAttachmentPersistedToS3 } from "../../utils/s3Upload.js";
-import { resolveEmployeeEmail, getFallbackEmailNote, addEmployeeEmailToSet } from "../../utils/resolveEmployeeEmail.js";
+import { resolveEmployeeEmail, addEmployeeEmailToSet } from "../../utils/resolveEmployeeEmail.js";
+import { buildRewardApprovedEmailHtml } from "../../utils/buildRewardApprovedEmailHtml.js";
 import { isUsernameSystemSuperUser, isReqUserSystemSuperUser } from "../../utils/systemSuperUser.js";
 import { runAfterResponse } from "../../utils/runAfterResponse.js";
 
@@ -715,24 +716,18 @@ ${reward.workflow ? reward.workflow.map((w, i) => `│ ${i + 1}. Role: ${w.role.
                                         secure: false,
                                         auth: { user: emailUser, pass: emailPass },
                                     });
-                                    const amountNote =
-                                        Number(reward.amount || 0) > 0
-                                            ? `<p>Amount: <strong>AED ${Number(reward.amount).toLocaleString()}</strong></p>`
-                                            : '';
                                     const stageMailPayload = {
                                         from: `"VeRP Notification" <${emailUser}>`,
                                         to: recipients,
-                                        subject: `Reward Management Approved — Pending Accounts: ${reward.rewardType} — ${employeeForStageMail.firstName || ''} ${employeeForStageMail.lastName || ''}`.trim(),
-                                        html: `
-                                            <div style="font-family: Arial, sans-serif; color: #333; max-width: 600px; margin: 0 auto; padding: 20px; border: 1px solid #eee; border-radius: 10px;">
-                                                <h2 style="color: #1565c0; text-align: center;">Management Approved</h2>
-                                                <p>Dear All,</p>
-                                                <p>Management has approved the reward for <strong>${employeeForStageMail.firstName || ''} ${employeeForStageMail.lastName || ''}</strong> (${reward.rewardType}${reward.title ? ` — ${reward.title}` : ''}).</p>
-                                                ${amountNote}
-                                                <p>Accounts will review expense details and complete the reward next.</p>
-                                                <p>Best Regards,<br/>VeRP System</p>
-                                            </div>
-                                        `,
+                                        subject: `Congratulations! Reward Approved — ${employeeForStageMail.firstName || ''} ${employeeForStageMail.lastName || ''}`.trim(),
+                                        html: buildRewardApprovedEmailHtml({
+                                            employeeFirstName: employeeForStageMail.firstName,
+                                            employeeLastName: employeeForStageMail.lastName,
+                                            rewardType: reward.rewardType,
+                                            title: reward.title,
+                                            amount: reward.amount,
+                                            showAccountsNote: true,
+                                        }),
                                     };
                                     runAfterResponse('updateReward-mgmt-accounts-email', () =>
                                         transporter.sendMail(stageMailPayload).then(() => {
@@ -948,7 +943,7 @@ ${reward.workflow ? reward.workflow.map((w, i) => `│ ${i + 1}. Role: ${w.role.
                         const toEmails = new Set();
                         const ccEmails = new Set();
 
-                        const { email: empEmail, isFallbackToReportee, employeeName, reporteeName } = resolveEmployeeEmail(employeeForEmail);
+                        const { email: empEmail } = resolveEmployeeEmail(employeeForEmail);
                         if (empEmail) toEmails.add(empEmail);
 
                         if (employeeForEmail.primaryReportee) {
@@ -1011,23 +1006,19 @@ ${reward.workflow ? reward.workflow.map((w, i) => `│ ${i + 1}. Role: ${w.role.
                                     auth: { user: emailUser, pass: emailPass }
                                 });
 
-                                const statusLabel = isCashOrGiftFinal ? 'Approved (Paid)' : 'Approved';
-                                const subject = isCashOrGiftFinal
-                                    ? `Reward Approved (Paid): ${reward.rewardType} - ${employeeForEmail.firstName} ${employeeForEmail.lastName}`
-                                    : "Congratulations! Reward Request Approved";
-                                const html = `
-                                    <div style="font-family: Arial, sans-serif; color: #333; max-width: 600px; margin: 0 auto; padding: 20px; border: 1px solid #eee; border-radius: 10px;">
-                                        <h2 style="color: #2e7d32; text-align: center;">Reward ${statusLabel}</h2>
-                                        ${isFallbackToReportee ? getFallbackEmailNote(employeeName, reporteeName) : ''}
-                                        <p>Dear All,</p>
-                                        <p>We are pleased to inform you that the reward request for <strong>${employeeForEmail.firstName} ${employeeForEmail.lastName}</strong> regarding <strong>${reward.rewardType}</strong> (${reward.title}) has been <strong>${statusLabel}</strong>.</p>
-                                        ${isCashOrGiftFinal ? `<p>Amount: <strong>AED ${Number(reward.amount || 0).toLocaleString()}</strong>.</p>` : ''}
-                                        <p>Please find the reward certificate ${reward.attachment && (reward.attachment.url || reward.attachment.publicId) ? 'and original documentation' : ''} attached to this email.</p>
-                                        <br>
-                                        <p>Best Regards,</p>
-                                        <p>Management Team</p>
-                                    </div>
-                                `;
+                                const employeeFullName = `${employeeForEmail.firstName || ''} ${employeeForEmail.lastName || ''}`.trim();
+                                const subject = `Congratulations! Reward Approved — ${employeeFullName}`;
+                                const html = buildRewardApprovedEmailHtml({
+                                    employeeFirstName: employeeForEmail.firstName,
+                                    employeeLastName: employeeForEmail.lastName,
+                                    rewardType: reward.rewardType,
+                                    title: reward.title,
+                                    amount: isCashOrGiftFinal ? reward.amount : null,
+                                    hasOriginalAttachment: Boolean(
+                                        reward.attachment && (reward.attachment.url || reward.attachment.publicId),
+                                    ),
+                                    showAccountsNote: false,
+                                });
 
                                 const mailOptions = {
                                     from: `"VeRP Notification" <${emailUser}>`,

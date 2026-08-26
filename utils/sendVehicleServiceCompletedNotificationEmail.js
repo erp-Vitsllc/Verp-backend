@@ -6,7 +6,6 @@ import {
     resolveEmployeeEmail,
     resolveEmployeeEmailWithReporteeLoaded,
     employeeDisplayName,
-    getFallbackEmailNote,
 } from './resolveEmployeeEmail.js';
 import {
     buildVehicleServiceCompletedEmailHtml,
@@ -14,13 +13,13 @@ import {
 } from './buildVehicleServiceCompletedEmailHtml.js';
 import { withFrontendPath, resolveFrontendBaseUrl } from './resolveFrontendBaseUrl.js';
 import { vehicleServiceDetailsPath } from './vehicleServiceAdminOfficerNotification.js';
+import { buildEmailDedupeKey, sendErpEmail } from './emailDispatch.js';
 
 const EMP_SELECT =
     'firstName lastName employeeId companyEmail workEmail personalEmail email company mobileNumber phoneNumber contactNumber phone mobile';
 
 function pickEmpEmail(emp) {
     if (!emp) return null;
-    // Company / work only — never personalEmail (birthday mails only).
     return resolveEmployeeEmail(emp).email || null;
 }
 
@@ -55,7 +54,6 @@ function firstFinite(...candidates) {
     return null;
 }
 
-/** Resolve company vs employee paid amounts from service remark / value. */
 function resolvePaidAmounts(remark = {}, service = null) {
     const mode = String(remark.amountMode || '').toLowerCase().trim();
     if (mode === 'warranty') {
@@ -144,8 +142,9 @@ function serviceDetailsUrl(asset, service, serviceType) {
 
 /**
  * After Complete / End Service — formal completion & return email.
- * TO: assigned user (+ car driven by, each personalized)
- * CC: Admin Officer, HR, Accounts
+ * TO: Admin Officer
+ * CC: vehicle assignee, HR, Accounts, car driven by
+ * One send per completed service (deduped).
  */
 export async function sendVehicleServiceCompletedNotificationEmail({
     asset,
@@ -207,7 +206,7 @@ export async function sendVehicleServiceCompletedNotificationEmail({
             ),
         );
 
-        const mailFields = {
+        const html = buildVehicleServiceCompletedEmailHtml({
             serviceType,
             vehicleNumber: plateOf(asset),
             vehicleAssetNumber: asset?.assetId || '',
@@ -221,18 +220,42 @@ export async function sendVehicleServiceCompletedNotificationEmail({
             adminOfficerName: employeeDisplayName(adminOfficer),
             adminOfficerEmail: pickEmpEmail(adminOfficer) || '',
             detailsUrl,
-        };
+        });
 
-        const stakeholderCc = [];
-        for (const emp of [adminOfficer, hr, accounts, driver]) {
-            const addr = pickEmpEmail(emp);
-            if (addr) stakeholderCc.push(addr.toLowerCase());
+        const { email: assigneeEmail } = await resolveEmployeeEmailWithReporteeLoaded(assignee);
+        const adminEmail = pickEmpEmail(adminOfficer);
+
+        const ccSet = new Set();
+        for (const addr of [
+            assigneeEmail,
+            pickEmpEmail(hr),
+            pickEmpEmail(accounts),
+            pickEmpEmail(driver),
+        ]) {
+            if (addr) ccSet.add(addr.toLowerCase());
         }
         for (const extra of ccExtra || []) {
             const addr = String(extra || '').trim();
-            if (addr) stakeholderCc.push(addr.toLowerCase());
+            if (addr) ccSet.add(addr.toLowerCase());
         }
-        const uniqueStakeholderCc = [...new Set(stakeholderCc)];
+
+        const primaryTo = String(toOverride || adminEmail || assigneeEmail || '').trim();
+        if (!primaryTo) {
+            console.warn('[VehicleServiceCompleted] No recipient email — skip.');
+            return { ok: false, reason: 'no-recipients' };
+        }
+
+        ccSet.delete(primaryTo.toLowerCase());
+        const cc = [...ccSet];
+
+        const serviceId = String(service?._id || service?.id || '');
+        const assetId = String(asset?._id || asset?.id || '');
+        const dedupeKey = buildEmailDedupeKey([
+            'VehicleServiceCompleted',
+            assetId,
+            serviceId,
+            completedDate,
+        ]);
 
         const transporter = nodemailer.createTransport({
             host: 'smtp.office365.com',
@@ -241,90 +264,31 @@ export async function sendVehicleServiceCompletedNotificationEmail({
             auth: { user: emailUser, pass: emailPass },
         });
 
-        const primaryRecipients = [];
-        const seenIds = new Set();
-        for (const emp of [assignee, driver]) {
-            if (!emp) continue;
-            const id = emp._id ? String(emp._id) : '';
-            if (id && seenIds.has(id)) continue;
-            if (id) seenIds.add(id);
-            primaryRecipients.push(emp);
-        }
+        const result = await sendErpEmail({
+            transporter,
+            from: `"VeRP Portal" <${emailUser}>`,
+            to: primaryTo,
+            cc,
+            subject,
+            html,
+            dedupeKey,
+            module: 'VehicleService',
+            emailType: 'completed',
+            recordId: serviceId || assetId,
+            metadata: { subjectCategory: 'completed' },
+        });
 
-        const buildCcForTo = (toAddr) => {
-            const ccSet = new Set(uniqueStakeholderCc);
-            ccSet.delete(String(toAddr || '').toLowerCase());
-            return [...ccSet];
-        };
-
-        if (toOverride) {
-            // Preview / force path: single TO override, still CC stakeholders.
-            const html = buildVehicleServiceCompletedEmailHtml(mailFields);
-            const cc = buildCcForTo(toOverride);
-            await transporter.sendMail({
-                from: `"VeRP Portal" <${emailUser}>`,
-                to: toOverride,
-                ...(cc.length ? { cc } : {}),
-                subject,
-                html,
-            });
-            console.log(
-                `[VehicleServiceCompleted] Sent TO: ${toOverride}${cc.length ? ` CC: ${cc.join(', ')}` : ''}`,
-            );
-            return { ok: true, to: [toOverride], cc };
-        }
-
-        if (!primaryRecipients.length) {
-            console.warn('[VehicleServiceCompleted] No assigned user / driver — skip.');
-            return { ok: false, reason: 'no-recipients' };
-        }
-
-        const sentTo = [];
-        let lastCc = [];
-        for (const recipient of primaryRecipients) {
-            const {
-                email: resolvedTo,
-                isFallbackToReportee,
-                employee: full,
-            } = await resolveEmployeeEmailWithReporteeLoaded(recipient);
-            const to = String(resolvedTo || '').trim();
-            if (!to) {
-                console.warn(
-                    `[VehicleServiceCompleted] No email for ${employeeDisplayName(recipient)} — skip.`,
-                );
-                continue;
+        if (!result.sent) {
+            if (result.reason === 'duplicate') {
+                console.log('[VehicleServiceCompleted] Duplicate completion notification suppressed.');
             }
-
-            const fallbackNote =
-                isFallbackToReportee && full?.primaryReportee
-                    ? getFallbackEmailNote(
-                          employeeDisplayName(full),
-                          employeeDisplayName(full.primaryReportee),
-                      )
-                    : '';
-
-            const html = buildVehicleServiceCompletedEmailHtml({
-                ...mailFields,
-                fallbackNoteHtml: fallbackNote,
-            });
-
-            const cc = buildCcForTo(to);
-            lastCc = cc;
-
-            await transporter.sendMail({
-                from: `"VeRP Portal" <${emailUser}>`,
-                to,
-                ...(cc.length ? { cc } : {}),
-                subject,
-                html,
-            });
-            sentTo.push(to);
-            console.log(
-                `[VehicleServiceCompleted] Sent TO: ${to}${cc.length ? ` CC: ${cc.join(', ')}` : ''}`,
-            );
+            return { ok: false, reason: result.reason || 'not-sent' };
         }
 
-        return { ok: sentTo.length > 0, to: sentTo, cc: lastCc };
+        console.log(
+            `[VehicleServiceCompleted] Sent TO: ${primaryTo}${cc.length ? ` CC: ${cc.join(', ')}` : ''}`,
+        );
+        return { ok: true, to: [primaryTo], cc };
     } catch (err) {
         console.error('[VehicleServiceCompleted] Email error:', err.message);
         return { ok: false, reason: err.message };

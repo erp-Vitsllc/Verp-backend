@@ -41,6 +41,8 @@ const workingTimeSchema = new mongoose.Schema(
         },
         site: { type: weekSchema, default: () => ({}) },
         office: { type: weekSchema, default: () => ({}) },
+        /** Weekly schedules for custom work locations, keyed by WorkLocation.key. */
+        extra: { type: mongoose.Schema.Types.Mixed, default: () => ({}) },
         updatedBy: {
             type: mongoose.Schema.Types.ObjectId,
             ref: 'User',

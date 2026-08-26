@@ -603,13 +603,11 @@ export async function completeBodyWorkService(asset, serviceId, serviceUpdates, 
     const { wf, bindActive } = getWorkflowContextForService(asset, serviceId);
     if (!wf || !isBodyWorkWorkflow(wf, service)) throw new Error('Not a body work workflow.');
     const stage = String(wf.stage || '').toLowerCase();
-    const { SHOP_SERVICE_SCHEDULED_STAGE, isShopServiceLive } = await import('./vehicleShopServiceScheduled.js');
-    const mayComplete =
-        stage === BODY_WORK_STAGE.ADMIN_RETURN ||
-        stage === 'pending_admin' ||
-        (stage === SHOP_SERVICE_SCHEDULED_STAGE && isShopServiceLive(asset, service));
-    if (!mayComplete) {
-        throw new Error('Return details can only be completed at the final admin step.');
+    const { shopServiceCompleteAllowed } = await import('./vehicleShopServiceScheduled.js');
+    if (!shopServiceCompleteAllowed(asset, service, wf)) {
+        throw new Error(
+            'Complete Service unlocks after Schedule is submitted and Accounts Approve (when required).',
+        );
     }
     if (stage === 'pending_admin') {
         wf.stage = BODY_WORK_STAGE.ADMIN_RETURN;
@@ -682,9 +680,10 @@ export async function completeBodyWorkService(asset, serviceId, serviceUpdates, 
         linkPath: `/HRM/Asset/Vehicle/details/${asset._id}/body-work/${serviceId}`,
         dashboardMeta: bodyWorkDashboardMeta(asset, serviceId),
         appendActivity: appendBodyWorkActivity,
+        reqUser: req.user,
     });
 
-    // Vehicle Damage fines are created after Zoho bill success (Make Payment), not on Complete.
+    // Vehicle Damage fines are created on Complete Service (before Accounts / Zoho).
 
     return asset;
 }

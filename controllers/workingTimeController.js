@@ -1,5 +1,6 @@
 import WorkingTime from '../models/WorkingTime.js';
 import { syncWeeklyOffFromToday } from '../utils/workingTimeHelpers.js';
+import { slugifyWorkLocationKey } from '../utils/workLocationHelpers.js';
 
 const DAY_KEYS = [
     'monday',
@@ -66,6 +67,17 @@ function sanitizeWeek(raw) {
     return base;
 }
 
+function sanitizeExtra(raw) {
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return {};
+    const extra = {};
+    Object.entries(raw).forEach(([key, week]) => {
+        const locKey = slugifyWorkLocationKey(key);
+        if (!locKey || locKey === 'office' || locKey === 'site') return;
+        extra[locKey] = sanitizeWeek(week);
+    });
+    return extra;
+}
+
 /**
  * GET /api/WorkingTime
  */
@@ -86,6 +98,7 @@ export async function getWorkingTime(req, res) {
             workingTime: {
                 site: sanitizeWeek(doc.site),
                 office: sanitizeWeek(doc.office),
+                extra: sanitizeExtra(doc.extra),
             },
         });
     } catch (error) {
@@ -104,16 +117,19 @@ export async function upsertWorkingTime(req, res) {
     try {
         const site = sanitizeWeek(req.body?.site);
         const office = sanitizeWeek(req.body?.office);
+        const extraProvided = req.body?.extra != null;
+        const extra = extraProvided ? sanitizeExtra(req.body.extra) : null;
+
+        const setPayload = {
+            site,
+            office,
+            updatedBy: req.user?.id || null,
+        };
+        if (extraProvided) setPayload.extra = extra;
 
         const doc = await WorkingTime.findOneAndUpdate(
             { key: 'default' },
-            {
-                $set: {
-                    site,
-                    office,
-                    updatedBy: req.user?.id || null,
-                },
-            },
+            { $set: setPayload },
             { upsert: true, new: true, setDefaultsOnInsert: true },
         ).lean();
 
@@ -122,6 +138,7 @@ export async function upsertWorkingTime(req, res) {
             syncResult = await syncWeeklyOffFromToday({
                 siteWeek: site,
                 officeWeek: office,
+                extra: extraProvided ? extra : sanitizeExtra(doc.extra),
                 updatedBy: req.user?.id || null,
             });
         } catch (syncErr) {
@@ -133,6 +150,7 @@ export async function upsertWorkingTime(req, res) {
             workingTime: {
                 site: sanitizeWeek(doc.site),
                 office: sanitizeWeek(doc.office),
+                extra: sanitizeExtra(doc.extra),
             },
             weeklyOffSync: syncResult,
         });

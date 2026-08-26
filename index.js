@@ -31,6 +31,7 @@ import attendanceRoute from "./routes/attendanceRoutes.js";
 import leaveRoute from "./routes/leaveRoutes.js";
 import holidayRoute from "./routes/holidayRoutes.js";
 import workingTimeRoute from "./routes/workingTimeRoutes.js";
+import workLocationRoute from "./routes/workLocationRoutes.js";
 import { startLocatorWebSocket } from "./services/locatorWebSocketService.js";
 import { syncLocatorToErpDatabase } from "./services/locatorSnapshotService.js";
 import { commonLimiter } from "./middleware/rateLimitMiddleware.js";
@@ -99,7 +100,7 @@ setInterval(() => {
     processFleetHandoverEscalation().catch((e) =>
         console.error('[processFleetHandoverEscalation] scheduled run failed:', e?.message || e),
     );
-}, 6 * 60 * 60 * 1000);
+}, 24 * 60 * 60 * 1000);
 
 setTimeout(() => { processAccidentAssets(); }, 60 * 1000);
 scheduleDailyAtMidnight(
@@ -155,7 +156,7 @@ scheduleDailyAtMidnight(
 
 // Run vehicle service hold reminders (creates deferred task/email near hold date).
 setTimeout(() => { processVehicleServiceHoldReminders(); }, 120 * 1000);
-setInterval(() => { processVehicleServiceHoldReminders(); }, 6 * 60 * 60 * 1000);
+setInterval(() => { processVehicleServiceHoldReminders(); }, 24 * 60 * 60 * 1000);
 
 // Scheduled vehicle service window: flip to "On Service" on the first day, email AC after window ends.
 setTimeout(() => { processVehicleServiceScheduledPhase(); }, 150 * 1000);
@@ -339,6 +340,7 @@ app.use("/api/Attendance", attendanceRoute);
 app.use("/api/Leave", leaveRoute);
 app.use("/api/Holiday", holidayRoute);
 app.use("/api/WorkingTime", workingTimeRoute);
+app.use("/api/WorkLocation", workLocationRoute);
 
 const PORT = process.env.PORT || 5000;
 

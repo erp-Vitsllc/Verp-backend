@@ -21,9 +21,9 @@ const holidaySchema = new mongoose.Schema(
             required: true,
             index: true,
         },
-        /** Who this holiday marks on the attendance calendar. Missing/empty = both (legacy). */
+        /** Work-location keys this holiday marks. Missing/empty = Office and Site (legacy). */
         appliesTo: {
-            type: [{ type: String, enum: ['office', 'site'] }],
+            type: [String],
             default: () => ['office', 'site'],
         },
         /** Original catalog date when this was added from UAE holidays (may differ if custom). */

@@ -12,6 +12,7 @@ import {
     sendEmployeeHubRequestEmails,
     sendEmployeeHubDecisionEmails,
 } from '../../utils/sendEmployeeHubRequestEmails.js';
+import { resolveEmployeeEmail } from '../../utils/resolveEmployeeEmail.js';
 
 const SELECT_PERSON =
     '_id employeeId firstName lastName companyEmail workEmail email primaryReportee';
@@ -216,6 +217,8 @@ export async function decideEmployeeHubRequest(req, res) {
             comment: row.decisionNote,
         });
 
+        const { email: actorEmail } = resolveEmployeeEmail(self || manager || {});
+
         sendEmployeeHubDecisionEmails({
             manager,
             employee,
@@ -225,6 +228,7 @@ export async function decideEmployeeHubRequest(req, res) {
             description: row.description,
             decisionNote: row.decisionNote,
             requestId: row._id,
+            actorEmail,
         }).catch(() => null);
 
         return res.status(200).json({

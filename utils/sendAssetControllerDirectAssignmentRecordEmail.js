@@ -1,5 +1,4 @@
 import nodemailer from 'nodemailer';
-import { normalizePdfAttachments } from './normalizeEmailAttachments.js';
 import { resolveEmployeeEmailWithReporteeLoaded } from './resolveEmployeeEmail.js';
 import { employeeDisplayName } from './resolveEmployeeEmail.js';
 
@@ -71,9 +70,7 @@ export async function sendAssetControllerDirectAssignmentRecordEmail({
                     <p style="font-size: 14px; color: #64748b;">Recorded by: <strong>${assignerName}</strong></p>
                     ${listHtml}
                     <p style="font-size: 13px; color: #64748b; margin-top: 20px;">
-                        The attached handover form includes your signature as <strong>Handover By</strong> and
-                        <strong>${assigneeName}</strong>&rsquo;s name and signature under <strong>Received and Acknowledge</strong>
-                        (assignee, not Asset Controller).
+                        The handover form is saved on the asset record in ERP and can be downloaded from the asset page when needed.
                     </p>
                 </div>
                 <div style="background-color: #f8fafc; padding: 16px; text-align: center; font-size: 12px; color: #64748b; border-top: 1px solid #e2e8f0;">
@@ -82,14 +79,11 @@ export async function sendAssetControllerDirectAssignmentRecordEmail({
             </div>
         `;
 
-        const att = normalizePdfAttachments(attachments);
-
         await transporter.sendMail({
             from: `"Asset Management" <${emailUser}>`,
             to: recipientEmail,
             subject,
             html,
-            ...(att.length ? { attachments: att } : {}),
         });
 
         console.log(`[AC direct assignment email] Sent to ${recipientEmail}`);

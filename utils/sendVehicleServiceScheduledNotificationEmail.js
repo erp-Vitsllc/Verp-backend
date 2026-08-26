@@ -1,26 +1,30 @@
 import nodemailer from 'nodemailer';
 import mongoose from 'mongoose';
 import EmployeeBasic from '../models/EmployeeBasic.js';
+import Company from '../models/Company.js';
 import { getDepartmentHOD } from './getDepartmentHOD.js';
 import {
     resolveEmployeeEmail,
     resolveEmployeeEmailWithReporteeLoaded,
+    pickEffectiveEmail,
     employeeDisplayName,
-    getFallbackEmailNote,
 } from './resolveEmployeeEmail.js';
+import { employeeHasActivePortalUser } from './vehicleHandoverApprovalFlow.js';
 import {
     buildVehicleServiceScheduledEmailHtml,
     vehicleServiceScheduledSubject,
 } from './buildVehicleServiceScheduledEmailHtml.js';
 import { withFrontendPath, resolveFrontendBaseUrl } from './resolveFrontendBaseUrl.js';
 import { vehicleServiceDetailsPath } from './vehicleServiceAdminOfficerNotification.js';
+import { buildEmailDedupeKey, sendErpEmail } from './emailDispatch.js';
 
 const EMP_SELECT =
-    'firstName lastName employeeId companyEmail workEmail personalEmail email company mobileNumber phoneNumber contactNumber phone mobile';
+    'firstName lastName employeeId companyEmail workEmail personalEmail email company mobileNumber phoneNumber contactNumber phone mobile primaryReportee enablePortalAccess';
+const REPORTEE_SELECT =
+    'firstName lastName employeeId companyEmail workEmail status profileStatus enablePortalAccess';
 
 function pickEmpEmail(emp) {
     if (!emp) return null;
-    // Company / work only — never personalEmail (birthday mails only).
     return resolveEmployeeEmail(emp).email || null;
 }
 
@@ -52,13 +56,83 @@ function formatPaymentMethod(remark = {}) {
     return '';
 }
 
-async function resolveEmployeeByIdOrCode(raw) {
-    const id = String(raw || '').trim();
-    if (!id) return null;
-    if (mongoose.Types.ObjectId.isValid(id)) {
-        return EmployeeBasic.findById(id).select(EMP_SELECT).populate('company', 'name').lean();
+function reporteeLooksPopulated(reportee) {
+    if (reportee == null) return true;
+    if (typeof reportee !== 'object') return false;
+    return Boolean(
+        reportee.firstName ||
+            reportee.lastName ||
+            reportee.employeeId ||
+            reportee.companyEmail ||
+            reportee.workEmail,
+    );
+}
+
+async function loadAssigneeWithReportee(raw) {
+    if (!raw) return null;
+    const alreadyLoaded =
+        typeof raw === 'object' &&
+        raw.employeeId &&
+        raw.primaryReportee !== undefined &&
+        reporteeLooksPopulated(raw.primaryReportee);
+    if (alreadyLoaded) return raw;
+    const id = raw._id || raw;
+    if (!id || !mongoose.Types.ObjectId.isValid(String(id))) {
+        return typeof raw === 'object' ? raw : null;
     }
-    return EmployeeBasic.findOne({ employeeId: id }).select(EMP_SELECT).populate('company', 'name').lean();
+    return EmployeeBasic.findById(id)
+        .select(EMP_SELECT)
+        .populate('company', 'name')
+        .populate('primaryReportee', REPORTEE_SELECT)
+        .lean();
+}
+
+function noUserAccountFallbackNote(employeeName, reporteeName) {
+    return `
+    <div style="background-color: #fff3cd; border: 1px solid #ffc107; padding: 12px; border-radius: 6px; margin-bottom: 20px; font-size: 13px;">
+        <strong>Note:</strong> This notification was sent to you (${reporteeName}) because <strong>${employeeName}</strong> does not have a user account. Please ensure they are informed.
+    </div>`;
+}
+
+async function resolveScheduledToRecipient(asset, assignee) {
+    if (asset?.assignedToType === 'Company' && asset?.assignedCompany) {
+        const companyId = asset.assignedCompany._id || asset.assignedCompany;
+        const company =
+            typeof asset.assignedCompany === 'object' && asset.assignedCompany.email !== undefined
+                ? asset.assignedCompany
+                : await Company.findById(companyId).select('name nickName email').lean();
+        const email = String(company?.email || '').trim() || null;
+        return {
+            email,
+            greetingName: String(company?.name || company?.nickName || 'Company').trim() || 'Employee',
+            fallbackNoteHtml: '',
+        };
+    }
+
+    if (!assignee) {
+        return { email: null, greetingName: 'Employee', fallbackNoteHtml: '' };
+    }
+
+    const hasUser = await employeeHasActivePortalUser(assignee);
+    const { email, employee } = await resolveEmployeeEmailWithReporteeLoaded(assignee);
+    const full = employee || assignee;
+
+    if (hasUser) {
+        return {
+            email,
+            greetingName: employeeDisplayName(full) || 'Employee',
+            fallbackNoteHtml: '',
+        };
+    }
+
+    const reportee = full?.primaryReportee;
+    return {
+        email: pickEffectiveEmail(reportee),
+        greetingName: employeeDisplayName(reportee) || 'Employee',
+        fallbackNoteHtml: reportee
+            ? noUserAccountFallbackNote(employeeDisplayName(full), employeeDisplayName(reportee))
+            : '',
+    };
 }
 
 function dayLabel(value) {
@@ -95,8 +169,9 @@ function serviceDetailsUrl(asset, service, serviceType) {
 
 /**
  * Formal scheduled-service email — after Admin completes Schedule / Reschedule.
- * TO: vehicle assigned user
- * CC: Admin Officer, HR, Accounts, car driven by
+ * TO only: vehicle assigned user (primary reportee if assignee has no user account).
+ * No CC.
+ * One send per service window (deduped).
  */
 export async function sendVehicleServiceScheduledNotificationEmail({
     asset,
@@ -104,7 +179,6 @@ export async function sendVehicleServiceScheduledNotificationEmail({
     service = null,
     serviceTypeLabel = '',
     toOverride = null,
-    ccExtra = [],
 } = {}) {
     try {
         const emailUser = process.env.EMAIL_USER?.trim();
@@ -114,54 +188,10 @@ export async function sendVehicleServiceScheduledNotificationEmail({
             return { ok: false, reason: 'no-credentials' };
         }
 
-        let assignee = asset?.assignedTo || null;
-        if (assignee && (!assignee.firstName || !pickEmpEmail(assignee) || !assignee.company)) {
-            const id = assignee._id || assignee;
-            if (id && mongoose.Types.ObjectId.isValid(String(id))) {
-                assignee = await EmployeeBasic.findById(id)
-                    .select(EMP_SELECT)
-                    .populate('company', 'name')
-                    .lean();
-            }
-        } else if (assignee && !assignee.company?.name && assignee.company) {
-            assignee = await EmployeeBasic.findById(assignee._id || assignee)
-                .select(EMP_SELECT)
-                .populate('company', 'name')
-                .lean();
-        }
-
-        const [adminOfficer, hr, accounts, driver] = await Promise.all([
-            getDepartmentHOD('admincontroller'),
-            getDepartmentHOD('hr'),
-            getDepartmentHOD('accounts'),
-            resolveEmployeeByIdOrCode(remark.carDrivenByEmployeeId),
-        ]);
-
-        const {
-            email: resolvedTo,
-            isFallbackToReportee,
-            employee: fullAssignee,
-        } = await resolveEmployeeEmailWithReporteeLoaded(assignee);
-
-        const to = String(toOverride || resolvedTo || '').trim();
-        if (!to) {
-            console.warn('[VehicleServiceScheduled] No assigned-user email — skip.');
-            return { ok: false, reason: 'no-assignee-email' };
-        }
-
-        const greetingName =
-            isFallbackToReportee && fullAssignee?.primaryReportee
-                ? fullAssignee.primaryReportee.firstName ||
-                  employeeDisplayName(fullAssignee.primaryReportee)
-                : employeeDisplayName(assignee);
-
-        const fallbackNote =
-            isFallbackToReportee && fullAssignee?.primaryReportee
-                ? getFallbackEmailNote(
-                      employeeDisplayName(fullAssignee),
-                      employeeDisplayName(fullAssignee.primaryReportee),
-                  )
-                : '';
+        const assignee = await loadAssigneeWithReportee(asset?.assignedTo || null);
+        const adminOfficer = await getDepartmentHOD('admincontroller');
+        const adminEmail = pickEmpEmail(adminOfficer);
+        const toRecipient = await resolveScheduledToRecipient(asset, assignee);
 
         const serviceType =
             String(serviceTypeLabel || service?.serviceType || remark.serviceType || 'service').trim() ||
@@ -182,7 +212,7 @@ export async function sendVehicleServiceScheduledNotificationEmail({
                 : remark.amount ?? remark.quotationAmount ?? remark.estimatedAmount ?? '';
 
         const html = buildVehicleServiceScheduledEmailHtml({
-            employeeName: greetingName,
+            employeeName: toRecipient.greetingName || 'Employee',
             serviceType,
             garageName: remark.garageName || remark.vendorName || '',
             garageLocation: remark.garageLocation || '',
@@ -197,26 +227,31 @@ export async function sendVehicleServiceScheduledNotificationEmail({
             vehicleNumber: plateOf(asset),
             vehicleModelYear: asset?.modelYear || '',
             vehicleAssetNumber: asset?.assetId || '',
-            assignedUser: assignedUserOf(asset, assignee || fullAssignee),
+            assignedUser: assignedUserOf(asset, assignee),
             currentKm: formatKm(asset?.currentKilometer),
             adminOfficerName: employeeDisplayName(adminOfficer),
-            adminOfficerEmail: pickEmpEmail(adminOfficer) || '',
+            adminOfficerEmail: adminEmail || '',
             detailsUrl: serviceDetailsUrl(asset, service, serviceType),
             portalUrl: resolveFrontendBaseUrl(),
-            fallbackNoteHtml: fallbackNote,
+            fallbackNoteHtml: toRecipient.fallbackNoteHtml || '',
         });
 
-        const ccSet = new Set();
-        for (const emp of [adminOfficer, hr, accounts, driver]) {
-            const addr = pickEmpEmail(emp);
-            if (addr) ccSet.add(addr.toLowerCase());
+        const primaryTo = String(toOverride || toRecipient.email || '').trim();
+        if (!primaryTo) {
+            console.warn('[VehicleServiceScheduled] No assigned user / primary reportee email — skip.');
+            return { ok: false, reason: 'no-recipients' };
         }
-        for (const extra of ccExtra || []) {
-            const addr = String(extra || '').trim();
-            if (addr) ccSet.add(addr.toLowerCase());
-        }
-        ccSet.delete(to.toLowerCase());
-        const cc = [...ccSet];
+
+        const serviceId = String(service?._id || service?.id || asset?.activeServiceWorkflow?.serviceRecordId || '');
+        const assetId = String(asset?._id || asset?.id || '');
+        const dedupeKey = buildEmailDedupeKey([
+            'VehicleServiceScheduled',
+            assetId,
+            serviceId,
+            start,
+            end,
+            serviceType,
+        ]);
 
         const transporter = nodemailer.createTransport({
             host: 'smtp.office365.com',
@@ -225,18 +260,28 @@ export async function sendVehicleServiceScheduledNotificationEmail({
             auth: { user: emailUser, pass: emailPass },
         });
 
-        await transporter.sendMail({
+        const result = await sendErpEmail({
+            transporter,
             from: `"VeRP Portal" <${emailUser}>`,
-            to,
-            ...(cc.length ? { cc } : {}),
+            to: primaryTo,
             subject: vehicleServiceScheduledSubject(serviceType),
             html,
+            dedupeKey,
+            module: 'VehicleService',
+            emailType: 'scheduled',
+            recordId: serviceId || assetId,
+            metadata: { subjectCategory: 'information' },
         });
 
-        console.log(
-            `[VehicleServiceScheduled] Sent TO: ${to}${cc.length ? ` CC: ${cc.join(', ')}` : ''} (${serviceType})`,
-        );
-        return { ok: true, to, cc };
+        if (!result.sent) {
+            if (result.reason === 'duplicate') {
+                console.log('[VehicleServiceScheduled] Duplicate scheduled notification suppressed.');
+            }
+            return { ok: false, reason: result.reason || 'not-sent' };
+        }
+
+        console.log(`[VehicleServiceScheduled] Sent TO: ${primaryTo} (${serviceType})`);
+        return { ok: true, to: primaryTo };
     } catch (err) {
         console.error('[VehicleServiceScheduled] Email error:', err.message);
         return { ok: false, reason: err.message };

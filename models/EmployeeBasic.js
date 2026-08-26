@@ -13,11 +13,12 @@ const employeeBasicSchema = new mongoose.Schema(
         role: { type: String, default: '' }, // HR Manager, Developer…
         department: { type: String, default: '' }, // Administration, HR, IT…
         designation: { type: String, default: '' },
-        /** Attendance grouping: office staff vs site staffs */
+        /** Attendance grouping key from WorkLocation catalog (office, site, or custom). */
         staffType: {
             type: String,
-            enum: ['office', 'site'],
             default: 'office',
+            trim: true,
+            lowercase: true,
         },
         company: { type: mongoose.Schema.Types.ObjectId, ref: "Company", default: null },
         status: {

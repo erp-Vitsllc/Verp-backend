@@ -365,6 +365,11 @@ async function actorCanDeleteFuel(user) {
     return isReqUserAdmin(user);
 }
 
+/** Portal Super User only — monthly limit is otherwise locked after create. */
+async function actorCanEditFuelMonthlyLimit(user) {
+    return actorCanDeleteFuel(user);
+}
+
 async function notifyFuelLimitThreshold(asset, bill, action) {
     const targets = await collectFuelLimitEmailTargets(asset);
     if (!targets.to) return;
@@ -682,6 +687,15 @@ export async function updateVehicleFuel(req, res) {
 
         const asset = await loadFleetVehicle(bill.vehicleId);
         if (!asset) return res.status(404).json({ message: 'Vehicle not found.' });
+
+        const canEditMonthlyLimit = await actorCanEditFuelMonthlyLimit(req.user);
+        const requestedLimit = parseAmount(req.body?.monthlyLimit);
+        if (canEditMonthlyLimit && req.body?.monthlyLimit != null && req.body?.monthlyLimit !== '') {
+            if (requestedLimit == null || requestedLimit <= 0) {
+                return res.status(400).json({ message: 'Enter a valid monthly limit.' });
+            }
+            bill.monthlyLimit = requestedLimit;
+        }
 
         const stats = await locatorStatsForVehicle(asset, bill.monthKey);
         const attachment = parseAttachment(req.body?.attachment);

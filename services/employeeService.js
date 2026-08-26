@@ -20,6 +20,7 @@ import { getSignedFileUrl, normalizeS3Key, isPresignedUrlStillFresh } from "../u
 import { getS3BucketName, looksLikeObjectStorageUrl } from "../config/storageConfig.js";
 import { syncProbationStatusFromEmploymentVisa } from "../utils/employeeStatusHelper.js";
 import { normalizeEmployeeProfileStatusForApi } from "../utils/employeeProfileStatusLock.js";
+import { resolveStoredStaffType } from "../utils/workLocationHelpers.js";
 
 const ROUTE_ID_QUERY_OPTIONS = { maxTimeMS: 10000 };
 
@@ -973,10 +974,9 @@ export const saveEmployeeData = async (employeeId, updatePayload) => {
             }
         });
 
-        // HR approval applies queued work details via this path — normalize Office/Site so the toggle sticks.
         if (Object.prototype.hasOwnProperty.call(basicUpdate, 'staffType')) {
-            const next = String(basicUpdate.staffType || '').trim().toLowerCase();
-            basicUpdate.staffType = next === 'site' ? 'site' : 'office';
+            const next = await resolveStoredStaffType(basicUpdate.staffType);
+            basicUpdate.staffType = next || 'office';
         }
 
         // Update collections in parallel

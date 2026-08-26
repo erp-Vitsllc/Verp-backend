@@ -1,10 +1,13 @@
 import nodemailer from "nodemailer";
-import { resolveFrontendBaseUrl, emailFrontendUrl } from './resolveFrontendBaseUrl.js';
-import { normalizePdfAttachments } from "./normalizeEmailAttachments.js";
+import { emailFrontendUrl } from './resolveFrontendBaseUrl.js';
 import {
     resolveEmployeeEmailWithReporteeLoaded,
     employeeDisplayName,
 } from "./resolveEmployeeEmail.js";
+import {
+    buildEmailDedupeKey,
+    sendErpEmail,
+} from "./emailDispatch.js";
 
 export const sendAssetAssignmentEmail = async ({
     asset,
@@ -15,15 +18,17 @@ export const sendAssetAssignmentEmail = async ({
     assetCount = 1,
     attachments = [],
     bulkAssignmentGroupId = null,
-    /** When true, email includes Accept / Reject action links (assignee must confirm in portal). */
+    /** When true, email prompts assignee to review and respond inside ERP (no direct action buttons). */
     pendingAssignment = false,
-    /** 'assignment' | 'transfer' — same handover PDF; transfer wording for reassign flows */
+    /** 'assignment' | 'transfer' — transfer wording for reassign flows */
     notificationContext = 'assignment',
     /** transfer only: 'target' | 'target_reportee' | 'asset_controller' | 'sender' */
     transferRecipientRole = null,
     /** Optional deep link (e.g. vehicle handover assign page) */
     detailsPath = null,
     stageLabel = null,
+    /** Optional extra dedupe segment (e.g. handover history id) */
+    dedupeEvent = '',
 }) => {
     try {
         const { email: recipientEmail, isFallbackToReportee, employee: resolvedRecipient } =
@@ -33,7 +38,7 @@ export const sendAssetAssignmentEmail = async ({
             console.warn(
                 `[Email Warning] No company/work email for assignee ${recipient?.employeeId || recipient?._id} and no primary reportee business email`,
             );
-            return;
+            return false;
         }
 
         const emailUser = process.env.EMAIL_USER?.trim();
@@ -41,7 +46,7 @@ export const sendAssetAssignmentEmail = async ({
 
         if (!emailUser || !emailPass) {
             console.error("[Email Error] Email credentials are not configured.");
-            return;
+            return false;
         }
 
         const transporter = nodemailer.createTransport({
@@ -54,14 +59,10 @@ export const sendAssetAssignmentEmail = async ({
             }
         });
 
-        const att = normalizePdfAttachments(attachments);
-        if (isBulk && att.length === 0) {
-            console.warn('[Email Warning] Bulk assignment PDF attachment unavailable. Sending notification email without attachment.');
-        }
-
         const employeeName = employee?.isCompany ? employee.firstName : `${employee?.firstName || ""} ${employee?.lastName || ""}`.trim();
         const assetName = isBulk ? `${assetCount} Assets` : asset.name;
         const assetIdDisplay = isBulk ? "Multiple Assets" : asset.assetId;
+        const recordId = asset._id?.toString() || asset.id?.toString() || '';
 
         const recipientRecord = resolvedRecipient || recipient;
         const isSelfAssignment =
@@ -107,27 +108,6 @@ export const sendAssetAssignmentEmail = async ({
                   : isBulk
                     ? `${frontendUrl}/HRM/Asset`
                     : `${frontendUrl}/HRM/Asset/details/${assetId}`;
-
-        const acceptUrl = !isBulk && assetId ? `${buttonUrl}?assignmentRespond=Accept` : buttonUrl;
-        const rejectUrl = !isBulk && assetId ? `${buttonUrl}?assignmentRespond=Reject` : buttonUrl;
-
-        const respondButtonsHtml =
-            pendingAssignment && !isBulk
-                ? `
-                    <div style="text-align: center; margin-top: 24px; margin-bottom: 12px;">
-                        <p style="font-size: 14px; color: #64748b; margin-bottom: 16px;">Please accept or reject this assignment:</p>
-                        <a href="${acceptUrl}"
-                           style="background-color: #10b981; color: #ffffff; padding: 14px 28px; text-decoration: none; border-radius: 10px; font-weight: bold; display: inline-block; font-size: 14px; margin: 0 8px 8px 0;">
-                           Accept
-                        </a>
-                        <a href="${rejectUrl}"
-                           style="background-color: #ef4444; color: #ffffff; padding: 14px 28px; text-decoration: none; border-radius: 10px; font-weight: bold; display: inline-block; font-size: 14px; margin: 0 8px 8px 0;">
-                           Reject
-                        </a>
-                    </div>
-                    <p style="font-size: 12px; color: #94a3b8; text-align: center;">You will be asked to confirm after signing in to the portal.</p>
-                `
-                : '';
 
         const recipientName = employeeDisplayName(recipientRecord);
         const fallbackNote = isPrimaryReporteeRecipient
@@ -199,18 +179,22 @@ export const sendAssetAssignmentEmail = async ({
                         </table>
                     </div>
 
-                    ${att.length ? `<p style="font-size: 13px; color: #64748b; margin-bottom: 12px;">The attached handover form includes the requester&rsquo;s name and signature. After acceptance, a completed copy with the assignee&rsquo;s name and signature is emailed and shown on the asset page.</p>` : ''}
-
-                    <p style="font-size: 14px; color: #64748b; margin-bottom: 30px;">
-                        ${isBulk && bulkAssignmentGroupId ? 'Use the button below to open the batch review: tick the assets you accept. Unticked assets are declined (returned to Unassigned, or to the prior assignee when applicable).' : pendingAssignment ? 'Review the assignment below and use Accept or Reject, or open the asset page for full details.' : 'Please log in to the portal to view the details and confirm receipt.'}
+                    <p style="font-size: 13px; color: #64748b; margin-bottom: 12px;">
+                        The handover form (if applicable) is available on the asset page in ERP — it is not attached to this email.
                     </p>
 
-                    ${respondButtonsHtml}
+                    <p style="font-size: 14px; color: #64748b; margin-bottom: 30px;">
+                        ${isBulk && bulkAssignmentGroupId
+                            ? 'Open the batch in ERP to review each asset.'
+                            : pendingAssignment
+                              ? 'Open the asset page in ERP to review the assignment and complete your response after signing in.'
+                              : 'Open the asset page in ERP to view details and download any handover documents when needed.'}
+                    </p>
 
                     <div style="text-align: center; margin-top: 30px; margin-bottom: 20px;">
                         <a href="${buttonUrl}" 
                            style="background-color: #2563eb; color: #ffffff; padding: 16px 36px; text-decoration: none; border-radius: 10px; font-weight: bold; display: inline-block; font-size: 15px; box-shadow: 0 4px 15px rgba(37, 99, 235, 0.3);">
-                           ${pendingAssignment && !isBulk ? 'View Asset Details' : 'View Assignment Details'}
+                           View in ERP
                         </a>
                     </div>
                 </div>
@@ -220,16 +204,37 @@ export const sendAssetAssignmentEmail = async ({
             </div>
         `;
 
-        await transporter.sendMail({
+        const dedupeKey = buildEmailDedupeKey([
+            'AssetAssignment',
+            recordId,
+            recipientEmail.toLowerCase(),
+            notificationContext,
+            pendingAssignment ? 'pending' : 'notice',
+            isBulk ? bulkAssignmentGroupId || 'bulk' : 'single',
+            dedupeEvent || stageLabel || transferRecipientRole || '',
+        ]);
+
+        const result = await sendErpEmail({
+            transporter,
             from: `"Asset Management" <${emailUser}>`,
             to: recipientEmail,
             subject,
             html,
-            ...(att.length ? { attachments: att } : {}),
+            dedupeKey,
+            module: 'Asset',
+            emailType: pendingAssignment ? 'assignment_pending' : 'assignment_notice',
+            recordId,
+            metadata: { subjectCategory: pendingAssignment ? 'action' : 'information' },
         });
 
-        console.log(`[Email Success] Asset assignment notification sent to ${recipientEmail}`);
-        return true;
+        if (result.sent) {
+            console.log(`[Email Success] Asset assignment notification sent to ${recipientEmail}`);
+            return true;
+        }
+        if (result.reason === 'duplicate') {
+            console.log(`[Email Skip] Duplicate asset assignment notification suppressed for ${recipientEmail}`);
+        }
+        return false;
     } catch (error) {
         console.error("[Email Error] Failed to send asset assignment email:", error);
         return false;

@@ -25,6 +25,7 @@ const S3_STORAGE_FOLDER_PREFIXES = [
     'fines',
     'loans',
     'company-documents',
+    'salary-policy',
 ];
 
 /**

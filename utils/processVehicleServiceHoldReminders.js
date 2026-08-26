@@ -5,7 +5,7 @@ import { getDepartmentHOD } from "./getDepartmentHOD.js";
 import { isTireChangeWorkflow, tireChangeDetailsPath, notifyTireChangeStakeholder } from "./tireChangeWorkflow.js";
 import { applyVehicleServiceNotificationCopy } from "./vehicleServiceNotificationCopy.js";
 
-const TWO_DAYS_MS = 2 * 24 * 60 * 60 * 1000;
+const ONE_DAY_MS = 24 * 60 * 60 * 1000;
 
 const isDue = (remindAt) => {
     if (!remindAt) return false;
@@ -16,7 +16,7 @@ const isDue = (remindAt) => {
 
 /**
  * Hold reminders + pending-accounts nudges for vehicle service workflows.
- * Tire change: every 2 days → Admin Officer. Other services: legacy assignee reminder.
+ * Tire change: at most once per 24 hours → Admin Officer. Other services: legacy assignee reminder.
  */
 export async function processVehicleServiceHoldReminders() {
     try {
@@ -62,9 +62,9 @@ export async function processVehicleServiceHoldReminders() {
 
                 if (hold?.holdUntilDate) {
                     wf.accountsHold.reminderSentAt = new Date();
-                    wf.accountsHold.remindAt = new Date(Date.now() + TWO_DAYS_MS);
+                    wf.accountsHold.remindAt = new Date(Date.now() + ONE_DAY_MS);
                 } else {
-                    wf.accountsReminderAt = new Date(Date.now() + TWO_DAYS_MS);
+                    wf.accountsReminderAt = new Date(Date.now() + ONE_DAY_MS);
                 }
                 asset.activeServiceWorkflow = wf;
                 asset.markModified("activeServiceWorkflow");
