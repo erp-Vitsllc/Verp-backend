@@ -229,7 +229,7 @@ const isLocalDevOrigin = (origin) => {
     try {
         const { hostname, protocol } = new URL(origin);
         if (protocol !== "http:" && protocol !== "https:") return false;
-        if (hostname === "localhost" || hostname === "127.0.0.1") return true;
+        if (hostname === "localhost" || hostname === "127.0.0.1" || hostname === "::1") return true;
         // LAN / private network (frontend on 0.0.0.0 — open via machine IP, e.g. 192.168.x.x:3000)
         if (/^10\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(hostname)) return true;
         if (/^192\.168\.\d{1,3}\.\d{1,3}$/.test(hostname)) return true;
@@ -353,9 +353,7 @@ async function startServer() {
     console.log("Connecting to MongoDB…");
     await connectDB();
 
-    app.listen(PORT, "0.0.0.0", () => {
-        console.log(`Server running at http://localhost:${PORT}`);
-        console.log(`Health check: http://localhost:${PORT}/api/health`);
+    const startBackgroundJobs = () => {
         startLocatorWebSocket();
         // Locator → ERP Mongo sync every 30 minutes (snapshots + AssetItem GPS cache).
         // Vehicle list/details must NOT call live Locator — they read ERP DB only.
@@ -370,6 +368,27 @@ async function startServer() {
                 console.error('[LocatorSync] scheduled sync failed:', e?.message || e),
             );
         }, LOCATOR_ERP_SYNC_MS);
+    };
+
+    // IPv4 (LAN + 127.0.0.1). Windows IPV6_V6ONLY is on, so this does not cover ::1.
+    const ipv4Server = app.listen(PORT, "0.0.0.0", () => {
+        console.log(`Server running at http://127.0.0.1:${PORT}`);
+        console.log(`Health check: http://127.0.0.1:${PORT}/api/health`);
+        startBackgroundJobs();
+    });
+    ipv4Server.on("error", (err) => {
+        console.error(`❌ Failed to bind 0.0.0.0:${PORT}:`, err?.message || err);
+        process.exit(1);
+    });
+
+    // IPv6 (::1). Edge/Chrome often resolve "localhost" here first; without this bind, login is ERR_CONNECTION_REFUSED.
+    const ipv6Server = app.listen(PORT, "::", () => {
+        console.log(`Server also listening on http://[::1]:${PORT} (localhost over IPv6)`);
+    });
+    ipv6Server.on("error", (err) => {
+        console.warn(
+            `IPv6 [::]:${PORT} bind skipped (${err.code || err.message}). If login fails in Edge, use http://127.0.0.1:3000`,
+        );
     });
 }
 

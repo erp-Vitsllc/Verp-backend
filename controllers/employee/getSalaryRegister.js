@@ -2,8 +2,8 @@ import mongoose from 'mongoose';
 import Attendance from '../../models/Attendance.js';
 import EmployeeBasic from '../../models/EmployeeBasic.js';
 import EmployeeSalary from '../../models/EmployeeSalary.js';
-import EmployeeBank from '../../models/EmployeeBank.js';
 import SalaryEnrollment from '../../models/SalaryEnrollment.js';
+import SalaryHistoricalProfile from '../../models/SalaryHistoricalProfile.js';
 import SalaryMonthPayment from '../../models/SalaryMonthPayment.js';
 import PayrollSettings from '../../models/PayrollSettings.js';
 import Company from '../../models/Company.js';
@@ -431,8 +431,28 @@ async function buildEnrollmentOverview(enrollments, monthKey) {
     );
     const defaultDoc = docByKey.get('default') || null;
     const defaultDay = toMonthDay(defaultDoc?.salaryProcessingDate);
+    const codes = people.map((emp) => String(emp.employeeId || '').trim()).filter(Boolean);
+    const enrolledCodes = [...enrollmentById.keys()];
+    const salaryYm = toYearMonth(monthKey);
+    const [salaryDocs, molByCode] = await Promise.all([
+        codes.length
+            ? EmployeeSalary.find({ employeeId: { $in: codes } })
+                .select('-offerLetter.data -salaryHistory.attachment.data -salaryHistory.offerLetter.data')
+                .lean()
+                .maxTimeMS(15000)
+            : Promise.resolve([]),
+        companyMolByEmployeeId(enrolledCodes),
+    ]);
+    const salaryByCode = new Map(
+        (salaryDocs || []).map((doc) => [String(doc.employeeId || '').trim(), doc]),
+    );
 
     let enrolled = 0;
+    let enrolledSalary = 0;
+    let totalSalary = 0;
+    let wpsEnrolled = 0;
+    let cashEnrolled = 0;
+    const unassigned = { enrolled: 0, totalActive: 0 };
     const byCompany = new Map();
     const byLocation = new Map();
     for (const loc of locationRows) {
@@ -461,7 +481,16 @@ async function buildEnrollmentOverview(enrollments, monthKey) {
         const code = String(emp.employeeId).trim();
         const enrollment = enrollmentById.get(code);
         const isEnrolled = Boolean(enrollment);
-        if (isEnrolled) enrolled += 1;
+        const monthlySalary = roundMoney(salaryAmountForMonth(salaryByCode.get(code), salaryYm));
+        const companyMolCode = isEnrolled ? molByCode.get(code) || '' : '';
+        const isWps = Boolean(companyMolCode);
+        totalSalary += monthlySalary;
+        if (isEnrolled) {
+            enrolled += 1;
+            enrolledSalary += monthlySalary;
+            if (isWps) wpsEnrolled += 1;
+            else cashEnrolled += 1;
+        }
         const companyKey = emp.company ? String(emp.company) : '';
         const companyName = companyKey ? companyById.get(companyKey) || '' : '';
         if (companyKey) {
@@ -469,6 +498,9 @@ async function buildEnrollmentOverview(enrollments, monthKey) {
             stats.totalActive += 1;
             if (isEnrolled) stats.enrolled += 1;
             byCompany.set(companyKey, stats);
+        } else {
+            unassigned.totalActive += 1;
+            if (isEnrolled) unassigned.enrolled += 1;
         }
 
         const locKey = normalizeStaffTypeKey(emp.staffType);
@@ -498,6 +530,10 @@ async function buildEnrollmentOverview(enrollments, monthKey) {
             locationLabel: locStats.label,
             companyName,
             enrolled: isEnrolled,
+            monthlySalary,
+            companyMolCode,
+            isWps,
+            paymentType: isEnrolled ? paymentTypeFromMol(companyMolCode) : '',
             fromMonth: String(enrollment?.fromMonth || '').trim(),
             salaryDate: toMonthDay(enrollment?.salaryDate),
         });
@@ -509,18 +545,32 @@ async function buildEnrollmentOverview(enrollments, monthKey) {
 
     const pendingRequests = await buildGroupPendingRequests(people, monthKey);
 
+    const companyRows = (companies || []).map((company) => {
+        const stats = byCompany.get(String(company._id)) || { enrolled: 0, totalActive: 0 };
+        return {
+            companyId: String(company.companyId || company._id),
+            name: String(company.nickName || company.name || 'Company').trim(),
+            enrolled: stats.enrolled,
+            totalActive: stats.totalActive,
+        };
+    });
+    if (unassigned.totalActive > 0) {
+        companyRows.push({
+            companyId: 'unassigned',
+            name: 'Unassigned',
+            enrolled: unassigned.enrolled,
+            totalActive: unassigned.totalActive,
+        });
+    }
+
     return {
         enrolled,
         totalActive: people.length,
-        companies: (companies || []).map((company) => {
-            const stats = byCompany.get(String(company._id)) || { enrolled: 0, totalActive: 0 };
-            return {
-                companyId: String(company.companyId || company._id),
-                name: String(company.nickName || company.name || 'Company').trim(),
-                enrolled: stats.enrolled,
-                totalActive: stats.totalActive,
-            };
-        }),
+        enrolledSalary: roundMoney(enrolledSalary),
+        totalSalary: roundMoney(totalSalary),
+        wpsEnrolled,
+        cashEnrolled,
+        companies: companyRows,
         workLocations: [...byLocation.values()],
         employees,
         pendingRequests,
@@ -663,12 +713,24 @@ function listMonthsInclusive(fromYm, toYm) {
     return months;
 }
 
-function paymentTypeFromBank(bank) {
-    const iban = String(bank?.ibanNumber || '').trim();
-    const account = String(bank?.accountNumber || '').trim();
-    if (iban) return 'WPS';
-    if (account) return 'Bank Transfer';
-    return 'Cash';
+/** Enroll details: Company MOL code present → WPS, otherwise Cash. */
+function paymentTypeFromMol(companyMolCode) {
+    return String(companyMolCode || '').trim() ? 'WPS' : 'Cash';
+}
+
+async function companyMolByEmployeeId(ids) {
+    const codes = [...new Set((ids || []).map((id) => String(id || '').trim()).filter(Boolean))];
+    if (!codes.length) return new Map();
+    const docs = await SalaryHistoricalProfile.find({ employeeId: { $in: codes } })
+        .select('employeeId companyMolCode')
+        .lean()
+        .maxTimeMS(8000);
+    return new Map(
+        (docs || []).map((doc) => [
+            String(doc.employeeId || '').trim(),
+            String(doc.companyMolCode || '').trim(),
+        ]),
+    );
 }
 
 function companyDisplayName(company) {
@@ -900,15 +962,7 @@ export const getSalaryRegister = async (req, res) => {
         const salaryByCode = new Map(
             salaryDocs.map((doc) => [String(doc.employeeId || '').trim(), doc]),
         );
-        const bankDocs = codes.length
-            ? await EmployeeBank.find({ employeeId: { $in: codes } })
-                .select('employeeId ibanNumber accountNumber')
-                .lean()
-                .maxTimeMS(8000)
-            : [];
-        const bankByCode = new Map(
-            (bankDocs || []).map((doc) => [String(doc.employeeId || '').trim(), doc]),
-        );
+        const molByCode = await companyMolByEmployeeId(codes);
         const pendingEmployeeIds = new Set(
             (enrollmentOverview?.pendingRequests || [])
                 .map((row) => String(row?.employeeId || '').trim())
@@ -1104,7 +1158,7 @@ export const getSalaryRegister = async (req, res) => {
                         basicSalary: roundMoney(empBasic),
                         ot: roundMoney(empOt),
                         deduction: roundMoney(empDeduction),
-                        paymentType: paymentTypeFromBank(bankByCode.get(code)),
+                        paymentType: paymentTypeFromMol(molByCode.get(code)),
                         status: processedEmployeeIds.has(code)
                             ? 'Processed'
                             : pendingEmployeeIds.has(code)
