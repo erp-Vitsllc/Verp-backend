@@ -539,6 +539,8 @@ async function syncApprovedUtilityBillToZohoInner(billDoc, { markAsOpen = true }
 
         const zohoBill = await createBillWithZohoSerial({
             vendor_id: vendorId,
+            bill_number: billNumber,
+            reference_number: billNumber || undefined,
             date: billDate,
             notes:
                 String(billDoc.notes || '').trim() ||

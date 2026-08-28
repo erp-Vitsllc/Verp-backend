@@ -341,6 +341,7 @@ async function syncApprovedFineToZohoInner(fineDoc, group) {
     try {
         const zohoBill = await createBillWithZohoSerial({
             vendor_id: vendorId,
+            bill_number: billNumber,
             date: billDate,
             notes: notesParts.join('\n') || undefined,
             line_items: lineItems,

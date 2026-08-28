@@ -773,21 +773,53 @@ export async function createBill(payload = {}) {
     return response.bill || response;
 }
 
+function sanitizeZohoDocumentBillNumber(value) {
+    return String(value || '')
+        .trim()
+        .replace(/\s+/g, '-')
+        .replace(/[^\w./-]/g, '-')
+        .replace(/-+/g, '-')
+        .replace(/^-|-$/g, '')
+        .slice(0, 50);
+}
+
 /**
- * Create a Zoho bill using Zoho's own serial (auto bill_number).
- * ERP invoice / account numbers are not sent as bill_number.
+ * Create a Zoho bill using the ERP document id as Bill#
+ * (fine ID, utility bill no, etc.). Zoho "Serial No." stays a separate custom field.
  */
 export async function createBillWithZohoSerial(payload = {}) {
     const rest = { ...(payload || {}) };
+    const billNumber = sanitizeZohoDocumentBillNumber(rest.bill_number || rest.billNumber);
     delete rest.bill_number;
     delete rest.billNumber;
+
+    const post = (number) => {
+        const data = { ...rest };
+        if (number) data.bill_number = number;
+        return createBill(data);
+    };
+
+    if (billNumber) {
+        try {
+            return await post(billNumber);
+        } catch (err) {
+            const msg = String(err?.message || '');
+            if (!/already|exist|duplicate|unique/i.test(msg)) throw err;
+            const retry = sanitizeZohoDocumentBillNumber(
+                `${billNumber}-${Date.now().toString(36).toUpperCase().slice(-4)}`,
+            );
+            return await post(retry || `${billNumber}-${Date.now()}`.slice(0, 50));
+        }
+    }
+
     try {
-        return await createBill(rest);
+        return await post('');
     } catch (err) {
         const msg = String(err?.message || '');
         if (!/bill_number/i.test(msg)) throw err;
-        const serial = `ERP${Date.now().toString(36).toUpperCase()}`.slice(0, 20);
-        return await createBill({ ...rest, bill_number: serial });
+        throw new Error(
+            'Zoho requires a Bill#. Pass the fine ID, utility bill number, or other ERP document id.',
+        );
     }
 }
 
