@@ -15,6 +15,7 @@ const processingRulesSchema = new mongoose.Schema(
         pendingUnauthorizedLeaveApproval: { type: Boolean, default: false },
         pendingSickLeaveApproval: { type: Boolean, default: false },
         pendingLateEarlyCompoffAdjustment: { type: Boolean, default: false },
+        pendingLeaveApproval: { type: Boolean, default: false },
         fine: { type: Boolean, default: false },
         reward: { type: Boolean, default: false },
         ncr: { type: Boolean, default: false },
@@ -33,6 +34,7 @@ const processingRulesSchema = new mongoose.Schema(
 
 const lateDeductRuleSchema = new mongoose.Schema(
     {
+        title: { type: String, default: '' },
         minutes: { type: Number, default: null },
         events: { type: Number, default: null },
         deduct: { type: String, default: '' },
@@ -43,7 +45,7 @@ const lateDeductRuleSchema = new mongoose.Schema(
 const salaryProcessReminderSchema = new mongoose.Schema(
     {
         daysBefore: { type: Number, default: null },
-        forWhom: { type: String, default: '' },
+        forWhom: { type: mongoose.Schema.Types.Mixed, default: () => [] },
     },
     { _id: false },
 );
@@ -62,6 +64,7 @@ const payrollSettingsSchema = new mongoose.Schema(
         unauthorizedLeaveDeductionDays: { type: Number, default: null },
         lateInRules: { type: [lateDeductRuleSchema], default: () => [] },
         lateOutRules: { type: [lateDeductRuleSchema], default: () => [] },
+        extraLateRules: { type: [lateDeductRuleSchema], default: () => [] },
         salaryProcessReminders: { type: [salaryProcessReminderSchema], default: () => [] },
         hiddenSalaryMonths: { type: [String], default: () => [] },
         attachment: {

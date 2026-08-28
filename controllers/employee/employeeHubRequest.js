@@ -125,6 +125,7 @@ export async function createEmployeeHubRequest(req, res) {
                 kind,
                 assetType,
                 requesterMongoId: String(employee._id),
+                leaveDashboard: kind === 'leave',
             }),
         });
 

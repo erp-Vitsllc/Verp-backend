@@ -16,6 +16,7 @@ const DEFAULT_RULES = {
     pendingUnauthorizedLeaveApproval: false,
     pendingSickLeaveApproval: false,
     pendingLateEarlyCompoffAdjustment: false,
+    pendingLeaveApproval: false,
     fine: false,
     reward: false,
     ncr: false,
@@ -33,8 +34,34 @@ const DEFAULT_RULES = {
 const LATE_DEDUCT = new Set(['quarter', 'half', 'full']);
 const EMPTY_LATE_RULE = { minutes: null, events: null, deduct: '' };
 const REMINDER_DAYS = new Set([5, 10, 20, 30]);
-const REMINDER_FOR_WHOM = new Set(['accounts', 'pendingEmployee', 'primaryReportee', 'hr']);
-const EMPTY_REMINDER = { daysBefore: null, forWhom: '' };
+const REMINDER_AUDIENCE_KEYS = new Set([
+    'wfAccounts',
+    'wfHr',
+    'wfAdmin',
+    'wfManagement',
+    'pendingTaskUser',
+]);
+const LEGACY_REMINDER_AUDIENCE = {
+    accounts: 'wfAccounts',
+    hr: 'wfHr',
+    pendingEmployee: 'pendingTaskUser',
+    primaryReportee: 'pendingTaskUser',
+};
+
+export function reminderAudienceList(value) {
+    const items = Array.isArray(value) ? value : value ? [value] : [];
+    return [
+        ...new Set(
+            items
+                .map((item) => {
+                    const raw = String(item || '').trim();
+                    if (REMINDER_AUDIENCE_KEYS.has(raw)) return raw;
+                    return LEGACY_REMINDER_AUDIENCE[raw] || '';
+                })
+                .filter(Boolean),
+        ),
+    ];
+}
 
 function toDays(value) {
     if (value === '' || value == null) return null;
@@ -42,23 +69,49 @@ function toDays(value) {
     return Number.isFinite(n) && n >= 0 ? n : null;
 }
 
-function toLateRules(value) {
+function toLateRules(value, { single = false } = {}) {
     const rows = Array.isArray(value) ? value : [];
     const normalized = rows.slice(0, 20).map((row) => {
         const deduct = String(row?.deduct || '').trim().toLowerCase();
         return {
+            title: String(row?.title || '').trim().slice(0, 80),
             minutes: toDays(row?.minutes),
             events: toDays(row?.events),
             deduct: LATE_DEDUCT.has(deduct) ? deduct : '',
         };
     });
-    return normalized.length ? normalized : [{ ...EMPTY_LATE_RULE }];
+    const next = normalized.length ? normalized : [{ ...EMPTY_LATE_RULE }];
+    return single ? next.slice(0, 1) : next;
 }
 
 function serializeLateRules(value) {
     const rows = Array.isArray(value) ? value : [];
     if (!rows.length) return [{ minutes: '', events: '', deduct: '' }];
     return rows.map((row) => ({
+        title: row?.title || '',
+        minutes: row?.minutes ?? '',
+        events: row?.events ?? '',
+        deduct: LATE_DEDUCT.has(String(row?.deduct || '')) ? row.deduct : '',
+    }));
+}
+
+function toExtraLateRules(value) {
+    const rows = Array.isArray(value) ? value : [];
+    return rows.slice(0, 20).map((row) => {
+        const deduct = String(row?.deduct || '').trim().toLowerCase();
+        return {
+            title: String(row?.title || '').trim().slice(0, 80),
+            minutes: toDays(row?.minutes),
+            events: toDays(row?.events),
+            deduct: LATE_DEDUCT.has(deduct) ? deduct : '',
+        };
+    });
+}
+
+function serializeExtraLateRules(value) {
+    const rows = Array.isArray(value) ? value : [];
+    return rows.map((row) => ({
+        title: row?.title || '',
         minutes: row?.minutes ?? '',
         events: row?.events ?? '',
         deduct: LATE_DEDUCT.has(String(row?.deduct || '')) ? row.deduct : '',
@@ -70,10 +123,9 @@ function toReminders(value) {
     return [0, 1, 2].map((index) => {
         const row = rows[index] || {};
         const days = Number(row.daysBefore);
-        const forWhom = String(row.forWhom || '').trim();
         return {
             daysBefore: REMINDER_DAYS.has(days) ? days : null,
-            forWhom: REMINDER_FOR_WHOM.has(forWhom) ? forWhom : '',
+            forWhom: reminderAudienceList(row.forWhom),
         };
     });
 }
@@ -81,18 +133,31 @@ function toReminders(value) {
 function serializeReminders(value) {
     return toReminders(value).map((row) => ({
         daysBefore: row.daysBefore ?? '',
-        forWhom: row.forWhom || '',
+        forWhom: Array.isArray(row.forWhom) ? row.forWhom : reminderAudienceList(row.forWhom),
     }));
+}
+
+function parseMonthDay(value) {
+    if (value === '' || value == null) return null;
+    const s = String(value).trim();
+    const iso = s.match(/^\d{4}-\d{2}-(\d{2})/);
+    const n = iso ? Number(iso[1]) : Number(s);
+    if (!Number.isInteger(n) || n < 1) return null;
+    return n;
 }
 
 /** Recurring calendar day 1–28 (fits every month). Accepts "15" or a leftover YYYY-MM-DD. */
 function toMonthDay(value) {
-    if (value === '' || value == null) return '';
-    const s = String(value).trim();
-    const iso = s.match(/^\d{4}-\d{2}-(\d{2})/);
-    const n = iso ? Number(iso[1]) : Number(s);
-    if (!Number.isInteger(n) || n < 1) return '';
+    const n = parseMonthDay(value);
+    if (n == null) return '';
     return String(Math.min(28, n));
+}
+
+/** Attendance cutoff can use any calendar day 1–31. */
+function toCutoffDay(value) {
+    const n = parseMonthDay(value);
+    if (n == null) return '';
+    return String(Math.min(31, n));
 }
 
 function serializePolicyAttachment(att) {
@@ -153,15 +218,16 @@ export function serializePayrollSettings(doc) {
     return {
         salaryProcessingDate: toMonthDay(doc?.salaryProcessingDate),
         salaryProcessStartMonth: doc?.salaryProcessStartMonth || '',
-        salaryCutoffDate: toMonthDay(doc?.salaryCutoffDate),
+        salaryCutoffDate: toCutoffDay(doc?.salaryCutoffDate),
         processingRules: rules,
         workingDaysRequiredToEligible: doc?.workingDaysRequiredToEligible ?? null,
         leaveSalaryWorkingDays: doc?.leaveSalaryWorkingDays ?? null,
         workingDaysRequiredForAirTicket: doc?.workingDaysRequiredForAirTicket ?? null,
         authorizedLeaveDeductionDays: doc?.authorizedLeaveDeductionDays ?? null,
         unauthorizedLeaveDeductionDays: doc?.unauthorizedLeaveDeductionDays ?? null,
-        lateInRules: serializeLateRules(doc?.lateInRules),
-        lateOutRules: serializeLateRules(doc?.lateOutRules),
+        lateInRules: serializeLateRules(doc?.lateInRules).slice(0, 1),
+        lateOutRules: serializeLateRules(doc?.lateOutRules).slice(0, 1),
+        extraLateRules: serializeExtraLateRules(doc?.extraLateRules),
         salaryProcessReminders: serializeReminders(doc?.salaryProcessReminders),
         attachment: serializePolicyAttachment(doc?.attachment),
     };
@@ -179,7 +245,7 @@ export function buildPayrollPolicyPayload(body, existing) {
     return {
         salaryProcessingDate: toMonthDay(body?.salaryProcessingDate),
         salaryProcessStartMonth: String(body?.salaryProcessStartMonth || '').trim(),
-        salaryCutoffDate: toMonthDay(body?.salaryCutoffDate),
+        salaryCutoffDate: toCutoffDay(body?.salaryCutoffDate),
         processingRules,
         workingDaysRequiredToEligible:
             body?.workingDaysRequiredToEligible !== undefined
@@ -202,9 +268,17 @@ export function buildPayrollPolicyPayload(body, existing) {
                 ? toDays(body.unauthorizedLeaveDeductionDays)
                 : existing?.unauthorizedLeaveDeductionDays ?? null,
         lateInRules:
-            body?.lateInRules !== undefined ? toLateRules(body.lateInRules) : toLateRules(existing?.lateInRules),
+            body?.lateInRules !== undefined
+                ? toLateRules(body.lateInRules, { single: true })
+                : toLateRules(existing?.lateInRules, { single: true }),
         lateOutRules:
-            body?.lateOutRules !== undefined ? toLateRules(body.lateOutRules) : toLateRules(existing?.lateOutRules),
+            body?.lateOutRules !== undefined
+                ? toLateRules(body.lateOutRules, { single: true })
+                : toLateRules(existing?.lateOutRules, { single: true }),
+        extraLateRules:
+            body?.extraLateRules !== undefined
+                ? toExtraLateRules(body.extraLateRules)
+                : toExtraLateRules(existing?.extraLateRules),
         salaryProcessReminders:
             body?.salaryProcessReminders !== undefined
                 ? toReminders(body.salaryProcessReminders)

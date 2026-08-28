@@ -28,6 +28,12 @@ import {
 } from '../utils/attendanceEmployeeFilters.js';
 import { listPendingHubInboxItems } from '../utils/employeeHubRequestInbox.js';
 import { isReqUserSystemSuperUser } from '../utils/systemSuperUser.js';
+import {
+    isLeaveDashboardAttendanceRow,
+    LEAVE_DASHBOARD_REQUEST_TYPE,
+    leaveDashboardRequestObjectId,
+    notifyPrimaryReporteeOfLeaveRequest,
+} from '../utils/notifyLeaveDashboardRequest.js';
 
 const LEAVE_REQUEST_STATUS_KEYS = new Set([
     'unauthorized_leave',
@@ -1586,7 +1592,7 @@ export async function getAttendancePendingInbox(req, res) {
         const reporteeIds = (reportees || []).map((r) => String(r._id));
         const hubItems = await listPendingHubInboxItems({
             assigneeIds: [self._id],
-            kinds: ['leave'],
+            kinds: [],
         });
 
         if (!reporteeIds.length) {
@@ -1608,6 +1614,7 @@ export async function getAttendancePendingInbox(req, res) {
 
         const items = (rows || [])
             .filter((r) => !isCompanyShellEmployee(r.employeeName) && !isCompanyShellEmployee(r))
+            .filter((r) => !isLeaveDashboardAttendanceRow(r))
             .map((r) => {
                 const kind = String(r.leaveRequestKind || '');
                 const isYellow = kind === 'yellow';
@@ -1826,32 +1833,16 @@ export async function requestAttendanceLeave(req, res) {
         record.employeeName = empName;
         await record.save();
 
-        await syncDashboardAction({
-            requestId: record._id,
-            requestType: 'Attendance Leave Request',
-            assignedTo: employee.primaryReportee._id,
-            status: 'Pending',
-            subjectEmployee: employee,
-            requestedByName: empName,
-            extra1: date,
-            extra2: `Leave request: ${requestedStatusLabel} (was ${previousStatusLabel})`,
-            extra3: JSON.stringify({
-                attendanceId: String(record._id),
-                employeeMongoId: String(employee._id),
-                date,
-                requestedStatusKey,
-                leaveRequestKind: 'leave',
-            }),
-        });
-
-        await sendAttendanceLeaveRequestEmail({
-            manager: employee.primaryReportee,
+        await notifyPrimaryReporteeOfLeaveRequest({
             employee,
-            date,
+            manager: employee.primaryReportee,
+            from: date,
+            to: date,
+            attendanceId: record._id,
             requestedLabel: requestedStatusLabel,
-            currentLabel: previousStatusLabel,
+            requestedStatusKey,
+            leaveRequestKind: 'leave',
             reason,
-            kind: 'leave',
             attachmentName,
         });
 
@@ -2243,38 +2234,63 @@ export async function requestAttendanceFuture(req, res) {
             await record.save();
             savedRecords.push(record);
 
-            await syncDashboardAction({
-                requestId: record._id,
-                requestType: 'Attendance Leave Request',
-                assignedTo: employee.primaryReportee._id,
-                status: 'Pending',
-                subjectEmployee: employee,
-                requestedByName: empName,
-                extra1: dateKey,
-                extra2: `${extra2Prefix}: ${rangeLabel} · ${dayPartLabel} · ${durationLabel}`,
-                extra3: JSON.stringify({
-                    attendanceId: String(record._id),
-                    employeeMongoId: String(employee._id),
-                    date: dateKey,
-                    requestedStatusKey: spec.requestedStatusKey,
-                    leaveRequestKind: spec.leaveRequestKind,
-                    leaveRequestGroupId: groupId,
-                    dayPart,
-                }),
-            });
+            if (!isLeaveDashboardAttendanceRow({ leaveRequestKind: spec.leaveRequestKind, requestedStatusKey: spec.requestedStatusKey })) {
+                await syncDashboardAction({
+                    requestId: record._id,
+                    requestType: 'Attendance Leave Request',
+                    assignedTo: employee.primaryReportee._id,
+                    status: 'Pending',
+                    subjectEmployee: employee,
+                    requestedByName: empName,
+                    extra1: dateKey,
+                    extra2: `${extra2Prefix}: ${rangeLabel} · ${dayPartLabel} · ${durationLabel}`,
+                    extra3: JSON.stringify({
+                        attendanceId: String(record._id),
+                        employeeMongoId: String(employee._id),
+                        date: dateKey,
+                        requestedStatusKey: spec.requestedStatusKey,
+                        leaveRequestKind: spec.leaveRequestKind,
+                        leaveRequestGroupId: groupId,
+                        dayPart,
+                    }),
+                });
+            }
         }
 
-        await sendAttendanceLeaveRequestEmail({
-            manager: employee.primaryReportee,
-            employee,
-            date: requestDates[0],
-            dateLabel: rangeLabel,
-            requestedLabel: `${requestedStatusLabel} · ${dayPartLabel}`,
-            currentLabel: 'Upcoming',
-            reason,
-            kind: spec.leaveRequestKind,
-            attachmentName,
-        });
+        if (isLeaveDashboardAttendanceRow({
+            leaveRequestKind: spec.leaveRequestKind,
+            requestedStatusKey: spec.requestedStatusKey,
+        })) {
+            const approvalAttendanceId = savedRecords.reduce((min, row) => {
+                const id = String(row?._id || '');
+                return !min || (id && id < min) ? id : min;
+            }, '');
+            await notifyPrimaryReporteeOfLeaveRequest({
+                employee,
+                manager: employee.primaryReportee,
+                from: fromDate,
+                to: toDate,
+                attendanceId: approvalAttendanceId || savedRecords[0]?._id,
+                groupId,
+                requestedLabel: requestedStatusLabel,
+                requestedStatusKey: spec.requestedStatusKey,
+                leaveRequestKind: spec.leaveRequestKind,
+                reason,
+                attachmentName,
+            });
+        } else {
+            await sendAttendanceLeaveRequestEmail({
+                manager: employee.primaryReportee,
+                employee,
+                date: requestDates[0],
+                dateLabel: rangeLabel,
+                requestedLabel: `${requestedStatusLabel} · ${dayPartLabel}`,
+                currentLabel: 'Upcoming',
+                reason,
+                kind: spec.leaveRequestKind,
+                attachmentName,
+            });
+        }
 
         return res.status(200).json({
             message: 'Request sent to your primary reportee.',
@@ -2434,6 +2450,44 @@ export async function decideLeaveRequestInternal({
 }
 
 /** Applies one approve/reject to a single day and keeps its dashboard action in sync. */
+async function syncLeaveDecisionDashboardActions({
+    record,
+    actor,
+    subject,
+    decision,
+    requestedLabel,
+}) {
+    const status = decision === 'approved' ? 'Approved' : 'Rejected';
+    const subjectEmployee = subject || {
+        _id: record.employeeMongoId,
+        employeeId: record.employeeId,
+        firstName: record.employeeName,
+    };
+    const payload = {
+        assignedTo: actor._id,
+        status,
+        subjectEmployee,
+        actionedBy: actor._id,
+        extra1: record.date,
+        extra2: requestedLabel,
+    };
+
+    await syncDashboardAction({
+        ...payload,
+        requestId: record._id,
+        requestType: 'Attendance Leave Request',
+    });
+
+    if (isLeaveDashboardAttendanceRow(record)) {
+        await syncDashboardAction({
+            ...payload,
+            requestId: leaveDashboardRequestObjectId(record.leaveRequestGroupId, record._id),
+            requestType: LEAVE_DASHBOARD_REQUEST_TYPE,
+        });
+    }
+}
+
+/** Applies one approve/reject to a single day and keeps its dashboard action in sync. */
 async function applyLeaveDecisionToRecord({
     record,
     decision,
@@ -2533,20 +2587,15 @@ async function applyLeaveDecisionToRecord({
     ) {
         const recordId = record._id;
         const dateKey = record.date;
+        const snapshot =
+            typeof record.toObject === 'function' ? record.toObject() : { ...record };
         await Attendance.deleteOne({ _id: recordId });
-        await syncDashboardAction({
-            requestId: recordId,
-            requestType: 'Attendance Leave Request',
-            assignedTo: actor._id,
-            status: 'Rejected',
-            subjectEmployee: subject || {
-                _id: record.employeeMongoId,
-                employeeId: record.employeeId,
-                firstName: record.employeeName,
-            },
-            actionedBy: actor._id,
-            extra1: dateKey,
-            extra2: requestedLabel,
+        await syncLeaveDecisionDashboardActions({
+            record: { ...snapshot, _id: recordId, date: dateKey },
+            actor,
+            subject,
+            decision: 'rejected',
+            requestedLabel,
         });
         return { ok: true, record: null };
     }
@@ -2556,19 +2605,12 @@ async function applyLeaveDecisionToRecord({
     record.leaveDecidedBy = actor._id;
     await record.save();
 
-    await syncDashboardAction({
-        requestId: record._id,
-        requestType: 'Attendance Leave Request',
-        assignedTo: actor._id,
-        status: decision === 'approved' ? 'Approved' : 'Rejected',
-        subjectEmployee: subject || {
-            _id: record.employeeMongoId,
-            employeeId: record.employeeId,
-            firstName: record.employeeName,
-        },
-        actionedBy: actor._id,
-        extra1: record.date,
-        extra2: requestedLabel,
+    await syncLeaveDecisionDashboardActions({
+        record,
+        actor,
+        subject,
+        decision,
+        requestedLabel,
     });
 
     return { ok: true, record };

@@ -10,6 +10,10 @@ import Company from '../../models/Company.js';
 import Fine from '../../models/Fine.js';
 import Loan from '../../models/Loan.js';
 import EmployeeHubRequest from '../../models/EmployeeHubRequest.js';
+import DashboardAction from '../../models/DashboardAction.js';
+import User from '../../models/User.js';
+import { getDepartmentHOD } from '../../utils/getDepartmentHOD.js';
+import { getManagementHOD } from '../../utils/getManagementHOD.js';
 import {
     isCompanyShellEmployee,
     REAL_EMPLOYEE_MONGO_FILTER,
@@ -19,7 +23,7 @@ import {
     listActiveWorkLocations,
     normalizeStaffTypeKey,
 } from '../../utils/workLocationHelpers.js';
-import { serializePayrollSettings } from './payrollSettingsController.js';
+import { serializePayrollSettings, reminderAudienceList } from './payrollSettingsController.js';
 import { resolveEmployeeFinePayableAmount } from '../../utils/finePayableAmount.js';
 import { buildLoanInstallments } from '../../utils/upsertLoanPartyExpenseFromPayment.js';
 import {
@@ -28,6 +32,7 @@ import {
 } from '../../utils/scheduleDailyAtMidnight.js';
 import { isJwtSystemSuperUser } from '../../utils/systemSuperUser.js';
 import { sendMailLater } from '../../utils/salaryEnrollmentApprovalNotify.js';
+import { withFrontendPath } from '../../utils/resolveFrontendBaseUrl.js';
 import {
     clockTimeToMinutes,
     getScheduledPunchMinutes,
@@ -186,6 +191,236 @@ function monthDateRange(ym) {
     };
 }
 
+function waitingLabel(fromDate) {
+    const date = fromDate instanceof Date ? fromDate : fromDate ? new Date(fromDate) : null;
+    if (!date || Number.isNaN(date.getTime())) return '—';
+    const start = Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate());
+    const now = new Date();
+    const today = Date.UTC(now.getFullYear(), now.getMonth(), now.getDate());
+    const days = Math.round((today - start) / 86400000);
+    if (!Number.isFinite(days) || days < 0) return '—';
+    if (days <= 0) return 'Today';
+    if (days === 1) return '1 day';
+    return `${days} days`;
+}
+
+function roleForPendingStatus(status) {
+    const value = String(status || '').toLowerCase();
+    if (value.includes('account') || value.includes('finance')) return 'Accounts';
+    if (value.includes('authoriz') || value.includes('management')) return 'Management';
+    if (value.includes('hr') || value.includes('review')) return 'HR';
+    return '';
+}
+
+function displayEmployeeName(emp) {
+    if (!emp) return '';
+    return `${emp.firstName || ''} ${emp.lastName || ''}`.trim() || String(emp.employeeId || '').trim();
+}
+
+function isRoleLabel(value) {
+    const v = String(value || '').trim().toLowerCase();
+    if (!v || v === '—') return true;
+    return /^(hr|hod|management|accounts|approver|employee|manager|admin|admin \/ hr|department hod)$/i.test(v);
+}
+
+async function hodForRole(role, cache) {
+    const key = String(role || '').trim();
+    if (!key) return null;
+    if (cache.has(key)) return cache.get(key);
+    let hod = null;
+    if (key === 'HR') hod = await getDepartmentHOD('hr');
+    else if (key === 'Accounts') hod = await getDepartmentHOD('accounts');
+    else if (key === 'Management') hod = await getManagementHOD();
+    cache.set(key, hod || null);
+    return hod || null;
+}
+
+function toObjectIdList(ids) {
+    const unique = [...new Set((ids || []).map((id) => String(id || '').trim()).filter(Boolean))];
+    return unique.filter((id) => mongoose.isValidObjectId(id)).map((id) => new mongoose.Types.ObjectId(id));
+}
+
+async function loadAssigneePeople({ empIds = [], mongoIds = [] }) {
+    const codes = [...new Set((empIds || []).map((id) => String(id || '').trim()).filter(Boolean))];
+    const objectIds = toObjectIdList(mongoIds);
+    const [empsByCode, empsByMongo, users] = await Promise.all([
+        codes.length
+            ? EmployeeBasic.find({ employeeId: { $in: codes } })
+                  .select('employeeId firstName lastName email companyEmail')
+                  .lean()
+                  .maxTimeMS(8000)
+            : [],
+        objectIds.length
+            ? EmployeeBasic.find({ _id: { $in: objectIds } })
+                  .select('employeeId firstName lastName email companyEmail')
+                  .lean()
+                  .maxTimeMS(8000)
+            : [],
+        objectIds.length
+            ? User.find({ _id: { $in: objectIds } })
+                  .select('employeeId name email')
+                  .lean()
+                  .maxTimeMS(8000)
+            : [],
+    ]);
+    const byEmpId = new Map();
+    const byMongo = new Map();
+    for (const emp of [...(empsByCode || []), ...(empsByMongo || [])]) {
+        const code = String(emp.employeeId || '').trim();
+        if (code) byEmpId.set(code, emp);
+        byMongo.set(String(emp._id), emp);
+    }
+    const userEmpCodes = [...new Set((users || []).map((row) => String(row.employeeId || '').trim()).filter(Boolean))];
+    const extra = userEmpCodes.length
+        ? await EmployeeBasic.find({ employeeId: { $in: userEmpCodes } })
+              .select('employeeId firstName lastName email companyEmail')
+              .lean()
+              .maxTimeMS(8000)
+        : [];
+    for (const emp of extra || []) {
+        const code = String(emp.employeeId || '').trim();
+        if (code) byEmpId.set(code, emp);
+        byMongo.set(String(emp._id), emp);
+    }
+    const userByMongo = new Map((users || []).map((row) => [String(row._id), row]));
+    return { byEmpId, byMongo, userByMongo };
+}
+
+function personFromMaps(code, mongoId, maps) {
+    const empId = String(code || '').trim();
+    const oid = String(mongoId || '').trim();
+    const emp =
+        (empId && maps.byEmpId.get(empId)) ||
+        (oid && maps.byMongo.get(oid)) ||
+        null;
+    if (emp) {
+        return {
+            employeeId: String(emp.employeeId || empId).trim(),
+            name: displayEmployeeName(emp),
+        };
+    }
+    const user = oid ? maps.userByMongo.get(oid) : null;
+    if (user) {
+        const userCode = String(user.employeeId || '').trim();
+        const linked = userCode ? maps.byEmpId.get(userCode) : null;
+        if (linked) {
+            return { employeeId: String(linked.employeeId || '').trim(), name: displayEmployeeName(linked) };
+        }
+        return { employeeId: userCode, name: String(user.name || '').trim() };
+    }
+    return { employeeId: empId, name: '' };
+}
+
+async function attachPayrollBlockerAssignees(items) {
+    const rows = Array.isArray(items) ? items : [];
+    if (!rows.length) return rows;
+
+    try {
+        const requestIds = toObjectIdList(rows.map((item) => item.requestId));
+        const actions = requestIds.length
+            ? await DashboardAction.find({
+                  status: 'Pending',
+                  requestId: { $in: requestIds },
+              })
+                  .select('requestId assignedTo assignedToEmpId requestedDate createdAt updatedAt')
+                  .lean()
+                  .maxTimeMS(8000)
+            : [];
+
+        const actionByRequest = new Map();
+        for (const action of actions || []) {
+            const key = String(action.requestId || '');
+            if (!key) continue;
+            const prev = actionByRequest.get(key);
+            const nextTime = new Date(action.updatedAt || action.requestedDate || 0).getTime();
+            const prevTime = prev ? new Date(prev.updatedAt || prev.requestedDate || 0).getTime() : 0;
+            if (!prev || nextTime >= prevTime) actionByRequest.set(key, action);
+        }
+
+        const empIds = [];
+        const mongoIds = [];
+        for (const item of rows) {
+            if (item.responsibleId) empIds.push(item.responsibleId);
+            if (item.assigneeMongoId) mongoIds.push(item.assigneeMongoId);
+        }
+        for (const action of actionByRequest.values()) {
+            if (action.assignedToEmpId) empIds.push(action.assignedToEmpId);
+            if (action.assignedTo) mongoIds.push(action.assignedTo);
+        }
+
+        const maps = await loadAssigneePeople({ empIds, mongoIds });
+        const hodCache = new Map();
+
+        for (const item of rows) {
+            const action = actionByRequest.get(String(item.requestId || ''));
+            let responsibleId = String(item.responsibleId || '').trim();
+            let responsibleName = String(item.responsibleName || '').trim();
+            let responsibleRole =
+                String(item.responsibleRole || '').trim() ||
+                roleForPendingStatus(item.detail) ||
+                (String(item.id || '').startsWith('unmarked-') ? 'Employee' : item.category === 'finance' ? 'HR' : 'Approver');
+            let notifiedAt = item.notifiedAt || action?.requestedDate || action?.createdAt || item.dateKey || '';
+
+            const tryAssign = (code, mongoId) => {
+                const person = personFromMaps(code, mongoId, maps);
+                if (person.employeeId && !responsibleId) responsibleId = person.employeeId;
+                if (person.name && !responsibleName) responsibleName = person.name;
+            };
+
+            if (action) {
+                tryAssign(action.assignedToEmpId, action.assignedTo);
+                notifiedAt = action.requestedDate || action.createdAt || notifiedAt;
+            }
+            tryAssign(item.responsibleId, item.assigneeMongoId);
+
+            if (isRoleLabel(responsibleName)) responsibleName = '';
+
+            if (!responsibleName) {
+                if (String(item.id || '').startsWith('unmarked-')) {
+                    responsibleId = responsibleId || item.employeeId;
+                    responsibleName = responsibleName || item.name;
+                    responsibleRole = 'Employee';
+                } else {
+                    const hod = await hodForRole(responsibleRole === 'Approver' ? 'HR' : responsibleRole, hodCache);
+                    if (hod) {
+                        const code = String(hod.employeeId || '').trim();
+                        if (code) {
+                            maps.byEmpId.set(code, hod);
+                            maps.byMongo.set(String(hod._id), hod);
+                            tryAssign(code, hod._id);
+                        }
+                        if (!responsibleName) responsibleName = displayEmployeeName(hod);
+                        if (!responsibleId) responsibleId = code;
+                    }
+                }
+            }
+
+            if (!responsibleName) responsibleName = responsibleRole || '—';
+
+            item.responsibleId = responsibleId;
+            item.responsibleName = responsibleName;
+            item.responsibleRole = responsibleRole;
+            const parsedNotify = notifiedAt ? new Date(notifiedAt) : null;
+            item.notifiedAt = parsedNotify && !Number.isNaN(parsedNotify.getTime()) ? parsedNotify.toISOString() : '';
+            item.waitingLabel = waitingLabel(item.notifiedAt || notifiedAt);
+            item.actorIsSubject = Boolean(responsibleId && responsibleId === item.employeeId);
+        }
+    } catch (error) {
+        console.error('[attachPayrollBlockerAssignees]', error);
+        for (const item of rows) {
+            const role =
+                roleForPendingStatus(item.detail) ||
+                (String(item.id || '').startsWith('unmarked-') ? 'Employee' : 'Approver');
+            item.responsibleId = item.responsibleId || '';
+            item.responsibleName = item.responsibleName || role;
+            item.responsibleRole = item.responsibleRole || role;
+            item.waitingLabel = item.waitingLabel || waitingLabel(item.notifiedAt || item.dateKey);
+        }
+    }
+
+    return rows;
+}
+
 async function buildGroupPendingRequests(people, monthKey) {
     const rows = Array.isArray(people) ? people : [];
     if (!rows.length) return [];
@@ -214,7 +449,7 @@ async function buildGroupPendingRequests(people, monthKey) {
                   ...dateFilter,
               })
                   .select(
-                      '_id employeeMongoId employeeId employeeName date leaveRequestKind requestedStatusKey requestedStatusLabel leaveRequestGroupId leaveRequestFromDate leaveRequestToDate',
+                      '_id employeeMongoId employeeId employeeName date leaveRequestKind requestedStatusKey requestedStatusLabel leaveRequestGroupId leaveRequestFromDate leaveRequestToDate createdAt',
                   )
                   .lean()
                   .maxTimeMS(12000)
@@ -228,7 +463,7 @@ async function buildGroupPendingRequests(people, monthKey) {
                           statusKey: 'not_marked',
                       },
                   },
-                  { $group: { _id: '$employeeMongoId', days: { $sum: 1 } } },
+                  { $group: { _id: '$employeeMongoId', days: { $sum: 1 }, since: { $min: '$date' } } },
               ])
             : [],
         codes.length
@@ -239,7 +474,7 @@ async function buildGroupPendingRequests(people, monthKey) {
                       { approvalStatus: { $in: PENDING_FINANCE_STATUSES } },
                   ],
               })
-                  .select('_id employeeId type status approvalStatus amount')
+                  .select('_id employeeId type status approvalStatus amount workflow createdAt updatedAt')
                   .lean()
                   .maxTimeMS(8000)
             : [],
@@ -248,7 +483,7 @@ async function buildGroupPendingRequests(people, monthKey) {
                   fineStatus: { $in: PENDING_FINANCE_STATUSES },
                   'assignedEmployees.employeeId': { $in: codes },
               })
-                  .select('_id fineId fineStatus fineType assignedEmployees')
+                  .select('_id fineId fineStatus fineType assignedEmployees workflow createdAt updatedAt')
                   .lean()
                   .maxTimeMS(8000)
             : [],
@@ -257,7 +492,7 @@ async function buildGroupPendingRequests(people, monthKey) {
                   status: 'Pending',
                   $or: [{ requester: { $in: objectIds } }, { requesterEmpId: { $in: codes } }],
               })
-                  .select('_id kind requester requesterEmpId requesterName')
+                  .select('_id kind requester requesterEmpId requesterName assignedTo assignedToEmpId createdAt')
                   .lean()
                   .maxTimeMS(8000)
                   .catch(() => [])
@@ -293,10 +528,12 @@ async function buildGroupPendingRequests(people, monthKey) {
             (category === 'attendance' ? 'Attendance correction' : category === 'compoff' ? 'Comp-off request' : 'Leave request');
         pushItem(emp, {
             id: `att-${row._id}`,
+            requestId: String(row._id),
             category,
             title: label,
             detail: String(row.leaveRequestFromDate || row.date || ''),
             dateKey: String(row.leaveRequestFromDate || row.date || ''),
+            notifiedAt: row.createdAt || row.leaveRequestFromDate || row.date,
         });
     }
 
@@ -309,18 +546,24 @@ async function buildGroupPendingRequests(people, monthKey) {
             title: 'Attendance not marked',
             detail: `${days} day${days === 1 ? '' : 's'} in this month`,
             dateKey: range?.from || '',
+            notifiedAt: row.since || range?.from,
         });
     }
 
     for (const loan of loans || []) {
         const emp = empByCode.get(String(loan.employeeId || '').trim());
         const kind = String(loan.type || 'Loan');
+        const pendingStep = (loan.workflow || []).find((step) => step.status === 'Pending');
         pushItem(emp, {
             id: `loan-${loan._id}`,
+            requestId: String(loan._id),
             category: 'finance',
             title: `${kind} approval`,
             detail: String(loan.approvalStatus || loan.status || 'Pending'),
             dateKey: '',
+            notifiedAt: pendingStep?.assignedAt || loan.updatedAt || loan.createdAt,
+            assigneeMongoId: pendingStep?.assignedTo || loan.submittedTo || '',
+            responsibleRole: roleForPendingStatus(loan.approvalStatus || loan.status) || 'HR',
         });
     }
 
@@ -331,12 +574,17 @@ async function buildGroupPendingRequests(people, monthKey) {
             .filter(Boolean);
         const targets = matched.length ? matched : [];
         for (const emp of targets) {
+            const pendingStep = (fine.workflow || []).find((step) => step.status === 'Pending');
             pushItem(emp, {
                 id: `fine-${fine._id}-${emp.employeeId}`,
+                requestId: String(fine._id),
                 category: 'finance',
                 title: 'Fine approval',
                 detail: String(fine.fineStatus || 'Pending'),
                 dateKey: '',
+                notifiedAt: pendingStep?.assignedAt || fine.updatedAt || fine.createdAt,
+                assigneeMongoId: pendingStep?.assignedTo || '',
+                responsibleRole: roleForPendingStatus(fine.fineStatus) || 'HR',
             });
         }
     }
@@ -364,10 +612,15 @@ async function buildGroupPendingRequests(people, monthKey) {
         }
         pushItem(emp, {
             id: `hub-${hub._id}`,
+            requestId: String(hub._id),
             category,
             title,
             detail: 'Pending approval',
             dateKey: '',
+            notifiedAt: hub.createdAt,
+            responsibleId: String(hub.assignedToEmpId || '').trim(),
+            assigneeMongoId: hub.assignedTo || '',
+            responsibleRole: kind === 'leave' ? 'Manager' : 'Approver',
         });
     }
 
@@ -376,7 +629,7 @@ async function buildGroupPendingRequests(people, monthKey) {
         if (dateCmp) return dateCmp;
         return String(a.name).localeCompare(String(b.name), undefined, { sensitivity: 'base' });
     });
-    return items;
+    return attachPayrollBlockerAssignees(items);
 }
 
 async function buildEnrollmentOverview(enrollments, monthKey) {
@@ -1286,9 +1539,99 @@ function escapeHtml(value) {
         .replace(/"/g, '&quot;');
 }
 
+function payrollBlockerPath(item) {
+    const id = encodeURIComponent(String(item?.employeeId || '').trim());
+    const key = String(item?.id || '');
+    const category = String(item?.category || '');
+    if (key.startsWith('hub-')) {
+        const hubId = key.slice(4);
+        return hubId ? `/dashboard?hubRequestId=${encodeURIComponent(hubId)}` : '/dashboard';
+    }
+    if (key.startsWith('fine-')) return '/HRM/Fine';
+    if (key.startsWith('loan-') || category === 'finance') return '/HRM/LoanAndAdvance';
+    if (category === 'attendance' || category === 'leave' || category === 'overtime' || category === 'compoff') {
+        return id ? `/HRM/Leave?employee=${id}` : '/HRM/Leave';
+    }
+    return id ? `/HRM/Salary/enroll/${id}` : '/HRM/Salary';
+}
+
+const BLOCKER_CATEGORIES = new Set(['attendance', 'leave', 'finance', 'overtime', 'compoff']);
+const BLOCKER_CATEGORY_LABEL = {
+    attendance: 'Attendance',
+    leave: 'Leave',
+    finance: 'Finance',
+    overtime: 'Overtime',
+    compoff: 'Comp-off',
+};
+
+function employeeReminderEmail(emp) {
+    const personal = String(emp?.email || '').trim().toLowerCase();
+    if (personal) return personal;
+    return String(emp?.companyEmail || emp?.workEmail || emp?.personalEmail || '')
+        .trim()
+        .toLowerCase();
+}
+
+function displayHodName(emp) {
+    return `${emp?.firstName || ''} ${emp?.lastName || ''}`.trim() || String(emp?.employeeId || '').trim();
+}
+
+function reminderAudienceFromPolicies(docs) {
+    const audiences = new Set();
+    for (const doc of docs || []) {
+        for (const row of doc?.salaryProcessReminders || []) {
+            for (const key of reminderAudienceList(row?.forWhom)) audiences.add(key);
+        }
+    }
+    return audiences;
+}
+
+async function flowchartPeopleForReminderAudiences(audiences) {
+    const people = [];
+    const seen = new Set();
+    async function push(empPromise, role) {
+        const emp = await empPromise;
+        const employeeId = String(emp?.employeeId || '').trim();
+        if (!emp || !employeeId || seen.has(employeeId)) return;
+        seen.add(employeeId);
+        people.push({
+            employeeId,
+            name: displayHodName(emp),
+            role,
+            email: employeeReminderEmail(emp),
+        });
+    }
+    if (audiences.has('wfAccounts')) await push(getDepartmentHOD('accounts'), 'WF Accounts');
+    if (audiences.has('wfHr')) await push(getDepartmentHOD('hr'), 'WF HR');
+    if (audiences.has('wfAdmin')) await push(getDepartmentHOD('admincontroller'), 'WF Admin');
+    if (audiences.has('wfManagement')) await push(getManagementHOD(), 'WF Management');
+    return people;
+}
+
+function normalizeIncomingBlockerTask(row) {
+    if (!row || typeof row !== 'object') return null;
+    const employeeId = String(row.employeeId || '').trim();
+    if (!employeeId) return null;
+    const category = String(row.category || '').trim().toLowerCase();
+    const path = String(row.path || '').trim() || payrollBlockerPath(row);
+    return {
+        id: String(row.id || '').trim(),
+        employeeId,
+        name: String(row.name || employeeId).trim(),
+        title: String(row.title || 'Pending task').trim(),
+        detail: String(row.detail || '').trim(),
+        category,
+        path: path.startsWith('/') ? path : payrollBlockerPath(row),
+        responsibleId: String(row.responsibleId || '').trim(),
+        responsibleName: String(row.responsibleName || '').trim(),
+        responsibleRole: String(row.responsibleRole || '').trim(),
+    };
+}
+
 /**
  * POST /api/Employee/salary-register/:monthKey/blockers/remind
- * One email per employee (company profile email) listing every pending payroll item.
+ * One email per employee listing every matching pending item as a numbered link.
+ * Prefers the visible modal task list from the client so tab / category / employee filters apply.
  */
 export const sendPayrollBlockerReminders = async (req, res) => {
     try {
@@ -1297,48 +1640,128 @@ export const sendPayrollBlockerReminders = async (req, res) => {
             return res.status(400).json({ message: 'Invalid salary month.' });
         }
 
-        const employeeRows = await EmployeeBasic.find({
-            employeeId: { $nin: ['', 'VEGA-HR-0000'] },
-            status: { $ne: 'Left User' },
-            profileStatus: 'active',
-            ...REAL_EMPLOYEE_MONGO_FILTER,
+        const incomingTasks = (Array.isArray(req.body?.tasks) ? req.body.tasks : [])
+            .map(normalizeIncomingBlockerTask)
+            .filter(Boolean);
+
+        let items = incomingTasks;
+        if (!items.length) {
+            const category = String(req.body?.category || '').trim().toLowerCase();
+            const employeeFilter = new Set(
+                (Array.isArray(req.body?.employeeIds) ? req.body.employeeIds : [])
+                    .map((id) => String(id || '').trim())
+                    .filter(Boolean),
+            );
+            const taskFilter = new Set(
+                (Array.isArray(req.body?.taskIds) ? req.body.taskIds : [])
+                    .map((id) => String(id || '').trim())
+                    .filter(Boolean),
+            );
+
+            const employeeRows = await EmployeeBasic.find({
+                employeeId: { $nin: ['', 'VEGA-HR-0000'] },
+                status: { $ne: 'Left User' },
+                profileStatus: 'active',
+                ...REAL_EMPLOYEE_MONGO_FILTER,
+            })
+                .select('employeeId firstName lastName staffType email companyEmail')
+                .lean()
+                .maxTimeMS(12000);
+
+            const people = (employeeRows || []).filter((emp) => {
+                const code = String(emp?.employeeId || '').trim();
+                return Boolean(code && !isPlaceholderEmployeeId(code) && !isCompanyShellEmployee(emp));
+            });
+
+            items = await buildGroupPendingRequests(people, monthKey);
+            if (category && BLOCKER_CATEGORIES.has(category)) {
+                items = items.filter((item) => String(item.category || '') === category);
+            }
+            if (employeeFilter.size) {
+                items = items.filter((item) => {
+                    const actor = String(item.responsibleId || '').trim();
+                    const subject = String(item.employeeId || '').trim();
+                    return employeeFilter.has(actor) || employeeFilter.has(subject);
+                });
+            }
+            if (taskFilter.size) {
+                items = items.filter((item) => taskFilter.has(String(item.id || '').trim()));
+            }
+        }
+
+        const policyDocs = await PayrollSettings.find({
+            $or: [{ key: 'default' }, { key: { $regex: /^group:/ } }],
         })
-            .select('employeeId firstName lastName staffType companyEmail')
+            .select('salaryProcessReminders')
             .lean()
-            .maxTimeMS(12000);
+            .maxTimeMS(8000);
+        const audiences = reminderAudienceFromPolicies(policyDocs);
+        const includePendingTaskUser = audiences.size === 0 || audiences.has('pendingTaskUser');
+        const flowchartPeople = await flowchartPeopleForReminderAudiences(audiences);
 
-        const people = (employeeRows || []).filter((emp) => {
-            const code = String(emp?.employeeId || '').trim();
-            return Boolean(code && !isPlaceholderEmployeeId(code) && !isCompanyShellEmployee(emp));
-        });
-
-        const items = await buildGroupPendingRequests(people, monthKey);
-        const byEmployee = new Map();
-        for (const item of items) {
-            const code = String(item.employeeId || '').trim();
-            if (!code) continue;
-            if (!byEmployee.has(code)) {
-                byEmployee.set(code, {
-                    employeeId: code,
-                    name: item.name,
+        const byActor = new Map();
+        function addTaskToActor(actorId, name, role, item) {
+            const id = String(actorId || '').trim();
+            if (!id) return;
+            if (!byActor.has(id)) {
+                byActor.set(id, {
+                    employeeId: id,
+                    name: name || id,
+                    role: role || '',
                     tasks: [],
                 });
             }
-            byEmployee.get(code).tasks.push(item);
+            const bucket = byActor.get(id);
+            const taskKey = String(item.id || `${item.category}-${item.title}-${item.detail}`);
+            if (bucket.tasks.some((task) => String(task.id || '') === taskKey)) return;
+            bucket.tasks.push({ ...item, id: taskKey });
         }
 
+        for (const item of items) {
+            if (includePendingTaskUser) {
+                addTaskToActor(item.responsibleId, item.responsibleName || item.name, item.responsibleRole, item);
+            }
+            for (const person of flowchartPeople) {
+                addTaskToActor(person.employeeId, person.name, person.role, item);
+            }
+        }
+
+        if (!byActor.size) {
+            return res.status(200).json({ sent: 0, skipped: 0, employees: 0, items: 0, monthKey });
+        }
+
+        const people = await EmployeeBasic.find({
+            employeeId: { $in: [...byActor.keys()] },
+        })
+            .select('employeeId firstName lastName email companyEmail')
+            .lean()
+            .maxTimeMS(8000);
+
         const emailByCode = new Map(
-            people.map((emp) => [
+            (people || []).map((emp) => [
                 String(emp.employeeId || '').trim(),
-                String(emp.companyEmail || '').trim().toLowerCase(),
+                employeeReminderEmail(emp),
             ]),
         );
+        for (const person of flowchartPeople) {
+            const code = String(person.employeeId || '').trim();
+            if (code && person.email && !emailByCode.get(code)) {
+                emailByCode.set(code, person.email);
+            }
+        }
+        for (const emp of people || []) {
+            const code = String(emp.employeeId || '').trim();
+            const row = byActor.get(code);
+            if (!row) continue;
+            const fullName = `${emp.firstName || ''} ${emp.lastName || ''}`.trim();
+            if (fullName) row.name = fullName;
+        }
 
         const label = monthLabel(monthKey);
         let sent = 0;
         let skipped = 0;
 
-        for (const row of byEmployee.values()) {
+        for (const row of byActor.values()) {
             const to = emailByCode.get(row.employeeId) || '';
             if (!to) {
                 skipped += 1;
@@ -1347,21 +1770,26 @@ export const sendPayrollBlockerReminders = async (req, res) => {
             const taskLines = row.tasks
                 .map((task) => {
                     const extra = String(task.detail || '').trim();
-                    return `<li><strong>${escapeHtml(task.title)}</strong>${
-                        extra ? ` — ${escapeHtml(extra)}` : ''
-                    }</li>`;
+                    const href = withFrontendPath(task.path || payrollBlockerPath(task), req);
+                    const category = BLOCKER_CATEGORY_LABEL[task.category] || '';
+                    const subject = `${task.name || task.employeeId} (${task.employeeId})`;
+                    const due = String(task.waitingLabel || '').trim();
+                    const labelText = `${category ? `${category}: ` : ''}${task.title || 'Pending task'}${
+                        extra ? ` — ${extra}` : ''
+                    }${due && due !== '—' ? ` · due ${due}` : ''}`;
+                    return `<li style="margin:0 0 10px"><span><strong>${escapeHtml(subject)}</strong> — ${escapeHtml(labelText)}</span><br/><a href="${escapeHtml(href)}">${escapeHtml(href)}</a></li>`;
                 })
                 .join('');
             sendMailLater({
                 to,
-                subject: `Payroll pending items — ${label}`,
+                subject: `Payroll actions waiting — ${label}`,
                 html: `
                     <p>Hello ${escapeHtml(row.name)},</p>
-                    <p>You have <strong>${row.tasks.length}</strong> pending payroll item${
-                        row.tasks.length === 1 ? '' : 's'
-                    } for <strong>${escapeHtml(label)}</strong>.</p>
-                    <ul>${taskLines}</ul>
-                    <p>Please complete these items so payroll can proceed. This is the only reminder for all of your pending items.</p>
+                    <p>These payroll items are waiting on you${
+                        row.role ? ` (${escapeHtml(row.role)})` : ''
+                    } for <strong>${escapeHtml(label)}</strong>. One reminder is sent with every task you need to complete.</p>
+                    <ol style="padding-left:20px">${taskLines}</ol>
+                    <p>Open each link to complete the task.</p>
                 `,
             });
             sent += 1;
@@ -1370,8 +1798,8 @@ export const sendPayrollBlockerReminders = async (req, res) => {
         return res.status(200).json({
             sent,
             skipped,
-            employees: byEmployee.size,
-            items: items.length,
+            employees: byActor.size,
+            items: [...byActor.values()].reduce((sum, row) => sum + row.tasks.length, 0),
             monthKey,
         });
     } catch (error) {

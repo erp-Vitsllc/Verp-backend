@@ -38,8 +38,11 @@ function hubLabel(kind, assetType = '') {
     return area ? `${base} · ${area}` : base;
 }
 
-function dashboardUrl(requestId, requesterId) {
+function dashboardUrl(requestId, requesterId, kind = '') {
     const base = emailFrontendUrl();
+    if (String(kind || '') === 'leave') {
+        return `${base}/HRM/Leave/annual-leave`;
+    }
     const qs = new URLSearchParams({ hubRequestId: String(requestId || '') });
     if (requesterId) qs.set('viewEmployee', String(requesterId));
     return `${base}/dashboard?${qs.toString()}`;
@@ -77,7 +80,7 @@ export async function sendEmployeeHubRequestEmails({
         const empName = personName(employee);
         const mgrName = personName(manager);
         const empId = employee?.employeeId || '—';
-        const url = dashboardUrl(requestId, employee?._id);
+        const url = dashboardUrl(requestId, employee?._id, kind);
         const desc = String(description || '').trim();
         const attach = String(attachmentName || '').trim();
 
@@ -135,7 +138,7 @@ export async function sendEmployeeHubDecisionEmails({
         const mgrName = personName(manager);
         const empId = employee?.employeeId || '—';
         const approved = String(decision || '') === 'Approved';
-        const url = dashboardUrl(requestId, employee?._id);
+        const url = dashboardUrl(requestId, employee?._id, kind);
         const note = String(decisionNote || '').trim();
         const desc = String(description || '').trim();
         const accent = approved ? '#059669' : '#e11d48';

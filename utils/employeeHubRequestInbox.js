@@ -10,6 +10,7 @@ function extra3For(row) {
         kind: row.kind,
         assetType: String(row.assetType || '').trim(),
         requesterMongoId: String(row.requester || ''),
+        leaveDashboard: row.kind === 'leave',
     });
 }
 

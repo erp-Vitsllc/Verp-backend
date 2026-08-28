@@ -40,6 +40,9 @@ export async function sendAttendanceLeaveRequestEmail({
     reason = '',
     kind = 'leave',
     attachmentName = '',
+    reviewPath = '',
+    buttonLabel = '',
+    emailTitle = '',
 }) {
     try {
         const mail = createTransport();
@@ -58,12 +61,19 @@ export async function sendAttendanceLeaveRequestEmail({
         const empName = personName(employee);
         const mgrName = personName(manager);
         const base = emailFrontendUrl();
-        const path = `/dashboard?focusAttendance=1&attendanceEmployeeId=${encodeURIComponent(
-            String(employee._id || ''),
-        )}&attendanceDate=${encodeURIComponent(String(date || ''))}`;
-        const buttonUrl = `${base}${path}`;
+        const path =
+            String(reviewPath || '').trim() ||
+            `/dashboard?focusAttendance=1&attendanceEmployeeId=${encodeURIComponent(
+                String(employee._id || ''),
+            )}&attendanceDate=${encodeURIComponent(String(date || ''))}`;
+        const buttonUrl = path.startsWith('http')
+            ? path
+            : `${base}${path.startsWith('/') ? path : `/${path}`}`;
+        const actionLabel = String(buttonLabel || '').trim() || 'Open employee attendance';
         const shownDate = dateLabel || date;
-        const title = isFutureLate
+        const title = String(emailTitle || '').trim()
+            ? String(emailTitle).trim()
+            : isFutureLate
             ? 'Late Arrival Request'
             : isFutureEarly
               ? 'Early Go Request'
@@ -117,7 +127,7 @@ export async function sendAttendanceLeaveRequestEmail({
                         <p>${confirmLine}</p>
                         <div style="text-align:center;margin-top:24px;">
                             <a href="${buttonUrl}" style="background:#EA3D2F;color:#fff;text-decoration:none;padding:12px 24px;border-radius:8px;font-weight:600;display:inline-block;">
-                                Open employee attendance
+                                ${actionLabel}
                             </a>
                         </div>
                     </div>

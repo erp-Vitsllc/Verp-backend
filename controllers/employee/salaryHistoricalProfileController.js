@@ -766,7 +766,7 @@ async function upsertFromBody(req, employeeId, extra = {}) {
         err.statusCode = 403;
         throw err;
     }
-    if (workflowIsLocked(workflowStatus) && extra.workflowStatus !== 'reopened' && extra.status !== 'created') {
+    if (workflowIsLocked(workflowStatus) && extra.workflowStatus !== 'reopened' && extra.status !== 'created' && extra.workflowStatus !== 'locked') {
         const err = new Error(MESSAGES.lockedReadOnly);
         err.statusCode = 403;
         throw err;
@@ -937,14 +937,23 @@ export async function saveSalaryHistoricalProfile(req, res) {
         const employeeId = String(req.params?.employeeId || '').trim();
         if (!employeeId) return res.status(400).json({ message: 'Employee is required.' });
         const who = actor(req);
+        const existing = await SalaryHistoricalProfile.findOne({ employeeId }).lean();
+        const workflowStatus = mapWorkflow(existing);
+        const keepLocked = workflowIsLocked(workflowStatus);
         await upsertFromBody(req, employeeId, {
+            ...(keepLocked
+                ? {
+                      workflowStatus: existing?.workflowStatus || 'locked',
+                      status: existing?.status || 'created',
+                  }
+                : {}),
             audit: {
-                action: 'save_draft',
+                action: keepLocked ? 'update' : 'save_draft',
                 recordType: 'historical_profile',
                 previousValue: null,
-                newValue: 'draft',
+                newValue: keepLocked ? 'updated' : 'draft',
                 reason: String(req.body?.reason || '').trim(),
-                verificationStatus: 'draft',
+                verificationStatus: keepLocked ? workflowStatus : 'draft',
                 changedBy: who.id,
                 changedByName: who.name,
             },

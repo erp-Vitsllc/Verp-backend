@@ -6,6 +6,11 @@ import {
     REAL_EMPLOYEE_MONGO_FILTER,
 } from '../utils/attendanceEmployeeFilters.js';
 import {
+    isLeaveEntryVisible,
+    leaveVisibilityByEmployeeId,
+    loadEnrolledLeaveVisibilityByMongoId,
+} from '../utils/leaveSalaryVisibility.js';
+import {
     getScheduledEmailTimeZone,
     getZonedParts,
 } from '../utils/scheduleDailyAtMidnight.js';
@@ -18,7 +23,30 @@ const LEAVE_COUNT_KEYS = [
     'on_leave',
 ];
 
-const LEAVE_CALENDAR_KEYS = [...LEAVE_COUNT_KEYS, 'holiday'];
+/** Personal leave only — holidays are company-wide, not per-user calendar bars. */
+const LEAVE_CALENDAR_KEYS = [...LEAVE_COUNT_KEYS];
+
+function calendarStatusKeysForLeaveType(leaveType) {
+    const raw = String(leaveType || 'all').trim().toLowerCase();
+    if (!raw || raw === 'all') return LEAVE_CALENDAR_KEYS;
+    const map = {
+        sick: 'sick_leave',
+        sick_leave: 'sick_leave',
+        authorized: 'authorized_leave',
+        authorize: 'authorized_leave',
+        authorized_leave: 'authorized_leave',
+        unauthorized: 'unauthorized_leave',
+        unauthorized_leave: 'unauthorized_leave',
+        compoff: 'compoff_leave',
+        comp_off: 'compoff_leave',
+        'comp-off': 'compoff_leave',
+        compoff_leave: 'compoff_leave',
+        annual: 'on_leave',
+        on_leave: 'on_leave',
+    };
+    const key = map[raw];
+    return key ? [key] : LEAVE_CALENDAR_KEYS;
+}
 
 function employeeDisplayName(emp) {
     return [emp?.firstName, emp?.lastName].filter(Boolean).join(' ').trim();
@@ -28,10 +56,19 @@ function isValidDateKey(value) {
     return /^\d{4}-\d{2}-\d{2}$/.test(String(value || '').trim());
 }
 
+function earliestProcessingStart(visibility, fallbackDate) {
+    let earliest = '';
+    for (const start of visibility?.values?.() || []) {
+        if (!isValidDateKey(start)) continue;
+        if (!earliest || start < earliest) earliest = start;
+    }
+    return earliest || fallbackDate;
+}
+
 /**
  * GET /api/Leave/employees
  * Active employees with leave day counts from attendance.
- * Query: year? | from?&to? (yyyy-MM-dd)
+ * Query: year=all | year=YYYY | from?&to? (yyyy-MM-dd)
  */
 export async function getEmployeeLeaveDirectory(req, res) {
     try {
@@ -42,24 +79,8 @@ export async function getEmployeeLeaveDirectory(req, res) {
         const dubai = getZonedParts(new Date(), getScheduledEmailTimeZone());
         const queryFrom = String(req.query.from || '').trim();
         const queryTo = String(req.query.to || '').trim();
+        const yearRaw = String(req.query.year || '').trim().toLowerCase();
         const requestedYear = Number(req.query.year);
-
-        let from;
-        let to;
-        let year;
-
-        if (isValidDateKey(queryFrom) && isValidDateKey(queryTo) && queryFrom <= queryTo) {
-            from = queryFrom;
-            to = queryTo;
-            year = Number(from.slice(0, 4));
-        } else {
-            year =
-                Number.isInteger(requestedYear) && requestedYear >= 2000 && requestedYear <= 2100
-                    ? requestedYear
-                    : dubai.year;
-            from = `${year}-01-01`;
-            to = `${year}-12-31`;
-        }
 
         const rows = await EmployeeBasic.find({
             profileStatus: 'active',
@@ -72,38 +93,66 @@ export async function getEmployeeLeaveDirectory(req, res) {
             .lean()
             .maxTimeMS(12000);
 
-        const employees = (rows || []).filter((e) => !isCompanyShellEmployee(e));
+        const activeEmployees = (rows || []).filter((e) => !isCompanyShellEmployee(e));
+        const visibility = await loadEnrolledLeaveVisibilityByMongoId(activeEmployees);
+        const visibilityByCode = leaveVisibilityByEmployeeId(activeEmployees, visibility);
+        const employees = activeEmployees.filter((emp) => visibility.has(String(emp._id)));
         const mongoIds = employees.map((e) => String(e._id));
+        const enrolledCodes = employees.map((e) => String(e.employeeId || '').trim()).filter(Boolean);
 
-        const grouped =
+        let from;
+        let to;
+        let year;
+
+        if (isValidDateKey(queryFrom) && isValidDateKey(queryTo) && queryFrom <= queryTo) {
+            from = queryFrom;
+            to = queryTo;
+            year = Number(from.slice(0, 4));
+        } else if (yearRaw === 'all') {
+            from = earliestProcessingStart(visibility, `${dubai.year}-01-01`);
+            to = `${dubai.year}-12-31`;
+            year = 'all';
+        } else {
+            year =
+                Number.isInteger(requestedYear) && requestedYear >= 2000 && requestedYear <= 2100
+                    ? requestedYear
+                    : dubai.year;
+            from = `${year}-01-01`;
+            to = `${year}-12-31`;
+        }
+
+        const leaveRows =
             mongoIds.length === 0
                 ? []
-                : await Attendance.aggregate([
-                      {
-                          $match: {
-                              employeeMongoId: { $in: mongoIds },
-                              date: { $gte: from, $lte: to },
-                              statusKey: { $in: LEAVE_COUNT_KEYS },
-                          },
-                      },
-                      {
-                          $group: {
-                              _id: {
-                                  employeeMongoId: '$employeeMongoId',
-                                  statusKey: '$statusKey',
-                              },
-                              count: { $sum: 1 },
-                          },
-                      },
-                  ]);
+                : await Attendance.find({
+                      $or: [
+                          { employeeMongoId: { $in: mongoIds } },
+                          ...(enrolledCodes.length ? [{ employeeId: { $in: enrolledCodes } }] : []),
+                      ],
+                      date: { $gte: from, $lte: to },
+                      statusKey: { $in: LEAVE_COUNT_KEYS },
+                  })
+                      .select('employeeMongoId employeeId date statusKey')
+                      .lean()
+                      .maxTimeMS(12000);
 
+        const mongoByCode = new Map(
+            employees.map((emp) => [String(emp.employeeId || '').trim(), String(emp._id)]),
+        );
         const countsByEmp = {};
-        for (const row of grouped) {
-            const id = String(row?._id?.employeeMongoId || '');
-            const key = String(row?._id?.statusKey || '').trim();
-            if (!id || !LEAVE_COUNT_KEYS.includes(key)) continue;
+        for (const row of leaveRows || []) {
+            const key = String(row?.statusKey || '').trim();
+            if (!LEAVE_COUNT_KEYS.includes(key)) continue;
+            if (!isLeaveEntryVisible(row, visibility, visibilityByCode)) continue;
+            const id =
+                (visibility.has(String(row.employeeMongoId || ''))
+                    ? String(row.employeeMongoId)
+                    : '') ||
+                mongoByCode.get(String(row.employeeId || '').trim()) ||
+                '';
+            if (!id) continue;
             if (!countsByEmp[id]) countsByEmp[id] = {};
-            countsByEmp[id][key] = Number(row.count) || 0;
+            countsByEmp[id][key] = (countsByEmp[id][key] || 0) + 1;
         }
 
         const list = employees.map((emp) => {
@@ -165,12 +214,7 @@ export async function getLeaveCalendar(req, res) {
         const employeeMongoId = String(req.query.employeeId || '').trim();
         const leaveType = String(req.query.leaveType || 'all').trim().toLowerCase();
 
-        const statusKeys =
-            leaveType === 'authorized'
-                ? ['authorized_leave']
-                : leaveType === 'annual'
-                  ? ['on_leave']
-                  : LEAVE_CALENDAR_KEYS;
+        const statusKeys = calendarStatusKeysForLeaveType(leaveType);
 
         if (!isValidDateKey(from) || !isValidDateKey(to) || from > to) {
             return res.status(400).json({ message: 'Valid from and to dates (yyyy-MM-dd) are required.' });
@@ -186,16 +230,48 @@ export async function getLeaveCalendar(req, res) {
             .lean()
             .maxTimeMS(12000);
 
+        const realEmployees = (activeEmployees || []).filter((row) => !isCompanyShellEmployee(row));
+        const visibility = await loadEnrolledLeaveVisibilityByMongoId(realEmployees);
+        const visibilityByCode = leaveVisibilityByEmployeeId(realEmployees, visibility);
+
         const employeeMap = new Map();
-        for (const emp of (activeEmployees || []).filter((row) => !isCompanyShellEmployee(row))) {
-            if (employeeMongoId && String(emp._id) !== employeeMongoId) continue;
-            employeeMap.set(String(emp._id), emp);
+        const employeeByCode = new Map();
+        for (const emp of realEmployees) {
+            const mongoId = String(emp._id);
+            if (!visibility.has(mongoId)) continue;
+            if (employeeMongoId && mongoId !== employeeMongoId && String(emp.employeeId || '') !== employeeMongoId) {
+                continue;
+            }
+            employeeMap.set(mongoId, emp);
+            const code = String(emp.employeeId || '').trim();
+            if (code) employeeByCode.set(code, emp);
         }
+
+        if (!employeeMap.size) {
+            return res.status(200).json({
+                message: 'Leave calendar fetched successfully',
+                from,
+                to,
+                leaveType,
+                focusEmployee: null,
+                count: 0,
+                entries: [],
+            });
+        }
+
+        const enrolledMongoIds = Array.from(employeeMap.keys());
+        const enrolledCodes = Array.from(employeeByCode.keys());
+        const partyFilter = {
+            $or: [
+                { employeeMongoId: { $in: enrolledMongoIds } },
+                ...(enrolledCodes.length ? [{ employeeId: { $in: enrolledCodes } }] : []),
+            ],
+        };
 
         const query = {
             date: { $gte: from, $lte: to },
             statusKey: { $in: statusKeys },
-            employeeMongoId: { $in: Array.from(employeeMap.keys()) },
+            ...partyFilter,
         };
 
         const records = await Attendance.find(query)
@@ -206,13 +282,17 @@ export async function getLeaveCalendar(req, res) {
         const pendingRecords = await Attendance.find({
             leaveRequestStatus: 'pending',
             leaveRequestKind: { $in: ['leave', 'future_leave', 'future_annual'] },
-            employeeMongoId: { $in: Array.from(employeeMap.keys()) },
             employeeName: { $not: /\(company\)\s*$/i },
-            $or: [
-                { date: { $gte: from, $lte: to } },
+            $and: [
+                partyFilter,
                 {
-                    leaveRequestFromDate: { $lte: to },
-                    leaveRequestToDate: { $gte: from },
+                    $or: [
+                        { date: { $gte: from, $lte: to } },
+                        {
+                            leaveRequestFromDate: { $lte: to },
+                            leaveRequestToDate: { $gte: from },
+                        },
+                    ],
                 },
             ],
         })
@@ -220,43 +300,53 @@ export async function getLeaveCalendar(req, res) {
             .lean()
             .maxTimeMS(12000);
 
+        const resolveEmp = (row) =>
+            employeeMap.get(String(row.employeeMongoId || '')) ||
+            employeeByCode.get(String(row.employeeId || '').trim()) ||
+            null;
+
         const approvedEntries = (records || [])
-            .filter((row) => employeeMap.has(String(row.employeeMongoId || '')))
             .map((row) => {
-                const emp = employeeMap.get(String(row.employeeMongoId));
+                const emp = resolveEmp(row);
+                if (!emp) return null;
                 return {
                     id: String(row._id || `${row.date}-${row.employeeMongoId}-${row.statusKey}`),
                     date: row.date,
-                    employeeMongoId: String(row.employeeMongoId || emp?._id || ''),
-                    employeeId: row.employeeId || emp?.employeeId || '',
+                    employeeMongoId: String(emp._id),
+                    employeeId: row.employeeId || emp.employeeId || '',
                     employeeName: row.employeeName || employeeDisplayName(emp),
                     statusKey: row.statusKey,
                     statusLabel: row.statusLabel || row.statusKey,
                     isPending: false,
                 };
-            });
+            })
+            .filter(Boolean);
 
         const pendingKeys = new Set();
         const pendingEntries = [];
 
         for (const row of pendingRecords || []) {
-            if (!employeeMap.has(String(row.employeeMongoId || ''))) continue;
+            const emp = resolveEmp(row);
+            if (!emp) continue;
 
-            const emp = employeeMap.get(String(row.employeeMongoId));
             const rangeStart = row.leaveRequestFromDate || row.date;
             const rangeEnd = row.leaveRequestToDate || row.date;
             let cursor = rangeStart > from ? rangeStart : from;
             const endKey = rangeEnd < to ? rangeEnd : to;
 
             while (cursor && cursor <= endKey) {
-                const dedupeKey = `${row.employeeMongoId}-${cursor}-pending`;
+                const dedupeKey = `${emp._id}-${cursor}-pending`;
                 if (!pendingKeys.has(dedupeKey)) {
                     pendingKeys.add(dedupeKey);
                     pendingEntries.push({
-                        id: String(row._id || `${cursor}-${row.employeeMongoId}-pending`),
+                        id: String(row._id || `${cursor}-${emp._id}-pending`),
+                        attendanceId: String(row._id || ''),
+                        leaveRequestGroupId: String(row.leaveRequestGroupId || row._id || ''),
                         date: cursor,
-                        employeeMongoId: String(row.employeeMongoId || emp?._id || ''),
-                        employeeId: row.employeeId || emp?.employeeId || '',
+                        rangeStart,
+                        rangeEnd,
+                        employeeMongoId: String(emp._id),
+                        employeeId: row.employeeId || emp.employeeId || '',
                         employeeName: row.employeeName || employeeDisplayName(emp),
                         statusKey: String(row.requestedStatusKey || 'on_leave'),
                         statusLabel: row.requestedStatusLabel || row.requestedStatusKey || 'Pending Leave',
@@ -271,9 +361,11 @@ export async function getLeaveCalendar(req, res) {
             }
         }
 
-        const entries = [...approvedEntries, ...pendingEntries].sort(
-            (a, b) => a.date.localeCompare(b.date) || a.employeeName.localeCompare(b.employeeName),
-        );
+        const entries = [...approvedEntries, ...pendingEntries]
+            .filter((entry) => isLeaveEntryVisible(entry, visibility, visibilityByCode))
+            .sort(
+                (a, b) => a.date.localeCompare(b.date) || a.employeeName.localeCompare(b.employeeName),
+            );
 
         const focusEmployee = employeeMongoId ? employeeMap.get(employeeMongoId) : null;
 
@@ -296,6 +388,57 @@ export async function getLeaveCalendar(req, res) {
         console.error('[getLeaveCalendar]', error);
         return res.status(500).json({
             message: error.message || 'Failed to fetch leave calendar.',
+        });
+    }
+}
+
+/**
+ * GET /api/Leave/salary-visibility
+ * Enrolled employees and their live salary start dates (for Leave UI filters).
+ */
+export async function getLeaveSalaryVisibility(req, res) {
+    try {
+        if (mongoose.connection.readyState !== 1) {
+            return res.status(503).json({ message: 'Database not connected.' });
+        }
+
+        const rows = await EmployeeBasic.find({
+            profileStatus: 'active',
+            status: { $ne: 'Left User' },
+            employeeId: { $ne: 'VEGA-HR-0000' },
+            ...REAL_EMPLOYEE_MONGO_FILTER,
+        })
+            .select('_id employeeId')
+            .lean()
+            .maxTimeMS(12000);
+
+        const employees = (rows || []).filter((row) => !isCompanyShellEmployee(row));
+        const visibility = await loadEnrolledLeaveVisibilityByMongoId(employees);
+        const items = employees
+            .filter((emp) => visibility.has(String(emp._id)))
+            .map((emp) => ({
+                employeeMongoId: String(emp._id),
+                employeeId: String(emp.employeeId || '').trim(),
+                processingStartDate: visibility.get(String(emp._id)) || '',
+            }));
+
+        const earliestProcessingStartDate = earliestProcessingStart(visibility, '');
+        const dubai = getZonedParts(new Date(), getScheduledEmailTimeZone());
+
+        return res.status(200).json({
+            message: 'Leave salary visibility fetched successfully',
+            count: items.length,
+            items,
+            earliestProcessingStartDate,
+            yearFrom: earliestProcessingStartDate
+                ? Number(earliestProcessingStartDate.slice(0, 4))
+                : dubai.year,
+            yearTo: dubai.year,
+        });
+    } catch (error) {
+        console.error('[getLeaveSalaryVisibility]', error);
+        return res.status(500).json({
+            message: error.message || 'Failed to fetch leave salary visibility.',
         });
     }
 }
