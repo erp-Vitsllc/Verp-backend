@@ -1,10 +1,11 @@
 import ZohoBill from '../models/ZohoBill.js';
 import ZohoExpense from '../models/ZohoExpense.js';
-import { fetchBillById, fetchExpenseById, getZohoOrganizationId } from '../services/zohoService.js';
+import { fetchBillByIdAcrossOrgs, fetchExpenseById, getZohoOrganizationId } from '../services/zohoService.js';
 import {
     mapZohoExpenseToDoc,
     resolveZohoBillSerialNumber,
     resolveZohoExpenseSerialNumber,
+    looksLikeZohoBillSerial,
 } from './zohoPurchaseMappers.js';
 import { withZohoOrganization } from './zohoOrgContext.js';
 
@@ -61,13 +62,19 @@ function resolveOrgId(record) {
     }
 }
 
+function serialFromCacheRow(row) {
+    if (!row) return '';
+    return (
+        resolveZohoBillSerialNumber(row.zohoRaw) ||
+        (looksLikeZohoBillSerial(row.billNumber) ? clean(row.billNumber) : '')
+    );
+}
+
 async function liveBillSerialNumber(record) {
     const id = clean(record?.zohoBillId);
     if (!id) return '';
     try {
-        const live = await withZohoOrganization(record?.zohoOrganizationId || null, () =>
-            fetchBillById(id),
-        );
+        const live = await fetchBillByIdAcrossOrgs(id, record?.zohoOrganizationId);
         const number = zohoReturnedBillSerialNumber(live);
         if (live) {
             try {
@@ -138,7 +145,7 @@ export async function attachZohoBillNumbers(records = [], options = {}) {
             .lean();
         for (const row of rows) {
             const id = clean(row.zohoBillId);
-            const number = resolveZohoBillSerialNumber(row.zohoRaw);
+            const number = serialFromCacheRow(row);
             if (id && number) map.set(id, number);
         }
     }
@@ -147,13 +154,12 @@ export async function attachZohoBillNumbers(records = [], options = {}) {
     for (const rec of list) {
         const id = clean(rec?.zohoBillId);
         const cachedSerial = id ? map.get(id) : '';
-        let zohoBillNumber = cachedSerial;
+        const storedSerial = clean(rec?.zohoBillNumber);
+        let zohoBillNumber = cachedSerial || storedSerial;
 
         if (fetchLive && id) {
             const liveSerial = await liveBillSerialNumber(rec);
             if (liveSerial) zohoBillNumber = liveSerial;
-        } else if (!zohoBillNumber) {
-            zohoBillNumber = clean(rec?.zohoBillNumber);
         }
 
         if (persistModel && zohoBillNumber && (id || rec?._id)) {

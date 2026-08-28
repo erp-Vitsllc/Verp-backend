@@ -2,9 +2,8 @@ import Fine from '../models/Fine.js';
 import ZohoBill from '../models/ZohoBill.js';
 import { isZohoBillFullyPaid } from './markUtilityVendorBillsPaidFromZoho.js';
 import { finalizeFineVendorPayment } from './finalizeFineVendorPayment.js';
-import { fetchBillById } from '../services/zohoService.js';
+import { fetchBillByIdAcrossOrgs } from '../services/zohoService.js';
 import { upsertZohoBillFromApi } from '../services/zohoPurchaseSyncService.js';
-import { withZohoOrganization } from './zohoOrgContext.js';
 
 function clean(value, fallback = '') {
     const text = String(value ?? '').trim();
@@ -32,33 +31,10 @@ function markZohoBillMissing(zohoBillId) {
     missingZohoBillCache.set(id, Date.now() + MISSING_TTL_MS);
 }
 
-function orgFallbackIds(preferredOrgId = '') {
-    return [
-        ...new Set(
-            [
-                clean(preferredOrgId),
-                process.env.ZOHO_ORGANIZATION_ID,
-                process.env.ZOHO_ORGANIZATION_ID_NNIT,
-                process.env.ZOHO_ORGANIZATION_ID_VEGA,
-            ]
-                .map((id) => clean(id))
-                .filter(Boolean),
-        ),
-    ];
-}
-
 async function fetchZohoBillLive(zohoBillId, preferredOrgId = '') {
     if (isMissingZohoBillCached(zohoBillId)) return null;
-    const attempts = orgFallbackIds(preferredOrgId);
-    const orgTries = attempts.length ? attempts : [''];
-    for (const orgId of orgTries) {
-        try {
-            const live = await withZohoOrganization(orgId || null, () => fetchBillById(zohoBillId));
-            if (live) return live;
-        } catch {
-            /* try next org */
-        }
-    }
+    const live = await fetchBillByIdAcrossOrgs(zohoBillId, preferredOrgId);
+    if (live) return live;
     markZohoBillMissing(zohoBillId);
     return null;
 }

@@ -5,7 +5,7 @@ import {
     issueOAuthState,
     validateOAuthState,
 } from '../utils/zohoTokenStore.js';
-import { getZohoOrgContext } from '../utils/zohoOrgContext.js';
+import { getZohoOrgContext, withZohoOrganization } from '../utils/zohoOrgContext.js';
 
 const TOKEN_EXPIRY_BUFFER_MS = 5 * 60 * 1000;
 const DEFAULT_OAUTH_SCOPE = [
@@ -763,10 +763,11 @@ export async function fetchVendorPaymentPdf(paymentId) {
     return { buffer, filename, contentType: 'application/pdf' };
 }
 
-export async function createBill(payload = {}) {
+export async function createBill(payload = {}, requestParams = {}) {
     const response = await requestZohoBooks('/bills', {
         method: 'post',
         data: payload,
+        params: requestParams,
         timeout: 30000,
     });
 
@@ -783,9 +784,22 @@ function sanitizeZohoDocumentBillNumber(value) {
         .slice(0, 50);
 }
 
+function isZohoDuplicateBillNumber(message) {
+    return /already|exist|duplicate|unique/i.test(String(message || ''));
+}
+
+function isZohoBillNumberRuleError(message) {
+    return /bill_number|auto.?number|ignore_auto|cannot specify|do not specify/i.test(
+        String(message || ''),
+    );
+}
+
 /**
  * Create a Zoho bill using the ERP document id as Bill#
  * (fine ID, utility bill no, etc.). Zoho "Serial No." stays a separate custom field.
+ *
+ * When auto Bill# is enabled, Zoho rejects a custom bill_number unless
+ * ignore_auto_number_generation=true is sent as a query param.
  */
 export async function createBillWithZohoSerial(payload = {}) {
     const rest = { ...(payload || {}) };
@@ -793,22 +807,42 @@ export async function createBillWithZohoSerial(payload = {}) {
     delete rest.bill_number;
     delete rest.billNumber;
 
-    const post = (number) => {
+    const post = (number, { ignoreAuto = false } = {}) => {
         const data = { ...rest };
-        if (number) data.bill_number = number;
-        return createBill(data);
+        const params = {};
+        if (number) {
+            data.bill_number = number;
+            if (ignoreAuto) params.ignore_auto_number_generation = 'true';
+        }
+        return createBill(data, params);
+    };
+
+    const postCustom = async (number, ignoreAuto) => {
+        try {
+            return await post(number, { ignoreAuto });
+        } catch (err) {
+            const msg = String(err?.message || '');
+            if (!isZohoDuplicateBillNumber(msg)) throw err;
+            const retry = sanitizeZohoDocumentBillNumber(
+                `${number}-${Date.now().toString(36).toUpperCase().slice(-4)}`,
+            );
+            return await post(retry || `${number}-${Date.now()}`.slice(0, 50), { ignoreAuto });
+        }
     };
 
     if (billNumber) {
         try {
-            return await post(billNumber);
+            return await postCustom(billNumber, true);
         } catch (err) {
             const msg = String(err?.message || '');
-            if (!/already|exist|duplicate|unique/i.test(msg)) throw err;
-            const retry = sanitizeZohoDocumentBillNumber(
-                `${billNumber}-${Date.now().toString(36).toUpperCase().slice(-4)}`,
-            );
-            return await post(retry || `${billNumber}-${Date.now()}`.slice(0, 50));
+            if (!isZohoBillNumberRuleError(msg)) throw err;
+            try {
+                return await postCustom(billNumber, false);
+            } catch (err2) {
+                const msg2 = String(err2?.message || '');
+                if (!isZohoBillNumberRuleError(msg2)) throw err2;
+                return await post('');
+            }
         }
     }
 
@@ -1050,6 +1084,36 @@ export async function fetchBillById(billId) {
     });
 
     return data.bill || null;
+}
+
+/** GET bill by id, trying VEGA / NNIT org ids when the preferred org misses. */
+export async function fetchBillByIdAcrossOrgs(billId, preferredOrgId = '') {
+    const id = String(billId || '').trim();
+    if (!id) return null;
+
+    const attempts = [
+        ...new Set(
+            [
+                String(preferredOrgId || '').trim(),
+                process.env.ZOHO_ORGANIZATION_ID,
+                process.env.ZOHO_ORGANIZATION_ID_NNIT,
+                process.env.ZOHO_ORGANIZATION_ID_VEGA,
+            ]
+                .map((value) => String(value || '').trim())
+                .filter(Boolean),
+        ),
+    ];
+    const orgTries = attempts.length ? attempts : [''];
+
+    for (const orgId of orgTries) {
+        try {
+            const live = await withZohoOrganization(orgId || null, () => fetchBillById(id));
+            if (live) return live;
+        } catch {
+            /* try next org */
+        }
+    }
+    return null;
 }
 
 export async function fetchExpenseById(expenseId) {

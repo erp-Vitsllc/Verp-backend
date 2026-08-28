@@ -3,29 +3,63 @@ function cleanText(value, fallback = '') {
     return text || fallback;
 }
 
+function customFieldValue(cf) {
+    if (cf == null || typeof cf !== 'object') return '';
+    return cleanText(cf.value ?? cf.value_formatted ?? cf.field_value ?? cf.customfield_value);
+}
+
+function customFieldName(cf) {
+    if (cf == null || typeof cf !== 'object') return '';
+    return String(
+        cf.label || cf.customfield_name || cf.api_name || cf.placeholder || cf.name || '',
+    );
+}
+
+/** True for Zoho Serial No. values like VITS-Bills-012507 — not ERP fine/utility IDs. */
+export function looksLikeZohoBillSerial(value) {
+    const v = cleanText(value);
+    if (!v) return false;
+    if (/FINE-|UTIL-|LOAN-|REWARD-/i.test(v)) return false;
+    if (/^ERP[A-Z0-9]+$/i.test(v)) return false;
+    if (/^VITS-Bills-/i.test(v)) return true;
+    if (/\bBills-\d+/i.test(v)) return true;
+    return false;
+}
+
 /** Zoho Books custom field "Serial No." (e.g. VITS-Bills-012507), not Bill#. */
 export function resolveZohoCustomFieldSerial(zohoRecord) {
     if (!zohoRecord || typeof zohoRecord !== 'object') return '';
-    let serialNo = '';
+
     if (Array.isArray(zohoRecord.custom_fields)) {
-        const sf = zohoRecord.custom_fields.find((cf) =>
-            /serial/i.test(String(cf?.label || cf?.api_name || '')),
+        const byLabel = zohoRecord.custom_fields.find((cf) => /serial/i.test(customFieldName(cf)));
+        const fromLabel = customFieldValue(byLabel);
+        if (fromLabel) return fromLabel;
+
+        const byValue = zohoRecord.custom_fields.find((cf) =>
+            looksLikeZohoBillSerial(customFieldValue(cf)),
         );
-        if (sf?.value) serialNo = cleanText(sf.value);
+        const fromValue = customFieldValue(byValue);
+        if (fromValue) return fromValue;
     }
-    if (!serialNo && zohoRecord.custom_field_hash && typeof zohoRecord.custom_field_hash === 'object') {
+
+    if (zohoRecord.custom_field_hash && typeof zohoRecord.custom_field_hash === 'object') {
         for (const [k, v] of Object.entries(zohoRecord.custom_field_hash)) {
-            if (/serial/i.test(k) && v) {
-                serialNo = cleanText(v);
-                break;
-            }
+            if (/serial/i.test(k) && v) return cleanText(v);
+        }
+        for (const v of Object.values(zohoRecord.custom_field_hash)) {
+            if (looksLikeZohoBillSerial(v)) return cleanText(v);
         }
     }
-    return serialNo;
+
+    return '';
 }
 
 export function resolveZohoBillSerialNumber(bill) {
-    return resolveZohoCustomFieldSerial(bill);
+    const fromCustom = resolveZohoCustomFieldSerial(bill);
+    if (fromCustom) return fromCustom;
+    const billNo = cleanText(bill?.bill_number || bill?.billNumber);
+    if (looksLikeZohoBillSerial(billNo)) return billNo;
+    return '';
 }
 
 export function resolveZohoExpenseSerialNumber(expense) {

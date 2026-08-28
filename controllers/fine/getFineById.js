@@ -243,6 +243,13 @@ export const getFineById = async (req, res) => {
                 }
                 if (!fine.zohoBillId && rf.zohoBillId) fine.zohoBillId = rf.zohoBillId;
                 if (!fine.zohoBillNumber && rf.zohoBillNumber) fine.zohoBillNumber = rf.zohoBillNumber;
+                if (
+                    String(rf.vendorBillStatus || '').toLowerCase() === 'paid' &&
+                    String(fine.vendorBillStatus || '').toLowerCase() !== 'paid'
+                ) {
+                    fine.vendorBillStatus = 'Paid';
+                    if (rf.vendorBillPaidAt) fine.vendorBillPaidAt = rf.vendorBillPaidAt;
+                }
                 if (!fine.billNumber && rf.billNumber) fine.billNumber = rf.billNumber;
             }
         } else if (relatedFines.length === 1 && !fine) {
@@ -404,19 +411,34 @@ export const getFineById = async (req, res) => {
             getManagementHOD(targetEmployeeId),
         ]);
 
-        // Vendor Paid/Not Paid from ZohoBill cache only — live Zoho on every detail load caused lag.
-        if (fine?._id && String(fine.zohoBillId || '').trim()) {
-            try {
-                const { syncFineVendorBillStatusFromZoho } = await import(
+        // One live Zoho GET on detail — Paid to Vendor + Serial No. need current Books data.
+        try {
+            const syncRows = (relatedFines.length ? relatedFines : fine ? [fine] : []).filter(
+                (row) => row?._id && String(row.zohoBillId || '').trim(),
+            );
+            if (syncRows.length) {
+                const { syncFineListVendorBillStatusFromZoho } = await import(
                     '../../utils/markFineVendorBillsPaidFromZoho.js'
                 );
-                await syncFineVendorBillStatusFromZoho(fine, { fetchLive: false });
-            } catch (vendorSyncErr) {
-                console.error(
-                    '[getFineById] Vendor bill Paid/Not Paid sync failed:',
-                    vendorSyncErr?.message || vendorSyncErr,
+                await syncFineListVendorBillStatusFromZoho(syncRows, { fetchLive: true });
+                const paidRow = syncRows.find(
+                    (row) => String(row.vendorBillStatus || '').toLowerCase() === 'paid',
                 );
+                if (fine) {
+                    if (paidRow) {
+                        fine.vendorBillStatus = 'Paid';
+                        fine.vendorBillPaidAt = paidRow.vendorBillPaidAt || fine.vendorBillPaidAt;
+                    } else {
+                        fine.vendorBillStatus = 'Pending';
+                        fine.vendorBillPaidAt = null;
+                    }
+                }
             }
+        } catch (vendorSyncErr) {
+            console.error(
+                '[getFineById] Vendor bill Paid/Not Paid sync failed:',
+                vendorSyncErr?.message || vendorSyncErr,
+            );
         }
 
         const hrHODName = hrHOD ? `${hrHOD.firstName} ${hrHOD.lastName}` : 'Unknown';

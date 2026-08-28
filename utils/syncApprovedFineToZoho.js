@@ -4,6 +4,7 @@ import {
     getZohoOrganizationId,
     markBillAsOpen,
     fetchBillById,
+    fetchBillByIdAcrossOrgs,
     uploadBillAttachment,
     updateBill,
 } from '../services/zohoService.js';
@@ -342,6 +343,7 @@ async function syncApprovedFineToZohoInner(fineDoc, group) {
         const zohoBill = await createBillWithZohoSerial({
             vendor_id: vendorId,
             bill_number: billNumber,
+            reference_number: billNumber || undefined,
             date: billDate,
             notes: notesParts.join('\n') || undefined,
             line_items: lineItems,
@@ -379,7 +381,23 @@ async function syncApprovedFineToZohoInner(fineDoc, group) {
             /* ignore */
         }
 
-        const zohoBillNumber = resolveZohoBillSerialNumber(zohoBillForUpsert || zohoBill);
+        let zohoBillNumber = resolveZohoBillSerialNumber(zohoBillForUpsert || zohoBill);
+        if (!zohoBillNumber) {
+            try {
+                const live = await fetchBillByIdAcrossOrgs(zohoBillId, orgId);
+                if (live) {
+                    zohoBillForUpsert = live;
+                    zohoBillNumber = resolveZohoBillSerialNumber(live);
+                    try {
+                        await upsertZohoBillFromApi(live);
+                    } catch {
+                        /* cache upsert is best-effort */
+                    }
+                }
+            } catch (serialErr) {
+                console.warn('[FineZoho] Serial No. fetch failed:', serialErr?.message || serialErr);
+            }
+        }
 
         for (const f of group) {
             f.billDate = billDate;
