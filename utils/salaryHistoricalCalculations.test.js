@@ -40,12 +40,13 @@ describe('salary historical calculations', () => {
             { date: '2026-08-06', statusKey: 'sick_leave' },
             { date: '2026-08-07', statusKey: 'holiday' },
             { date: '2026-08-08', statusKey: 'not_marked' },
+            { date: '2026-08-09', statusKey: 'on_leave' },
         ]);
         assert.equal(live.workingDays, 2);
-        assert.equal(live.leaveRecords.length, 3);
+        assert.equal(live.leaveRecords.length, 4);
         assert.deepEqual(
             live.leaveRecords.map((row) => row.leaveType).sort(),
-            ['authorized', 'sick', 'unauthorized'],
+            ['annual', 'authorized', 'sick', 'unauthorized'],
         );
         const result = calculateHistoricalEligibility({
             workingDays: 40 + live.workingDays,
@@ -63,7 +64,8 @@ describe('salary historical calculations', () => {
         assert.equal(result.authorizedDeduction, 6);
         assert.equal(result.unauthorizedDeduction, 2);
         assert.equal(result.sickDeduction, 1);
-        assert.equal(result.eligibleBalance, 33);
+        assert.equal(result.annualDeduction, 1);
+        assert.equal(result.eligibleBalance, 32);
     });
 
     it('counts unauthorized leave at twice eligible working days', () => {
@@ -124,10 +126,10 @@ describe('salary historical calculations', () => {
         assert.equal(result.paidVerifiedCycles, 2);
         assert.equal(result.consumedEntitlementDays, 600);
         assert.equal(result.remainingAfterCycles, 267);
-        assert.equal(result.eligibleBalance, 867);
-        assert.equal(result.daysRequired, 0);
-        assert.equal(result.eligibleForBenefit, true);
-        assert.equal(result.availableCycles, 2);
+        assert.equal(result.eligibleBalance, 267);
+        assert.equal(result.daysRequired, 33);
+        assert.equal(result.eligibleForBenefit, false);
+        assert.equal(result.availableCycles, 0);
     });
 
     it('keeps a signed eligible balance when leave exceeds joining-to-VERP working days', () => {
@@ -150,7 +152,7 @@ describe('salary historical calculations', () => {
         assert.equal(result.eligibleForBenefit, false);
     });
 
-    it('sets current eligible balance to working days minus leave only', () => {
+    it('subtracts 300 entitlement days from eligible balance for each paid cycle', () => {
         const result = calculateHistoricalEligibility({
             workingDays: 42,
             cycleDays: 300,
@@ -167,11 +169,11 @@ describe('salary historical calculations', () => {
             ],
         });
         assert.equal(result.totalLeaveDeduction, 63);
-        assert.equal(result.eligibleBalance, -21);
         assert.equal(result.netQualifyingDays, -21);
         assert.equal(result.consumedEntitlementDays, 300);
+        assert.equal(result.eligibleBalance, -321);
         assert.equal(result.remainingAfterCycles, -321);
-        assert.equal(result.daysRequired, 321);
+        assert.equal(result.daysRequired, 621);
         assert.equal(result.eligibleForBenefit, false);
     });
 
@@ -182,7 +184,6 @@ describe('salary historical calculations', () => {
             leaveRecords: [],
             paymentCycles: [
                 { paymentStatus: 'draft', verificationStatus: 'pending' },
-                { paymentStatus: 'paid', verificationStatus: 'pending' },
                 { paymentStatus: 'cancelled', verificationStatus: 'verified' },
                 { paymentStatus: 'paid', verificationStatus: 'rejected' },
             ],
@@ -211,6 +212,8 @@ describe('salary historical calculations', () => {
         });
         assert.equal(result.consumedEntitlementDays, 300);
         assert.equal(result.paidVerifiedCycles, 1);
+        assert.equal(result.eligibleBalance, 300);
+        assert.equal(result.availableCycles, 1);
     });
 
     it('validates VERP start after joining and historical period end = start − 1', () => {
@@ -249,6 +252,18 @@ describe('salary historical calculations', () => {
                 { leaveType: 'unauthorized', fromDate: '2026-08-01', toDate: '2026-08-01' },
             ]),
             null,
+        );
+        assert.equal(
+            validateLeaveDates({ leaveType: 'sick', eligibleWorkingDays: 4 }, '2023-01-15', '2026-07-31'),
+            '',
+        );
+        assert.equal(
+            validateLeaveDates({ leaveType: 'annual', eligibleWorkingDays: 4 }, '2023-01-15', '2026-07-31'),
+            MESSAGES.annualLeaveDatesRequired,
+        );
+        assert.equal(
+            validateLeaveDates({}, '2023-01-15', '2026-07-31'),
+            MESSAGES.leaveCountRequired,
         );
     });
 

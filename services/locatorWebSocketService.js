@@ -43,7 +43,7 @@ function ingestPositions(positions) {
         if (position.uniqueId) {
             latestByUniqueId.set(String(position.uniqueId), position);
         }
-        // Intentionally do NOT write Mongo from WS — ERP DB sync runs on a 30-min
+        // Intentionally do NOT write Mongo from WS — ERP DB sync runs on a 10-min
         // REST job so continuous WS traffic never slows Vehicle Asset pages.
     }
 }

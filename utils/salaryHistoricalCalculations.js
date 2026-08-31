@@ -20,6 +20,8 @@ export const MESSAGES = {
     verpAfterJoining: 'VERP salary start date must be after the contract joining date.',
     leaveOverlap: 'This leave period overlaps with an existing record.',
     leaveOutsidePeriod: 'Leave dates must be within the historical calculation period.',
+    leaveCountRequired: 'Enter a day count for this leave record.',
+    annualLeaveDatesRequired: 'Annual leave requires a start date and an end date.',
     cycleAlreadyConsumed: 'This entitlement cycle has already consumed qualifying days.',
     completeBeforeCreate: 'Complete and verify all required sections before creating the salary profile.',
     joiningDateHrOnly: 'Only an authorized HR user can modify the contract joining date.',
@@ -30,6 +32,7 @@ export const MESSAGES = {
     awaitingHrApproval: 'This salary profile is waiting for flowchart HR approval.',
     alreadyAwaitingHr: 'This salary profile is already sent for HR approval.',
     rejectReasonRequired: 'A rejection description is required.',
+    createdProfileHrOnly: 'Only flowchart HR can update a created salary profile.',
 };
 
 const ISO = /^\d{4}-\d{2}-\d{2}$/;
@@ -163,9 +166,20 @@ export function findOverlappingLeave(records) {
 }
 
 export function validateLeaveDates(row, periodStart, periodEnd) {
+    const type = String(row?.leaveType || '').toLowerCase();
+    const isAnnual = type === 'annual';
     const from = row?.fromDate || row?.startDate;
     const to = row?.toDate || row?.endDate;
-    if (!isDateKey(from) || !isDateKey(to)) return 'Leave start and end dates are required.';
+    const hasFrom = isDateKey(from);
+    const hasTo = isDateKey(to);
+    const count = Math.max(0, Number(row?.eligibleWorkingDays ?? row?.actualDays ?? row?.calendarDays) || 0);
+    if (!hasFrom && !hasTo) {
+        if (isAnnual) return MESSAGES.annualLeaveDatesRequired;
+        return count > 0 ? '' : MESSAGES.leaveCountRequired;
+    }
+    if (!hasFrom || !hasTo) {
+        return isAnnual ? MESSAGES.annualLeaveDatesRequired : 'Leave start and end dates are required.';
+    }
     if (to < from) return MESSAGES.endBeforeStart;
     if (periodStart && periodEnd && (from < periodStart || to > periodEnd)) {
         return MESSAGES.leaveOutsidePeriod;
@@ -200,10 +214,9 @@ export function isConsumingCycle(cycle, cycleDays) {
     const payment = String(cycle?.paymentStatus || cycle?.status || '').toLowerCase();
     const verification = String(cycle?.verificationStatus || '').toLowerCase();
     if (payment === 'cancelled' || payment === 'rejected' || verification === 'rejected') return false;
-    if (payment === 'draft' || verification === 'pending' || verification === 'draft') return false;
+    if (payment === 'draft') return false;
     const paid = payment === 'paid';
-    const verified = verification === 'verified' || (!cycle?.verificationStatus && paid);
-    if (!paid || !verified) return false;
+    if (!paid) return false;
     const entitlement = Number(cycle?.entitlementDays ?? cycle?.qualifyingDays);
     return Number.isFinite(entitlement) ? entitlement > 0 : resolveEntitlementDays(cycleDays) > 0;
 }
@@ -220,7 +233,7 @@ export const LIVE_LEAVE_STATUS_MAP = {
     authorized_leave: 'authorized',
     unauthorized_leave: 'unauthorized',
     sick_leave: 'sick',
-    on_leave: 'authorized',
+    on_leave: 'annual',
 };
 
 /**
@@ -253,7 +266,7 @@ export function summarizeAttendanceEligibility(rows = []) {
             eligibleWorkingDays: 1,
             actualDays: 1,
             calendarDays: 1,
-            source: 'erp',
+            source: 'system',
             status: 'approved',
         });
     }
@@ -276,8 +289,8 @@ export function calculateHistoricalEligibility({
     const netQualifyingDays = working - leave.total;
     const consuming = (paymentCycles || []).filter((row) => isConsumingCycle(row, entitlementDays));
     const consumedEntitlementDays = consuming.length * entitlementDays;
-    const eligibleBalance = netQualifyingDays;
     const remainingAfterCycles = netQualifyingDays - consumedEntitlementDays;
+    const eligibleBalance = remainingAfterCycles;
     const daysRequired = Math.max(0, entitlementDays - eligibleBalance);
     const availableCycles =
         eligibleBalance >= entitlementDays ? Math.floor(eligibleBalance / entitlementDays) : 0;

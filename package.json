@@ -4,7 +4,7 @@
   "description": "",
   "main": "index.js",
   "scripts": {
-    "test": "node --test utils/salaryHistoricalCalculations.test.js utils/leaveSalaryVisibility.test.js",
+    "test": "node --test utils/salaryHistoricalCalculations.test.js utils/leaveSalaryVisibility.test.js utils/employeeLeavePolicy.test.js",
     "test:historical-salary": "node --test utils/salaryHistoricalCalculations.test.js",
     "test:leave-visibility": "node --test utils/leaveSalaryVisibility.test.js",
     "start": "node index.js",

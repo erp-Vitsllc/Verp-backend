@@ -28,12 +28,13 @@ const DEFAULT_RULES = {
     utilityBill: false,
     salikExcess: false,
     sandwichLeave: false,
+    allowedSickLeavePerYear: false,
     gratuityCalculationRequired: false,
 };
 
 const LATE_DEDUCT = new Set(['quarter', 'half', 'full']);
 const EMPTY_LATE_RULE = { minutes: null, events: null, deduct: '' };
-const REMINDER_DAYS = new Set([5, 10, 20, 30]);
+const MAX_REMINDER_DAYS = 30;
 const REMINDER_AUDIENCE_KEYS = new Set([
     'wfAccounts',
     'wfHr',
@@ -118,16 +119,24 @@ function serializeExtraLateRules(value) {
     }));
 }
 
+function toReminderDays(value) {
+    const n = Number(value);
+    if (!Number.isInteger(n) || n < 1 || n > MAX_REMINDER_DAYS) return null;
+    return n;
+}
+
 function toReminders(value) {
     const rows = Array.isArray(value) ? value : [];
-    return [0, 1, 2].map((index) => {
-        const row = rows[index] || {};
-        const days = Number(row.daysBefore);
-        return {
-            daysBefore: REMINDER_DAYS.has(days) ? days : null,
-            forWhom: reminderAudienceList(row.forWhom),
-        };
-    });
+    const first = toReminderDays(rows[0]?.daysBefore);
+    const secondRaw = toReminderDays(rows[1]?.daysBefore);
+    const second = first && secondRaw && secondRaw >= 1 && secondRaw <= first - 1 ? secondRaw : null;
+    const thirdRaw = toReminderDays(rows[2]?.daysBefore);
+    const third = second && thirdRaw && thirdRaw >= 1 && thirdRaw <= second ? thirdRaw : null;
+    return [
+        { daysBefore: first, forWhom: reminderAudienceList(rows[0]?.forWhom) },
+        { daysBefore: second, forWhom: reminderAudienceList(rows[1]?.forWhom) },
+        { daysBefore: third, forWhom: reminderAudienceList(rows[2]?.forWhom) },
+    ];
 }
 
 function serializeReminders(value) {
@@ -225,6 +234,7 @@ export function serializePayrollSettings(doc) {
         workingDaysRequiredForAirTicket: doc?.workingDaysRequiredForAirTicket ?? null,
         authorizedLeaveDeductionDays: doc?.authorizedLeaveDeductionDays ?? null,
         unauthorizedLeaveDeductionDays: doc?.unauthorizedLeaveDeductionDays ?? null,
+        allowedSickLeaveDaysPerYear: doc?.allowedSickLeaveDaysPerYear ?? null,
         lateInRules: serializeLateRules(doc?.lateInRules).slice(0, 1),
         lateOutRules: serializeLateRules(doc?.lateOutRules).slice(0, 1),
         extraLateRules: serializeExtraLateRules(doc?.extraLateRules),
@@ -267,6 +277,10 @@ export function buildPayrollPolicyPayload(body, existing) {
             body?.unauthorizedLeaveDeductionDays !== undefined
                 ? toDays(body.unauthorizedLeaveDeductionDays)
                 : existing?.unauthorizedLeaveDeductionDays ?? null,
+        allowedSickLeaveDaysPerYear:
+            body?.allowedSickLeaveDaysPerYear !== undefined
+                ? toDays(body.allowedSickLeaveDaysPerYear)
+                : existing?.allowedSickLeaveDaysPerYear ?? null,
         lateInRules:
             body?.lateInRules !== undefined
                 ? toLateRules(body.lateInRules, { single: true })
@@ -286,10 +300,29 @@ export function buildPayrollPolicyPayload(body, existing) {
     };
 }
 
+export function isMainSalaryPolicyConfigured(doc) {
+    return Boolean(doc?._id);
+}
+
+export const MAIN_POLICY_REQUIRED_MESSAGE =
+    'Update the main salary policy first before enrolling an employee.';
+
+export async function requireMainSalaryPolicy() {
+    const doc = await PayrollSettings.findOne({ key: 'default' }).select('_id').lean();
+    if (isMainSalaryPolicyConfigured(doc)) return;
+    const err = new Error(MAIN_POLICY_REQUIRED_MESSAGE);
+    err.statusCode = 400;
+    err.code = 'MAIN_POLICY_REQUIRED';
+    throw err;
+}
+
 export async function getPayrollSettings(req, res) {
     try {
         const doc = await PayrollSettings.findOne({ key: 'default' }).lean();
-        return res.status(200).json(serializePayrollSettings(doc));
+        return res.status(200).json({
+            ...serializePayrollSettings(doc),
+            mainPolicyConfigured: isMainSalaryPolicyConfigured(doc),
+        });
     } catch (error) {
         console.error('[getPayrollSettings]', error);
         return res.status(500).json({ message: error.message || 'Failed to load payroll settings.' });
@@ -322,6 +355,7 @@ export async function savePayrollSettings(req, res) {
 
         return res.status(200).json({
             message: 'Payroll settings saved.',
+            mainPolicyConfigured: true,
             ...serializePayrollSettings(doc),
         });
     } catch (error) {

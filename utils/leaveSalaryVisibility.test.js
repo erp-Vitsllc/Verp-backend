@@ -7,8 +7,12 @@ import {
     isLeaveDateVisible,
     isLeaveEntryVisible,
     leaveRangeTouchesVisiblePeriod,
+    formatProcessingMonthLabel,
+    isSalaryMonthOpen,
+    processingMonthFromStart,
     processingStartFromEnrollment,
     resolveSalaryProcessingStartDate,
+    salaryOpensFromMessage,
 } from './leaveSalaryVisibility.js';
 
 describe('leave salary visibility', () => {
@@ -45,6 +49,16 @@ describe('leave salary visibility', () => {
             }),
             '2026-07-05',
         );
+    });
+
+    it('describes when live attendance opens after enrollment', () => {
+        assert.equal(processingMonthFromStart('2026-09-01'), '2026-09');
+        assert.equal(processingMonthFromStart({ fromMonth: '2026-09' }), '2026-09');
+        assert.equal(formatProcessingMonthLabel('2026-09'), 'September 2026');
+        assert.equal(salaryOpensFromMessage('2026-09'), 'You can open the September 2026 onwards');
+        assert.equal(isSalaryMonthOpen('2026-08', '2026-09'), false);
+        assert.equal(isSalaryMonthOpen('2026-09', '2026-09'), true);
+        assert.equal(isSalaryMonthOpen('2026-10', '2026-09'), true);
     });
 
     it('hides leave days before the salary processing start date', () => {

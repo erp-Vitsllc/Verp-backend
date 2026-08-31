@@ -11,6 +11,8 @@ const locatorGpsSnapshotSchema = new mongoose.Schema(
         state: { type: String, default: '' },
         speedKmh: { type: Number, default: 0 },
         statusDurationSec: { type: Number, default: 0 },
+        /** Locator attributes.idleStart — epoch ms when the current idling session began. */
+        idleStart: { type: Number, default: 0 },
         capturedAt: { type: Date, default: Date.now },
     },
     { timestamps: true },

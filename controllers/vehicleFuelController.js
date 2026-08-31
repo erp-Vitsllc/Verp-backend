@@ -9,8 +9,10 @@ import {
     getLocatorMonthStatsForDevice,
     getLocatorMonthStatsMap,
     getLocatorMonthStatsByDevices,
+    buildFuelGpsPageStats,
     formatLocatorIdleLabel,
 } from '../services/locatorSnapshotService.js';
+import { isLocatorConfigured } from '../services/locatorService.js';
 import { getDepartmentHOD, isUserInFlowchart } from '../utils/getDepartmentHOD.js';
 import {
     employeeHasActivePortalUser,
@@ -29,6 +31,7 @@ import { isReqUserAdmin } from '../utils/sendAdminDeletionNotificationEmails.js'
 import { awaitAdminDeletionArchive } from '../utils/adminDeletionArchiveRun.js';
 
 const MONTH_KEY_RE = /^\d{4}-(0[1-9]|1[0-2])$/;
+const DAY_KEY_RE = /^\d{4}-\d{2}-\d{2}$/;
 const ADD_FUEL_PERMISSION = 'hrm_asset_vehicle_add_fuel';
 const ADD_FUEL_FLAGS = ['isView', 'isActive', 'isCreate', 'isEdit', 'isDelete', 'isDownload'];
 
@@ -111,7 +114,7 @@ function draftVisibilityQuery(reqUser) {
 }
 
 const FUEL_FLEET_SELECT =
-    'assetId name vehicleBrand vehicleCode plateEmirate plateNumber assignedTo assignedToType assignedCompany status fuelMonthlyLimit locatorDeviceId vehicleProfileActivationStatus vehicleInspectionStatus vehicleDispositionStatus documents.type documents.description';
+    'assetId name vehicleBrand vehicleCode plateEmirate plateNumber assignedTo assignedToType assignedCompany status fuelMonthlyLimit locatorDeviceId currentKilometer vehicleProfileActivationStatus vehicleInspectionStatus vehicleDispositionStatus documents.type documents.description';
 
 async function loadFuelFleetVehicles(req) {
     const vehicleTypeDocs = await AssetType.find({
@@ -544,6 +547,49 @@ export async function listAccessFuel(req, res) {
     }
 }
 
+function localDayKey(date = new Date()) {
+    const d = date instanceof Date ? date : new Date(date);
+    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+}
+
+function defaultFuelGpsRange() {
+    const now = new Date();
+    return {
+        from: `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-01`,
+        to: localDayKey(now),
+    };
+}
+
+export async function listFuelGpsStats(req, res) {
+    try {
+        const defaults = defaultFuelGpsRange();
+        const fromKey = DAY_KEY_RE.test(String(req.query.from || '').trim())
+            ? String(req.query.from).trim()
+            : defaults.from;
+        const toKey = DAY_KEY_RE.test(String(req.query.to || '').trim())
+            ? String(req.query.to).trim()
+            : defaults.to;
+
+        const vehicles = await loadFuelFleetVehicles(req);
+        const gps = await buildFuelGpsPageStats({
+            fromKey,
+            toKey,
+            erpVehicles: vehicles,
+        });
+
+        return res.json({
+            from: fromKey,
+            to: toKey,
+            rangeStart: gps?.rangeStart || null,
+            rangeEnd: gps?.rangeEnd || null,
+            configured: gps?.configured !== false && isLocatorConfigured(),
+            rows: Array.isArray(gps?.rows) ? gps.rows : [],
+        });
+    } catch (error) {
+        return res.status(500).json({ message: error.message || 'Failed to load GPS fuel stats.' });
+    }
+}
+
 export async function listVehicleFuelBills(req, res) {
     try {
         const vehicleId = String(req.params.vehicleId || '').trim();
@@ -723,6 +769,67 @@ export async function updateVehicleFuel(req, res) {
         });
     } catch (error) {
         return res.status(500).json({ message: error.message || 'Failed to update fuel.' });
+    }
+}
+
+function findFuelEntry(bill, entryId) {
+    const id = String(entryId || '').trim();
+    if (!id) return null;
+    return (
+        (typeof bill.entries?.id === 'function' ? bill.entries.id(id) : null) ||
+        (bill.entries || []).find((row) => String(row._id) === id) ||
+        null
+    );
+}
+
+export async function updateVehicleFuelEntry(req, res) {
+    try {
+        const bill = await VehicleFuelBill.findById(req.params.id);
+        if (!bill) return res.status(404).json({ message: 'Fuel bill not found.' });
+
+        const entry = findFuelEntry(bill, req.params.entryId);
+        if (!entry) return res.status(404).json({ message: 'Fuel entry not found.' });
+
+        const amount = parseAmount(req.body?.amount);
+        if (amount == null || amount <= 0) return res.status(400).json({ message: 'Enter a valid amount.' });
+
+        const asset = await loadFleetVehicle(bill.vehicleId);
+        if (!asset) return res.status(404).json({ message: 'Vehicle not found.' });
+
+        const canEditMonthlyLimit = await actorCanEditFuelMonthlyLimit(req.user);
+        const requestedLimit = parseAmount(req.body?.monthlyLimit);
+        if (canEditMonthlyLimit && req.body?.monthlyLimit != null && req.body?.monthlyLimit !== '') {
+            if (requestedLimit == null || requestedLimit <= 0) {
+                return res.status(400).json({ message: 'Enter a valid monthly limit.' });
+            }
+            bill.monthlyLimit = requestedLimit;
+        }
+
+        const stats = await locatorStatsForVehicle(asset, bill.monthKey);
+        const attachment = parseAttachment(req.body?.attachment);
+
+        entry.amount = amount;
+        if (attachment) entry.attachment = attachment;
+        bill.markModified('entries');
+
+        const lastEntry = bill.entries[bill.entries.length - 1];
+        bill.amountUsed = parseAmount(lastEntry?.amount) ?? bill.amountUsed;
+        bill.kmRun = stats.kmRun;
+        bill.idleTimeMinutes = stats.idleTimeMinutes;
+        bill.updatedBy = req.user?._id || null;
+
+        await bill.save();
+        const lean = bill.toObject();
+        maybeNotifyFuelLimitThresholds(asset, lean).catch((err) => {
+            console.error('[VehicleFuel] limit email failed:', err?.message || err);
+        });
+
+        return res.json({
+            message: 'Fuel entry updated.',
+            data: serializeBill(lean, asset, stats),
+        });
+    } catch (error) {
+        return res.status(500).json({ message: error.message || 'Failed to update fuel entry.' });
     }
 }
 

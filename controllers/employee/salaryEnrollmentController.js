@@ -1,6 +1,7 @@
 import EmployeeBasic from '../../models/EmployeeBasic.js';
 import PayrollSettings from '../../models/PayrollSettings.js';
 import SalaryEnrollment from '../../models/SalaryEnrollment.js';
+import SalaryHistoricalProfile from '../../models/SalaryHistoricalProfile.js';
 import {
     isCompanyShellEmployee,
     REAL_EMPLOYEE_MONGO_FILTER,
@@ -10,6 +11,8 @@ import {
     buildPayrollPolicyPayload,
     serializePayrollSettings,
     resolvePolicyAttachment,
+    requireMainSalaryPolicy,
+    isMainSalaryPolicyConfigured,
 } from './payrollSettingsController.js';
 
 const YEAR_MONTH = /^\d{4}-\d{2}$/;
@@ -47,7 +50,7 @@ async function policyCopyForEmployee(employee, salaryDay) {
 
 export async function getSalaryEnrollOptions(req, res) {
     try {
-        const [employeeRows, enrollmentDocs] = await Promise.all([
+        const [employeeRows, enrollmentDocs, profileDocs, mainPolicy] = await Promise.all([
             EmployeeBasic.find({
                 employeeId: { $nin: ['', 'VEGA-HR-0000'] },
                 status: { $ne: 'Left User' },
@@ -58,35 +61,68 @@ export async function getSalaryEnrollOptions(req, res) {
                 .lean()
                 .maxTimeMS(12000),
             SalaryEnrollment.find({}).select('employeeId fromMonth salaryDate processDate').lean().maxTimeMS(8000),
+            SalaryHistoricalProfile.find({})
+                .select('employeeId verpStartDate companyMolCode workflowStatus')
+                .lean()
+                .maxTimeMS(8000),
+            PayrollSettings.findOne({ key: 'default' }).select('_id').lean().maxTimeMS(8000),
         ]);
 
-        const enrollmentById = new Map(
-            (enrollmentDocs || []).map((row) => [String(row.employeeId || '').trim(), row]),
-        );
+        const enrollmentByKey = new Map();
+        const molByKey = new Map();
+        for (const row of enrollmentDocs || []) {
+            const key = String(row.employeeId || '').trim().replace(/\s+/g, '').toUpperCase();
+            if (!key) continue;
+            enrollmentByKey.set(key, {
+                ...row,
+                fromMonth: String(row.fromMonth || '').trim(),
+            });
+        }
+        for (const row of profileDocs || []) {
+            const key = String(row.employeeId || '').trim().replace(/\s+/g, '').toUpperCase();
+            if (!key) continue;
+            const mol = String(row.companyMolCode || '').trim();
+            if (mol && !molByKey.has(key)) molByKey.set(key, mol);
+            if (String(row.workflowStatus || '') === 'locked' && !enrollmentByKey.has(key)) {
+                enrollmentByKey.set(key, {
+                    ...row,
+                    fromMonth: String(row.verpStartDate || '').slice(0, 7),
+                });
+            }
+        }
 
         const employees = (employeeRows || [])
             .filter((emp) => emp?.employeeId && !isCompanyShellEmployee(emp))
             .map((emp) => {
                 const employeeId = String(emp.employeeId).trim();
-                const enrollment = enrollmentById.get(employeeId);
+                const key = employeeId.replace(/\s+/g, '').toUpperCase();
+                const enrollment = enrollmentByKey.get(key);
+                const enrolled = Boolean(enrollment);
+                const companyMolCode = enrolled ? molByKey.get(key) || '' : '';
                 return {
                     employeeId,
                     firstName: emp.firstName || '',
                     lastName: emp.lastName || '',
                     name: `${emp.firstName || ''} ${emp.lastName || ''}`.trim() || employeeId,
                     staffType: normalizeStaffTypeKey(emp.staffType),
-                    enrolled: Boolean(enrollment),
+                    enrolled,
                     fromMonth: String(enrollment?.fromMonth || '').trim(),
                     salaryDate: toMonthDay(enrollment?.salaryDate),
+                    salaryType: enrolled ? (companyMolCode ? 'WPS' : 'Cash') : '',
                 };
             });
 
         const enrollments = (enrollmentDocs || []).map((row) =>
             serializeEnrollment(row, { includePolicy: false }),
         );
-        const enrolledIds = enrollments.map((row) => row.employeeId);
+        const enrolledIds = employees.filter((row) => row.enrolled).map((row) => row.employeeId);
 
-        return res.status(200).json({ employees, enrolledIds, enrollments });
+        return res.status(200).json({
+            employees,
+            enrolledIds,
+            enrollments,
+            mainPolicyConfigured: isMainSalaryPolicyConfigured(mainPolicy),
+        });
     } catch (error) {
         console.error('[getSalaryEnrollOptions]', error);
         return res.status(500).json({ message: error.message || 'Failed to load enroll options.' });
@@ -108,6 +144,8 @@ export async function createSalaryEnrollment(req, res) {
         if (!salaryDay) {
             return res.status(400).json({ message: 'Salary day is required (1–28).' });
         }
+
+        await requireMainSalaryPolicy();
 
         const employee = await EmployeeBasic.findOne({ employeeId }).select('employeeId firstName lastName status staffType').lean();
         if (!employee || isCompanyShellEmployee(employee)) {
@@ -141,7 +179,9 @@ export async function createSalaryEnrollment(req, res) {
             return res.status(409).json({ message: 'This employee is already enrolled.' });
         }
         console.error('[createSalaryEnrollment]', error);
-        return res.status(500).json({ message: error.message || 'Failed to enroll employee.' });
+        return res.status(error.statusCode || 500).json({
+            message: error.message || 'Failed to enroll employee.',
+        });
     }
 }
 

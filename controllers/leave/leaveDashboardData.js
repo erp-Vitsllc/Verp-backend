@@ -18,6 +18,7 @@ import {
 } from '../../utils/scheduleDailyAtMidnight.js';
 import { listActiveWorkLocations, normalizeStaffTypeKey } from '../../utils/workLocationHelpers.js';
 import { decideLeaveRequestInternal } from '../attendanceController.js';
+import { checkEmployeeLeaveAllowance, resolveSickOverflowStatuses } from '../../utils/employeeLeavePolicy.js';
 import { hasPermission } from '../../services/permissionService.js';
 import { listPendingHubInboxItems } from '../../utils/employeeHubRequestInbox.js';
 import { isReqUserSystemSuperUser } from '../../utils/systemSuperUser.js';
@@ -807,7 +808,9 @@ const LEAVE_APPLY_SPECS = {
     },
 };
 
-function resolveLeaveApplySpec(leaveType, dayCount) {
+const APPLY_LEAVE_TYPES = new Set(['annual', 'authorized']);
+
+function resolveLeaveApplySpec(leaveType, dayCount, { restrictToApplyTypes = false } = {}) {
     const raw = String(leaveType || '')
         .trim()
         .toLowerCase()
@@ -827,6 +830,9 @@ function resolveLeaveApplySpec(leaveType, dayCount) {
         compoff_leave: 'compoff',
     };
     const mapped = aliases[raw];
+    if (restrictToApplyTypes && mapped && !APPLY_LEAVE_TYPES.has(mapped)) {
+        return null;
+    }
     if (mapped && LEAVE_APPLY_SPECS[mapped]) return LEAVE_APPLY_SPECS[mapped];
     return dayCount < 5 ? LEAVE_APPLY_SPECS.authorized : LEAVE_APPLY_SPECS.annual;
 }
@@ -1119,7 +1125,7 @@ export async function applyLeaveRange(req, res) {
 
         const employee = await EmployeeBasic.findById(employeeMongoId)
             .select(
-                '_id employeeId firstName lastName status profileStatus companyEmail workEmail email primaryReportee',
+                '_id employeeId firstName lastName status profileStatus companyEmail workEmail email primaryReportee staffType',
             )
             .populate(
                 'primaryReportee',
@@ -1144,7 +1150,14 @@ export async function applyLeaveRange(req, res) {
             return res.status(400).json({ message: 'Selected date range is empty.' });
         }
 
-        const spec = resolveLeaveApplySpec(req.body?.leaveType || req.body?.leaveMode, dayCount);
+        const spec = resolveLeaveApplySpec(req.body?.leaveType || req.body?.leaveMode, dayCount, {
+            restrictToApplyTypes: !attendanceId,
+        });
+        if (!spec) {
+            return res.status(400).json({
+                message: 'Leave type must be Annual Leave or Authorized Leave.',
+            });
+        }
         const existingGroup = attendanceId ? await loadEditableLeaveGroup(attendanceId) : null;
         if (attendanceId && !existingGroup) {
             return res.status(400).json({ message: 'No leave request found to update.' });
@@ -1175,6 +1188,15 @@ export async function applyLeaveRange(req, res) {
             return res.status(400).json({ message: conflict });
         }
 
+        const allowanceError = await checkEmployeeLeaveAllowance(employee, {
+            statusKey: spec.requestedStatusKey,
+            extraDates: dateKeysInRange(from, to),
+            excludeGroupId,
+        });
+        if (allowanceError) {
+            return res.status(400).json({ message: allowanceError });
+        }
+
         if (existingGroup?.records?.length) {
             const previousEmployeeId = String(existingGroup.records[0].employeeMongoId || '');
             const employeeChanged = previousEmployeeId !== String(employee._id);
@@ -1195,19 +1217,29 @@ export async function applyLeaveRange(req, res) {
         const markedBy = req.user?.id || null;
         const requestedAt = new Date();
         const reason = `${spec.requestedStatusLabel} request (${dayCount} day${dayCount === 1 ? '' : 's'})`;
+        const rangeDates = dateKeysInRange(from, to);
+        let specByDate = null;
+        if (spec.requestedStatusKey === 'sick_leave') {
+            specByDate = await resolveSickOverflowStatuses(employee, rangeDates, { excludeGroupId });
+        }
         const saved = [];
 
-        for (const dateKey of dateKeysInRange(from, to)) {
+        for (const dateKey of rangeDates) {
+            const dayStatus = specByDate?.get(dateKey);
+            const daySpec = dayStatus === 'authorized_leave' ? LEAVE_APPLY_SPECS.authorized : spec;
             const record = await writePendingLeaveDay({
                 dateKey,
                 employee,
-                spec,
+                spec: daySpec,
                 from,
                 to,
                 groupId,
                 requestedAt,
                 markedBy,
-                reason,
+                reason:
+                    dayStatus === 'authorized_leave'
+                        ? `${reason} · Sick allowance used`
+                        : reason,
             });
             saved.push(record);
         }

@@ -184,6 +184,15 @@ import {
     getSalaryHistoricalAudit,
 } from "../controllers/employee/salaryHistoricalProfileController.js";
 import { getPendingSalaryDashboardInbox } from "../controllers/employee/getPendingSalaryDashboardInbox.js";
+import {
+    getMonthSalaryDmf,
+    startMonthSalaryDmf,
+    approveMonthSalaryDmf,
+    rejectMonthSalaryDmf,
+    startHistoricalSalaryDmf,
+    approveHistoricalSalaryDmf,
+    rejectHistoricalSalaryDmf,
+} from "../controllers/employee/salaryDmfController.js";
 import { getUserActivityStats } from "../controllers/stats/getUserActivityStats.js";
 import { deleteDashboardAction } from "../controllers/stats/deleteDashboardAction.js";
 import { deleteProfileActivationDashboardByRequest } from "../controllers/stats/deleteProfileActivationDashboardByRequest.js";
@@ -226,6 +235,7 @@ router.get(
     checkAnyModulePermission([
         ['hrm_salary', 'view'],
         ['hrm_employees_view_salary', 'view'],
+        ['hrm_employees_view_payroll_history', 'view'],
     ]),
     getSalaryRegister,
 );
@@ -234,6 +244,7 @@ router.get(
     checkAnyModulePermission([
         ['hrm_salary', 'view'],
         ['hrm_employees_view_salary', 'view'],
+        ['hrm_employees_view_payroll_history', 'view'],
     ]),
     getSalaryRegister,
 );
@@ -256,6 +267,45 @@ router.post(
         ['hrm_employees_view_salary', 'view'],
     ]),
     createSalaryMonthPayment,
+);
+router.get(
+    "/salary-register/:monthKey/dmf",
+    checkAnyModulePermission([
+        ['hrm_salary', 'view'],
+        ['hrm_employees_view_salary', 'view'],
+        ['hrm_employees_view_payroll_history', 'view'],
+    ]),
+    getMonthSalaryDmf,
+);
+router.post(
+    "/salary-register/:monthKey/dmf/start",
+    checkAnyModulePermission([
+        ['hrm_salary', 'view'],
+        ['hrm_salary', 'edit'],
+        ['hrm_employees_view_salary', 'view'],
+        ['hrm_employees_view_salary', 'edit'],
+    ]),
+    startMonthSalaryDmf,
+);
+router.post(
+    "/salary-register/:monthKey/dmf/approve",
+    checkAnyModulePermission([
+        ['hrm_salary', 'view'],
+        ['hrm_salary', 'edit'],
+        ['hrm_employees_view_salary', 'view'],
+        ['hrm_employees_view_salary', 'edit'],
+    ]),
+    approveMonthSalaryDmf,
+);
+router.post(
+    "/salary-register/:monthKey/dmf/reject",
+    checkAnyModulePermission([
+        ['hrm_salary', 'view'],
+        ['hrm_salary', 'edit'],
+        ['hrm_employees_view_salary', 'view'],
+        ['hrm_employees_view_salary', 'edit'],
+    ]),
+    rejectMonthSalaryDmf,
 );
 router.delete(
     "/salary-register/:monthKey",
@@ -396,6 +446,36 @@ router.post(
         ['hrm_employees_view_salary', 'edit'],
     ]),
     rejectSalaryHistoricalProfile,
+);
+router.post(
+    "/salary-enroll/:employeeId/historical/dmf/start",
+    checkAnyModulePermission([
+        ['hrm_salary', 'view'],
+        ['hrm_salary', 'edit'],
+        ['hrm_employees_view_salary', 'view'],
+        ['hrm_employees_view_salary', 'edit'],
+    ]),
+    startHistoricalSalaryDmf,
+);
+router.post(
+    "/salary-enroll/:employeeId/historical/dmf/approve",
+    checkAnyModulePermission([
+        ['hrm_salary', 'view'],
+        ['hrm_salary', 'edit'],
+        ['hrm_employees_view_salary', 'view'],
+        ['hrm_employees_view_salary', 'edit'],
+    ]),
+    approveHistoricalSalaryDmf,
+);
+router.post(
+    "/salary-enroll/:employeeId/historical/dmf/reject",
+    checkAnyModulePermission([
+        ['hrm_salary', 'view'],
+        ['hrm_salary', 'edit'],
+        ['hrm_employees_view_salary', 'view'],
+        ['hrm_employees_view_salary', 'edit'],
+    ]),
+    rejectHistoricalSalaryDmf,
 );
 router.get(
     "/payroll-settings",

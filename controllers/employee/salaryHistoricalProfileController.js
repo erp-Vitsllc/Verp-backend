@@ -4,6 +4,7 @@ import Holiday from '../../models/Holiday.js';
 import PayrollSettings from '../../models/PayrollSettings.js';
 import SalaryEnrollment from '../../models/SalaryEnrollment.js';
 import SalaryHistoricalProfile from '../../models/SalaryHistoricalProfile.js';
+import EmployeeSalary from '../../models/EmployeeSalary.js';
 import WorkingTime from '../../models/WorkingTime.js';
 import User from '../../models/User.js';
 import { isCompanyShellEmployee } from '../../utils/attendanceEmployeeFilters.js';
@@ -37,15 +38,20 @@ import {
     validateVerpStart,
     workflowIsLocked,
 } from '../../utils/salaryHistoricalCalculations.js';
-import { serializePayrollSettings } from './payrollSettingsController.js';
+import { serializePayrollSettings, requireMainSalaryPolicy } from './payrollSettingsController.js';
+import { applySickAllowanceToLeaveRecords, leavePolicyEntitlements, resolveEmployeePayrollPolicy } from '../../utils/employeeLeavePolicy.js';
 import { resolveFlowchartHrEmployee } from '../../utils/resolveFlowchartHrEmployee.js';
-import { isReqUserAdmin } from '../../utils/sendAdminDeletionNotificationEmails.js';
+import { viewerIsSalaryFlowchartHr as viewerIsSalaryHr } from '../../utils/viewerIsSalaryFlowchartHr.js';
 import {
     closeSalaryEnrollmentInbox,
     emailCreatorSalaryApproved,
     emailEmployeeSalaryRejected,
     notifySalaryEnrollmentSubmitted,
 } from '../../utils/salaryEnrollmentApprovalNotify.js';
+import {
+    buildDmfViewerContext,
+    serializeDmf,
+} from '../../utils/salaryDmfApproval.js';
 
 const ISO = /^\d{4}-\d{2}-\d{2}$/;
 const LEAVE_TYPES = new Set(['sick', 'authorized', 'unauthorized', 'annual']);
@@ -201,6 +207,17 @@ function cycleDaysFromPolicy(policy) {
     return resolveEntitlementDays(policy?.leaveSalaryWorkingDays || policy?.workingDaysRequiredToEligible);
 }
 
+function pickEmployeeLeaveSalary(salaryDoc) {
+    const fromSalary = Number(salaryDoc?.basic ?? salaryDoc?.basicSalary) || 0;
+    if (fromSalary > 0) return fromSalary;
+    const history = Array.isArray(salaryDoc?.salaryHistory) ? salaryDoc.salaryHistory : [];
+    for (let i = history.length - 1; i >= 0; i -= 1) {
+        const basic = Number(history[i]?.basic) || 0;
+        if (basic > 0) return basic;
+    }
+    return 0;
+}
+
 async function policyCopyForEmployee(employee, salaryDay) {
     const staffType = normalizeStaffTypeKey(employee?.staffType);
     const group = staffType
@@ -293,7 +310,7 @@ function toLeaveRows(value, policyMultipliers) {
             Number(row?.actualDays) ||
             0;
         const deductionDays = Number(row?.deductionDays ?? row?.deduction) || eligible * multiplier;
-        const source = String(row?.source || 'manual').toLowerCase() === 'erp' ? 'erp' : 'manual';
+        const source = normalizeLeaveSource(row?.source);
         const status = String(row?.status || 'approved').trim().toLowerCase() || 'approved';
         return {
             id: String(row?._id || row?.id || ''),
@@ -340,7 +357,7 @@ function toAnnualRows(value) {
             actualDays: eligible,
             multiplier: 1,
             deductionDays: eligible,
-            source: String(row?.source || 'manual').toLowerCase() === 'erp' ? 'erp' : 'manual',
+            source: normalizeLeaveSource(row?.source),
             status: String(row?.status || 'approved').trim().toLowerCase() || 'approved',
             remarks: String(row?.remarks || '').trim(),
             attachment: serializeAttachment(row?.attachment),
@@ -393,12 +410,18 @@ function toCycleRows(value, cycleDays) {
     });
 }
 
-function isErpLeave(row) {
-    return String(row?.source || '').toLowerCase() === 'erp';
+function normalizeLeaveSource(value) {
+    const raw = String(value || 'manual').trim().toLowerCase();
+    if (raw === 'erp' || raw === 'system') return 'system';
+    return 'manual';
+}
+
+function isSystemLeave(row) {
+    return normalizeLeaveSource(row?.source) === 'system';
 }
 
 function historicalLeaveOnly(rows) {
-    return (Array.isArray(rows) ? rows : []).filter((row) => !isErpLeave(row));
+    return (Array.isArray(rows) ? rows : []).filter((row) => !isSystemLeave(row));
 }
 
 function pushAudit(existing, entry) {
@@ -416,16 +439,19 @@ async function enrichLeaveWorkingDays(rows, staffType, periodStart, periodEnd, p
             err.statusCode = 400;
             throw err;
         }
-        const stats =
-            row.fromDate && row.toDate
-                ? await calcWorkingDays({ from: row.fromDate, to: row.toDate, staffType })
-                : { workingDays: 0 };
-        const eligible = stats.workingDays;
+        const hasDates = isDateKey(row.fromDate) && isDateKey(row.toDate);
+        const provided = Math.max(0, Number(row.eligibleWorkingDays ?? row.actualDays) || 0);
+        let eligible = provided;
+        if (hasDates && provided <= 0) {
+            const stats = await calcWorkingDays({ from: row.fromDate, to: row.toDate, staffType });
+            eligible = stats.workingDays;
+        }
         const multiplier = leaveMultiplier(row.leaveType, row.multiplier, policyMultipliers);
+        const calendarDays = hasDates ? inclusiveCalendarDays(row.fromDate, row.toDate) : provided;
         out.push({
             ...row,
-            calendarDays: inclusiveCalendarDays(row.fromDate, row.toDate),
-            actualDays: inclusiveCalendarDays(row.fromDate, row.toDate),
+            calendarDays: calendarDays || provided,
+            actualDays: eligible,
             eligibleWorkingDays: eligible,
             multiplier,
             rule: multiplier,
@@ -441,7 +467,12 @@ async function enrichAnnualWorkingDays(rows, staffType, periodStart, periodEnd) 
     const out = [];
     for (const row of list) {
         const dateError = validateLeaveDates(
-            { fromDate: row.startDate, toDate: row.endDate },
+            {
+                leaveType: 'annual',
+                fromDate: row.startDate,
+                toDate: row.endDate,
+                eligibleWorkingDays: row.eligibleWorkingDays,
+            },
             periodStart,
             periodEnd,
         );
@@ -450,16 +481,20 @@ async function enrichAnnualWorkingDays(rows, staffType, periodStart, periodEnd) 
             err.statusCode = 400;
             throw err;
         }
-        const stats =
-            row.startDate && row.endDate
-                ? await calcWorkingDays({ from: row.startDate, to: row.endDate, staffType })
-                : { workingDays: 0 };
+        const hasDates = isDateKey(row.startDate) && isDateKey(row.endDate);
+        const provided = Math.max(0, Number(row.eligibleWorkingDays ?? row.actualDays) || 0);
+        let eligible = provided;
+        if (hasDates && provided <= 0) {
+            const stats = await calcWorkingDays({ from: row.startDate, to: row.endDate, staffType });
+            eligible = stats.workingDays;
+        }
+        const calendarDays = hasDates ? inclusiveCalendarDays(row.startDate, row.endDate) : provided;
         out.push({
             ...row,
-            calendarDays: inclusiveCalendarDays(row.startDate, row.endDate),
-            eligibleWorkingDays: stats.workingDays,
-            actualDays: stats.workingDays,
-            deductionDays: stats.workingDays,
+            calendarDays: calendarDays || provided,
+            eligibleWorkingDays: eligible,
+            actualDays: eligible,
+            deductionDays: eligible,
         });
     }
     return out;
@@ -488,7 +523,12 @@ function validateRecords(leaveRecords, annualLeaveRecords, periodStart, periodEn
     for (const row of annual) {
         if (row.status === 'cancelled' || row.status === 'rejected') continue;
         const error = validateLeaveDates(
-            { fromDate: row.startDate, toDate: row.endDate },
+            {
+                leaveType: 'annual',
+                fromDate: row.startDate,
+                toDate: row.endDate,
+                eligibleWorkingDays: row.eligibleWorkingDays,
+            },
             periodStart,
             periodEnd,
         );
@@ -508,25 +548,12 @@ function mapWorkflow(profile) {
 async function loadEmployee(employeeId) {
     return EmployeeBasic.findOne({ employeeId })
         .select(
-            '_id employeeId firstName lastName status profileStatus designation role department staffType dateOfJoining contractJoiningDate profilePicture primaryReportee companyEmail',
+            '_id employeeId firstName lastName status profileStatus designation role department staffType dateOfJoining contractJoiningDate profilePicture primaryReportee reportingAuthority companyEmail company',
         )
         .populate('primaryReportee', 'firstName lastName employeeId')
+        .populate('reportingAuthority', 'firstName lastName employeeId companyEmail')
+        .populate('company', 'zohoOrganizationId name')
         .lean();
-}
-
-async function viewerIsSalaryHr(req) {
-    if (!req?.user) return false;
-    if (await isReqUserAdmin(req.user)) return true;
-    const userId = req.user.id || req.user._id;
-    if (userId && (await isUserAdministrator(userId))) return true;
-    const hrResolved = await resolveFlowchartHrEmployee();
-    if (hrResolved.error || !hrResolved.employee?._id) return false;
-    const hrId = String(hrResolved.employee._id);
-    const myObj = String(req.user.employeeObjectId || req.user.empObjectId || '');
-    if (myObj && myObj === hrId) return true;
-    const myEid = String(req.user.employeeId || '').trim().toLowerCase().replace(/\s+/g, '');
-    const hrEid = String(hrResolved.employee.employeeId || '').trim().toLowerCase().replace(/\s+/g, '');
-    return Boolean(myEid && hrEid && myEid === hrEid);
 }
 
 async function resolveSubmitterEmail(who) {
@@ -546,7 +573,7 @@ async function resolveSubmitterEmail(who) {
     return '';
 }
 
-async function buildPayload(req, employeeId, overlay = {}) {
+export async function buildPayload(req, employeeId, overlay = {}) {
     const employee = await loadEmployee(employeeId);
     if (!employee || isCompanyShellEmployee(employee)) {
         const err = new Error('Employee not found.');
@@ -555,12 +582,14 @@ async function buildPayload(req, employeeId, overlay = {}) {
     }
 
     const canEdit = await userCanEdit(req);
-    const [profile, enrollment, policy, locations] = await Promise.all([
+    const [profile, enrollment, locations, salaryDoc, mainPolicyDoc] = await Promise.all([
         SalaryHistoricalProfile.findOne({ employeeId }).lean(),
         SalaryEnrollment.findOne({ employeeId }).lean(),
-        policyCopyForEmployee(employee, ''),
         listActiveWorkLocations(),
+        EmployeeSalary.findOne({ employeeId }).select('basic basicSalary monthlySalary salaryHistory.basic').lean(),
+        PayrollSettings.findOne({ key: 'default' }).select('_id').lean(),
     ]);
+    const policy = await resolveEmployeePayrollPolicy(employee);
 
     const staffType = normalizeStaffTypeKey(employee.staffType);
     const workLocationLabel =
@@ -628,6 +657,19 @@ async function buildPayload(req, employeeId, overlay = {}) {
                   staffType: employee.staffType,
               })
             : { workingDays: 0, leaveRecords: [], from: '', to: '' };
+    const priorSickDaysByYear = {};
+    for (const row of leaveRecords || []) {
+        if (String(row?.leaveType || '').toLowerCase() !== 'sick') continue;
+        const year = String(row.fromDate || row.toDate || '').slice(0, 4);
+        if (!/^\d{4}$/.test(year)) continue;
+        priorSickDaysByYear[year] =
+            (priorSickDaysByYear[year] || 0) + Math.max(1, Number(row.eligibleWorkingDays) || 1);
+    }
+    liveAttendance.leaveRecords = applySickAllowanceToLeaveRecords(
+        liveAttendance.leaveRecords || [],
+        leavePolicyEntitlements(policy),
+        { priorSickDaysByYear },
+    );
     const calculation = calculateHistoricalEligibility({
         workingDays: stats.workingDays + (Number(liveAttendance.workingDays) || 0),
         calendarDays: stats.calendarDays,
@@ -648,6 +690,7 @@ async function buildPayload(req, employeeId, overlay = {}) {
         workflowStatus === 'pending_hr';
     const companyMolCode = String(overlay.companyMolCode ?? profile?.companyMolCode ?? '').trim();
     const employeeMolId = String(overlay.employeeMolId ?? profile?.employeeMolId ?? '').trim();
+    const salarySlip = Boolean(overlay.salarySlip ?? profile?.salarySlip);
     const readiness = buildReadinessItems({
         joiningDate,
         verpStartDate,
@@ -679,6 +722,7 @@ async function buildPayload(req, employeeId, overlay = {}) {
         verpStartDate,
         companyMolCode,
         employeeMolId,
+        salarySlip,
         historicalFrom: period.start,
         historicalTo: period.end,
         calendarDays: stats.calendarDays,
@@ -696,7 +740,9 @@ async function buildPayload(req, employeeId, overlay = {}) {
         annualLeaveRecords,
         paymentCycles,
         cycleDays,
+        employeeLeaveSalary: pickEmployeeLeaveSalary(salaryDoc),
         leaveMultipliers,
+        policy,
         leaveHistoryComplete: leaveComplete,
         annualLeaveComplete: annualComplete,
         benefitsComplete: benefitsComplete,
@@ -715,7 +761,9 @@ async function buildPayload(req, employeeId, overlay = {}) {
         auditLog: Array.isArray(profile?.auditLog) ? profile.auditLog.slice(0, 50) : [],
         permissions: {
             canEdit: canEditProfile({ workflowStatus, canEdit }),
-            canChangeJoiningDate: canEdit && canEditProfile({ workflowStatus, canEdit }),
+            canChangeJoiningDate:
+                (canEdit && canEditProfile({ workflowStatus, canEdit })) ||
+                (isHrApprover && workflowIsLocked(workflowStatus)),
             canVerify: canEdit && ['draft', 'correction', 'reopened'].includes(workflowStatus),
             canCreate: canEdit && readiness.canCreate && workflowStatus === 'verified',
             canApprove: isHrApprover && workflowStatus === 'pending_hr',
@@ -723,10 +771,16 @@ async function buildPayload(req, employeeId, overlay = {}) {
             canReopen: canEdit && workflowIsLocked(workflowStatus),
             canReturn: canEdit && workflowStatus === 'verified',
             canViewAudit: true,
+            isSalaryHr: isHrApprover,
+            mainPolicyConfigured: Boolean(mainPolicyDoc?._id),
         },
         approvalSent: workflowStatus === 'pending_hr',
         submittedByName: profile?.submittedByName || '',
         lastRejectReason: profile?.lastRejectReason || '',
+        dmf: serializeDmf(profile?.dmfApproval, {
+            ready: false,
+            ctx: await buildDmfViewerContext(req),
+        }),
         errors: [verpError, overlapError ? MESSAGES.leaveOverlap : ''].filter(Boolean),
     };
 }
@@ -747,15 +801,27 @@ async function persistRowsAttachments(rows, folder) {
 }
 
 async function upsertFromBody(req, employeeId, extra = {}) {
+    const existing = await SalaryHistoricalProfile.findOne({ employeeId }).lean();
+    const workflowStatus = mapWorkflow(existing);
     const canEdit = await userCanEdit(req);
-    if (!canEdit) {
+    const isSalaryHr = await viewerIsSalaryHr(req);
+    const isLockedProfile = workflowIsLocked(workflowStatus);
+    const body = req.body || {};
+    const salarySlipOnly =
+        hasBodyField(body, 'salarySlip') &&
+        Object.keys(body).every((key) => key === 'salarySlip');
+
+    if (isLockedProfile && !isSalaryHr) {
+        const err = new Error(MESSAGES.createdProfileHrOnly);
+        err.statusCode = 403;
+        throw err;
+    }
+    if (!isLockedProfile && !canEdit) {
         const err = new Error(MESSAGES.joiningDateHrOnly.replace('contract joining date', 'historical salary setup'));
         err.statusCode = 403;
         throw err;
     }
 
-    const existing = await SalaryHistoricalProfile.findOne({ employeeId }).lean();
-    const workflowStatus = mapWorkflow(existing);
     if (
         workflowStatus === 'pending_hr' &&
         extra.workflowStatus !== 'verified' &&
@@ -767,9 +833,11 @@ async function upsertFromBody(req, employeeId, extra = {}) {
         throw err;
     }
     if (workflowIsLocked(workflowStatus) && extra.workflowStatus !== 'reopened' && extra.status !== 'created' && extra.workflowStatus !== 'locked') {
-        const err = new Error(MESSAGES.lockedReadOnly);
-        err.statusCode = 403;
-        throw err;
+        if (!salarySlipOnly) {
+            const err = new Error(MESSAGES.lockedReadOnly);
+            err.statusCode = 403;
+            throw err;
+        }
     }
 
     const employee = await loadEmployee(employeeId);
@@ -779,14 +847,13 @@ async function upsertFromBody(req, employeeId, extra = {}) {
         throw err;
     }
 
-    const body = req.body || {};
     const who = actor(req);
     const originalJoining = toDateKey(
         existing?.originalContractJoiningDate || employee.contractJoiningDate || employee.dateOfJoining,
     );
     const nextJoining = toDateKey(body.contractJoiningDate) || originalJoining;
     if (nextJoining !== originalJoining && nextJoining !== toDateKey(existing?.contractJoiningDate)) {
-        if (!canEdit) {
+        if (!canEdit && !isSalaryHr) {
             const err = new Error(MESSAGES.joiningDateHrOnly);
             err.statusCode = 403;
             throw err;
@@ -807,7 +874,7 @@ async function upsertFromBody(req, employeeId, extra = {}) {
         throw err;
     }
     const period = historicalPeriod(nextJoining, verpStartDate);
-    const policy = await policyCopyForEmployee(employee, '');
+    const policy = await resolveEmployeePayrollPolicy(employee);
     const cycleDays = resolveEntitlementDays(body.cycleDays || existing?.cycleDays || cycleDaysFromPolicy(policy));
 
     const leaveRecords = await enrichLeaveWorkingDays(
@@ -876,6 +943,9 @@ async function upsertFromBody(req, employeeId, extra = {}) {
                 ? body.employeeMolId
                 : existing?.employeeMolId || '',
         ).trim(),
+        salarySlip: hasBodyField(body, 'salarySlip')
+            ? Boolean(body.salarySlip)
+            : Boolean(existing?.salarySlip),
         leaveRecords: savedLeave,
         annualLeaveRecords: savedAnnual,
         paymentCycles: savedCycles,
@@ -895,7 +965,10 @@ async function upsertFromBody(req, employeeId, extra = {}) {
     };
     delete payload.audit;
     if (!existing) payload.createdBy = who.id || null;
-    if (!extra.workflowStatus) {
+    if (salarySlipOnly && isLockedProfile) {
+        payload.workflowStatus = existing.workflowStatus || 'locked';
+        payload.status = existing.status || 'created';
+    } else if (!extra.workflowStatus) {
         if (workflowStatus === 'verified') payload.workflowStatus = 'draft';
         else if (workflowStatus === 'reopened' || workflowStatus === 'correction') {
             payload.workflowStatus = workflowStatus;
@@ -1145,6 +1218,45 @@ async function applySalaryEnrollmentFromProfile({ employee, profile, employeeId,
     return enrollment;
 }
 
+async function lockAndEnrollSalaryProfile({
+    employeeId,
+    employee,
+    who,
+    existing,
+    auditAction,
+    previousValue,
+    reason = '',
+}) {
+    await SalaryHistoricalProfile.findOneAndUpdate(
+        { employeeId },
+        {
+            $set: {
+                status: 'created',
+                workflowStatus: 'locked',
+                createdProfileAt: existing?.createdProfileAt || new Date(),
+                lockedBy: who.id,
+                lockedByName: who.name,
+                lockedAt: new Date(),
+                lastRejectReason: '',
+                updatedBy: who.id,
+                auditLog: pushAudit(existing, {
+                    action: auditAction,
+                    recordType: 'historical_profile',
+                    previousValue,
+                    newValue: 'locked',
+                    changedBy: who.id,
+                    changedByName: who.name,
+                    reason,
+                    verificationStatus: 'locked',
+                }),
+            },
+        },
+    );
+    const profile = await SalaryHistoricalProfile.findOne({ employeeId }).lean();
+    await applySalaryEnrollmentFromProfile({ employee, profile, employeeId, who });
+    return profile;
+}
+
 export async function createSalaryHistoricalProfile(req, res) {
     try {
         const employeeId = String(req.params?.employeeId || '').trim();
@@ -1152,6 +1264,7 @@ export async function createSalaryHistoricalProfile(req, res) {
         if (!(await userCanEdit(req))) {
             return res.status(403).json({ message: 'Only an authorized HR user can create a salary profile.' });
         }
+        await requireMainSalaryPolicy();
 
         const employee = await loadEmployee(employeeId);
         if (!employee || isCompanyShellEmployee(employee)) {
@@ -1172,9 +1285,13 @@ export async function createSalaryHistoricalProfile(req, res) {
             return res.status(400).json({ message: MESSAGES.completeBeforeCreate });
         }
 
-        const hrResolved = await resolveFlowchartHrEmployee();
-        if (hrResolved.error) {
-            return res.status(400).json({ message: hrResolved.message });
+        const isSalaryHr = await viewerIsSalaryHr(req);
+        let hrResolved = null;
+        if (!isSalaryHr) {
+            hrResolved = await resolveFlowchartHrEmployee();
+            if (hrResolved.error) {
+                return res.status(400).json({ message: hrResolved.message });
+            }
         }
 
         const keepCreated = existing?.status === 'created';
@@ -1190,6 +1307,20 @@ export async function createSalaryHistoricalProfile(req, res) {
         const verpStartDate = toDateKey(req.body.verpStartDate || preview.verpStartDate);
         if (!verpStartDate) {
             return res.status(400).json({ message: 'VERP salary processing start date is required.' });
+        }
+
+        if (isSalaryHr) {
+            const latest = await SalaryHistoricalProfile.findOne({ employeeId }).lean();
+            await lockAndEnrollSalaryProfile({
+                employeeId,
+                employee,
+                who,
+                existing: latest,
+                auditAction: 'create_salary_profile',
+                previousValue: 'verified',
+                reason: String(req.body?.reason || '').trim(),
+            });
+            return res.status(200).json(await buildPayload(req, employeeId, { skipImport: true }));
         }
 
         const submitterEmail = await resolveSubmitterEmail(who);
@@ -1245,6 +1376,7 @@ export async function approveSalaryHistoricalProfile(req, res) {
         if (!(await viewerIsSalaryHr(req))) {
             return res.status(403).json({ message: 'Only flowchart HR can approve a salary profile.' });
         }
+        await requireMainSalaryPolicy();
 
         const employee = await loadEmployee(employeeId);
         if (!employee || isCompanyShellEmployee(employee)) {
@@ -1263,34 +1395,15 @@ export async function approveSalaryHistoricalProfile(req, res) {
         }));
         const creatorName = existing.submittedByName || 'there';
 
-        await SalaryHistoricalProfile.findOneAndUpdate(
-            { employeeId },
-            {
-                $set: {
-                    status: 'created',
-                    workflowStatus: 'locked',
-                    createdProfileAt: existing.createdProfileAt || new Date(),
-                    lockedBy: who.id,
-                    lockedByName: who.name,
-                    lockedAt: new Date(),
-                    lastRejectReason: '',
-                    updatedBy: who.id,
-                    auditLog: pushAudit(existing, {
-                        action: 'approve_salary_profile',
-                        recordType: 'historical_profile',
-                        previousValue: 'pending_hr',
-                        newValue: 'locked',
-                        changedBy: who.id,
-                        changedByName: who.name,
-                        reason: String(req.body?.reason || '').trim(),
-                        verificationStatus: 'locked',
-                    }),
-                },
-            },
-        );
-
-        const profile = await SalaryHistoricalProfile.findOne({ employeeId }).lean();
-        await applySalaryEnrollmentFromProfile({ employee, profile, employeeId, who });
+        await lockAndEnrollSalaryProfile({
+            employeeId,
+            employee,
+            who,
+            existing,
+            auditAction: 'approve_salary_profile',
+            previousValue: 'pending_hr',
+            reason: String(req.body?.reason || '').trim(),
+        });
 
         try {
             await closeSalaryEnrollmentInbox({

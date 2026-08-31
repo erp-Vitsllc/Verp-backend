@@ -33,6 +33,36 @@ export function resolveSalaryProcessingStartDate({ verpStartDate, enrollment } =
     return processingStartFromEnrollment(enrollment);
 }
 
+export function processingMonthFromStart(value) {
+    const raw = String(value || '').trim();
+    if (ISO_DATE.test(raw) || YEAR_MONTH.test(raw)) return raw.slice(0, 7);
+    return String(value?.fromMonth || '').trim();
+}
+
+export function formatProcessingMonthLabel(monthKey) {
+    const key = processingMonthFromStart(monthKey);
+    if (!YEAR_MONTH.test(key)) return '';
+    const [year, month] = key.split('-').map(Number);
+    return new Intl.DateTimeFormat('en-US', {
+        month: 'long',
+        year: 'numeric',
+        timeZone: 'UTC',
+    }).format(new Date(Date.UTC(year, month - 1, 1)));
+}
+
+export function salaryOpensFromMessage(monthKey) {
+    const label = formatProcessingMonthLabel(monthKey);
+    return label ? `You can open the ${label} onwards` : '';
+}
+
+export function isSalaryMonthOpen(compareMonth, processingMonth) {
+    const current = processingMonthFromStart(compareMonth);
+    const start = processingMonthFromStart(processingMonth);
+    if (!YEAR_MONTH.test(start)) return true;
+    if (!YEAR_MONTH.test(current)) return false;
+    return current >= start;
+}
+
 /** Live leave days before the salary processing start date stay hidden. */
 export function isLeaveDateVisible(dateKey, processingStartDate) {
     if (!isDateKey(dateKey) || !isDateKey(processingStartDate)) return false;

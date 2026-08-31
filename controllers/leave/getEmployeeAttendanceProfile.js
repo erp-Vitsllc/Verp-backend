@@ -2,7 +2,6 @@ import mongoose from 'mongoose';
 import Attendance from '../../models/Attendance.js';
 import EmployeeBasic from '../../models/EmployeeBasic.js';
 import EmployeePersonal from '../../models/EmployeePersonal.js';
-import PayrollSettings from '../../models/PayrollSettings.js';
 import Loan from '../../models/Loan.js';
 import Reward from '../../models/Reward.js';
 import Fine from '../../models/Fine.js';
@@ -19,9 +18,12 @@ import {
 import { hasPermission } from '../../services/permissionService.js';
 import { isReqUserSystemSuperUser } from '../../utils/systemSuperUser.js';
 import { signOrKeepAttachmentUrl } from '../../utils/s3Upload.js';
-
-const ANNUAL_LEAVE_DAYS = 30;
-const SICK_LEAVE_DAYS = 15;
+import {
+    buildLeaveBalances,
+    leavePolicyEntitlements,
+    loadOffDateSet,
+    resolveEmployeePayrollPolicy,
+} from '../../utils/employeeLeavePolicy.js';
 
 const LEAVE_STATUS_KEYS = new Set([
     'on_leave',
@@ -347,25 +349,58 @@ function pickSalary(salaryDoc) {
     };
 }
 
-function pickLatestIncrement(history) {
-    if (!Array.isArray(history) || history.length < 2) return null;
-    const sorted = [...history].sort((a, b) => {
-        const aKey = toDateKey(a?.fromDate) || String(a?.month || '');
-        const bKey = toDateKey(b?.fromDate) || String(b?.month || '');
-        return aKey.localeCompare(bKey);
-    });
-    const current = sorted[sorted.length - 1];
-    const previous = sorted[sorted.length - 2];
-    const amount = roundMoney(
-        (Number(current?.totalSalary) || 0) - (Number(previous?.totalSalary) || 0),
+function salaryHistorySortKey(row) {
+    return toDateKey(row?.fromDate) || String(row?.month || '');
+}
+
+function mapSalaryHistoryItems(history) {
+    if (!Array.isArray(history) || !history.length) return [];
+    return [...history]
+        .sort((a, b) => salaryHistorySortKey(b).localeCompare(salaryHistorySortKey(a)))
+        .map((row, index) => {
+            const fromKey = toDateKey(row?.fromDate);
+            const toKey = toDateKey(row?.toDate);
+            return {
+                id: String(row?._id || `salary-${fromKey || index}`),
+                month: String(row?.month || '').trim(),
+                fromDate: fromKey,
+                toDate: toKey,
+                dateLabel: formatDayMonthYear(fromKey) || String(row?.month || '').trim(),
+                toLabel: toKey ? formatDayMonthYear(toKey) : 'Current',
+                basic: roundMoney(row?.basic),
+                total: roundMoney(row?.totalSalary),
+            };
+        });
+}
+
+function mapIncrementItems(history) {
+    if (!Array.isArray(history) || history.length < 2) return [];
+    const sorted = [...history].sort((a, b) =>
+        salaryHistorySortKey(a).localeCompare(salaryHistorySortKey(b)),
     );
-    if (amount <= 0) return null;
-    const dateKey = toDateKey(current?.fromDate);
-    return {
-        amount,
-        dateKey,
-        dateLabel: formatDayMonthYear(dateKey) || String(current?.month || '').trim(),
-    };
+    const items = [];
+    for (let i = 1; i < sorted.length; i += 1) {
+        const current = sorted[i];
+        const previous = sorted[i - 1];
+        const amount = roundMoney(
+            (Number(current?.totalSalary) || 0) - (Number(previous?.totalSalary) || 0),
+        );
+        if (amount <= 0) continue;
+        const dateKey = toDateKey(current?.fromDate);
+        items.push({
+            id: String(current?._id || `inc-${dateKey || i}`),
+            amount,
+            dateKey,
+            dateLabel: formatDayMonthYear(dateKey) || String(current?.month || '').trim(),
+            fromTotal: roundMoney(previous?.totalSalary),
+            toTotal: roundMoney(current?.totalSalary),
+        });
+    }
+    return items.reverse();
+}
+
+function pickLatestIncrement(history) {
+    return mapIncrementItems(history)[0] || null;
 }
 
 function roundMoney(value) {
@@ -386,6 +421,7 @@ function mapLoanFinancialItem(item) {
     const repaid = roundMoney(item.repaidAmount ?? item.paidAmount);
     const paid = roundMoney(item.paidAmount);
     const outstanding = Math.max(0, roundMoney(total - repaid));
+    const createdKey = toDateKey(item.createdAt);
     return {
         id: String(item._id),
         code: item.loanId || (item.type === 'Advance' ? 'Advance' : 'Loan'),
@@ -395,6 +431,7 @@ function mapLoanFinancialItem(item) {
         outstanding,
         remainingPayments: remainingLoanPayments(item, outstanding, total),
         status: item.approvalStatus || item.status || '',
+        dateLabel: formatDayMonthYear(createdKey),
     };
 }
 
@@ -407,6 +444,7 @@ function mapFineFinancialItem(item, employeeCode) {
     const paidRaw = parseFloat(entry?.paidAmount ?? item.paidAmount ?? 0) || 0;
     const paid = roundMoney(Math.min(paidRaw, total));
 
+    const createdKey = toDateKey(item.createdAt);
     return {
         id: String(item._id),
         code: item.fineId || 'Fine',
@@ -415,6 +453,7 @@ function mapFineFinancialItem(item, employeeCode) {
         paid,
         outstanding: Math.max(0, roundMoney(total - paid)),
         status: item.fineStatus || '',
+        dateLabel: formatDayMonthYear(createdKey),
     };
 }
 
@@ -442,6 +481,30 @@ function mapUtilityExcess(bills) {
         billMonth: String(latest?.billMonth || '').trim(),
         billMonthLabel: formatMonthYear(String(latest?.billMonth || '').trim()),
     };
+}
+
+function mapUtilityItems(bills) {
+    return (bills || [])
+        .map((bill) => {
+            const excess = Number(bill?.employeeDiffAmount);
+            const pay = Number(bill?.employeePayAmount);
+            const amount =
+                Number.isFinite(excess) && excess > 0.009
+                    ? excess
+                    : Number.isFinite(pay) && pay > 0.009
+                      ? pay
+                      : 0;
+            const month = String(bill?.billMonth || '').trim();
+            return {
+                id: String(bill._id),
+                utilityType: String(bill?.utilityType || '').trim(),
+                billMonth: month,
+                billMonthLabel: formatMonthYear(month),
+                amount: roundMoney(amount),
+                status: String(bill?.status || ''),
+            };
+        })
+        .filter((row) => row.amount > 0.009 || row.status);
 }
 
 /**
@@ -500,7 +563,7 @@ export async function getEmployeeAttendanceProfile(req, res) {
         const employeeCode = String(employee.employeeId || '').trim();
         const staffType = normalizeStaffTypeKey(employee.staffType) || 'office';
 
-        const [records, loans, rewards, fines, assets, personal, payrollGroup, payrollDefault, nextBirthday, salaryDoc, utilityBills] =
+        const [records, loans, rewards, fines, assets, personal, policy, offSet, nextBirthday, salaryDoc, utilityBills] =
             await Promise.all([
             Attendance.find({ employeeMongoId, date: { $gte: from, $lte: to } })
                 .select(
@@ -523,7 +586,7 @@ export async function getEmployeeAttendanceProfile(req, res) {
                 .lean(),
             Fine.find({ 'assignedEmployees.employeeId': employeeCode, fineStatus: { $ne: 'Draft' } })
                 .select(
-                    'fineId fineType fineStatus responsibleFor fineAmount totalFineAmount employeeAmount companyAmount serviceCharge discount isGroupView assignedEmployees paidAmount',
+                    'fineId fineType fineStatus responsibleFor fineAmount totalFineAmount employeeAmount companyAmount serviceCharge discount isGroupView assignedEmployees paidAmount createdAt',
                 )
                 .sort({ createdAt: -1 })
                 .limit(20)
@@ -537,8 +600,8 @@ export async function getEmployeeAttendanceProfile(req, res) {
                 .limit(30)
                 .lean(),
             EmployeePersonal.findOne({ employeeId: employeeCode }).select('dateOfBirth').lean(),
-            PayrollSettings.findOne({ key: `group:${staffType}` }).lean(),
-            PayrollSettings.findOne({ key: 'default' }).lean(),
+            resolveEmployeePayrollPolicy(employee),
+            loadOffDateSet({ staffType, from, to }),
             findNextBirthday(dubai),
             EmployeeSalary.findOne({ employeeId: employeeCode })
                 .select(
@@ -659,21 +722,54 @@ export async function getEmployeeAttendanceProfile(req, res) {
             } else if (key === 'on_leave') periodAnnual += 1;
             else if (LEAVE_STATUS_KEYS.has(key)) periodOtherLeave += 1;
         }
-        const periodRest = Math.max(0, periodDays - periodPresent - periodAnnual - periodOtherLeave);
+        let periodRest = Math.max(0, periodDays - periodPresent - periodAnnual - periodOtherLeave);
 
-        const policy = payrollGroup || payrollDefault || {};
-        const requiredPresentDays =
-            Number(policy.workingDaysRequiredToEligible) > 0
-                ? Number(policy.workingDaysRequiredToEligible)
-                : 300;
-        const airTicketRequiredDays =
-            Number(policy.workingDaysRequiredForAirTicket) > 0
-                ? Number(policy.workingDaysRequiredForAirTicket)
-                : requiredPresentDays;
+        const entitlements = leavePolicyEntitlements(policy);
+        const { types: leaveBalances, sandwichRows, overflowSickDates } = buildLeaveBalances({
+            records,
+            entitlements,
+            offSet,
+            from,
+            to,
+        });
+        const overflowSet = new Set(overflowSickDates || []);
+        for (const extra of sandwichRows) {
+            if (counts[extra.statusKey] != null) counts[extra.statusKey] += 1;
+            events.push({
+                id: `sandwich-${extra.date}-${extra.statusKey}`,
+                date: extra.date,
+                statusKey: extra.statusKey,
+                statusLabel: `${STATUS_LABELS[extra.statusKey] || extra.statusKey} (sandwich)`,
+                reason:
+                    extra.statusKey === 'authorized_leave' && overflowSet.has(extra.date)
+                        ? 'Counted as authorized leave after sick leave allowance was used'
+                        : 'Counted under sandwich leave salary policy',
+                attachmentName: '',
+                leavePayType: '',
+                sandwich: true,
+            });
+            if (extra.date >= pieFrom && extra.date <= pieTo) {
+                if (extra.statusKey === 'on_leave') periodAnnual += 1;
+                else periodOtherLeave += 1;
+                periodRest = Math.max(0, periodRest - 1);
+            }
+        }
+        for (const event of events) {
+            if (event.statusKey !== 'sick_leave' || !overflowSet.has(event.date) || event.sandwich) continue;
+            if (counts.sick_leave > 0) counts.sick_leave -= 1;
+            counts.authorized_leave += 1;
+            event.statusKey = 'authorized_leave';
+            event.statusLabel = 'Authorized leave (sick allowance used)';
+            event.reason = event.reason
+                ? `${event.reason} · Converted after sick leave allowance`
+                : 'Converted from sick leave after the yearly allowance was used';
+        }
+        const requiredPresentDays = entitlements.requiredPresentDays;
+        const airTicketRequiredDays = entitlements.airTicketRequiredDays;
         const annualEligible = presentDays >= requiredPresentDays;
-        const annualTaken = counts.on_leave || 0;
-        const annualRemaining = Math.max(0, ANNUAL_LEAVE_DAYS - annualTaken);
-        const sickRemaining = Math.max(0, SICK_LEAVE_DAYS - (counts.sick_leave || 0));
+        const annualTaken = leaveBalances.on_leave?.taken || 0;
+        const annualRemaining = leaveBalances.on_leave?.remaining ?? 0;
+        const sickRemaining = leaveBalances.sick_leave?.remaining;
         const joinKey = toDateKey(employee.dateOfJoining || employee.joiningDate);
         const dobKey = toDateKey(personal?.dateOfBirth);
         const isActive =
@@ -746,11 +842,12 @@ export async function getEmployeeAttendanceProfile(req, res) {
                 eligible: annualEligible,
                 presentDays,
                 requiredPresentDays,
-                eligibleDays: ANNUAL_LEAVE_DAYS,
+                eligibleDays: entitlements.annualAllowedDays,
                 leaveSalaryDays: annualTaken,
                 remainingDays: annualRemaining,
-                sickDays: SICK_LEAVE_DAYS,
+                sickDays: leaveBalances.sick_leave?.allowed,
                 sickRemaining,
+                sickEnabled: entitlements.sickEnabled,
                 airTicketEligible: presentDays >= airTicketRequiredDays,
                 airTicketRequiredDays,
                 lastAnnualLeaveDate,
@@ -763,10 +860,21 @@ export async function getEmployeeAttendanceProfile(req, res) {
                     { key: 'other', label: 'Other / off', value: periodRest, color: '#CBD5E1' },
                 ].filter((s) => s.value > 0),
             },
+            leaveBalances,
+            leavePolicy: {
+                annualAllowedDays: entitlements.annualAllowedDays,
+                sickEnabled: entitlements.sickEnabled,
+                sickAllowedDays: entitlements.sickAllowedDays,
+                sandwichLeave: entitlements.sandwichLeave,
+                authorizedDeductionDays: entitlements.multipliers.authorized,
+                unauthorizedDeductionDays: entitlements.multipliers.unauthorized,
+            },
             events,
             financial: {
                 salary,
+                salaryHistory: mapSalaryHistoryItems(salaryDoc?.salaryHistory),
                 increment,
+                increments: mapIncrementItems(salaryDoc?.salaryHistory),
                 loans: loanItems.map(mapLoanFinancialItem),
                 advances: advanceItems.map(mapLoanFinancialItem),
                 rewards: (rewards || []).map((r) => ({
@@ -781,6 +889,7 @@ export async function getEmployeeAttendanceProfile(req, res) {
                     .map((f) => mapFineFinancialItem(f, employeeCode))
                     .filter(Boolean),
                 utility,
+                utilityItems: mapUtilityItems(utilityBills),
                 assets: (assets || []).map((a) => ({
                     id: String(a._id),
                     code: a.plateNumber || a.assetId || a.name || 'Asset',

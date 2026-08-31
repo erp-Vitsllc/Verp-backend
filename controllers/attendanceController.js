@@ -34,6 +34,17 @@ import {
     leaveDashboardRequestObjectId,
     notifyPrimaryReporteeOfLeaveRequest,
 } from '../utils/notifyLeaveDashboardRequest.js';
+import {
+    isSalaryMonthOpen,
+    processingMonthFromStart,
+    processingStartFromEnrollment,
+    salaryOpensFromMessage,
+} from '../utils/leaveSalaryVisibility.js';
+import {
+    checkEmployeeLeaveAllowance,
+    loadEmployeeLeaveBalances,
+    resolveSickOverflowStatuses,
+} from '../utils/employeeLeavePolicy.js';
 
 const LEAVE_REQUEST_STATUS_KEYS = new Set([
     'unauthorized_leave',
@@ -184,19 +195,52 @@ function getDubaiClockTime(date = new Date()) {
 const SALARY_ENROLL_REQUIRED =
     'Enroll to salary first. Attendance, check-in/out, and leave unlock after Enroll Status is Enrolled.';
 
-/** Enroll Status = Enrolled when a SalaryEnrollment row exists for the employee. */
-async function isSalaryEnrolled(employee) {
-    const employeeId = String(employee?.employeeId || '').trim();
-    if (!employeeId) return false;
-    return Boolean(await SalaryEnrollment.exists({ employeeId }));
+function salaryLockPayload(gate) {
+    return {
+        message: gate.lockMessage,
+        lockMessage: gate.lockMessage,
+        salaryEnrolled: gate.enrolled,
+        attendanceLocked: true,
+        processingStartMonth: gate.processingStartMonth || '',
+        processingStartDate: gate.processingStartDate || '',
+    };
 }
 
-async function rejectIfNotSalaryEnrolled(res, employee) {
-    if (await isSalaryEnrolled(employee)) return false;
-    res.status(403).json({
-        message: SALARY_ENROLL_REQUIRED,
-        salaryEnrolled: false,
-    });
+async function loadSalaryAttendanceGate(employee, { monthKey, dateKey } = {}) {
+    const enrollRequired = {
+        enrolled: false,
+        attendanceLocked: true,
+        lockMessage: SALARY_ENROLL_REQUIRED,
+        processingStartMonth: '',
+        processingStartDate: '',
+    };
+    const employeeId = String(employee?.employeeId || '').trim();
+    if (!employeeId) return enrollRequired;
+
+    const enrollment = await SalaryEnrollment.findOne({ employeeId })
+        .select('fromMonth salaryDate processDate')
+        .lean();
+    if (!enrollment) return enrollRequired;
+
+    const processingStartDate = processingStartFromEnrollment(enrollment);
+    const processingStartMonth =
+        processingMonthFromStart(enrollment.fromMonth) || processingMonthFromStart(processingStartDate);
+    const todayKey = getDubaiDateKey();
+    const compareMonth = processingMonthFromStart(monthKey) || processingMonthFromStart(dateKey) || todayKey.slice(0, 7);
+    const notOpenYet = !isSalaryMonthOpen(compareMonth, processingStartMonth);
+    return {
+        enrolled: true,
+        attendanceLocked: notOpenYet,
+        lockMessage: notOpenYet ? salaryOpensFromMessage(processingStartMonth) : '',
+        processingStartMonth,
+        processingStartDate,
+    };
+}
+
+async function rejectIfNotSalaryEnrolled(res, employee, opts = {}) {
+    const gate = await loadSalaryAttendanceGate(employee, opts);
+    if (!gate.attendanceLocked) return false;
+    res.status(403).json(salaryLockPayload(gate));
     return true;
 }
 
@@ -718,7 +762,7 @@ export async function markAttendance(req, res) {
             const timeIn = raw?.timeIn != null && raw.timeIn !== '—' ? String(raw.timeIn).trim() : '';
             const timeOut = raw?.timeOut != null && raw.timeOut !== '—' ? String(raw.timeOut).trim() : '';
             let reason = String(raw?.reason || '').trim();
-            const leavePayType = leavePayTypeForStatus(statusKey, raw?.leavePayType);
+            let leavePayType = leavePayTypeForStatus(statusKey, raw?.leavePayType);
 
             if (statusKey === 'authorized_leave' && !leavePayType) {
                 return res.status(400).json({
@@ -730,11 +774,12 @@ export async function markAttendance(req, res) {
             let finalStatusKey = statusKey;
             let finalStatusLabel =
                 statusKey === 'authorized_leave' ? authorizedLeaveLabel(leavePayType) : statusLabel;
+            let markEmployee = null;
             try {
-                const emp = await EmployeeBasic.findById(employeeMongoId)
+                markEmployee = await EmployeeBasic.findById(employeeMongoId)
                     .select('staffType employeeId firstName lastName')
                     .lean();
-                const staffType = normalizeStaffType(emp?.staffType);
+                const staffType = normalizeStaffType(markEmployee?.staffType);
                 const workingTime = await loadWorkingTimeDoc();
                 const week = getWeekForStaffType(workingTime, staffType);
                 const schedule = getScheduledPunchMinutes(week, date);
@@ -756,6 +801,26 @@ export async function markAttendance(req, res) {
                 if (resolved.reason !== undefined) reason = resolved.reason;
             } catch (scheduleErr) {
                 console.error('[markAttendance] schedule punch rules failed:', scheduleErr);
+            }
+
+            if (finalStatusKey === 'sick_leave') {
+                if (!markEmployee) {
+                    markEmployee = await EmployeeBasic.findById(employeeMongoId)
+                        .select('staffType employeeId')
+                        .lean();
+                }
+                const overflowMap = await resolveSickOverflowStatuses(
+                    markEmployee || { _id: employeeMongoId },
+                    [date],
+                );
+                if (overflowMap.get(date) === 'authorized_leave') {
+                    finalStatusKey = 'authorized_leave';
+                    leavePayType = leavePayType || 'unpaid';
+                    finalStatusLabel = authorizedLeaveLabel(leavePayType);
+                    reason = reason
+                        ? `${reason} · Sick allowance used`
+                        : 'Converted from sick leave after the yearly allowance was used';
+                }
             }
 
             if (finalStatusKey === 'authorized_leave') {
@@ -859,11 +924,12 @@ export async function getMyAttendanceMonth(req, res) {
         const isSelf = Boolean(self) && employeeMongoId === String(self._id);
         const staffType = normalizeStaffType(employee.staffType);
 
-        if (!(await isSalaryEnrolled(employee))) {
+        const requestedMonth = `${year}-${String(monthNum).padStart(2, '0')}`;
+        const gate = await loadSalaryAttendanceGate(employee, { monthKey: requestedMonth });
+        if (gate.attendanceLocked) {
             return res.status(200).json({
-                message: SALARY_ENROLL_REQUIRED,
-                salaryEnrolled: false,
-                month: `${year}-${String(monthNum).padStart(2, '0')}`,
+                ...salaryLockPayload(gate),
+                month: requestedMonth,
                 from,
                 to,
                 today: todayKey,
@@ -896,7 +962,10 @@ export async function getMyAttendanceMonth(req, res) {
         return res.status(200).json({
             message: 'Attendance fetched successfully',
             salaryEnrolled: true,
-            month: `${year}-${String(monthNum).padStart(2, '0')}`,
+            attendanceLocked: false,
+            processingStartMonth: gate.processingStartMonth || '',
+            processingStartDate: gate.processingStartDate || '',
+            month: requestedMonth,
             from,
             to,
             today: todayKey,
@@ -1002,15 +1071,22 @@ export async function getMyAttendanceYearSummary(req, res) {
             to = `${year}-12-31`;
         }
 
-        if (!(await isSalaryEnrolled(self))) {
+        const todayMonth = `${dubai.year}-${String(dubai.month).padStart(2, '0')}`;
+        const yearEndMonth = `${year}-12`;
+        const summaryMonth = monthNum
+            ? `${year}-${String(monthNum).padStart(2, '0')}`
+            : yearEndMonth < todayMonth
+                ? yearEndMonth
+                : todayMonth;
+        const gate = await loadSalaryAttendanceGate(self, { monthKey: summaryMonth });
+        if (gate.attendanceLocked) {
             const counts = emptyYearCounts();
             counts.authorized_leave_paid = 0;
             counts.authorized_leave_unpaid = 0;
             counts.not_marked = 0;
             counts.absent = 0;
             return res.status(200).json({
-                message: SALARY_ENROLL_REQUIRED,
-                salaryEnrolled: false,
+                ...salaryLockPayload(gate),
                 year,
                 month: monthNum ? `${year}-${String(monthNum).padStart(2, '0')}` : '',
                 from,
@@ -1105,9 +1181,17 @@ export async function getMyAttendanceYearSummary(req, res) {
             counts.authorized_leave +
             counts.unauthorized_leave;
 
+        const { types: leaveBalances, entitlements } = await loadEmployeeLeaveBalances(
+            { _id: self._id, employeeId: self.employeeId, staffType },
+            { year },
+        );
+
         return res.status(200).json({
             message: 'Year summary fetched successfully',
             salaryEnrolled: true,
+            attendanceLocked: false,
+            processingStartMonth: gate.processingStartMonth || '',
+            processingStartDate: gate.processingStartDate || '',
             year,
             month: monthNum ? `${year}-${String(monthNum).padStart(2, '0')}` : '',
             from,
@@ -1123,6 +1207,15 @@ export async function getMyAttendanceYearSummary(req, res) {
             holidayCount: schedule.holidayCount,
             weeklyOffCount: schedule.weeklyOffCount,
             lastAnnualLeaveDate: lastAnnualLeave?.date || '',
+            leaveBalances,
+            leavePolicy: {
+                annualAllowedDays: entitlements.annualAllowedDays,
+                sickEnabled: entitlements.sickEnabled,
+                sickAllowedDays: entitlements.sickAllowedDays,
+                sandwichLeave: entitlements.sandwichLeave,
+                authorizedDeductionDays: entitlements.multipliers.authorized,
+                unauthorizedDeductionDays: entitlements.multipliers.unauthorized,
+            },
         });
     } catch (error) {
         console.error('[getMyAttendanceYearSummary]', error);
@@ -1742,7 +1835,7 @@ export async function requestAttendanceLeave(req, res) {
         if (!self) {
             return res.status(404).json({ message: 'No linked employee profile found for this user.' });
         }
-        if (await rejectIfNotSalaryEnrolled(res, self)) return;
+        if (await rejectIfNotSalaryEnrolled(res, self, { dateKey: String(req.body?.date || '').trim() })) return;
 
         const date = String(req.body?.date || '').trim();
         const requestedStatusKey = String(req.body?.requestedStatusKey || '').trim();
@@ -1771,7 +1864,7 @@ export async function requestAttendanceLeave(req, res) {
 
         const employee = await EmployeeBasic.findById(self._id)
             .select(
-                '_id employeeId firstName lastName companyEmail workEmail email primaryReportee',
+                '_id employeeId firstName lastName companyEmail workEmail email primaryReportee staffType',
             )
             .populate(
                 'primaryReportee',
@@ -1809,20 +1902,39 @@ export async function requestAttendanceLeave(req, res) {
             });
         }
 
+        const allowanceError = await checkEmployeeLeaveAllowance(employee, {
+            statusKey: requestedStatusKey,
+            extraDates: [date],
+        });
+        if (allowanceError) {
+            return res.status(400).json({ message: allowanceError });
+        }
+
+        let resolvedStatusKey = requestedStatusKey;
+        if (requestedStatusKey === 'sick_leave') {
+            const overflowMap = await resolveSickOverflowStatuses(employee, [date]);
+            resolvedStatusKey = overflowMap.get(date) || 'sick_leave';
+        }
+
         const empName =
             [employee.firstName, employee.lastName].filter(Boolean).join(' ').trim() ||
             record.employeeName ||
             'Employee';
-        const requestedStatusLabel = leaveStatusLabel(requestedStatusKey);
+        const requestedStatusLabel = leaveStatusLabel(resolvedStatusKey);
         const previousStatusKey = record.statusKey;
         const previousStatusLabel =
             record.statusLabel || leaveStatusLabel(record.statusKey);
 
         record.previousStatusKey = previousStatusKey;
         record.previousStatusLabel = previousStatusLabel;
-        record.requestedStatusKey = requestedStatusKey;
+        record.requestedStatusKey = resolvedStatusKey;
         record.requestedStatusLabel = requestedStatusLabel;
-        record.leaveRequestReason = reason;
+        record.leaveRequestReason =
+            resolvedStatusKey === 'authorized_leave' && requestedStatusKey === 'sick_leave'
+                ? reason
+                    ? `${reason} · Sick allowance used`
+                    : 'Converted from sick leave after the yearly allowance was used'
+                : reason;
         record.leaveRequestKind = 'leave';
         record.attachmentName = attachmentName || record.attachmentName || '';
         record.leaveRequestStatus = 'pending';
@@ -1840,7 +1952,7 @@ export async function requestAttendanceLeave(req, res) {
             to: date,
             attendanceId: record._id,
             requestedLabel: requestedStatusLabel,
-            requestedStatusKey,
+            requestedStatusKey: resolvedStatusKey,
             leaveRequestKind: 'leave',
             reason,
             attachmentName,
@@ -1871,7 +1983,7 @@ export async function requestAttendanceYellow(req, res) {
         if (!self) {
             return res.status(404).json({ message: 'No linked employee profile found for this user.' });
         }
-        if (await rejectIfNotSalaryEnrolled(res, self)) return;
+        if (await rejectIfNotSalaryEnrolled(res, self, { dateKey: String(req.body?.date || '').trim() })) return;
 
         const date = String(req.body?.date || '').trim();
         const reason = String(req.body?.reason || '').trim();
@@ -2055,7 +2167,13 @@ export async function requestAttendanceFuture(req, res) {
         if (!self) {
             return res.status(404).json({ message: 'No linked employee profile found for this user.' });
         }
-        if (await rejectIfNotSalaryEnrolled(res, self)) return;
+        if (
+            await rejectIfNotSalaryEnrolled(res, self, {
+                dateKey: String(req.body?.fromDate || req.body?.date || '').trim(),
+            })
+        ) {
+            return;
+        }
 
         const fromDate = String(req.body?.fromDate || req.body?.date || '').trim();
         const toDate = String(req.body?.toDate || fromDate).trim();
@@ -2392,7 +2510,7 @@ export async function decideLeaveRequestInternal({
     }
 
     const subject = await EmployeeBasic.findById(record.employeeMongoId)
-        .select('_id employeeId firstName lastName companyEmail workEmail email primaryReportee')
+        .select('_id employeeId firstName lastName companyEmail workEmail email primaryReportee staffType')
         .lean();
 
     // Multi-day requests share a group id, so one decision covers every day of the range.
@@ -2408,6 +2526,29 @@ export async function decideLeaveRequestInternal({
         groupRecords = [record, ...others].sort((a, b) => (a.date < b.date ? -1 : 1));
     }
 
+    const requestedKey = String(approvedStatusKey || record.requestedStatusKey || '').trim();
+    const extraDates = groupRecords.map((row) => String(row.date || '').trim());
+    let overflowMap = new Map();
+    if (decision === 'approved' && subject) {
+        if (
+            requestedKey === 'sick_leave' ||
+            groupRecords.some((row) => String(row.requestedStatusKey || '') === 'sick_leave')
+        ) {
+            overflowMap = await resolveSickOverflowStatuses(subject, extraDates, {
+                excludeGroupId: groupId,
+            });
+        } else {
+            const allowanceError = await checkEmployeeLeaveAllowance(subject, {
+                statusKey: requestedKey,
+                extraDates,
+                excludeGroupId: groupId,
+            });
+            if (allowanceError) {
+                return { ok: false, status: 400, message: allowanceError };
+            }
+        }
+    }
+
     const requestedLabel =
         record.requestedStatusLabel || leaveStatusLabel(String(record.requestedStatusKey || '').trim());
     const dateLabel =
@@ -2417,11 +2558,16 @@ export async function decideLeaveRequestInternal({
 
     let finalLabel = '';
     for (const groupRecord of groupRecords) {
+        const dayKey =
+            overflowMap.get(String(groupRecord.date || '').trim()) ||
+            approvedStatusKey ||
+            String(groupRecord.requestedStatusKey || requestedKey || '').trim();
         const applied = await applyLeaveDecisionToRecord({
             record: groupRecord,
             decision,
-            approvedStatusKey,
-            leavePayType,
+            approvedStatusKey: dayKey,
+            leavePayType:
+                dayKey === 'authorized_leave' ? leavePayType || 'unpaid' : leavePayType,
             actor,
             subject,
         });

@@ -1,4 +1,5 @@
 import mongoose from 'mongoose';
+import { salaryDmfApprovalSchema } from './salaryDmfSchema.js';
 
 const attachmentSchema = new mongoose.Schema(
     {
@@ -114,6 +115,7 @@ const salaryHistoricalProfileSchema = new mongoose.Schema(
         verpStartDate: { type: String, default: '' },
         companyMolCode: { type: String, default: '' },
         employeeMolId: { type: String, default: '' },
+        salarySlip: { type: Boolean, default: false },
         leaveRecords: { type: [leaveRecordSchema], default: () => [] },
         annualLeaveRecords: { type: [annualLeaveSchema], default: () => [] },
         paymentCycles: { type: [paymentCycleSchema], default: () => [] },
@@ -142,6 +144,7 @@ const salaryHistoricalProfileSchema = new mongoose.Schema(
         submittedByEmail: { type: String, default: '' },
         submittedAt: { type: Date, default: null },
         lastRejectReason: { type: String, default: '' },
+        dmfApproval: { type: salaryDmfApprovalSchema, default: () => ({}) },
     },
     { timestamps: true },
 );
