@@ -42,8 +42,8 @@ export async function notifySalaryDmfStep({
     const subjectName = personDisplayName(subjectEmployee) || employeeId || monthKey || 'Salary';
     const extra1 =
         kind === 'month'
-            ? `${monthKey} payroll DMF is waiting on ${step.label}.`
-            : `${subjectName} (${employeeId || ''}) DMF is waiting on ${step.label}.`.replace(' ()', '');
+            ? `${monthKey} payroll waiting for ${step.label}.`
+            : `${subjectName} (${employeeId || ''}) payroll waiting for ${step.label}.`.replace(' ()', '');
 
     await syncDashboardAction({
         requestId,
@@ -57,7 +57,7 @@ export async function notifySalaryDmfStep({
         },
         requestedByName: requestedByName || dmf.submittedByName || '',
         extra1,
-        extra2: 'DMF approval',
+        extra2: `Pending ${step.label}`,
         extra3: extraPayload({ kind, employeeId, monthKey, href }),
     });
 
@@ -65,12 +65,14 @@ export async function notifySalaryDmfStep({
     const assigneeName = step.assignedTo?.name || step.label;
     if (!to) return;
     const baseUrl = resolveFrontendBaseUrl(req);
+    const payrollTitle =
+        kind === 'month' ? `${monthKey} payroll` : `${subjectName} payroll`;
     sendMailLater({
         to,
-        subject: `Salary DMF approval — ${subjectName}`,
+        subject: `${payrollTitle} waiting for ${step.label}`,
         html: `
             <p>Hello ${assigneeName},</p>
-            <p>A salary DMF needs your approval (${step.label} stage).</p>
+            <p><strong>${payrollTitle}</strong> is waiting for ${step.label} approval.</p>
             <p><a href="${baseUrl}${href}">Open in VERP</a></p>
         `,
     });

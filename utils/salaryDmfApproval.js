@@ -257,6 +257,21 @@ export function currentDmfStep(dmf) {
     return steps.find((step) => step.status === 'pending') || null;
 }
 
+/** User-facing payroll status: Pending → Pending Accounts → Pending HR → Pending Management → Approved. */
+export function payrollApprovalStatusLabel(dmf) {
+    const status = String(dmf?.status || 'idle').toLowerCase();
+    if (status === 'approved') return 'Approved';
+    if (status === 'pending') {
+        const step = currentDmfStep(dmf);
+        const key = String(step?.key || dmf?.currentStepKey || '').toLowerCase();
+        if (key === 'hr') return 'Pending HR';
+        if (key === 'management') return 'Pending Management';
+        if (key === 'user1') return `Pending ${step?.label || 'User'}`;
+        return 'Pending Accounts';
+    }
+    return 'Pending';
+}
+
 function personMatchesViewer(viewer, person) {
     if (!viewer || !person) return false;
     return (
@@ -304,6 +319,7 @@ export function serializeDmf(dmf, { ready = false, ctx = null } = {}) {
     const canAct = viewerCanActOnDmf(row, ctx);
     return {
         status,
+        statusLabel: payrollApprovalStatusLabel(row),
         currentStepKey: row.currentStepKey || '',
         submittedByName: row.submittedByName || '',
         submittedAt: row.submittedAt || null,
