@@ -45,6 +45,7 @@ import { processTemporaryAssignments } from "./utils/processTemporaryAssignments
 import { processAccidentAssets } from "./utils/processAccidentAssets.js";
 import { processDocumentExpiryReminders } from "./utils/processDocumentExpiryReminders.js";
 import { processUtilityBillPaymentDayReminders } from "./utils/processUtilityBillPaymentDayReminders.js";
+import { processSalaryProcessReminders } from "./utils/processSalaryProcessReminders.js";
 import { processUtilityContractExpiryReminders } from "./utils/processUtilityContractExpiryReminders.js";
 import { processVehicleServiceHoldReminders } from "./utils/processVehicleServiceHoldReminders.js";
 import { processVehicleServiceScheduledPhase } from "./utils/processVehicleServiceScheduledPhase.js";
@@ -130,6 +131,17 @@ setTimeout(() => {
 scheduleDailyAtMidnight(
     () => processUtilityBillPaymentDayReminders(),
     { name: "UtilityBillPaymentDayReminders" },
+);
+
+// Salary process reminders (days before processing date + on the processing day).
+setTimeout(() => {
+    processSalaryProcessReminders().catch((e) =>
+        console.error("[SalaryProcessReminders] startup failed:", e?.message || e),
+    );
+}, 118 * 1000);
+scheduleDailyAtMidnight(
+    () => processSalaryProcessReminders(),
+    { name: "SalaryProcessReminders" },
 );
 
 // Utility contract end-date expiry (T-10 / T-5 / due-or-past → Accounts flowchart; sticky until done).

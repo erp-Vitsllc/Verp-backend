@@ -55,7 +55,8 @@ describe('leave salary visibility', () => {
         assert.equal(processingMonthFromStart('2026-09-01'), '2026-09');
         assert.equal(processingMonthFromStart({ fromMonth: '2026-09' }), '2026-09');
         assert.equal(formatProcessingMonthLabel('2026-09'), 'September 2026');
-        assert.equal(salaryOpensFromMessage('2026-09'), 'You can open the September 2026 onwards');
+        assert.equal(salaryOpensFromMessage('2026-09'), 'This will unlock after September 2026');
+        assert.equal(salaryOpensFromMessage('2026-09-01'), 'This will unlock after 1 September 2026');
         assert.equal(isSalaryMonthOpen('2026-08', '2026-09'), false);
         assert.equal(isSalaryMonthOpen('2026-09', '2026-09'), true);
         assert.equal(isSalaryMonthOpen('2026-10', '2026-09'), true);

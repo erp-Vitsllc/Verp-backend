@@ -40,7 +40,11 @@ export async function notifySalaryEnrollmentSubmitted({
     const employeeId = employee?.employeeId || profile?.employeeId;
     const baseUrl = resolveFrontendBaseUrl(req);
     const href = `${baseUrl}/HRM/Salary/enroll/${encodeURIComponent(employeeId)}`;
-    const extra1 = `${employeeName} (${employeeId}) salary profile is waiting for HR approval.`;
+    const isUpdate = String(profile?.status || '') === 'created';
+    const extra1 = isUpdate
+        ? `${employeeName} (${employeeId}) salary profile update is waiting for HR approval.`
+        : `${employeeName} (${employeeId}) salary profile is waiting for HR approval.`;
+    const extra2 = isUpdate ? 'Salary profile update approval' : 'Salary profile approval';
 
     await syncDashboardAction({
         requestId: profile._id,
@@ -50,7 +54,7 @@ export async function notifySalaryEnrollmentSubmitted({
         subjectEmployee: employee,
         requestedByName: submittedByName || '',
         extra1,
-        extra2: 'Salary profile approval',
+        extra2,
         extra3: JSON.stringify({ href: `/HRM/Salary/enroll/${encodeURIComponent(employeeId)}`, employeeId }),
     });
 

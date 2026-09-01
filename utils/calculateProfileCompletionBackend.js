@@ -3,6 +3,7 @@ import {
     employeeRequiresLabourCard,
     employeeRequiresBankDetails,
 } from "./employeeRequiresEmiratesId.js";
+import { isEmployeeUaeNationality } from "./employeeUaeNationality.js";
 
 const checkField = (val) => {
     if (val === null || val === undefined) return false;
@@ -79,8 +80,8 @@ export const calculateProfileCompletionBackend = (employee = {}) => {
         });
     }
 
-    // 3. Visa Details — required for all nationalities
-    {
+    // 3. Visa Details — required except UAE nationals (visa is optional for 100%)
+    if (!isEmployeeUaeNationality(employee)) {
         const visaTypes = ['visit', 'employment', 'spouse'];
         const visaDetails = employee.visaDetails || {};
         let activeVisaType = null;

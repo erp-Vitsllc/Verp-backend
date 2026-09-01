@@ -54,7 +54,7 @@ const salaryProcessReminderSchema = new mongoose.Schema(
 const payrollSettingsSchema = new mongoose.Schema(
     {
         key: { type: String, default: 'default', unique: true },
-        salaryProcessingDate: { type: String, default: '' },
+        salaryProcessingDate: { type: String, default: '1' },
         salaryProcessStartMonth: { type: String, default: '' },
         salaryCutoffDate: { type: String, default: '' },
         processingRules: { type: processingRulesSchema, default: () => ({}) },

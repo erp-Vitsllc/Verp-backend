@@ -240,6 +240,14 @@ describe('salary historical calculations', () => {
             MESSAGES.leaveOutsidePeriod,
         );
         assert.equal(
+            validateLeaveDates(
+                { leaveType: 'annual', fromDate: '2026-07-26', toDate: '2026-08-31' },
+                '2023-01-15',
+                '2026-07-31',
+            ),
+            '',
+        );
+        assert.equal(
             findOverlappingLeave([
                 { fromDate: '2024-03-04', toDate: '2024-03-11', status: 'cancelled' },
                 { fromDate: '2024-03-10', toDate: '2024-03-12', status: 'verified' },

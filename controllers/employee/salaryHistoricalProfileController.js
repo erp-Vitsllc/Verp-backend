@@ -203,6 +203,17 @@ async function userCanEdit(req) {
     );
 }
 
+async function userCanViewSalarySetup(req) {
+    const userId = req.user?.id || req.user?._id;
+    if (!userId) return false;
+    if (await isUserAdministrator(userId)) return true;
+    if (await userCanEdit(req)) return true;
+    return (
+        (await hasPermission(userId, 'hrm_salary', 'isView')) ||
+        (await hasPermission(userId, 'hrm_employees_view_salary', 'isView'))
+    );
+}
+
 function cycleDaysFromPolicy(policy) {
     return resolveEntitlementDays(policy?.leaveSalaryWorkingDays || policy?.workingDaysRequiredToEligible);
 }
@@ -582,6 +593,7 @@ export async function buildPayload(req, employeeId, overlay = {}) {
     }
 
     const canEdit = await userCanEdit(req);
+    const canViewSalarySetup = await userCanViewSalarySetup(req);
     const [profile, enrollment, locations, salaryDoc, mainPolicyDoc] = await Promise.all([
         SalaryHistoricalProfile.findOne({ employeeId }).lean(),
         SalaryEnrollment.findOne({ employeeId }).lean(),
@@ -688,8 +700,12 @@ export async function buildPayload(req, employeeId, overlay = {}) {
         workflowStatus === 'verified' ||
         workflowStatus === 'locked' ||
         workflowStatus === 'pending_hr';
-    const companyMolCode = String(overlay.companyMolCode ?? profile?.companyMolCode ?? '').trim();
-    const employeeMolId = String(overlay.employeeMolId ?? profile?.employeeMolId ?? '').trim();
+    const companyMolCode = canViewSalarySetup
+        ? String(overlay.companyMolCode ?? profile?.companyMolCode ?? '').trim()
+        : '';
+    const employeeMolId = canViewSalarySetup
+        ? String(overlay.employeeMolId ?? profile?.employeeMolId ?? '').trim()
+        : '';
     const salarySlip = Boolean(overlay.salarySlip ?? profile?.salarySlip);
     const readiness = buildReadinessItems({
         joiningDate,
@@ -771,6 +787,7 @@ export async function buildPayload(req, employeeId, overlay = {}) {
             canReopen: canEdit && workflowIsLocked(workflowStatus),
             canReturn: canEdit && workflowStatus === 'verified',
             canViewAudit: true,
+            canViewPayrollCodes: canViewSalarySetup,
             isSalaryHr: isHrApprover,
             mainPolicyConfigured: Boolean(mainPolicyDoc?._id),
         },

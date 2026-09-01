@@ -183,6 +183,7 @@ import {
     reopenSalaryHistoricalProfile,
     getSalaryHistoricalAudit,
 } from "../controllers/employee/salaryHistoricalProfileController.js";
+import { downloadSalarySlipPdf } from "../controllers/employee/downloadSalarySlipPdf.js";
 import { getPendingSalaryDashboardInbox } from "../controllers/employee/getPendingSalaryDashboardInbox.js";
 import {
     getMonthSalaryDmf,
@@ -386,6 +387,14 @@ router.get(
         ['hrm_employees_view_salary', 'view'],
     ]),
     getSalaryHistoricalAudit,
+);
+router.get(
+    "/salary-enroll/:employeeId/historical/salary-slip",
+    checkAnyModulePermission([
+        ['hrm_salary', 'view'],
+        ['hrm_employees_view_salary', 'view'],
+    ]),
+    downloadSalarySlipPdf,
 );
 router.put(
     "/salary-enroll/:employeeId/historical",

@@ -50,9 +50,23 @@ export function formatProcessingMonthLabel(monthKey) {
     }).format(new Date(Date.UTC(year, month - 1, 1)));
 }
 
+export function formatProcessingDateLabel(value) {
+    const raw = String(value || '').trim();
+    if (ISO_DATE.test(raw)) {
+        const [year, month, day] = raw.split('-').map(Number);
+        return new Intl.DateTimeFormat('en-GB', {
+            day: 'numeric',
+            month: 'long',
+            year: 'numeric',
+            timeZone: 'UTC',
+        }).format(new Date(Date.UTC(year, month - 1, day)));
+    }
+    return formatProcessingMonthLabel(raw);
+}
+
 export function salaryOpensFromMessage(monthKey) {
-    const label = formatProcessingMonthLabel(monthKey);
-    return label ? `You can open the ${label} onwards` : '';
+    const label = formatProcessingDateLabel(monthKey);
+    return label ? `This will unlock after ${label}` : '';
 }
 
 export function isSalaryMonthOpen(compareMonth, processingMonth) {

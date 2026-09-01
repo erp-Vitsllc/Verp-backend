@@ -136,12 +136,13 @@ function toReminders(value) {
         { daysBefore: first, forWhom: reminderAudienceList(rows[0]?.forWhom) },
         { daysBefore: second, forWhom: reminderAudienceList(rows[1]?.forWhom) },
         { daysBefore: third, forWhom: reminderAudienceList(rows[2]?.forWhom) },
+        { daysBefore: 0, forWhom: reminderAudienceList(rows[3]?.forWhom) },
     ];
 }
 
 function serializeReminders(value) {
     return toReminders(value).map((row) => ({
-        daysBefore: row.daysBefore ?? '',
+        daysBefore: row.daysBefore == null ? '' : row.daysBefore,
         forWhom: Array.isArray(row.forWhom) ? row.forWhom : reminderAudienceList(row.forWhom),
     }));
 }
@@ -225,7 +226,7 @@ export function serializePayrollSettings(doc) {
         rules.pendingSickLeaveApproval || rules.allSickLeaveApproval,
     );
     return {
-        salaryProcessingDate: toMonthDay(doc?.salaryProcessingDate),
+        salaryProcessingDate: toMonthDay(doc?.salaryProcessingDate) || '1',
         salaryProcessStartMonth: doc?.salaryProcessStartMonth || '',
         salaryCutoffDate: toCutoffDay(doc?.salaryCutoffDate),
         processingRules: rules,
@@ -253,7 +254,7 @@ export function buildPayrollPolicyPayload(body, existing) {
     });
 
     return {
-        salaryProcessingDate: toMonthDay(body?.salaryProcessingDate),
+        salaryProcessingDate: toMonthDay(body?.salaryProcessingDate) || '1',
         salaryProcessStartMonth: String(body?.salaryProcessStartMonth || '').trim(),
         salaryCutoffDate: toCutoffDay(body?.salaryCutoffDate),
         processingRules,

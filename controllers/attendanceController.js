@@ -3,6 +3,7 @@ import Attendance, { ATTENDANCE_STATUS_KEYS } from '../models/Attendance.js';
 import EmployeeBasic from '../models/EmployeeBasic.js';
 import Holiday from '../models/Holiday.js';
 import SalaryEnrollment from '../models/SalaryEnrollment.js';
+import SalaryHistoricalProfile from '../models/SalaryHistoricalProfile.js';
 import { getScheduledEmailTimeZone, getZonedParts } from '../utils/scheduleDailyAtMidnight.js';
 import {
     getOffWeekdayKeys,
@@ -38,6 +39,7 @@ import {
     isSalaryMonthOpen,
     processingMonthFromStart,
     processingStartFromEnrollment,
+    resolveSalaryProcessingStartDate,
     salaryOpensFromMessage,
 } from '../utils/leaveSalaryVisibility.js';
 import {
@@ -217,21 +219,25 @@ async function loadSalaryAttendanceGate(employee, { monthKey, dateKey } = {}) {
     const employeeId = String(employee?.employeeId || '').trim();
     if (!employeeId) return enrollRequired;
 
-    const enrollment = await SalaryEnrollment.findOne({ employeeId })
-        .select('fromMonth salaryDate processDate')
-        .lean();
+    const [enrollment, profile] = await Promise.all([
+        SalaryEnrollment.findOne({ employeeId }).select('fromMonth salaryDate processDate').lean(),
+        SalaryHistoricalProfile.findOne({ employeeId }).select('verpStartDate').lean(),
+    ]);
     if (!enrollment) return enrollRequired;
 
-    const processingStartDate = processingStartFromEnrollment(enrollment);
+    const processingStartDate = resolveSalaryProcessingStartDate({
+        verpStartDate: profile?.verpStartDate,
+        enrollment,
+    }) || processingStartFromEnrollment(enrollment);
     const processingStartMonth =
-        processingMonthFromStart(enrollment.fromMonth) || processingMonthFromStart(processingStartDate);
+        processingMonthFromStart(processingStartDate) || processingMonthFromStart(enrollment.fromMonth);
     const todayKey = getDubaiDateKey();
     const compareMonth = processingMonthFromStart(monthKey) || processingMonthFromStart(dateKey) || todayKey.slice(0, 7);
     const notOpenYet = !isSalaryMonthOpen(compareMonth, processingStartMonth);
     return {
         enrolled: true,
         attendanceLocked: notOpenYet,
-        lockMessage: notOpenYet ? salaryOpensFromMessage(processingStartMonth) : '',
+        lockMessage: notOpenYet ? salaryOpensFromMessage(processingStartDate || processingStartMonth) : '',
         processingStartMonth,
         processingStartDate,
     };

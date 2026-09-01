@@ -19,7 +19,7 @@ export const LOCKED_STATUSES = new Set(['locked', 'created']);
 export const MESSAGES = {
     verpAfterJoining: 'VERP salary start date must be after the contract joining date.',
     leaveOverlap: 'This leave period overlaps with an existing record.',
-    leaveOutsidePeriod: 'Leave dates must be within the historical calculation period.',
+    leaveOutsidePeriod: 'Leave dates cannot be before the contract joining date.',
     leaveCountRequired: 'Enter a day count for this leave record.',
     annualLeaveDatesRequired: 'Annual leave requires a start date and an end date.',
     cycleAlreadyConsumed: 'This entitlement cycle has already consumed qualifying days.',
@@ -181,7 +181,7 @@ export function validateLeaveDates(row, periodStart, periodEnd) {
         return isAnnual ? MESSAGES.annualLeaveDatesRequired : 'Leave start and end dates are required.';
     }
     if (to < from) return MESSAGES.endBeforeStart;
-    if (periodStart && periodEnd && (from < periodStart || to > periodEnd)) {
+    if (periodStart && (from < periodStart || to < periodStart)) {
         return MESSAGES.leaveOutsidePeriod;
     }
     return '';

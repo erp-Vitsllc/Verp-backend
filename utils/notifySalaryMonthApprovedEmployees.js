@@ -5,11 +5,7 @@ import SalaryEnrollment from '../models/SalaryEnrollment.js';
 import SalaryHistoricalProfile from '../models/SalaryHistoricalProfile.js';
 import { isCompanyShellEmployee, REAL_EMPLOYEE_MONGO_FILTER } from './attendanceEmployeeFilters.js';
 import { isPlaceholderEmployeeId } from './employeeIdPrefix.js';
-import { generatePdfFromHtml, pdfOutputToBuffer } from './generatePdf.js';
-import {
-    buildSalarySlipPdfHtml,
-    SALARY_SLIP_PDF_SELECTOR,
-} from './buildSalarySlipPdfHtml.js';
+import { generateSalarySlipPdfBuffer } from './generateSalarySlipPdf.js';
 import { buildEmailDedupeKey, sendErpEmail } from './emailDispatch.js';
 
 const MONTH_FULL = [
@@ -53,75 +49,8 @@ function monthLabel(ym) {
     return name ? `${name} ${match[1]}` : ym;
 }
 
-function money(value) {
-    const n = Number(value);
-    return Number.isFinite(n) ? n : 0;
-}
-
 function personName(row) {
     return `${row?.firstName || ''} ${row?.lastName || ''}`.trim() || row?.employeeId || 'Employee';
-}
-
-function companyNameOf(emp) {
-    const company = emp?.company;
-    if (!company) return '';
-    if (typeof company === 'string') return company.trim();
-    return String(company.nickName || company.name || '').trim();
-}
-
-function historyFromMonth(entry) {
-    return toYearMonth(entry?.fromDate) || toYearMonth(entry?.month);
-}
-
-function historyCoversMonth(entry, ym) {
-    const from = historyFromMonth(entry);
-    const to = toYearMonth(entry?.toDate);
-    if (!from && !to) return false;
-    if (from && from > ym) return false;
-    if (to && to < ym) return false;
-    return true;
-}
-
-function historyEntryForMonth(salaryDoc, ym) {
-    const history = Array.isArray(salaryDoc?.salaryHistory) ? salaryDoc.salaryHistory : [];
-    const matching = history.filter((entry) => historyCoversMonth(entry, ym));
-    if (matching.length) {
-        matching.sort((a, b) => String(historyFromMonth(b) || '').localeCompare(String(historyFromMonth(a) || '')));
-        return matching[0];
-    }
-    const openRows = history.filter((entry) => !entry?.toDate);
-    if (openRows.length) {
-        openRows.sort((a, b) => String(historyFromMonth(b) || '').localeCompare(String(historyFromMonth(a) || '')));
-        const latestOpen = openRows[0];
-        const from = historyFromMonth(latestOpen);
-        if (!from || from <= ym) return latestOpen;
-    }
-    return salaryDoc || null;
-}
-
-function salaryEarnings(entry) {
-    const extras = Array.isArray(entry?.additionalAllowances) ? entry.additionalAllowances : [];
-    const extraHasVehicle = extras.some((row) => String(row?.type || '').toLowerCase().includes('vehicle'));
-    const extraHasFuel = extras.some((row) => String(row?.type || '').toLowerCase().includes('fuel'));
-    const rows = [
-        { label: 'Basic salary', amount: money(entry?.basic) },
-        { label: 'House rent allowance', amount: money(entry?.houseRentAllowance) },
-        { label: 'Other allowance', amount: money(entry?.otherAllowance) },
-        extraHasVehicle ? null : { label: 'Vehicle allowance', amount: money(entry?.vehicleAllowance) },
-        extraHasFuel ? null : { label: 'Fuel allowance', amount: money(entry?.fuelAllowance) },
-        ...extras.map((row) => ({
-            label: String(row?.type || 'Allowance').trim() || 'Allowance',
-            amount: money(row?.amount),
-        })),
-    ].filter(Boolean);
-    const total =
-        money(entry?.totalSalary) ||
-        money(entry?.monthlySalary) ||
-        rows.reduce((sum, row) => sum + money(row.amount), 0);
-    if (total > 0 && !rows.some((row) => row.amount > 0)) {
-        rows.push({ label: 'Monthly salary', amount: total, always: true });
-    }
-    return { rows, total };
 }
 
 function mailTransport() {
@@ -164,21 +93,14 @@ function emailHtml({ name, month, attachedSlip }) {
     `;
 }
 
-async function buildSlipPdf({ emp, salaryDoc, monthKey, month }) {
-    const entry = historyEntryForMonth(salaryDoc, monthKey);
-    const { rows, total } = salaryEarnings(entry);
-    const html = buildSalarySlipPdfHtml({
-        monthLabel: month,
-        employeeName: personName(emp),
+async function buildSlipPdf({ emp, salaryDoc, monthKey }) {
+    const { buffer } = await generateSalarySlipPdfBuffer({
         employeeId: emp.employeeId,
-        designation: String(emp.designation || '').trim(),
-        companyName: companyNameOf(emp),
-        earnings: rows,
-        netSalary: total,
+        monthKey,
+        emp,
+        salaryDoc,
     });
-    const raw = await generatePdfFromHtml(html, SALARY_SLIP_PDF_SELECTOR);
-    const buf = pdfOutputToBuffer(raw);
-    return buf && buf.length > 500 ? buf : null;
+    return buffer && buffer.length > 500 ? buffer : null;
 }
 
 export async function notifySalaryMonthApprovedEmployees({ monthKey } = {}) {
