@@ -39,6 +39,27 @@ export function processingMonthFromStart(value) {
     return String(value?.fromMonth || '').trim();
 }
 
+/** Attendance always opens on the 1st of the salary processing month. */
+export function firstOfProcessingMonth(value) {
+    const month = processingMonthFromStart(value);
+    if (!YEAR_MONTH.test(month)) return '';
+    return `${month}-01`;
+}
+
+export function daysUntilDateKey(fromKey, toKey) {
+    if (!isDateKey(fromKey) || !isDateKey(toKey)) return 0;
+    const [y1, m1, d1] = fromKey.split('-').map(Number);
+    const [y2, m2, d2] = toKey.split('-').map(Number);
+    const diff = Math.round(
+        (Date.UTC(y2, m2 - 1, d2) - Date.UTC(y1, m1 - 1, d1)) / 86400000,
+    );
+    return Math.max(0, diff);
+}
+
+export function daysUntilProcessingStart(todayKey, processingStart) {
+    return daysUntilDateKey(todayKey, firstOfProcessingMonth(processingStart));
+}
+
 export function formatProcessingMonthLabel(monthKey) {
     const key = processingMonthFromStart(monthKey);
     if (!YEAR_MONTH.test(key)) return '';
@@ -64,9 +85,15 @@ export function formatProcessingDateLabel(value) {
     return formatProcessingMonthLabel(raw);
 }
 
-export function salaryOpensFromMessage(monthKey) {
-    const label = formatProcessingDateLabel(monthKey);
-    return label ? `This will unlock after ${label}` : '';
+export function salaryOpensFromMessage(monthKey, todayKey = '') {
+    const start = firstOfProcessingMonth(monthKey) || String(monthKey || '').trim();
+    const label = formatProcessingDateLabel(start);
+    if (!label) return '';
+    const days = todayKey ? daysUntilProcessingStart(todayKey, start) : 0;
+    if (days > 0) {
+        return `Your attendance will start on ${label}. ${days} day${days === 1 ? '' : 's'} remaining`;
+    }
+    return `Your attendance will start on ${label}`;
 }
 
 export function isSalaryMonthOpen(compareMonth, processingMonth) {

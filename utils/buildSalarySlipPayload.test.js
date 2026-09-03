@@ -1,7 +1,5 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
-import assert from 'node:assert/strict';
-import { describe, it } from 'node:test';
 import { amountInWordsAed, monthKeyOf } from './buildSalarySlipPayload.js';
 
 describe('salary slip wording', () => {

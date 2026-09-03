@@ -30,11 +30,18 @@ import {
     inclusiveCalendarDays,
     isDateKey,
     leaveMultiplier,
+    leaveRecordPeriodRange,
     MESSAGES,
+    annualLeavePeriodRange,
+    partitionEnrollmentRows,
+    paymentCyclePeriodRange,
     policyLeaveMultipliers,
+    policyLeaveWorkingDays,
     resolveEntitlementDays,
+    LIVE_LEAVE_STATUS_MAP,
     summarizeAttendanceEligibility,
     validateLeaveDates,
+    consolidateCountOnlyLeaveRecords,
     validateVerpStart,
     workflowIsLocked,
 } from '../../utils/salaryHistoricalCalculations.js';
@@ -42,16 +49,22 @@ import { serializePayrollSettings, requireMainSalaryPolicy } from './payrollSett
 import { applySickAllowanceToLeaveRecords, leavePolicyEntitlements, resolveEmployeePayrollPolicy } from '../../utils/employeeLeavePolicy.js';
 import { resolveFlowchartHrEmployee } from '../../utils/resolveFlowchartHrEmployee.js';
 import { viewerIsSalaryFlowchartHr as viewerIsSalaryHr } from '../../utils/viewerIsSalaryFlowchartHr.js';
+import { isUserActiveInFlowchart } from '../../utils/getDepartmentHOD.js';
 import {
     closeSalaryEnrollmentInbox,
     emailCreatorSalaryApproved,
     emailEmployeeSalaryRejected,
+    emailHrSalaryEnrollmentRevoked,
+    notifyManagementSalaryEnrollmentReset,
     notifySalaryEnrollmentSubmitted,
 } from '../../utils/salaryEnrollmentApprovalNotify.js';
 import {
     buildDmfViewerContext,
     serializeDmf,
 } from '../../utils/salaryDmfApproval.js';
+import { awaitAdminDeletionArchive } from '../../utils/adminDeletionArchiveRun.js';
+import { verifyFlowchartHrUserPassword } from '../../utils/verifyCurrentUserPassword.js';
+import { SALARY_ENROLLMENT_RESET_RETENTION_DAYS } from '../../constants/adminDeletionArchiveConstants.js';
 
 const ISO = /^\d{4}-\d{2}-\d{2}$/;
 const LEAVE_TYPES = new Set(['sick', 'authorized', 'unauthorized', 'annual']);
@@ -215,7 +228,19 @@ async function userCanViewSalarySetup(req) {
 }
 
 function cycleDaysFromPolicy(policy) {
-    return resolveEntitlementDays(policy?.leaveSalaryWorkingDays || policy?.workingDaysRequiredToEligible);
+    return policyLeaveWorkingDays(policy);
+}
+
+function withLiveLeaveEntitlements(policy, livePolicy) {
+    if (!livePolicy) return policy;
+    return {
+        ...policy,
+        leaveSalaryWorkingDays: livePolicy.leaveSalaryWorkingDays ?? policy?.leaveSalaryWorkingDays,
+        workingDaysRequiredForAirTicket:
+            livePolicy.workingDaysRequiredForAirTicket ?? policy?.workingDaysRequiredForAirTicket,
+        workingDaysRequiredToEligible:
+            livePolicy.workingDaysRequiredToEligible ?? policy?.workingDaysRequiredToEligible,
+    };
 }
 
 function pickEmployeeLeaveSalary(salaryDoc) {
@@ -283,29 +308,41 @@ function dubaiDateKey(date = new Date()) {
 }
 
 async function loadLiveAttendanceEligibility({ employee, from, to, staffType }) {
-    if (!isDateKey(from) || !isDateKey(to) || to < from || !employee) {
+    if (!isDateKey(from) || !employee) {
         return { workingDays: 0, leaveRecords: [], from: '', to: '' };
     }
     const clauses = [];
     if (employee._id) clauses.push({ employeeMongoId: String(employee._id) });
     if (employee.employeeId) clauses.push({ employeeId: employee.employeeId });
-    const stats = await calcWorkingDays({ from, to, staffType });
+    const periodEnd = isDateKey(to) && to >= from ? to : '';
+    const stats = periodEnd
+        ? await calcWorkingDays({ from, to: periodEnd, staffType })
+        : { workingDays: 0, weeklyOffs: 0, holidays: 0, calendarDays: 0 };
     if (!clauses.length) {
-        return { workingDays: stats.workingDays, leaveRecords: [], from, to };
+        return { workingDays: stats.workingDays, leaveRecords: [], from, to: periodEnd };
     }
 
+    const leaveStatusKeys = Object.keys(LIVE_LEAVE_STATUS_MAP);
     const rows = await Attendance.find({
-        date: { $gte: from, $lte: to },
-        $or: clauses,
+        date: { $gte: from },
+        $and: [
+            { $or: clauses },
+            {
+                $or: [
+                    { statusKey: { $in: leaveStatusKeys } },
+                    { leaveRequestStatus: { $in: ['approved', 'pending'] } },
+                ],
+            },
+        ],
     })
-        .select('date statusKey')
+        .select('date statusKey leaveRequestStatus requestedStatusKey')
         .lean();
     const live = summarizeAttendanceEligibility(rows);
     return {
         workingDays: stats.workingDays,
         leaveRecords: live.leaveRecords,
         from,
-        to,
+        to: periodEnd,
     };
 }
 
@@ -338,6 +375,11 @@ function toLeaveRows(value, policyMultipliers) {
             source,
             status,
             remarks: String(row?.remarks || '').trim(),
+            includeLeave: Boolean(row?.includeLeave),
+            includeTicket: Boolean(row?.includeTicket),
+            leaveSalaryAmount: Math.max(0, Number(row?.leaveSalaryAmount ?? row?.leaveSalary) || 0),
+            ticketAmount: Math.max(0, Number(row?.ticketAmount) || 0),
+            reduceHistoricalWorkingDays: Boolean(row?.reduceHistoricalWorkingDays),
             attachment: serializeAttachment(row?.attachment),
             createdBy: row?.createdBy || null,
             createdByName: String(row?.createdByName || ''),
@@ -371,6 +413,11 @@ function toAnnualRows(value) {
             source: normalizeLeaveSource(row?.source),
             status: String(row?.status || 'approved').trim().toLowerCase() || 'approved',
             remarks: String(row?.remarks || '').trim(),
+            includeLeave: Boolean(row?.includeLeave),
+            includeTicket: Boolean(row?.includeTicket),
+            leaveSalaryAmount: Math.max(0, Number(row?.leaveSalaryAmount ?? row?.leaveSalary) || 0),
+            ticketAmount: Math.max(0, Number(row?.ticketAmount) || 0),
+            reduceHistoricalWorkingDays: Boolean(row?.reduceHistoricalWorkingDays),
             attachment: serializeAttachment(row?.attachment),
             createdBy: row?.createdBy || null,
             createdByName: String(row?.createdByName || ''),
@@ -411,6 +458,11 @@ function toCycleRows(value, cycleDays) {
             status: paymentStatus,
             remarks: String(row?.remarks || '').trim(),
             annualLeaveKey: String(row?.annualLeaveKey || '').trim(),
+            includeLeave:
+                typeof row?.includeLeave === 'boolean' ? row.includeLeave : leaveSalaryAmount > 0 || ticketAmount <= 0,
+            includeTicket:
+                typeof row?.includeTicket === 'boolean' ? row.includeTicket : ticketAmount > 0 || leaveSalaryAmount <= 0,
+            reduceHistoricalWorkingDays: row?.reduceHistoricalWorkingDays !== false,
             attachment: serializeAttachment(row?.attachment),
             createdBy: row?.createdBy || null,
             createdByName: String(row?.createdByName || ''),
@@ -429,6 +481,52 @@ function normalizeLeaveSource(value) {
 
 function isSystemLeave(row) {
     return normalizeLeaveSource(row?.source) === 'system';
+}
+
+function toHiddenSystemLeave(value) {
+    const seen = new Set();
+    const out = [];
+    for (const row of Array.isArray(value) ? value : []) {
+        const leaveType = String(row?.leaveType || '').trim().toLowerCase();
+        if (!leaveType) continue;
+        const rawFrom = String(row?.fromDate || row?.startDate || '').trim();
+        if (rawFrom === '*') {
+            const key = `${leaveType}|*|*`;
+            if (seen.has(key)) continue;
+            seen.add(key);
+            out.push({ leaveType, fromDate: '*', toDate: '*' });
+            continue;
+        }
+        const fromDate = toDateKey(rawFrom);
+        const toDate = toDateKey(row?.toDate || row?.endDate) || fromDate;
+        if (!fromDate) continue;
+        const key = `${leaveType}|${fromDate}|${toDate}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        out.push({ leaveType, fromDate, toDate });
+    }
+    return out;
+}
+
+function isHiddenSystemLeaveRow(row, hidden) {
+    const type = String(row?.leaveType || '').trim().toLowerCase();
+    const from = toDateKey(row?.fromDate || row?.startDate);
+    const to = toDateKey(row?.toDate || row?.endDate) || from;
+    if (!type) return false;
+    return (hidden || []).some((item) => {
+        if (String(item?.leaveType || '').toLowerCase() !== type) return false;
+        if (String(item?.fromDate || '') === '*') return true;
+        const hideFrom = toDateKey(item?.fromDate);
+        const hideTo = toDateKey(item?.toDate) || hideFrom;
+        if (!from || !hideFrom) return false;
+        return from <= hideTo && to >= hideFrom;
+    });
+}
+
+function filterHiddenSystemLeave(rows, hidden) {
+    const list = toHiddenSystemLeave(hidden);
+    if (!list.length) return Array.isArray(rows) ? rows : [];
+    return (Array.isArray(rows) ? rows : []).filter((row) => !isHiddenSystemLeaveRow(row, list));
 }
 
 function historicalLeaveOnly(rows) {
@@ -601,7 +699,11 @@ export async function buildPayload(req, employeeId, overlay = {}) {
         EmployeeSalary.findOne({ employeeId }).select('basic basicSalary monthlySalary salaryHistory.basic').lean(),
         PayrollSettings.findOne({ key: 'default' }).select('_id').lean(),
     ]);
-    const policy = await resolveEmployeePayrollPolicy(employee);
+    const [policyFromEnrollment, livePolicy] = await Promise.all([
+        resolveEmployeePayrollPolicy(employee),
+        policyCopyForEmployee(employee),
+    ]);
+    const policy = withLiveLeaveEntitlements(policyFromEnrollment, livePolicy);
 
     const staffType = normalizeStaffTypeKey(employee.staffType);
     const workLocationLabel =
@@ -645,12 +747,11 @@ export async function buildPayload(req, employeeId, overlay = {}) {
               })
             : { workingDays: 0, weeklyOffs: 0, holidays: 0, calendarDays: 0 };
 
-    const cycleDays = resolveEntitlementDays(
-        overlay.cycleDays || profile?.cycleDays || cycleDaysFromPolicy(policy),
-    );
+    const cycleDays = cycleDaysFromPolicy(policy);
     const leaveMultipliers = policyLeaveMultipliers(policy);
-    const leaveRecords = historicalLeaveOnly(
-        toLeaveRows(overlay.leaveRecords || profile?.leaveRecords, leaveMultipliers),
+    const leaveRecords = consolidateCountOnlyLeaveRecords(
+        historicalLeaveOnly(toLeaveRows(overlay.leaveRecords || profile?.leaveRecords, leaveMultipliers)),
+        leaveMultipliers,
     );
     const annualLeaveRecords = historicalLeaveOnly(
         toAnnualRows(overlay.annualLeaveRecords || profile?.annualLeaveRecords),
@@ -661,11 +762,11 @@ export async function buildPayload(req, employeeId, overlay = {}) {
     const enrolled = Boolean(enrollment) || workflowStatus === 'locked';
     const todayKey = dubaiDateKey();
     const liveAttendance =
-        enrolled && verpStartDate && todayKey >= verpStartDate
+        enrolled && isDateKey(verpStartDate)
             ? await loadLiveAttendanceEligibility({
                   employee,
                   from: verpStartDate,
-                  to: todayKey,
+                  to: todayKey >= verpStartDate ? todayKey : '',
                   staffType: employee.staffType,
               })
             : { workingDays: 0, leaveRecords: [], from: '', to: '' };
@@ -677,8 +778,11 @@ export async function buildPayload(req, employeeId, overlay = {}) {
         priorSickDaysByYear[year] =
             (priorSickDaysByYear[year] || 0) + Math.max(1, Number(row.eligibleWorkingDays) || 1);
     }
+    const hiddenSystemLeave = toHiddenSystemLeave(
+        overlay.hiddenSystemLeave ?? profile?.hiddenSystemLeave,
+    );
     liveAttendance.leaveRecords = applySickAllowanceToLeaveRecords(
-        liveAttendance.leaveRecords || [],
+        filterHiddenSystemLeave(liveAttendance.leaveRecords || [], hiddenSystemLeave),
         leavePolicyEntitlements(policy),
         { priorSickDaysByYear },
     );
@@ -724,6 +828,7 @@ export async function buildPayload(req, employeeId, overlay = {}) {
     });
 
     const isHrApprover = await viewerIsSalaryHr(req);
+    const isFlowchartHr = await isUserActiveInFlowchart(req.user, 'hr');
     const employeeOut = serializeEmployee(employee, workLocationLabel);
     employeeOut.profilePicture = await signedProfilePicture(employee.profilePicture);
 
@@ -754,6 +859,7 @@ export async function buildPayload(req, employeeId, overlay = {}) {
         },
         leaveRecords,
         annualLeaveRecords,
+        hiddenSystemLeave,
         paymentCycles,
         cycleDays,
         employeeLeaveSalary: pickEmployeeLeaveSalary(salaryDoc),
@@ -784,11 +890,15 @@ export async function buildPayload(req, employeeId, overlay = {}) {
             canCreate: canEdit && readiness.canCreate && workflowStatus === 'verified',
             canApprove: isHrApprover && workflowStatus === 'pending_hr',
             canReject: isHrApprover && workflowStatus === 'pending_hr',
+            canRevoke: canEdit && !isHrApprover && workflowStatus === 'pending_hr',
             canReopen: canEdit && workflowIsLocked(workflowStatus),
             canReturn: canEdit && workflowStatus === 'verified',
             canViewAudit: true,
             canViewPayrollCodes: canViewSalarySetup,
             isSalaryHr: isHrApprover,
+            canResetEnrollment: Boolean(
+                isFlowchartHr && profile && isDateKey(joiningDate) && isDateKey(verpStartDate),
+            ),
             mainPolicyConfigured: Boolean(mainPolicyDoc?._id),
         },
         approvalSent: workflowStatus === 'pending_hr',
@@ -891,14 +1001,21 @@ async function upsertFromBody(req, employeeId, extra = {}) {
         throw err;
     }
     const period = historicalPeriod(nextJoining, verpStartDate);
-    const policy = await resolveEmployeePayrollPolicy(employee);
-    const cycleDays = resolveEntitlementDays(body.cycleDays || existing?.cycleDays || cycleDaysFromPolicy(policy));
+    const [policyFromEnrollment, livePolicy] = await Promise.all([
+        resolveEmployeePayrollPolicy(employee),
+        policyCopyForEmployee(employee),
+    ]);
+    const policy = withLiveLeaveEntitlements(policyFromEnrollment, livePolicy);
+    const cycleDays = cycleDaysFromPolicy(policy);
 
-    const leaveRecords = await enrichLeaveWorkingDays(
-        historicalLeaveOnly(body.leaveRecords || existing?.leaveRecords),
-        employee.staffType,
-        period.start,
-        period.end,
+    const leaveRecords = consolidateCountOnlyLeaveRecords(
+        await enrichLeaveWorkingDays(
+            historicalLeaveOnly(body.leaveRecords || existing?.leaveRecords),
+            employee.staffType,
+            period.start,
+            period.end,
+            policyLeaveMultipliers(policy),
+        ),
         policyLeaveMultipliers(policy),
     );
     const annualLeaveRecords = await enrichAnnualWorkingDays(
@@ -965,6 +1082,9 @@ async function upsertFromBody(req, employeeId, extra = {}) {
             : Boolean(existing?.salarySlip),
         leaveRecords: savedLeave,
         annualLeaveRecords: savedAnnual,
+        hiddenSystemLeave: hasBodyField(body, 'hiddenSystemLeave')
+            ? toHiddenSystemLeave(body.hiddenSystemLeave)
+            : toHiddenSystemLeave(existing?.hiddenSystemLeave),
         paymentCycles: savedCycles,
         cycleDays,
         leaveHistoryComplete: hasBodyField(body, 'leaveHistoryComplete')
@@ -1048,6 +1168,15 @@ export async function saveSalaryHistoricalProfile(req, res) {
                 changedByName: who.name,
             },
         });
+        if (keepLocked) {
+            const [profile, employee] = await Promise.all([
+                SalaryHistoricalProfile.findOne({ employeeId }).lean(),
+                loadEmployee(employeeId),
+            ]);
+            if (profile && employee && !isCompanyShellEmployee(employee)) {
+                await applySalaryEnrollmentFromProfile({ employee, profile, employeeId, who });
+            }
+        }
         const payload = await buildPayload(req, employeeId, { skipImport: true, ...req.body });
         return res.status(200).json(payload);
     } catch (error) {
@@ -1187,6 +1316,162 @@ export async function reopenSalaryHistoricalProfile(req, res) {
         console.error('[reopenSalaryHistoricalProfile]', error);
         return res.status(error.statusCode || 500).json({
             message: error.message || 'Failed to reopen historical profile.',
+        });
+    }
+}
+
+function asPlainEnrollmentRows(rows) {
+    return (Array.isArray(rows) ? rows : []).map((row) => {
+        const obj = row?.toObject ? row.toObject() : { ...row };
+        delete obj.__v;
+        return obj;
+    });
+}
+
+export async function resetSalaryHistoricalEnrollment(req, res) {
+    try {
+        const employeeId = String(req.params?.employeeId || '').trim();
+        if (!employeeId) return res.status(400).json({ message: 'Employee is required.' });
+        if (!(await isUserActiveInFlowchart(req.user, 'hr'))) {
+            return res.status(403).json({ message: 'Only flowchart HR can reset enrolment.' });
+        }
+        await verifyFlowchartHrUserPassword(req.body?.password);
+
+        const employee = await loadEmployee(employeeId);
+        if (!employee || isCompanyShellEmployee(employee)) {
+            return res.status(404).json({ message: 'Employee not found.' });
+        }
+
+        const existing = await SalaryHistoricalProfile.findOne({ employeeId }).lean();
+        if (!existing) {
+            return res.status(400).json({ message: 'No salary enrolment profile to reset.' });
+        }
+
+        const joiningDate = toDateKey(existing.contractJoiningDate);
+        const verpStartDate = toDateKey(existing.verpStartDate);
+        const period = historicalPeriod(joiningDate, verpStartDate);
+        if (!period.start || !period.end || period.calendarDays <= 0) {
+            return res.status(400).json({
+                message:
+                    'Contract joining date and VERP salary processing date are required to reset enrolment.',
+            });
+        }
+
+        const leaveSplit = partitionEnrollmentRows(
+            (existing.leaveRecords || []).filter((row) => !isSystemLeave(row)),
+            period,
+            leaveRecordPeriodRange,
+        );
+        const keptSystemLeave = (existing.leaveRecords || []).filter((row) => isSystemLeave(row));
+        const annualSplit = partitionEnrollmentRows(
+            existing.annualLeaveRecords,
+            period,
+            annualLeavePeriodRange,
+        );
+        const cycleSplit = partitionEnrollmentRows(
+            existing.paymentCycles,
+            period,
+            paymentCyclePeriodRange,
+        );
+        const archivedCount =
+            leaveSplit.archived.length + annualSplit.archived.length + cycleSplit.archived.length;
+        if (archivedCount === 0) {
+            return res.status(400).json({
+                message:
+                    'No enrolment details found between the contract joining date and VERP salary processing date.',
+            });
+        }
+
+        const employeeName = personName(employee) || employeeId;
+        const archiveTitle = `${employeeName} enrol details`;
+        const snapshot = {
+            employeeId,
+            employeeName,
+            period,
+            contractJoiningDate: joiningDate,
+            verpStartDate,
+            leaveRecords: asPlainEnrollmentRows(leaveSplit.archived),
+            annualLeaveRecords: asPlainEnrollmentRows(annualSplit.archived),
+            paymentCycles: asPlainEnrollmentRows(cycleSplit.archived),
+            leaveHistoryComplete: Boolean(existing.leaveHistoryComplete),
+            annualLeaveComplete: Boolean(existing.annualLeaveComplete),
+            benefitsComplete: Boolean(existing.benefitsComplete),
+        };
+
+        const archive = await awaitAdminDeletionArchive(req, {
+            moduleName: archiveTitle,
+            recordId: employeeId,
+            details: `${joiningDate} — ${period.end}`,
+            deletedPayload: snapshot,
+            skipManagementEmail: true,
+            retentionDays: SALARY_ENROLLMENT_RESET_RETENTION_DAYS,
+            archive: {
+                topModule: 'employees',
+                category: 'salary',
+                entityType: 'salary_enrollment_reset',
+                title: archiveTitle,
+                subtitle: employeeId,
+                details: `Enrolment ${joiningDate} — ${period.end}`,
+                parentRef: { employeeId },
+                restoreDescriptor: { type: 'salary_enrollment_reset', employeeId },
+            },
+        });
+        if (!archive?._id) {
+            return res.status(500).json({
+                message: 'Could not archive enrolment details. Reset was cancelled.',
+            });
+        }
+
+        const who = actor(req);
+        await SalaryHistoricalProfile.findOneAndUpdate(
+            { employeeId },
+            {
+                $set: {
+                    leaveRecords: [...keptSystemLeave, ...leaveSplit.kept],
+                    annualLeaveRecords: annualSplit.kept,
+                    paymentCycles: cycleSplit.kept,
+                    leaveHistoryComplete: leaveSplit.archived.length
+                        ? false
+                        : existing.leaveHistoryComplete,
+                    annualLeaveComplete: annualSplit.archived.length
+                        ? false
+                        : existing.annualLeaveComplete,
+                    benefitsComplete: cycleSplit.archived.length
+                        ? false
+                        : existing.benefitsComplete,
+                    updatedBy: who.id,
+                    auditLog: pushAudit(existing, {
+                        action: 'reset_enrollment',
+                        recordType: 'historical_profile',
+                        previousValue: `${joiningDate} — ${period.end}`,
+                        newValue: archiveTitle,
+                        changedBy: who.id,
+                        changedByName: who.name,
+                        reason: 'Reset enrolment',
+                        verificationStatus: mapWorkflow(existing),
+                    }),
+                },
+            },
+        );
+
+        await notifyManagementSalaryEnrollmentReset({
+            req,
+            employeeName,
+            employeeId,
+            period,
+            archiveId: archive._id,
+            resetByName: who.name,
+        });
+
+        return res.status(200).json({
+            ...(await buildPayload(req, employeeId, { skipImport: true })),
+            message: `Enrolment details were moved to Deleted Records for ${SALARY_ENROLLMENT_RESET_RETENTION_DAYS} days.`,
+            archiveId: String(archive._id),
+        });
+    } catch (error) {
+        console.error('[resetSalaryHistoricalEnrollment]', error);
+        return res.status(error.statusCode || 500).json({
+            message: error.message || 'Failed to reset enrolment.',
         });
     }
 }
@@ -1402,7 +1687,7 @@ export async function approveSalaryHistoricalProfile(req, res) {
 
         const existing = await SalaryHistoricalProfile.findOne({ employeeId }).lean();
         if (mapWorkflow(existing) !== 'pending_hr') {
-            return res.status(400).json({ message: 'This salary profile is not waiting for HR approval.' });
+            return res.status(400).json({ message: MESSAGES.notAwaitingHr });
         }
 
         const who = actor(req);
@@ -1470,7 +1755,7 @@ export async function rejectSalaryHistoricalProfile(req, res) {
 
         const existing = await SalaryHistoricalProfile.findOne({ employeeId }).lean();
         if (mapWorkflow(existing) !== 'pending_hr') {
-            return res.status(400).json({ message: 'This salary profile is not waiting for HR approval.' });
+            return res.status(400).json({ message: MESSAGES.notAwaitingHr });
         }
 
         const who = actor(req);
@@ -1517,6 +1802,92 @@ export async function rejectSalaryHistoricalProfile(req, res) {
         console.error('[rejectSalaryHistoricalProfile]', error);
         return res.status(error.statusCode || 500).json({
             message: error.message || 'Failed to reject salary profile.',
+        });
+    }
+}
+
+export async function revokeSalaryHistoricalProfile(req, res) {
+    try {
+        const employeeId = String(req.params?.employeeId || '').trim();
+        if (!employeeId) return res.status(400).json({ message: 'Employee is required.' });
+        if (!(await userCanEdit(req))) {
+            return res.status(403).json({ message: 'Only the user who sent this request can revoke it.' });
+        }
+        if (await viewerIsSalaryHr(req)) {
+            return res.status(403).json({
+                message: 'Flowchart HR can approve or reject this request instead of revoking it.',
+            });
+        }
+
+        const employee = await loadEmployee(employeeId);
+        if (!employee || isCompanyShellEmployee(employee)) {
+            return res.status(404).json({ message: 'Employee not found.' });
+        }
+
+        const existing = await SalaryHistoricalProfile.findOne({ employeeId }).lean();
+        if (mapWorkflow(existing) !== 'pending_hr') {
+            return res.status(400).json({ message: MESSAGES.notAwaitingHr });
+        }
+
+        const who = actor(req);
+        await SalaryHistoricalProfile.findOneAndUpdate(
+            { employeeId },
+            {
+                $set: {
+                    workflowStatus: 'verified',
+                    status: existing.status === 'created' ? 'created' : 'draft',
+                    submittedTo: null,
+                    submittedBy: null,
+                    submittedByName: '',
+                    submittedByEmail: '',
+                    submittedAt: null,
+                    lastRejectReason: '',
+                    updatedBy: who.id,
+                    auditLog: pushAudit(existing, {
+                        action: 'revoke_salary_profile',
+                        recordType: 'historical_profile',
+                        previousValue: 'pending_hr',
+                        newValue: 'verified',
+                        changedBy: who.id,
+                        changedByName: who.name,
+                        reason: String(req.body?.reason || '').trim() || 'Request revoked by sender',
+                        verificationStatus: 'verified',
+                    }),
+                },
+            },
+        );
+
+        try {
+            await closeSalaryEnrollmentInbox({
+                profile: existing,
+                status: 'Dismissed',
+                actionedBy: who.id,
+                comment: `Enrolment approval revoked by ${who.name || 'user'}`,
+            });
+        } catch (inboxError) {
+            console.error('[revokeSalaryHistoricalProfile] inbox close failed:', inboxError);
+        }
+
+        try {
+            const hrResolved = await resolveFlowchartHrEmployee();
+            if (!hrResolved.error && hrResolved.email) {
+                emailHrSalaryEnrollmentRevoked({
+                    req,
+                    employee,
+                    hrEmployee: hrResolved.employee,
+                    hrEmail: hrResolved.email,
+                    revokedByName: who.name,
+                });
+            }
+        } catch (emailError) {
+            console.error('[revokeSalaryHistoricalProfile] email failed:', emailError);
+        }
+
+        return res.status(200).json(await buildPayload(req, employeeId, { skipImport: true }));
+    } catch (error) {
+        console.error('[revokeSalaryHistoricalProfile]', error);
+        return res.status(error.statusCode || 500).json({
+            message: error.message || 'Failed to revoke enrolment request.',
         });
     }
 }

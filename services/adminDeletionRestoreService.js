@@ -22,6 +22,7 @@ import EmployeeExperience from '../models/EmployeeExperience.js';
 import EmployeeTraining from '../models/EmployeeTraining.js';
 import EmployeeEmergencyContact from '../models/EmployeeEmergencyContact.js';
 import EmployeeSalary from '../models/EmployeeSalary.js';
+import SalaryHistoricalProfile from '../models/SalaryHistoricalProfile.js';
 import EmployeeContact from '../models/EmployeeContact.js';
 import EmployeePersonal from '../models/EmployeePersonal.js';
 import EmployeeBank from '../models/EmployeeBank.js';
@@ -37,6 +38,54 @@ function stripMongoDoc(doc) {
     if (!doc || typeof doc !== 'object') return doc;
     const { _id, __v, createdAt, updatedAt, ...rest } = doc;
     return rest;
+}
+
+function enrollmentRowId(row) {
+    return String(row?._id || row?.id || '').trim();
+}
+
+function enrollmentLeaveKey(row) {
+    return [
+        String(row?.leaveType || '').toLowerCase(),
+        row?.fromDate || row?.startDate || '',
+        row?.toDate || row?.endDate || '',
+    ].join('|');
+}
+
+function enrollmentAnnualKey(row) {
+    return [row?.startDate || row?.fromDate || '', row?.endDate || row?.toDate || ''].join('|');
+}
+
+function enrollmentCycleKey(row) {
+    return [
+        String(row?.cycleNumber || ''),
+        row?.eligibilityStartDate || '',
+        row?.eligibilityEndDate || '',
+        row?.leaveSalaryPaymentDate || row?.paymentDate || '',
+    ].join('|');
+}
+
+function mergeEnrollmentArray(existing, incoming, identityFn) {
+    const list = (Array.isArray(existing) ? existing : []).map((row) =>
+        row?.toObject ? row.toObject() : { ...row },
+    );
+    const ids = new Set(list.map(enrollmentRowId).filter(Boolean));
+    const keys = new Set(
+        list.map(identityFn).filter((key) => key && !/^\|+$/.test(key)),
+    );
+    for (const raw of Array.isArray(incoming) ? incoming : []) {
+        if (!raw || typeof raw !== 'object') continue;
+        const row = raw.toObject ? raw.toObject() : { ...raw };
+        delete row.__v;
+        const id = enrollmentRowId(row);
+        const key = identityFn(row);
+        if (id && ids.has(id)) continue;
+        if (key && !/^\|+$/.test(key) && keys.has(key)) continue;
+        list.push(row);
+        if (id) ids.add(id);
+        if (key && !/^\|+$/.test(key)) keys.add(key);
+    }
+    return list;
 }
 
 /** Restore docs that use a stable custom `_id` (e.g. UtilityEntry string ids). */
@@ -787,6 +836,39 @@ export async function restoreArchivedRecord(archive) {
             salary.salaryHistory.push(entry);
             await salary.save();
             return salary;
+        }
+
+        case 'salary_enrollment_reset': {
+            const employeeId = snapshot?.employeeId || archive.restoreDescriptor?.employeeId;
+            if (!employeeId) throw new Error('Missing employee ID in enrolment snapshot.');
+            const profile = await SalaryHistoricalProfile.findOne({ employeeId });
+            if (!profile) throw new Error('Salary enrolment profile not found.');
+            profile.leaveRecords = mergeEnrollmentArray(
+                profile.leaveRecords,
+                snapshot.leaveRecords,
+                enrollmentLeaveKey,
+            );
+            profile.annualLeaveRecords = mergeEnrollmentArray(
+                profile.annualLeaveRecords,
+                snapshot.annualLeaveRecords,
+                enrollmentAnnualKey,
+            );
+            profile.paymentCycles = mergeEnrollmentArray(
+                profile.paymentCycles,
+                snapshot.paymentCycles,
+                enrollmentCycleKey,
+            );
+            if (snapshot.leaveHistoryComplete != null) {
+                profile.leaveHistoryComplete = Boolean(snapshot.leaveHistoryComplete);
+            }
+            if (snapshot.annualLeaveComplete != null) {
+                profile.annualLeaveComplete = Boolean(snapshot.annualLeaveComplete);
+            }
+            if (snapshot.benefitsComplete != null) {
+                profile.benefitsComplete = Boolean(snapshot.benefitsComplete);
+            }
+            await profile.save();
+            return profile;
         }
 
         case 'employee_whole': {

@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 import {
+    consolidateCountOnlyLeaveRecords,
     DEFAULT_ENTITLEMENT_DAYS,
     MESSAGES,
     addDays,
@@ -14,7 +15,14 @@ import {
     historicalPeriod,
     leaveDeductionDays,
     leaveMultiplier,
+    leaveTicketEligibility,
+    countPolicyEntitlements,
+    leaveRecordPeriodRange,
+    partitionEnrollmentRows,
+    paymentCyclePeriodRange,
+    annualLeavePeriodRange,
     policyLeaveMultipliers,
+    policyLeaveWorkingDays,
     resolveEntitlementDays,
     summarizeAttendanceEligibility,
     validateLeaveDates,
@@ -29,6 +37,13 @@ describe('salary historical calculations', () => {
         assert.equal(resolveEntitlementDays(null), DEFAULT_ENTITLEMENT_DAYS);
     });
 
+    it('reads salary policy Number of working days eligible for Leave first', () => {
+        assert.equal(policyLeaveWorkingDays({ leaveSalaryWorkingDays: 240, workingDaysRequiredToEligible: 300 }, 300), 240);
+        assert.equal(policyLeaveWorkingDays({ leaveSalaryWorkingDays: null, workingDaysRequiredToEligible: 220 }, 300), 220);
+        assert.equal(policyLeaveWorkingDays({}, 180), 180);
+        assert.equal(policyLeaveWorkingDays({}), DEFAULT_ENTITLEMENT_DAYS);
+    });
+
     it('counts live attendance working days and policy leave types', () => {
         const live = summarizeAttendanceEligibility([
             { date: '2026-08-01', statusKey: 'on_office' },
@@ -41,13 +56,29 @@ describe('salary historical calculations', () => {
             { date: '2026-08-07', statusKey: 'holiday' },
             { date: '2026-08-08', statusKey: 'not_marked' },
             { date: '2026-08-09', statusKey: 'on_leave' },
+            { date: '2026-08-10', statusKey: 'compoff_leave' },
+            {
+                date: '2026-08-11',
+                statusKey: 'not_marked',
+                leaveRequestStatus: 'approved',
+                requestedStatusKey: 'sick_leave',
+            },
+            {
+                date: '2026-08-12',
+                statusKey: 'on_office',
+                leaveRequestStatus: 'pending',
+                requestedStatusKey: 'authorized_leave',
+            },
         ]);
         assert.equal(live.workingDays, 2);
-        assert.equal(live.leaveRecords.length, 4);
+        assert.equal(live.leaveRecords.length, 7);
         assert.deepEqual(
             live.leaveRecords.map((row) => row.leaveType).sort(),
-            ['annual', 'authorized', 'sick', 'unauthorized'],
+            ['annual', 'annual', 'authorized', 'authorized', 'sick', 'sick', 'unauthorized'],
         );
+        const pending = live.leaveRecords.find((row) => row.fromDate === '2026-08-12');
+        assert.equal(pending.status, 'pending');
+        assert.equal(leaveDeductionDays(pending), 0);
         const result = calculateHistoricalEligibility({
             workingDays: 40 + live.workingDays,
             leaveRecords: [
@@ -63,9 +94,9 @@ describe('salary historical calculations', () => {
         assert.equal(result.workingDays, 42);
         assert.equal(result.authorizedDeduction, 6);
         assert.equal(result.unauthorizedDeduction, 2);
-        assert.equal(result.sickDeduction, 1);
-        assert.equal(result.annualDeduction, 1);
-        assert.equal(result.eligibleBalance, 32);
+        assert.equal(result.sickDeduction, 2);
+        assert.equal(result.annualDeduction, 2);
+        assert.equal(result.eligibleBalance, 30);
     });
 
     it('counts unauthorized leave at twice eligible working days', () => {
@@ -130,6 +161,23 @@ describe('salary historical calculations', () => {
         assert.equal(result.daysRequired, 33);
         assert.equal(result.eligibleForBenefit, false);
         assert.equal(result.availableCycles, 0);
+    });
+
+    it('counts leave and ticket eligibility by subtracting policy working days', () => {
+        const { count, remainder } = countPolicyEntitlements(720, 300);
+        assert.equal(count, 2);
+        assert.equal(remainder, 120);
+        const { count: none } = countPolicyEntitlements(299, 300);
+        assert.equal(none, 0);
+        const eligibility = leaveTicketEligibility({
+            days: 720,
+            leaveWorkingDays: 300,
+            airTicketWorkingDays: 365,
+            basicSalary: 2500,
+        });
+        assert.equal(eligibility.count, 2);
+        assert.equal(eligibility.eligibleLeaveSalary, 5000);
+        assert.equal(eligibility.eligibleTicketDays, 730);
     });
 
     it('keeps a signed eligible balance when leave exceeds joining-to-VERP working days', () => {
@@ -216,6 +264,104 @@ describe('salary historical calculations', () => {
         assert.equal(result.availableCycles, 1);
     });
 
+    it('does not consume entitlement when reduceHistoricalWorkingDays is false', () => {
+        const result = calculateHistoricalEligibility({
+            workingDays: 600,
+            cycleDays: 300,
+            paymentCycles: [
+                {
+                    paymentStatus: 'paid',
+                    verificationStatus: 'verified',
+                    leaveSalaryAmount: 8500,
+                    ticketAmount: 1800,
+                    entitlementDays: 300,
+                    reduceHistoricalWorkingDays: false,
+                },
+            ],
+        });
+        assert.equal(result.consumedEntitlementDays, 0);
+        assert.equal(result.paidVerifiedCycles, 0);
+        assert.equal(result.eligibleBalance, 600);
+    });
+
+    it('subtracts the salary-policy leave working days once for reducing annual leave', () => {
+        const result = calculateHistoricalEligibility({
+            workingDays: 500,
+            cycleDays: 240,
+            annualLeaveRecords: [
+                {
+                    startDate: '2026-06-01',
+                    endDate: '2026-06-20',
+                    eligibleWorkingDays: 14,
+                    reduceHistoricalWorkingDays: true,
+                },
+            ],
+        });
+        assert.equal(result.cycleDays, 240);
+        assert.equal(result.annualDeduction, 14);
+        assert.equal(result.consumedAnnualLeaveCycles, 1);
+        assert.equal(result.consumedEntitlementDays, 240);
+        assert.equal(result.eligibleBalance, 246);
+    });
+
+    it('does not subtract policy leave days twice for the same annual leave and paid cycle', () => {
+        const result = calculateHistoricalEligibility({
+            workingDays: 500,
+            cycleDays: 240,
+            annualLeaveRecords: [
+                {
+                    startDate: '2026-06-01',
+                    endDate: '2026-06-20',
+                    eligibleWorkingDays: 14,
+                    reduceHistoricalWorkingDays: true,
+                },
+            ],
+            paymentCycles: [
+                {
+                    eligibilityStartDate: '2026-06-01',
+                    eligibilityEndDate: '2026-06-20',
+                    paymentStatus: 'paid',
+                    verificationStatus: 'verified',
+                    entitlementDays: 240,
+                },
+            ],
+        });
+        assert.equal(result.consumedEntitlementDays, 240);
+        assert.equal(result.consumedAnnualLeaveCycles, 1);
+        assert.equal(result.paidVerifiedCycles, 0);
+        assert.equal(result.eligibleBalance, 246);
+    });
+
+    it('reduces 300 working days only once per annual leave even if leave and ticket are paid separately', () => {
+        const result = calculateHistoricalEligibility({
+            workingDays: 600,
+            cycleDays: 300,
+            paymentCycles: [
+                {
+                    annualLeaveKey: '2025-01-01|2025-01-20',
+                    paymentStatus: 'paid',
+                    verificationStatus: 'verified',
+                    includeLeave: true,
+                    leaveSalaryAmount: 8000,
+                    entitlementDays: 300,
+                    reduceHistoricalWorkingDays: true,
+                },
+                {
+                    annualLeaveKey: '2025-01-01|2025-01-20',
+                    paymentStatus: 'paid',
+                    verificationStatus: 'verified',
+                    includeTicket: true,
+                    ticketAmount: 1500,
+                    entitlementDays: 300,
+                    reduceHistoricalWorkingDays: true,
+                },
+            ],
+        });
+        assert.equal(result.consumedEntitlementDays, 300);
+        assert.equal(result.paidVerifiedCycles, 1);
+        assert.equal(result.eligibleBalance, 300);
+    });
+
     it('validates VERP start after joining and historical period end = start − 1', () => {
         assert.equal(validateVerpStart('2023-01-15', '2023-01-15'), MESSAGES.verpAfterJoining);
         assert.equal(validateVerpStart('2023-01-15', '2023-01-14'), MESSAGES.verpAfterJoining);
@@ -266,6 +412,26 @@ describe('salary historical calculations', () => {
             '',
         );
         assert.equal(
+            validateLeaveDates(
+                { leaveType: 'sick', fromDate: '2024-02-01', eligibleWorkingDays: 3 },
+                '2023-01-15',
+                '2026-07-31',
+            ),
+            'Enter both a start date and an end date, or leave both blank.',
+        );
+        assert.equal(
+            validateLeaveDates(
+                { leaveType: 'sick', fromDate: '2024-02-01', toDate: '2024-02-03', eligibleWorkingDays: 3 },
+                '2023-01-15',
+                '2026-07-31',
+            ),
+            '',
+        );
+        assert.equal(
+            validateLeaveDates({ leaveType: 'authorized', eligibleWorkingDays: 4 }, '2023-01-15', '2026-07-31'),
+            '',
+        );
+        assert.equal(
             validateLeaveDates({ leaveType: 'annual', eligibleWorkingDays: 4 }, '2023-01-15', '2026-07-31'),
             MESSAGES.annualLeaveDatesRequired,
         );
@@ -273,6 +439,29 @@ describe('salary historical calculations', () => {
             validateLeaveDates({}, '2023-01-15', '2026-07-31'),
             MESSAGES.leaveCountRequired,
         );
+    });
+
+    it('keeps only one authorized and unauthorized row per source', () => {
+        const rows = consolidateCountOnlyLeaveRecords(
+            [
+                { leaveType: 'authorized', eligibleWorkingDays: 2, source: 'manual' },
+                { leaveType: 'authorized', eligibleWorkingDays: 3, source: 'manual' },
+                { leaveType: 'unauthorized', eligibleWorkingDays: 1, source: 'system' },
+                { leaveType: 'unauthorized', eligibleWorkingDays: 4, source: 'system' },
+                { leaveType: 'sick', fromDate: '2026-08-01', toDate: '2026-08-02', eligibleWorkingDays: 2 },
+            ],
+            policyLeaveMultipliers({ unauthorizedLeaveDeductionDays: 2 }),
+        );
+        const authorized = rows.filter((row) => row.leaveType === 'authorized');
+        const unauthorized = rows.filter((row) => row.leaveType === 'unauthorized');
+        const sick = rows.filter((row) => row.leaveType === 'sick');
+        assert.equal(authorized.length, 1);
+        assert.equal(authorized[0].eligibleWorkingDays, 5);
+        assert.equal(authorized[0].source, 'manual');
+        assert.equal(unauthorized.length, 1);
+        assert.equal(unauthorized[0].eligibleWorkingDays, 5);
+        assert.equal(unauthorized[0].deductionDays, 10);
+        assert.equal(sick.length, 1);
     });
 
     it('treats locked profiles as read-only until an authorized reopen', () => {
@@ -357,5 +546,40 @@ describe('salary historical calculations', () => {
         );
         assert.equal(allCyclesVerified([{ paymentStatus: 'paid', verificationStatus: 'verified' }]), true);
         assert.equal(allCyclesVerified([{ paymentStatus: 'paid', verificationStatus: 'pending' }]), false);
+    });
+
+    it('partitions only enrolment rows that overlap joining → day before VERP start', () => {
+        const period = historicalPeriod('2023-01-15', '2026-08-01');
+        const leave = partitionEnrollmentRows(
+            [
+                { fromDate: '2024-03-01', toDate: '2024-03-05' },
+                { fromDate: '2026-08-02', toDate: '2026-08-04' },
+                { fromDate: '2022-12-01', toDate: '2022-12-10' },
+            ],
+            period,
+            leaveRecordPeriodRange,
+        );
+        assert.equal(leave.archived.length, 1);
+        assert.equal(leave.archived[0].fromDate, '2024-03-01');
+        assert.equal(leave.kept.length, 2);
+
+        const annual = partitionEnrollmentRows(
+            [{ startDate: '2026-07-20', endDate: '2026-07-28' }],
+            period,
+            annualLeavePeriodRange,
+        );
+        assert.equal(annual.archived.length, 1);
+
+        const cycles = partitionEnrollmentRows(
+            [
+                { eligibilityStartDate: '2025-01-01', eligibilityEndDate: '2025-10-28' },
+                { eligibilityStartDate: '2026-08-01', eligibilityEndDate: '2027-05-28' },
+            ],
+            period,
+            paymentCyclePeriodRange,
+        );
+        assert.equal(cycles.archived.length, 1);
+        assert.equal(cycles.kept.length, 1);
+        assert.equal(cycles.kept[0].eligibilityStartDate, '2026-08-01');
     });
 });

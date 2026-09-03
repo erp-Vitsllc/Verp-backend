@@ -8,6 +8,8 @@ import {
     isLeaveEntryVisible,
     leaveRangeTouchesVisiblePeriod,
     formatProcessingMonthLabel,
+    firstOfProcessingMonth,
+    daysUntilProcessingStart,
     isSalaryMonthOpen,
     processingMonthFromStart,
     processingStartFromEnrollment,
@@ -54,9 +56,24 @@ describe('leave salary visibility', () => {
     it('describes when live attendance opens after enrollment', () => {
         assert.equal(processingMonthFromStart('2026-09-01'), '2026-09');
         assert.equal(processingMonthFromStart({ fromMonth: '2026-09' }), '2026-09');
+        assert.equal(firstOfProcessingMonth('2026-09-15'), '2026-09-01');
+        assert.equal(firstOfProcessingMonth('2026-10'), '2026-10-01');
         assert.equal(formatProcessingMonthLabel('2026-09'), 'September 2026');
-        assert.equal(salaryOpensFromMessage('2026-09'), 'This will unlock after September 2026');
-        assert.equal(salaryOpensFromMessage('2026-09-01'), 'This will unlock after 1 September 2026');
+        assert.equal(daysUntilProcessingStart('2026-09-02', '2026-10'), 29);
+        assert.equal(daysUntilProcessingStart('2026-09-30', '2026-10-01'), 1);
+        assert.equal(daysUntilProcessingStart('2026-10-01', '2026-10'), 0);
+        assert.equal(
+            salaryOpensFromMessage('2026-09'),
+            'Your attendance will start on 1 September 2026',
+        );
+        assert.equal(
+            salaryOpensFromMessage('2026-10-15', '2026-09-02'),
+            'Your attendance will start on 1 October 2026. 29 days remaining',
+        );
+        assert.equal(
+            salaryOpensFromMessage('2026-10', '2026-09-30'),
+            'Your attendance will start on 1 October 2026. 1 day remaining',
+        );
         assert.equal(isSalaryMonthOpen('2026-08', '2026-09'), false);
         assert.equal(isSalaryMonthOpen('2026-09', '2026-09'), true);
         assert.equal(isSalaryMonthOpen('2026-10', '2026-09'), true);

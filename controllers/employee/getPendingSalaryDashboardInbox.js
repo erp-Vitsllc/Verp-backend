@@ -14,7 +14,12 @@ import {
     buildAssigneeClauses,
     resolveDashboardAssigneeContext,
 } from '../../utils/resolveDashboardAssigneeContext.js';
-import { SALARY_ENROLLMENT_REQUEST_TYPE } from '../../utils/salaryEnrollmentApprovalNotify.js';
+import {
+    SALARY_ENROLLMENT_REQUEST_TYPE,
+    rewriteSalaryEnrollmentWaitingCopy,
+    salaryEnrollmentApproverLabel,
+    salaryEnrollmentWaitingMessage,
+} from '../../utils/salaryEnrollmentApprovalNotify.js';
 import { SALARY_DMF_REQUEST_TYPE } from '../../utils/salaryDmfApproval.js';
 import { viewerIsSalaryFlowchartHr } from '../../utils/viewerIsSalaryFlowchartHr.js';
 
@@ -131,7 +136,11 @@ function payrollWaitingCopy(text, type) {
         .trim();
 }
 
-function mapDashboardInboxItem(da, profileById, monthDmfById) {
+async function resolveEnrollmentApproverLabel() {
+    return salaryEnrollmentApproverLabel();
+}
+
+function mapDashboardInboxItem(da, profileById, monthDmfById, approverLabel = 'HR') {
     const type = String(da.requestType || SALARY_ENROLLMENT_REQUEST_TYPE);
     const profile = profileById[String(da.requestId)];
     const monthRow = monthDmfById[String(da.requestId)];
@@ -145,9 +154,20 @@ function mapDashboardInboxItem(da, profileById, monthDmfById) {
             : employeeId
               ? `/HRM/Salary/enroll/${encodeURIComponent(employeeId)}`
               : '/HRM/Salary');
-    const extra1 =
-        payrollWaitingCopy(da.extra1, type) ||
-        (type === SALARY_DMF_REQUEST_TYPE ? 'Payroll waiting for approval' : '');
+    const isEnrollment = type === SALARY_ENROLLMENT_REQUEST_TYPE;
+    const extra1 = isEnrollment
+        ? rewriteSalaryEnrollmentWaitingCopy(da.extra1, approverLabel) ||
+          salaryEnrollmentWaitingMessage({
+              employeeName: da.subjectName,
+              employeeId,
+              approverLabel,
+          })
+        : payrollWaitingCopy(da.extra1, type) || 'Payroll waiting for approval';
+    const extra2 = isEnrollment
+        ? `Enrolment waiting for ${approverLabel}`
+        : da.extra2 === 'DMF approval'
+          ? 'Payroll approval'
+          : da.extra2 || 'Payroll approval';
     return {
         dashboardActionId: da._id,
         requestType: type,
@@ -156,11 +176,7 @@ function mapDashboardInboxItem(da, profileById, monthDmfById) {
         subjectName: da.subjectName || employeeId || monthKey,
         subjectEmployeeId: employeeId,
         extra1,
-        extra2:
-            da.extra2 === 'DMF approval'
-                ? 'Payroll approval'
-                : da.extra2 ||
-                  (type === SALARY_DMF_REQUEST_TYPE ? 'Payroll approval' : 'Salary profile approval'),
+        extra2,
         extra3: da.extra3 || JSON.stringify({ href, employeeId, monthKey }),
         href,
         status: 'Pending',
@@ -244,7 +260,12 @@ export const getPendingSalaryDashboardInbox = async (req, res) => {
                 );
             }
 
-            items.push(...actionableRows.map((da) => mapDashboardInboxItem(da, profileById, monthDmfById)));
+            const approverLabel = await resolveEnrollmentApproverLabel();
+            items.push(
+                ...actionableRows.map((da) =>
+                    mapDashboardInboxItem(da, profileById, monthDmfById, approverLabel),
+                ),
+            );
         }
 
         let includePendingEnrollments = false;

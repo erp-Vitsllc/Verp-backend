@@ -10,23 +10,15 @@ import {
 } from '../services/adminDeletionArchiveService.js';
 import {
     canRestoreAdminDeletionArchive,
+    canRestoreArchiveItem,
     canViewAdminDeletionArchive,
 } from '../utils/adminRestoreAccess.js';
 
 async function ensureViewAccess(req, res) {
     const allowed = await canViewAdminDeletionArchive(req.user);
     if (!allowed) {
-        res.status(403).json({ message: 'Only administrator or management can access deleted records.' });
-        return false;
-    }
-    return true;
-}
-
-async function ensureRestoreAccess(req, res) {
-    const canRestore = await canRestoreAdminDeletionArchive(req.user);
-    if (!canRestore) {
         res.status(403).json({
-            message: 'Only Super User (Admin) or Flowchart Management can restore or permanently delete records.',
+            message: 'Only administrator, management, or flowchart HR can access deleted records.',
         });
         return false;
     }
@@ -35,11 +27,12 @@ async function ensureRestoreAccess(req, res) {
 
 export const checkAdminRestoreAccess = async (req, res) => {
     try {
-        const [allowed, canRestore] = await Promise.all([
+        const [allowed, canPurge] = await Promise.all([
             canViewAdminDeletionArchive(req.user),
             canRestoreAdminDeletionArchive(req.user),
         ]);
-        return res.json({ allowed, canRestore });
+        const canRestore = canPurge || allowed;
+        return res.json({ allowed, canRestore, canPurge });
     } catch (error) {
         console.error('[checkAdminRestoreAccess]', error);
         return res.status(500).json({ message: 'Failed to check access.' });
@@ -108,7 +101,13 @@ export const getAdminDeletionArchiveItem = async (req, res) => {
 
 export const restoreAdminDeletionArchiveItem = async (req, res) => {
     try {
-        if (!(await ensureRestoreAccess(req, res))) return;
+        const existing = await getArchiveById(req.params.id);
+        if (!existing) return res.status(404).json({ message: 'Record not found.' });
+        if (!(await canRestoreArchiveItem(req.user, existing))) {
+            return res.status(403).json({
+                message: 'Only Super User, Flowchart Management, or Flowchart HR (enrolment details) can restore this record.',
+            });
+        }
         const archive = await restoreArchiveById(req.params.id, req);
         return res.json({
             message: 'Record restored successfully.',
@@ -122,7 +121,11 @@ export const restoreAdminDeletionArchiveItem = async (req, res) => {
 
 export const purgeAdminDeletionArchiveItem = async (req, res) => {
     try {
-        if (!(await ensureRestoreAccess(req, res))) return;
+        if (!(await canRestoreAdminDeletionArchive(req.user))) {
+            return res.status(403).json({
+                message: 'Only Super User (Admin) or Flowchart Management can restore or permanently delete records.',
+            });
+        }
         const archive = await purgeArchiveById(req.params.id, req);
         return res.json({
             message: 'Record permanently deleted from recovery.',

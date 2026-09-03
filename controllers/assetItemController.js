@@ -883,6 +883,136 @@ const resolveEmployeeAssignmentActors = async (employeeToAssign, assignerEmpObje
 const NO_PORTAL_NO_REPORTEE_ASSIGN_MESSAGE =
     'This employee has no user account, and no primary reportee. Set a primary reportee (with a login) on their profile before assigning — otherwise Accept waits forever on someone who cannot log in.';
 
+const NO_PORTAL_NO_REPORTEE_OWNER_APPROVAL_MESSAGE =
+    'This assigned employee has no user account, and no primary reportee. Set a primary reportee (with a login) on their profile before sending Leave / End of Services — otherwise approval waits forever on someone who cannot log in.';
+
+/**
+ * When Asset Controller sends Leave / End of Services to the holder:
+ * holder with a login approves; otherwise primary reportee approves.
+ */
+const resolveOwnerTransferApprover = async (ownerEmp) => {
+    if (!ownerEmp?._id) {
+        return { ok: false, message: 'Asset has no assigned owner to approve this transfer.' };
+    }
+
+    const ownerDoc = await EmployeeBasic.findById(ownerEmp._id)
+        .select(
+            '_id employeeId firstName lastName companyEmail workEmail enablePortalAccess primaryReportee',
+        )
+        .populate(
+            'primaryReportee',
+            '_id employeeId firstName lastName companyEmail workEmail enablePortalAccess',
+        )
+        .lean()
+        .catch(() => null);
+    if (!ownerDoc?._id) {
+        return { ok: false, message: 'Asset has no assigned owner to approve this transfer.' };
+    }
+
+    const actors = await resolveEmployeeAssignmentActors(ownerDoc, null);
+    if (actors.assigneeCanSelfAcknowledge) {
+        return { ok: true, approver: ownerDoc, delegatedFromOwner: false, owner: ownerDoc };
+    }
+    if (actors.missingPrimaryReporteeForNoPortal || !actors.actionRecipientDoc?._id) {
+        return { ok: false, message: NO_PORTAL_NO_REPORTEE_OWNER_APPROVAL_MESSAGE };
+    }
+    return {
+        ok: true,
+        approver: actors.actionRecipientDoc,
+        delegatedFromOwner: true,
+        owner: ownerDoc,
+    };
+};
+
+const OWNER_TRANSFER_PENDING_ACTIONS = new Set(['Leave', 'Return Asset']);
+
+const looksLikeOwnerTransferApproval = (asset) => {
+    if (!OWNER_TRANSFER_PENDING_ACTIONS.has(String(asset?.pendingAction || ''))) return false;
+    if (!asset?.assignedTo) return false;
+    const role = String(asset.pendingActionDetails?.requestedByRole || '').toLowerCase();
+    if (role === 'assetcontroller') return true;
+    if (role === 'assignee' || role === 'companycoordinator') return false;
+    const arId = asset.actionRequiredBy?._id?.toString?.() || asset.actionRequiredBy?.toString?.() || '';
+    const ownerId = asset.assignedTo?._id?.toString?.() || asset.assignedTo?.toString?.() || '';
+    return !!arId && !!ownerId && arId === ownerId;
+};
+
+const applyOwnerTransferApproverHealToAsset = async (asset) => {
+    if (!looksLikeOwnerTransferApproval(asset)) return false;
+    const ownerResolved = await resolveOwnerTransferApprover(asset.assignedTo);
+    if (!ownerResolved.ok || !ownerResolved.approver?._id) return false;
+    const expectedId = ownerResolved.approver._id.toString();
+    const currentAr =
+        asset.actionRequiredBy?._id?.toString?.() ||
+        asset.actionRequiredBy?.toString?.() ||
+        '';
+    const delegated = ownerResolved.delegatedFromOwner === true;
+    const flagNeedsHeal = delegated && asset.pendingActionDetails?.ownerApprovalDelegated !== true;
+    if (currentAr === expectedId && !flagNeedsHeal) return false;
+
+    const rawDetails = asset.pendingActionDetails;
+    const detailsBase =
+        rawDetails && typeof rawDetails === 'object'
+            ? typeof rawDetails.toObject === 'function'
+                ? rawDetails.toObject()
+                : { ...rawDetails }
+            : {};
+    const nextDetails = {
+        ...detailsBase,
+        ownerApprovalDelegated: delegated,
+    };
+    delete nextDetails._id;
+
+    await AssetItem.updateOne(
+        { _id: asset._id },
+        {
+            $set: {
+                actionRequiredBy: expectedId,
+                pendingActionDetails: nextDetails,
+            },
+        },
+    );
+    asset.actionRequiredBy = ownerResolved.approver;
+    asset.pendingActionDetails = nextDetails;
+
+    const dashFilter =
+        String(asset.pendingAction) === 'Leave'
+            ? { requestId: asset._id, status: 'Pending', requestType: 'Asset Leave' }
+            : { requestId: asset._id, status: 'Pending', extra2: 'Return Asset' };
+    await DashboardAction.updateMany(dashFilter, {
+        $set: {
+            assignedTo: expectedId,
+            ...(ownerResolved.approver.employeeId
+                ? { assignedToEmpId: ownerResolved.approver.employeeId }
+                : {}),
+        },
+    }).catch(() => null);
+    return true;
+};
+
+/** Re-route AC-raised Leave / Return sitting on a holder who cannot log in onto their primary reportee. */
+const healMisroutedOwnerTransferApprovals = async () => {
+    try {
+        const pendingAssets = await AssetItem.find({
+            pendingAction: { $in: ['Leave', 'Return Asset'] },
+            assignedTo: { $ne: null },
+        })
+            .select('assetId pendingAction pendingActionDetails actionRequiredBy assignedTo')
+            .populate({
+                path: 'assignedTo',
+                select: '_id employeeId firstName lastName enablePortalAccess primaryReportee companyEmail workEmail',
+                populate: { path: 'primaryReportee', select: '_id employeeId firstName lastName' },
+            })
+            .limit(200)
+            .lean();
+        for (const asset of pendingAssets) {
+            await applyOwnerTransferApproverHealToAsset(asset);
+        }
+    } catch {
+        /* non-fatal */
+    }
+};
+
 const empAckDisplayName = (emp) => {
     if (!emp || typeof emp !== 'object') return '';
     const n = `${emp.firstName || ''} ${emp.lastName || ''}`.trim();
@@ -5924,6 +6054,12 @@ export const getAssetItemDetail = async (req, res) => {
 
         if (!isAssignedToUser && assigneeEmployeeIdNorm && currentEmployeeIdNorm) {
             isAssignedToUser = assigneeEmployeeIdNorm === currentEmployeeIdNorm;
+        }
+
+        try {
+            await applyOwnerTransferApproverHealToAsset(item);
+        } catch {
+            /* non-fatal */
         }
 
         let isActionRequiredByUser = false;
@@ -15387,20 +15523,15 @@ export const requestAssetAction = async (req, res) => {
         let nextApprover = assetController;
         if (isTransferAction) {
             if (isAssetControllerRequester && !isAssigneeRequester) {
-                let ownerEmp = asset.assignedTo;
-                if (ownerEmp && !ownerEmp._id && typeof ownerEmp !== 'object') {
-                    ownerEmp = await EmployeeBasic.findById(ownerEmp)
-                        .select('_id employeeId firstName lastName companyEmail workEmail')
-                        .lean();
-                } else if (ownerEmp?._id && !ownerEmp.employeeId) {
-                    ownerEmp = await EmployeeBasic.findById(ownerEmp._id)
-                        .select('_id employeeId firstName lastName companyEmail workEmail')
-                        .lean();
+                const ownerResolved = await resolveOwnerTransferApprover(asset.assignedTo);
+                if (!ownerResolved.ok) {
+                    return res.status(400).json({ message: ownerResolved.message });
                 }
-                if (!ownerEmp?._id) {
-                    return res.status(400).json({ message: 'Asset has no assigned owner to approve this transfer.' });
-                }
-                nextApprover = ownerEmp;
+                nextApprover = ownerResolved.approver;
+                asset.pendingActionDetails = {
+                    ...asset.pendingActionDetails,
+                    ownerApprovalDelegated: ownerResolved.delegatedFromOwner === true,
+                };
             } else {
                 nextApprover = await resolveAssetControllerEmployee(assetController);
             }
@@ -15513,7 +15644,9 @@ export const requestAssetAction = async (req, res) => {
 
         let approverLabel =
             isTransferAction && isAssetControllerRequester && !isAssigneeRequester
-                ? 'asset owner'
+                ? (asset.pendingActionDetails?.ownerApprovalDelegated
+                    ? 'primary reportee'
+                    : 'asset owner')
                 : 'Asset Controller';
         if (pendingActionType === 'End of Life') {
             if (isAssigneeRequester) {
@@ -15607,6 +15740,7 @@ export const bulkRequestAssetAction = async (req, res) => {
 
         const resolvedAssetController = await resolveAssetControllerEmployee(assetController);
         let bulkTransferApprover = resolvedAssetController;
+        let ownerApprovalDelegated = false;
         if (isTransferBulk && allCompanyAssigned && isCompanyCoordinatorRequester) {
             bulkTransferApprover = resolvedAssetController;
         } else if (isTransferBulk && isAssetControllerRequester && allCompanyAssigned) {
@@ -15620,16 +15754,12 @@ export const bulkRequestAssetAction = async (req, res) => {
             }
             bulkTransferApprover = coord;
         } else if (isTransferBulk && isAssetControllerRequester && !isAssigneeRequester && !allCompanyAssigned) {
-            let ownerEmp = assets[0]?.assignedTo;
-            if (ownerEmp?._id && !ownerEmp.employeeId) {
-                ownerEmp = await EmployeeBasic.findById(ownerEmp._id)
-                    .select('_id employeeId firstName lastName companyEmail workEmail')
-                    .lean();
+            const ownerResolved = await resolveOwnerTransferApprover(assets[0]?.assignedTo);
+            if (!ownerResolved.ok) {
+                return res.status(400).json({ message: ownerResolved.message });
             }
-            if (!ownerEmp?._id) {
-                return res.status(400).json({ message: 'Bulk transfer requires an assigned asset owner for approval.' });
-            }
-            bulkTransferApprover = ownerEmp;
+            bulkTransferApprover = ownerResolved.approver;
+            ownerApprovalDelegated = ownerResolved.delegatedFromOwner === true;
         }
 
         let companyCoordinator = null;
@@ -15709,6 +15839,7 @@ export const bulkRequestAssetAction = async (req, res) => {
                     originalActionType,
                     requestedBy: req.user.employeeObjectId || req.user._id,
                     requestedByRole,
+                    ownerApprovalDelegated,
                 };
 
                 // actionRequiredBy references EmployeeBasic, so use EmployeeBasic._id
@@ -19409,6 +19540,7 @@ export const getPendingAssetDashboardInbox = async (req, res) => {
         // Tools / all: move stuck Accept tasks off employees with no ERP User onto primary reportee.
         if (scope !== 'vehicle') {
             await healMisroutedAssignmentInboxTasks();
+            await healMisroutedOwnerTransferApprovals();
         }
 
         const match = {

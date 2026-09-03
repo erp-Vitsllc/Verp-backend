@@ -13,7 +13,7 @@ export const LEAVE_MULTIPLIERS = {
     annual: 1,
 };
 
-export const INACTIVE_LEAVE = new Set(['cancelled', 'rejected']);
+export const INACTIVE_LEAVE = new Set(['cancelled', 'rejected', 'pending', 'draft']);
 export const LOCKED_STATUSES = new Set(['locked', 'created']);
 
 export const MESSAGES = {
@@ -21,6 +21,7 @@ export const MESSAGES = {
     leaveOverlap: 'This leave period overlaps with an existing record.',
     leaveOutsidePeriod: 'Leave dates cannot be before the contract joining date.',
     leaveCountRequired: 'Enter a day count for this leave record.',
+    leaveDatesRequired: 'This leave type requires a start date and an end date.',
     annualLeaveDatesRequired: 'Annual leave requires a start date and an end date.',
     cycleAlreadyConsumed: 'This entitlement cycle has already consumed qualifying days.',
     completeBeforeCreate: 'Complete and verify all required sections before creating the salary profile.',
@@ -31,6 +32,7 @@ export const MESSAGES = {
     joiningReasonRequired: 'A reason is required to change the contract joining date.',
     awaitingHrApproval: 'This salary profile is waiting for flowchart HR approval.',
     alreadyAwaitingHr: 'This salary profile is already sent for HR approval.',
+    notAwaitingHr: 'This salary profile is not waiting for HR approval.',
     rejectReasonRequired: 'A rejection description is required.',
     createdProfileHrOnly: 'Only flowchart HR can update a created salary profile.',
 };
@@ -44,6 +46,45 @@ export function isDateKey(value) {
 export function resolveEntitlementDays(value) {
     const n = Number(value);
     return Number.isFinite(n) && n > 0 ? n : DEFAULT_ENTITLEMENT_DAYS;
+}
+
+export function policyLeaveWorkingDays(policy, fallback) {
+    const leaveDays = Number(policy?.leaveSalaryWorkingDays);
+    if (Number.isFinite(leaveDays) && leaveDays > 0) return leaveDays;
+    const eligibleDays = Number(policy?.workingDaysRequiredToEligible);
+    if (Number.isFinite(eligibleDays) && eligibleDays > 0) return eligibleDays;
+    return resolveEntitlementDays(fallback);
+}
+
+/** Subtract the policy leave-day threshold until remaining days are below it. */
+export function countPolicyEntitlements(days, threshold) {
+    const step = Number(threshold);
+    if (!Number.isFinite(step) || step <= 0) return { count: 0, remainder: Math.max(0, Number(days) || 0) };
+    let remaining = Number(days) || 0;
+    let count = 0;
+    while (remaining >= step) {
+        remaining -= step;
+        count += 1;
+        if (count > 500) break;
+    }
+    return { count, remainder: remaining };
+}
+
+export function leaveTicketEligibility({
+    days,
+    leaveWorkingDays,
+    airTicketWorkingDays,
+    basicSalary,
+} = {}) {
+    const { count, remainder } = countPolicyEntitlements(days, leaveWorkingDays);
+    const basic = Math.max(0, Number(basicSalary) || 0);
+    const ticketDays = Math.max(0, Number(airTicketWorkingDays) || 0);
+    return {
+        count,
+        remainder,
+        eligibleLeaveSalary: basic * count,
+        eligibleTicketDays: ticketDays * count,
+    };
 }
 
 export function resolveLeaveMultiplierValue(value) {
@@ -118,6 +159,50 @@ export function rangesOverlap(aFrom, aTo, bFrom, bTo) {
     return aFrom <= bTo && bFrom <= aTo;
 }
 
+export function enrollmentRecordOverlapsPeriod(from, to, period) {
+    if (!isDateKey(period?.start) || !isDateKey(period?.end)) return false;
+    const a = isDateKey(from) ? from : isDateKey(to) ? to : '';
+    const b = isDateKey(to) ? to : a;
+    if (!isDateKey(a) || !isDateKey(b)) return false;
+    return rangesOverlap(a, b, period.start, period.end);
+}
+
+export function leaveRecordPeriodRange(row) {
+    return {
+        from: row?.fromDate || row?.startDate || '',
+        to: row?.toDate || row?.endDate || row?.fromDate || row?.startDate || '',
+    };
+}
+
+export function annualLeavePeriodRange(row) {
+    return {
+        from: row?.startDate || row?.fromDate || '',
+        to: row?.endDate || row?.toDate || row?.startDate || '',
+    };
+}
+
+export function paymentCyclePeriodRange(row) {
+    const from =
+        row?.eligibilityStartDate ||
+        row?.leaveSalaryPaymentDate ||
+        row?.ticketPaymentDate ||
+        row?.paymentDate ||
+        '';
+    const to = row?.eligibilityEndDate || from;
+    return { from, to };
+}
+
+export function partitionEnrollmentRows(rows, period, getRange) {
+    const archived = [];
+    const kept = [];
+    for (const row of Array.isArray(rows) ? rows : []) {
+        const range = typeof getRange === 'function' ? getRange(row) || {} : {};
+        if (enrollmentRecordOverlapsPeriod(range.from, range.to, period)) archived.push(row);
+        else kept.push(row);
+    }
+    return { archived, kept };
+}
+
 export function isActiveLeave(row) {
     return !INACTIVE_LEAVE.has(String(row?.status || '').toLowerCase());
 }
@@ -165,20 +250,88 @@ export function findOverlappingLeave(records) {
     return null;
 }
 
+export function isDatedLeaveType(type) {
+    return String(type || '').toLowerCase() === 'annual';
+}
+
+export function isOptionalDateLeaveType(type) {
+    return String(type || '').toLowerCase() === 'sick';
+}
+
+export function isCountOnlyLeaveType(type) {
+    const key = String(type || '').toLowerCase();
+    return key === 'authorized' || key === 'unauthorized';
+}
+
+export function normalizeLeaveSourceKey(value) {
+    const raw = String(value || 'manual').trim().toLowerCase();
+    if (raw === 'erp' || raw === 'system') return 'system';
+    return 'manual';
+}
+
+export function consolidateCountOnlyLeaveRecords(rows, policyMultipliers) {
+    const kept = [];
+    const buckets = new Map();
+    for (const row of Array.isArray(rows) ? rows : []) {
+        const type = String(row?.leaveType || '').toLowerCase();
+        if (!isCountOnlyLeaveType(type)) {
+            kept.push(row);
+            continue;
+        }
+        const source = normalizeLeaveSourceKey(row?.source);
+        const key = `${type}|${source}`;
+        const days = Math.max(
+            0,
+            Number(row?.eligibleWorkingDays ?? row?.actualDays ?? row?.calendarDays) || 0,
+        );
+        const multiplier = leaveMultiplier(type, row?.multiplier ?? row?.rule, policyMultipliers);
+        const existing = buckets.get(key);
+        if (!existing) {
+            buckets.set(key, {
+                ...row,
+                leaveType: type,
+                source,
+                fromDate: '',
+                toDate: '',
+                startDate: '',
+                endDate: '',
+                eligibleWorkingDays: days,
+                actualDays: days,
+                calendarDays: days,
+                multiplier,
+                rule: multiplier,
+                deductionDays: days * multiplier,
+                deduction: days * multiplier,
+            });
+            continue;
+        }
+        existing.eligibleWorkingDays += days;
+        existing.actualDays += days;
+        existing.calendarDays += days;
+        existing.deductionDays = existing.eligibleWorkingDays * existing.multiplier;
+        existing.deduction = existing.deductionDays;
+    }
+    return [...kept, ...buckets.values()];
+}
+
 export function validateLeaveDates(row, periodStart, periodEnd) {
     const type = String(row?.leaveType || '').toLowerCase();
-    const isAnnual = type === 'annual';
+    const needsDates = isDatedLeaveType(type);
     const from = row?.fromDate || row?.startDate;
     const to = row?.toDate || row?.endDate;
     const hasFrom = isDateKey(from);
     const hasTo = isDateKey(to);
     const count = Math.max(0, Number(row?.eligibleWorkingDays ?? row?.actualDays ?? row?.calendarDays) || 0);
+    const datesRequiredMessage =
+        type === 'annual' ? MESSAGES.annualLeaveDatesRequired : MESSAGES.leaveDatesRequired;
     if (!hasFrom && !hasTo) {
-        if (isAnnual) return MESSAGES.annualLeaveDatesRequired;
+        if (needsDates) return datesRequiredMessage;
         return count > 0 ? '' : MESSAGES.leaveCountRequired;
     }
     if (!hasFrom || !hasTo) {
-        return isAnnual ? MESSAGES.annualLeaveDatesRequired : 'Leave start and end dates are required.';
+        return needsDates
+            ? datesRequiredMessage
+            : 'Enter both a start date and an end date, or leave both blank.';
     }
     if (to < from) return MESSAGES.endBeforeStart;
     if (periodStart && (from < periodStart || to < periodStart)) {
@@ -211,6 +364,7 @@ export function summarizeLeaveDeductions(leaveRecords, annualLeaveRecords = [], 
 }
 
 export function isConsumingCycle(cycle, cycleDays) {
+    if (cycle?.reduceHistoricalWorkingDays === false) return false;
     const payment = String(cycle?.paymentStatus || cycle?.status || '').toLowerCase();
     const verification = String(cycle?.verificationStatus || '').toLowerCase();
     if (payment === 'cancelled' || payment === 'rejected' || verification === 'rejected') return false;
@@ -219,6 +373,77 @@ export function isConsumingCycle(cycle, cycleDays) {
     if (!paid) return false;
     const entitlement = Number(cycle?.entitlementDays ?? cycle?.qualifyingDays);
     return Number.isFinite(entitlement) ? entitlement > 0 : resolveEntitlementDays(cycleDays) > 0;
+}
+
+export function cycleAnnualLeaveConsumeKey(cycle) {
+    const key = String(cycle?.annualLeaveKey || '').trim();
+    if (key) return `leave:${key}`;
+    const from = String(cycle?.eligibilityStartDate || '').trim();
+    const to = String(cycle?.eligibilityEndDate || '').trim();
+    if (from || to) return `dates:${from}|${to}`;
+    return '';
+}
+
+export function annualLeaveConsumeKey(row) {
+    const from = String(row?.fromDate || row?.startDate || '').trim();
+    const to = String(row?.toDate || row?.endDate || '').trim();
+    if (from || to) return `dates:${from}|${to}`;
+    const id = String(row?._id || row?.id || '').trim();
+    return id ? `id:${id}` : '';
+}
+
+export function isConsumingAnnualLeave(row) {
+    if (!isActiveLeave(row)) return false;
+    return row?.reduceHistoricalWorkingDays === true;
+}
+
+/** Count a policy leave-day reduction only once per annual leave. */
+export function uniqueConsumingCycles(paymentCycles = [], cycleDays) {
+    const seen = new Set();
+    const out = [];
+    for (const row of paymentCycles || []) {
+        if (!isConsumingCycle(row, cycleDays)) continue;
+        const key = cycleAnnualLeaveConsumeKey(row);
+        if (key) {
+            if (seen.has(key)) continue;
+            seen.add(key);
+        }
+        out.push(row);
+    }
+    return out;
+}
+
+export function uniqueEntitlementConsumers({
+    paymentCycles = [],
+    annualLeaveRecords = [],
+    cycleDays,
+} = {}) {
+    const seen = new Set();
+    const annual = [];
+    for (const row of annualLeaveRecords || []) {
+        if (!isConsumingAnnualLeave(row)) continue;
+        const key = annualLeaveConsumeKey(row);
+        if (key) {
+            if (seen.has(key)) continue;
+            seen.add(key);
+        }
+        annual.push(row);
+    }
+    const cycles = [];
+    for (const row of paymentCycles || []) {
+        if (!isConsumingCycle(row, cycleDays)) continue;
+        const key = cycleAnnualLeaveConsumeKey(row);
+        if (key) {
+            if (seen.has(key)) continue;
+            seen.add(key);
+        }
+        cycles.push(row);
+    }
+    return {
+        annual,
+        cycles,
+        count: annual.length + cycles.length,
+    };
 }
 
 export const LIVE_WORKING_STATUS_KEYS = new Set([
@@ -234,7 +459,27 @@ export const LIVE_LEAVE_STATUS_MAP = {
     unauthorized_leave: 'unauthorized',
     sick_leave: 'sick',
     on_leave: 'annual',
+    compoff_leave: 'annual',
 };
+
+export const OWNED_LEAVE_REQUEST_STATUSES = new Set(['approved', 'pending']);
+
+/** Leave this employee owns: marked leave days, plus their approved/pending leave requests. */
+export function resolveOwnedAttendanceLeave(row) {
+    const statusKey = String(row?.statusKey || '').trim();
+    const statusType = LIVE_LEAVE_STATUS_MAP[statusKey];
+    if (statusType) {
+        return { leaveType: statusType, status: 'approved' };
+    }
+    const requestStatus = String(row?.leaveRequestStatus || '').trim().toLowerCase();
+    if (!OWNED_LEAVE_REQUEST_STATUSES.has(requestStatus)) return null;
+    const requestedType = LIVE_LEAVE_STATUS_MAP[String(row?.requestedStatusKey || '').trim()];
+    if (!requestedType) return null;
+    return {
+        leaveType: requestedType,
+        status: requestStatus === 'pending' ? 'pending' : 'approved',
+    };
+}
 
 /**
  * Map daily attendance rows (after VERP start) into working days + leave deductions.
@@ -251,24 +496,23 @@ export function summarizeAttendanceEligibility(rows = []) {
     let workingDays = 0;
     const leaveRecords = [];
     for (const row of byDate.values()) {
-        const key = String(row?.statusKey || '').trim();
-        if (LIVE_WORKING_STATUS_KEYS.has(key)) {
-            workingDays += 1;
+        const owned = resolveOwnedAttendanceLeave(row);
+        if (owned) {
+            const date = String(row.date).trim();
+            leaveRecords.push({
+                leaveType: owned.leaveType,
+                fromDate: date,
+                toDate: date,
+                eligibleWorkingDays: 1,
+                actualDays: 1,
+                calendarDays: 1,
+                source: 'system',
+                status: owned.status,
+            });
             continue;
         }
-        const leaveType = LIVE_LEAVE_STATUS_MAP[key];
-        if (!leaveType) continue;
-        const date = String(row.date).trim();
-        leaveRecords.push({
-            leaveType,
-            fromDate: date,
-            toDate: date,
-            eligibleWorkingDays: 1,
-            actualDays: 1,
-            calendarDays: 1,
-            source: 'system',
-            status: 'approved',
-        });
+        const key = String(row?.statusKey || '').trim();
+        if (LIVE_WORKING_STATUS_KEYS.has(key)) workingDays += 1;
     }
     return { workingDays, leaveRecords };
 }
@@ -287,13 +531,16 @@ export function calculateHistoricalEligibility({
     const working = Number(workingDays) || 0;
     const calendar = Number(calendarDays) || 0;
     const netQualifyingDays = working - leave.total;
-    const consuming = (paymentCycles || []).filter((row) => isConsumingCycle(row, entitlementDays));
-    const consumedEntitlementDays = consuming.length * entitlementDays;
+    const consumers = uniqueEntitlementConsumers({
+        paymentCycles,
+        annualLeaveRecords,
+        cycleDays: entitlementDays,
+    });
+    const consumedEntitlementDays = consumers.count * entitlementDays;
     const remainingAfterCycles = netQualifyingDays - consumedEntitlementDays;
     const eligibleBalance = remainingAfterCycles;
     const daysRequired = Math.max(0, entitlementDays - eligibleBalance);
-    const availableCycles =
-        eligibleBalance >= entitlementDays ? Math.floor(eligibleBalance / entitlementDays) : 0;
+    const availableCycles = countPolicyEntitlements(eligibleBalance, entitlementDays).count;
     const towardCycle = eligibleBalance > 0 ? eligibleBalance % entitlementDays : 0;
     const progressFill = eligibleBalance >= entitlementDays ? entitlementDays : towardCycle;
 
@@ -306,7 +553,8 @@ export function calculateHistoricalEligibility({
         annualDeduction: leave.annual,
         totalLeaveDeduction: leave.total,
         netQualifyingDays,
-        paidVerifiedCycles: consuming.length,
+        paidVerifiedCycles: consumers.cycles.length,
+        consumedAnnualLeaveCycles: consumers.annual.length,
         consumedEntitlementDays,
         remainingAfterCycles,
         eligibleBalance,

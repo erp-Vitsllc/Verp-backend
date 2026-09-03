@@ -24,6 +24,13 @@ import {
     loadOffDateSet,
     resolveEmployeePayrollPolicy,
 } from '../../utils/employeeLeavePolicy.js';
+import {
+    applyOverlayCounts,
+    applyOverlayCountsToBalances,
+    lastOverlayAnnualLeaveDate,
+    loadHistoricalLeaveProfile,
+    overlayHistoricalLeave,
+} from '../../utils/historicalLeaveAttendanceOverlay.js';
 
 const LEAVE_STATUS_KEYS = new Set([
     'on_leave',
@@ -563,7 +570,7 @@ export async function getEmployeeAttendanceProfile(req, res) {
         const employeeCode = String(employee.employeeId || '').trim();
         const staffType = normalizeStaffTypeKey(employee.staffType) || 'office';
 
-        const [records, loans, rewards, fines, assets, personal, policy, offSet, nextBirthday, salaryDoc, utilityBills] =
+        const [records, loans, rewards, fines, assets, personal, policy, offSet, nextBirthday, salaryDoc, utilityBills, historicalProfile] =
             await Promise.all([
             Attendance.find({ employeeMongoId, date: { $gte: from, $lte: to } })
                 .select(
@@ -618,6 +625,7 @@ export async function getEmployeeAttendanceProfile(req, res) {
                 .sort({ createdAt: -1 })
                 .limit(30)
                 .lean(),
+            loadHistoricalLeaveProfile(employeeCode),
         ]);
 
         const counts = {
@@ -700,6 +708,30 @@ export async function getEmployeeAttendanceProfile(req, res) {
             }
         }
 
+        const overlay = overlayHistoricalLeave(historicalProfile, {
+            from,
+            to,
+            includeCountOnly: true,
+        });
+        const existingEventDates = new Set(events.map((event) => `${event.date}|${event.statusKey}`));
+        for (const row of overlay.calendarRecords) {
+            const key = `${row.date}|${row.statusKey}`;
+            if (existingEventDates.has(key)) continue;
+            existingEventDates.add(key);
+            events.push({
+                id: row._id,
+                date: row.date,
+                statusKey: row.statusKey,
+                statusLabel: row.statusLabel || STATUS_LABELS[row.statusKey] || row.statusKey,
+                reason: String(row.reason || 'Salary enrollment').trim(),
+                attachmentName: '',
+                leavePayType: '',
+                historical: true,
+            });
+        }
+        Object.assign(counts, applyOverlayCounts(counts, overlay.extraCounts));
+        lastAnnualLeaveDate = lastOverlayAnnualLeaveDate(overlay.entries, lastAnnualLeaveDate);
+
         const presentDays =
             counts.on_office +
             counts.work_from_home +
@@ -725,13 +757,14 @@ export async function getEmployeeAttendanceProfile(req, res) {
         let periodRest = Math.max(0, periodDays - periodPresent - periodAnnual - periodOtherLeave);
 
         const entitlements = leavePolicyEntitlements(policy);
-        const { types: leaveBalances, sandwichRows, overflowSickDates } = buildLeaveBalances({
+        const { types: rawLeaveBalances, sandwichRows, overflowSickDates } = buildLeaveBalances({
             records,
             entitlements,
             offSet,
             from,
             to,
         });
+        const leaveBalances = applyOverlayCountsToBalances(rawLeaveBalances, overlay.extraCounts);
         const overflowSet = new Set(overflowSickDates || []);
         for (const extra of sandwichRows) {
             if (counts[extra.statusKey] != null) counts[extra.statusKey] += 1;

@@ -13,6 +13,10 @@ import {
     loadEnrolledLeaveVisibilityByMongoId,
 } from '../../utils/leaveSalaryVisibility.js';
 import {
+    loadHistoricalLeaveProfilesByEmployeeId,
+    overlayAttendanceRowsForEmployee,
+} from '../../utils/historicalLeaveAttendanceOverlay.js';
+import {
     getScheduledEmailTimeZone,
     getZonedParts,
 } from '../../utils/scheduleDailyAtMidnight.js';
@@ -382,7 +386,7 @@ export async function getLeavePendingRequests(req, res) {
             employeeId: { $ne: 'VEGA-HR-0000' },
             ...REAL_EMPLOYEE_MONGO_FILTER,
         })
-            .select('_id employeeId primaryReportee')
+            .select('_id employeeId firstName lastName primaryReportee')
             .lean()
             .maxTimeMS(12000);
 
@@ -505,6 +509,26 @@ export async function getLeavePendingRequests(req, res) {
                 );
             })
             .map(normalizeCompletedLeaveRow);
+
+        const historicalProfiles = await loadHistoricalLeaveProfilesByEmployeeId(enrolledCodes);
+        const overlayFrom = year ? yearFrom : '';
+        const overlayTo = year ? yearTo : '';
+        for (const emp of realEmployees) {
+            if (!visibility.has(String(emp._id))) continue;
+            const overlayRows = overlayAttendanceRowsForEmployee({
+                profile: historicalProfiles.get(String(emp.employeeId || '').trim()),
+                employee: emp,
+                from: overlayFrom,
+                to: overlayTo,
+                statusKeys: new Set(LEAVE_TRACK_KEYS),
+            });
+            for (const row of overlayRows) {
+                const occupiedKey = `${row.employeeMongoId}|${row.date}`;
+                if (coveredDates.has(occupiedKey)) continue;
+                coveredDates.add(occupiedKey);
+                extraLeaveRows.push(normalizeCompletedLeaveRow(row));
+            }
+        }
 
         const completedItems = mergeAdjacentApprovedItems(groupPendingRows(extraLeaveRows));
 
@@ -1438,6 +1462,32 @@ export async function getLeaveTeamTrack(req, res) {
             if (!groupsByPeriod.has(periodKey)) groupsByPeriod.set(periodKey, new Map());
             const locCounts = groupsByPeriod.get(periodKey);
             locCounts.set(locKey, (locCounts.get(locKey) || 0) + 1);
+        }
+
+        const historicalProfiles = await loadHistoricalLeaveProfilesByEmployeeId(enrolledCodes);
+        const trackStatusKeys = new Set(trackStatusKeysForLeaveType(req.query.leaveType));
+        for (const emp of realEmployees) {
+            if (!visibility.has(String(emp._id))) continue;
+            const overlayRows = overlayAttendanceRowsForEmployee({
+                profile: historicalProfiles.get(String(emp.employeeId || '').trim()),
+                employee: emp,
+                from,
+                to,
+                statusKeys: trackStatusKeys,
+            });
+            for (const row of overlayRows) {
+                const dateKey = String(row.date || '');
+                const statusKey = String(row.statusKey || '');
+                if (!dateKey || !statusKey) continue;
+                const periodKey = dateKey.slice(0, 7);
+                if (!totalsByPeriod.has(periodKey)) totalsByPeriod.set(periodKey, {});
+                const periodCounts = totalsByPeriod.get(periodKey);
+                periodCounts[statusKey] = (periodCounts[statusKey] || 0) + 1;
+                const locKey = locationByMongoId.get(String(emp._id)) || 'office';
+                if (!groupsByPeriod.has(periodKey)) groupsByPeriod.set(periodKey, new Map());
+                const locCounts = groupsByPeriod.get(periodKey);
+                locCounts.set(locKey, (locCounts.get(locKey) || 0) + 1);
+            }
         }
 
         const periodRows = isAll

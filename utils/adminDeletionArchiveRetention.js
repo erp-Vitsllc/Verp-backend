@@ -5,10 +5,15 @@ import { deletePreservedDeletionAttachments } from './preserveDeletionAttachment
 
 const MS_PER_DAY = 24 * 60 * 60 * 1000;
 
-export function computeArchiveExpiresAt(deletedAt = new Date()) {
+export function computeArchiveExpiresAt(
+    deletedAt = new Date(),
+    retentionDays = ADMIN_DELETION_ARCHIVE_RETENTION_DAYS,
+) {
     const base = deletedAt instanceof Date ? deletedAt : new Date(deletedAt);
+    const days = Number(retentionDays);
+    const useDays = Number.isFinite(days) && days > 0 ? days : ADMIN_DELETION_ARCHIVE_RETENTION_DAYS;
     const expires = new Date(base.getTime());
-    expires.setDate(expires.getDate() + ADMIN_DELETION_ARCHIVE_RETENTION_DAYS);
+    expires.setDate(expires.getDate() + useDays);
     return expires;
 }
 
@@ -134,11 +139,25 @@ export function enrichArchiveRetentionFields(archive) {
     const attachmentCount = resolveArchiveAttachmentCount(archive);
     const { snapshot, ...rest } = archive;
     const status = String(archive.status || 'pending').toLowerCase();
+    const storedDays = Number(archive.retentionDays);
+    const fromDates =
+        archive.deletedAt && archive.expiresAt
+            ? Math.round(
+                  (new Date(archive.expiresAt).getTime() - new Date(archive.deletedAt).getTime()) /
+                      MS_PER_DAY,
+              )
+            : 0;
+    const retentionDays =
+        Number.isFinite(storedDays) && storedDays > 0
+            ? storedDays
+            : fromDates > 0
+              ? fromDates
+              : ADMIN_DELETION_ARCHIVE_RETENTION_DAYS;
     return {
         ...rest,
         attachmentCount,
         expiresAt,
-        retentionDays: ADMIN_DELETION_ARCHIVE_RETENTION_DAYS,
+        retentionDays,
         daysRemaining,
         isExpired: daysRemaining <= 0,
         status,

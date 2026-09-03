@@ -11,6 +11,12 @@ import {
     loadEnrolledLeaveVisibilityByMongoId,
 } from '../utils/leaveSalaryVisibility.js';
 import {
+    addOverlayCountsForEmployees,
+    isHistoricalLeaveEntry,
+    loadHistoricalLeaveProfilesByEmployeeId,
+    overlayAttendanceRowsForEmployee,
+} from '../utils/historicalLeaveAttendanceOverlay.js';
+import {
     getScheduledEmailTimeZone,
     getZonedParts,
 } from '../utils/scheduleDailyAtMidnight.js';
@@ -154,6 +160,15 @@ export async function getEmployeeLeaveDirectory(req, res) {
             if (!countsByEmp[id]) countsByEmp[id] = {};
             countsByEmp[id][key] = (countsByEmp[id][key] || 0) + 1;
         }
+
+        const historicalProfiles = await loadHistoricalLeaveProfilesByEmployeeId(enrolledCodes);
+        addOverlayCountsForEmployees({
+            profilesByCode: historicalProfiles,
+            employees,
+            from: yearRaw === 'all' ? '' : from,
+            to,
+            countsByEmp,
+        });
 
         const list = employees.map((emp) => {
             const counts = countsByEmp[String(emp._id)] || {};
@@ -322,6 +337,39 @@ export async function getLeaveCalendar(req, res) {
             })
             .filter(Boolean);
 
+        const historicalProfiles = await loadHistoricalLeaveProfilesByEmployeeId(enrolledCodes);
+        const occupiedLeaveDays = new Set(
+            approvedEntries.map((row) => `${row.employeeMongoId}|${row.date}`),
+        );
+        const statusKeySet = new Set(statusKeys);
+        for (const emp of employeeMap.values()) {
+            const overlayRows = overlayAttendanceRowsForEmployee({
+                profile: historicalProfiles.get(String(emp.employeeId || '').trim()),
+                employee: emp,
+                from,
+                to,
+                statusKeys: statusKeySet,
+            });
+            for (const row of overlayRows) {
+                const occupiedKey = `${row.employeeMongoId}|${row.date}`;
+                if (occupiedLeaveDays.has(occupiedKey)) continue;
+                occupiedLeaveDays.add(occupiedKey);
+                approvedEntries.push({
+                    id: String(row._id || `${row.date}-${row.employeeMongoId}-${row.statusKey}`),
+                    date: row.date,
+                    employeeMongoId: row.employeeMongoId,
+                    employeeId: row.employeeId,
+                    employeeName: row.employeeName || employeeDisplayName(emp),
+                    statusKey: row.statusKey,
+                    statusLabel: row.statusLabel || row.statusKey,
+                    isPending: false,
+                    historical: true,
+                    source: 'Salary enrollment',
+                    leaveRequestKind: 'historical',
+                });
+            }
+        }
+
         const pendingKeys = new Set();
         const pendingEntries = [];
 
@@ -362,7 +410,11 @@ export async function getLeaveCalendar(req, res) {
         }
 
         const entries = [...approvedEntries, ...pendingEntries]
-            .filter((entry) => isLeaveEntryVisible(entry, visibility, visibilityByCode))
+            .filter(
+                (entry) =>
+                    isHistoricalLeaveEntry(entry) ||
+                    isLeaveEntryVisible(entry, visibility, visibilityByCode),
+            )
             .sort(
                 (a, b) => a.date.localeCompare(b.date) || a.employeeName.localeCompare(b.employeeName),
             );

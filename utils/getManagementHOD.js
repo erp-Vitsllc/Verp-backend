@@ -55,3 +55,22 @@ export const getManagementHOD = async (identifier = null) => {
     }
 };
 
+/** Company emails for every Active flowchart Management assignee. */
+export async function listActiveFlowchartManagementCompanyEmails() {
+    const rows = await Flowchart.find({
+        category: { $regex: /^management$/i },
+        status: 'Active',
+    })
+        .populate('empObjectId', 'companyEmail employeeId firstName lastName')
+        .lean();
+
+    const emails = new Set();
+    for (const row of rows || []) {
+        const fromRow = String(row?.companyEmail || '').trim();
+        if (fromRow) emails.add(fromRow);
+        const fromEmp = String(row?.empObjectId?.companyEmail || '').trim();
+        if (fromEmp) emails.add(fromEmp);
+    }
+    return [...emails];
+}
+

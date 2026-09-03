@@ -35,6 +35,12 @@ const MODULE_RULES = [
     { test: (m) => m.includes('Emergency'), entityType: 'employee_emergency_contact', topModule: 'employees', category: 'personal_details' },
     { test: (m) => m.includes('Signature'), entityType: 'employee_signature', topModule: 'employees', category: 'basic_details' },
     { test: (m) => m.includes('Work Details') || m.includes('Work details'), entityType: 'employee_work_details', topModule: 'employees', category: 'work_details' },
+    {
+        test: (m) => /enrol details/i.test(m) || m.includes('Salary Enrollment Reset'),
+        entityType: 'salary_enrollment_reset',
+        topModule: 'employees',
+        category: 'salary',
+    },
     { test: (m) => m.includes('Salary'), entityType: 'employee_salary_history', topModule: 'employees', category: 'salary' },
     { test: (m) => m === 'Company', entityType: 'company_whole', topModule: 'company', category: 'list' },
     { test: (m) => m === 'Company Old Document' || (m.includes('Company') && m.includes('Old Document')), entityType: 'company_old_document', topModule: 'company', category: 'documents_old' },

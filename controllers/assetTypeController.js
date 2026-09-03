@@ -832,9 +832,9 @@ async function loadToolsAssetUnifiedList(req, toolsView) {
         .populate('assignedCompany', 'name nickName companyId companyEmail')
         .populate({
             path: 'assignedTo',
-            select: 'firstName lastName employeeId department primaryReportee reportingAuthority',
+            select: 'firstName lastName employeeId enablePortalAccess department primaryReportee reportingAuthority',
             populate: [
-                { path: 'primaryReportee', select: 'firstName lastName' },
+                { path: 'primaryReportee', select: 'firstName lastName employeeId' },
                 { path: 'reportingAuthority', select: 'firstName lastName' },
             ],
         })
@@ -971,9 +971,9 @@ export const getAssetTypes = async (req, res) => {
                 .populate('assignedCompany', 'name nickName companyId companyEmail')
                 .populate({
                     path: 'assignedTo',
-                    select: 'firstName lastName employeeId department primaryReportee reportingAuthority',
+                    select: 'firstName lastName employeeId enablePortalAccess department primaryReportee reportingAuthority',
                     populate: [
-                        { path: 'primaryReportee', select: 'firstName lastName' },
+                        { path: 'primaryReportee', select: 'firstName lastName employeeId' },
                         { path: 'reportingAuthority', select: 'firstName lastName' }
                     ]
                 })

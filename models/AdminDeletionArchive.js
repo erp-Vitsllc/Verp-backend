@@ -30,6 +30,8 @@ const adminDeletionArchiveSchema = new mongoose.Schema(
         deletedAt: { type: Date, default: Date.now, index: true },
         /** After this date, pending recovery is permanently purged (default: deletedAt + 60 days). */
         expiresAt: { type: Date, index: true },
+        /** Recovery window in days (defaults to 60; enrolment reset uses 90). */
+        retentionDays: { type: Number, default: 60 },
         restoredBy: {
             userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
             name: { type: String, default: '' },

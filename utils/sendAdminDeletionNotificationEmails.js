@@ -338,15 +338,19 @@ export async function runManagementAdminDeletionArchive(req, opts) {
     try {
         const archive = await createAdminDeletionArchiveFromDeletion(req, opts);
         archiveId = archive?._id?.toString?.() || String(archive?._id || '');
-        await notifyAdminDeletedBusinessRecordToManagement(req, {
-            ...opts,
-            archiveId,
-            preservedAttachments: archive?.preservedAttachments,
-        });
+        if (!opts.skipManagementEmail) {
+            await notifyAdminDeletedBusinessRecordToManagement(req, {
+                ...opts,
+                archiveId,
+                preservedAttachments: archive?.preservedAttachments,
+            });
+        }
         return archive;
     } catch (e) {
         console.error('[runManagementAdminDeletionArchive] archive:', e?.message || e);
-        await notifyAdminDeletedBusinessRecordToManagement(req, { ...opts, archiveId });
+        if (!opts.skipManagementEmail) {
+            await notifyAdminDeletedBusinessRecordToManagement(req, { ...opts, archiveId });
+        }
         return null;
     }
 }

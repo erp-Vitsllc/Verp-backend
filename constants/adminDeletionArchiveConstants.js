@@ -1,6 +1,9 @@
 /** Pending recovery rows are auto-purged after this many days (not moved to Old Documents). */
 export const ADMIN_DELETION_ARCHIVE_RETENTION_DAYS = 60;
 
+/** Enrolment reset snapshots stay in Deleted Records this many days. */
+export const SALARY_ENROLLMENT_RESET_RETENTION_DAYS = 90;
+
 /** Top-level tabs (align with ERP sidebar modules). */
 export const ARCHIVE_TOP_MODULES = {
     employees: { key: 'employees', label: 'Employees' },

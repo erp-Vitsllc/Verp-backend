@@ -178,12 +178,14 @@ import {
     createSalaryHistoricalProfile,
     approveSalaryHistoricalProfile,
     rejectSalaryHistoricalProfile,
+    revokeSalaryHistoricalProfile,
     verifySalaryHistoricalProfile,
     returnSalaryHistoricalProfile,
     reopenSalaryHistoricalProfile,
+    resetSalaryHistoricalEnrollment,
     getSalaryHistoricalAudit,
 } from "../controllers/employee/salaryHistoricalProfileController.js";
-import { downloadSalarySlipPdf } from "../controllers/employee/downloadSalarySlipPdf.js";
+import { downloadSalarySlipPdf, listEmployeeSalarySlipMonths, saveSalarySlipMonth } from "../controllers/employee/downloadSalarySlipPdf.js";
 import { getPendingSalaryDashboardInbox } from "../controllers/employee/getPendingSalaryDashboardInbox.js";
 import {
     getMonthSalaryDmf,
@@ -389,12 +391,28 @@ router.get(
     getSalaryHistoricalAudit,
 );
 router.get(
+    "/salary-enroll/:employeeId/historical/salary-slips",
+    checkAnyModulePermission([
+        ['hrm_salary', 'view'],
+        ['hrm_employees_view_salary', 'view'],
+    ]),
+    listEmployeeSalarySlipMonths,
+);
+router.get(
     "/salary-enroll/:employeeId/historical/salary-slip",
     checkAnyModulePermission([
         ['hrm_salary', 'view'],
         ['hrm_employees_view_salary', 'view'],
     ]),
     downloadSalarySlipPdf,
+);
+router.put(
+    "/salary-enroll/:employeeId/historical/salary-slip",
+    checkAnyModulePermission([
+        ['hrm_salary', 'edit'],
+        ['hrm_employees_view_salary', 'edit'],
+    ]),
+    saveSalarySlipMonth,
 );
 router.put(
     "/salary-enroll/:employeeId/historical",
@@ -429,6 +447,14 @@ router.post(
     reopenSalaryHistoricalProfile,
 );
 router.post(
+    "/salary-enroll/:employeeId/historical/reset",
+    checkAnyModulePermission([
+        ['hrm_salary', 'edit'],
+        ['hrm_employees_view_salary', 'edit'],
+    ]),
+    resetSalaryHistoricalEnrollment,
+);
+router.post(
     "/salary-enroll/:employeeId/historical/create",
     checkAnyModulePermission([
         ['hrm_salary', 'edit'],
@@ -455,6 +481,14 @@ router.post(
         ['hrm_employees_view_salary', 'edit'],
     ]),
     rejectSalaryHistoricalProfile,
+);
+router.post(
+    "/salary-enroll/:employeeId/historical/revoke",
+    checkAnyModulePermission([
+        ['hrm_salary', 'edit'],
+        ['hrm_employees_view_salary', 'edit'],
+    ]),
+    revokeSalaryHistoricalProfile,
 );
 router.post(
     "/salary-enroll/:employeeId/historical/dmf/start",

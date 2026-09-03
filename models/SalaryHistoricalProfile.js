@@ -26,6 +26,11 @@ const leaveRecordSchema = new mongoose.Schema(
         source: { type: String, default: 'manual' },
         status: { type: String, default: 'draft' },
         remarks: { type: String, default: '' },
+        includeLeave: { type: Boolean, default: false },
+        includeTicket: { type: Boolean, default: false },
+        leaveSalaryAmount: { type: Number, default: 0 },
+        ticketAmount: { type: Number, default: 0 },
+        reduceHistoricalWorkingDays: { type: Boolean, default: false },
         attachment: { type: attachmentSchema, default: null },
         createdBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null },
         createdByName: { type: String, default: '' },
@@ -46,6 +51,11 @@ const annualLeaveSchema = new mongoose.Schema(
         status: { type: String, default: 'draft' },
         source: { type: String, default: 'manual' },
         remarks: { type: String, default: '' },
+        includeLeave: { type: Boolean, default: false },
+        includeTicket: { type: Boolean, default: false },
+        leaveSalaryAmount: { type: Number, default: 0 },
+        ticketAmount: { type: Number, default: 0 },
+        reduceHistoricalWorkingDays: { type: Boolean, default: false },
         attachment: { type: attachmentSchema, default: null },
         createdBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null },
         createdByName: { type: String, default: '' },
@@ -76,6 +86,9 @@ const paymentCycleSchema = new mongoose.Schema(
         status: { type: String, default: 'draft' },
         remarks: { type: String, default: '' },
         annualLeaveKey: { type: String, default: '' },
+        includeLeave: { type: Boolean, default: true },
+        includeTicket: { type: Boolean, default: true },
+        reduceHistoricalWorkingDays: { type: Boolean, default: true },
         attachment: { type: attachmentSchema, default: null },
         createdBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null },
         createdByName: { type: String, default: '' },
@@ -101,6 +114,15 @@ const auditEntrySchema = new mongoose.Schema(
     { _id: true },
 );
 
+const hiddenSystemLeaveSchema = new mongoose.Schema(
+    {
+        leaveType: { type: String, default: '' },
+        fromDate: { type: String, default: '' },
+        toDate: { type: String, default: '' },
+    },
+    { _id: false },
+);
+
 const salaryHistoricalProfileSchema = new mongoose.Schema(
     {
         employeeId: { type: String, required: true, trim: true, unique: true },
@@ -118,6 +140,7 @@ const salaryHistoricalProfileSchema = new mongoose.Schema(
         salarySlip: { type: Boolean, default: false },
         leaveRecords: { type: [leaveRecordSchema], default: () => [] },
         annualLeaveRecords: { type: [annualLeaveSchema], default: () => [] },
+        hiddenSystemLeave: { type: [hiddenSystemLeaveSchema], default: () => [] },
         paymentCycles: { type: [paymentCycleSchema], default: () => [] },
         cycleDays: { type: Number, default: 300 },
         leaveHistoryComplete: { type: Boolean, default: false },

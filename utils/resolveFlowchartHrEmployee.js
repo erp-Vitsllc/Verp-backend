@@ -25,7 +25,7 @@ export const resolveFlowchartHrEmployee = async () => {
         const re = pattern ? new RegExp(`^${pattern}$`, "i") : null;
         doc = re
             ? await EmployeeBasic.findOne({ employeeId: { $regex: re } }).select(
-                  "_id employeeId firstName lastName companyEmail workEmail personalEmail email"
+                  "_id employeeId firstName lastName companyEmail workEmail personalEmail email designation"
               )
             : null;
         if (!doc) {

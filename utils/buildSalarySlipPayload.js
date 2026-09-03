@@ -4,9 +4,11 @@ import EmployeeSalary from '../models/EmployeeSalary.js';
 import Fine from '../models/Fine.js';
 import Holiday from '../models/Holiday.js';
 import Loan from '../models/Loan.js';
+import PartyExpense from '../models/PartyExpense.js';
 import PayrollSettings from '../models/PayrollSettings.js';
 import Reward from '../models/Reward.js';
 import SalaryHistoricalProfile from '../models/SalaryHistoricalProfile.js';
+import SalarySlipMonth from '../models/SalarySlipMonth.js';
 import UtilityBillPayment from '../models/UtilityBillPayment.js';
 import { isCompanyShellEmployee } from './attendanceEmployeeFilters.js';
 import { resolveEmployeeFinePayableAmount } from './finePayableAmount.js';
@@ -64,6 +66,25 @@ export function monthKeyOf(value) {
     if (named) {
         const idx = MONTH_FULL.findIndex((name) => name.toLowerCase() === named[1].toLowerCase());
         if (idx >= 0) return `${named[2]}-${pad2(idx + 1)}`;
+    }
+    return '';
+}
+
+function escapeRegex(value) {
+    return String(value || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+/** YYYY-MM for loan/fine payable schedules (string, Date, or ISO). */
+function payableMonthKey(value) {
+    if (!value) return '';
+    if (value instanceof Date && !Number.isNaN(value.getTime())) {
+        return `${value.getFullYear()}-${pad2(value.getMonth() + 1)}`;
+    }
+    const fromText = monthKeyOf(value);
+    if (fromText) return fromText;
+    const parsed = new Date(value);
+    if (!Number.isNaN(parsed.getTime())) {
+        return `${parsed.getFullYear()}-${pad2(parsed.getMonth() + 1)}`;
     }
     return '';
 }
@@ -175,11 +196,7 @@ function slipRefOf(ym, employeeId) {
 }
 
 function toYearMonth(value) {
-    if (!value) return '';
-    if (value instanceof Date && !Number.isNaN(value.getTime())) {
-        return `${value.getFullYear()}-${pad2(value.getMonth() + 1)}`;
-    }
-    return monthKeyOf(value);
+    return payableMonthKey(value);
 }
 
 function historyFromMonth(entry) {
@@ -229,24 +246,100 @@ function monthlySalaryOf(entry) {
     return stored > 0 ? stored : computed;
 }
 
+function allowanceType(row) {
+    return String(row?.type || '').trim().toLowerCase();
+}
+
+function isPhoneAllowance(row) {
+    return /phone|mobile/.test(allowanceType(row));
+}
+
+function upsertEarning(rows, component, basis, amount) {
+    const list = Array.isArray(rows) ? rows : [];
+    const idx = list.findIndex((row) => String(row?.component || '').trim() === component);
+    const next = { component, basis, amount: money(amount) };
+    if (idx >= 0) {
+        list[idx] = { ...list[idx], ...next };
+        return list;
+    }
+    list.push(next);
+    return list;
+}
+
 function structureEarnings(entry) {
     const extras = Array.isArray(entry?.additionalAllowances) ? entry.additionalAllowances : [];
-    const extraHasVehicle = extras.some((row) => String(row?.type || '').toLowerCase().includes('vehicle'));
-    const extraHasFuel = extras.some((row) => String(row?.type || '').toLowerCase().includes('fuel'));
-    const rows = [
+    const extraHasVehicle = extras.some((row) => allowanceType(row).includes('vehicle'));
+    const extraHasFuel = extras.some((row) => allowanceType(row).includes('fuel'));
+    const phoneAmount = extras.filter(isPhoneAllowance).reduce((sum, row) => sum + money(row?.amount), 0);
+    const vehicleFromExtras = extras
+        .filter((row) => allowanceType(row).includes('vehicle'))
+        .reduce((sum, row) => sum + money(row?.amount), 0);
+    const fuelFromExtras = extras
+        .filter((row) => allowanceType(row).includes('fuel'))
+        .reduce((sum, row) => sum + money(row?.amount), 0);
+    const leftoverExtras = extras.filter((row) => {
+        const type = allowanceType(row);
+        return !isPhoneAllowance(row) && !type.includes('vehicle') && !type.includes('fuel');
+    });
+    return [
         { component: 'Basic Salary', basis: 'Monthly', amount: money(entry?.basic) },
         { component: 'Other Allowance', basis: 'Monthly', amount: money(entry?.otherAllowance) },
-        { component: 'Accommodation Allowance', basis: 'Monthly', amount: money(entry?.houseRentAllowance) },
-        extraHasVehicle ? null : { component: 'Vehicle Allowance', basis: 'Monthly', amount: money(entry?.vehicleAllowance) },
-        extraHasFuel ? null : { component: 'Fuel Allowance', basis: 'Monthly', amount: money(entry?.fuelAllowance) },
-        ...extras.map((row) => ({
-            component: String(row?.type || 'Allowance').trim() || 'Allowance',
-            basis: 'Monthly',
-            amount: money(row?.amount),
-        })),
-    ].filter(Boolean);
-    const always = new Set(['Basic Salary', 'Other Allowance', 'Accommodation Allowance']);
-    return rows.filter((row) => always.has(row.component) || row.amount > 0);
+        { component: 'House Rental Allowance', basis: 'Monthly', amount: money(entry?.houseRentAllowance) },
+        { component: 'Vehicle Allowance', basis: 'Monthly', amount: extraHasVehicle ? vehicleFromExtras : money(entry?.vehicleAllowance) },
+        { component: 'Fuel Allowance', basis: 'Monthly', amount: extraHasFuel ? fuelFromExtras : money(entry?.fuelAllowance) },
+        { component: 'Phone Allowance', basis: 'Monthly', amount: phoneAmount },
+        ...leftoverExtras
+            .map((row) => ({
+                component: String(row?.type || 'Allowance').trim() || 'Allowance',
+                basis: 'Monthly',
+                amount: money(row?.amount),
+            }))
+            .filter((row) => row.amount > 0),
+    ];
+}
+
+const YEARLY_SALARY_COMPONENTS = new Set([
+    'Basic Salary',
+    'Other Allowance',
+    'House Rental Allowance',
+    'Vehicle Allowance',
+    'Fuel Allowance',
+]);
+
+function inCalendarYear(value, year) {
+    const ym = payableMonthKey(value) || monthKeyOf(value);
+    return Boolean(year && ym && ym.startsWith(`${year}-`));
+}
+
+function yearlyEndOfServiceBenefit(basicMonthly, joiningDate, year) {
+    const basic = money(basicMonthly);
+    if (basic <= 0 || !year) return 0;
+    const daily = money(basic / 30);
+    const join = joiningDate ? new Date(joiningDate) : null;
+    const asOf = new Date(year, 11, 31);
+    if (!join || Number.isNaN(join.getTime()) || join > asOf) {
+        return money(daily * 21);
+    }
+    const msYear = 365.25 * 24 * 60 * 60 * 1000;
+    const years = (asOf.getTime() - join.getTime()) / msYear;
+    const daysPerYear = years >= 5 ? 30 : 21;
+    if (years < 1) {
+        const start = join.getFullYear() === year ? join : new Date(year, 0, 1);
+        const servedDays = Math.max(0, Math.round((asOf.getTime() - start.getTime()) / 86400000) + 1);
+        const yearLen = year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0) ? 366 : 365;
+        return money(daily * 21 * Math.min(1, servedDays / yearLen));
+    }
+    return money(daily * daysPerYear);
+}
+
+function structureYearlySalary(entry) {
+    return structureEarnings(entry)
+        .filter((row) => YEARLY_SALARY_COMPONENTS.has(row.component))
+        .map((row) => ({
+            component: row.component,
+            basis: 'Yearly',
+            amount: money(row.amount * 12),
+        }));
 }
 
 function overtimeFromPunch({ timeIn, timeOut, date, week, monthlySalary }) {
@@ -294,11 +387,35 @@ function addMonthsYm(ym, count) {
 
 function scheduleHasMonth(startYm, duration, ym) {
     const months = Math.max(1, Number(duration) || 1);
-    if (!startYm) return false;
+    const start = payableMonthKey(startYm);
+    const target = payableMonthKey(ym);
+    if (!start || !target) return false;
     for (let i = 0; i < months; i += 1) {
-        if (addMonthsYm(startYm, i) === ym) return true;
+        if (addMonthsYm(start, i) === target) return true;
     }
     return false;
+}
+
+function installmentAmountForMonth(installments, ym) {
+    const target = payableMonthKey(ym);
+    const part = (installments || []).find((row) => payableMonthKey(row.monthKey) === target);
+    return part ? money(part.amount) : 0;
+}
+
+function partyInstallmentThisMonth(expenses, ym, { kind, mongoField, mongoId } = {}) {
+    const wantId = mongoId ? String(mongoId) : '';
+    for (const exp of expenses || []) {
+        if (kind && exp.kind !== kind) continue;
+        if (wantId && String(exp[mongoField] || '') !== wantId) continue;
+        const fromParts = installmentAmountForMonth(exp.installments, ym);
+        if (fromParts > 0) return fromParts;
+        if (payableMonthKey(exp.monthStart) === payableMonthKey(ym)) {
+            const duration = Math.max(1, Number(exp.duration) || 1);
+            const sliced = money(money(exp.amount) / duration);
+            if (sliced > 0) return sliced;
+        }
+    }
+    return 0;
 }
 
 function emptyLoanRow(type) {
@@ -316,7 +433,13 @@ function emptyLoanRow(type) {
 /**
  * Build the VEGA salary-slip view model for one employee and YYYY-MM.
  */
-export async function buildSalarySlipPayload({ employeeId, monthKey, emp: preloadedEmp, salaryDoc: preloadedSalary } = {}) {
+export async function buildSalarySlipPayload({
+    employeeId,
+    monthKey,
+    emp: preloadedEmp,
+    salaryDoc: preloadedSalary,
+    skipOverride = false,
+} = {}) {
     const code = String(employeeId || preloadedEmp?.employeeId || '').trim();
     const ym = monthKeyOf(monthKey) || defaultSalarySlipMonthKey();
     if (!code) throw new SalarySlipError('Employee is required.', 400);
@@ -336,20 +459,21 @@ export async function buildSalarySlipPayload({ employeeId, monthKey, emp: preloa
     const daysInMonth = lastDayOfMonth(ym);
     const from = `${ym}-01`;
     const to = `${ym}-${pad2(daysInMonth)}`;
+    const idPattern = new RegExp(`^${escapeRegex(code)}$`, 'i');
 
-    const [salaryDoc, profile, policy, workingTime, attendance, holidayDocs, loans, fines, rewards, utilityBills] =
+    const [salaryDoc, profile, policy, workingTime, attendance, holidayDocs, loans, fines, rewards, utilityBills, partyExpenses] =
         await Promise.all([
             preloadedSalary ||
-                EmployeeSalary.findOne({ employeeId: code })
+                EmployeeSalary.findOne({ employeeId: idPattern })
                     .select('-offerLetter.data -salaryHistory.attachment.data -salaryHistory.offerLetter.data')
                     .lean(),
-            SalaryHistoricalProfile.findOne({ employeeId: code })
+            SalaryHistoricalProfile.findOne({ employeeId: idPattern })
                 .select('salarySlip companyMolCode paymentCycles')
                 .lean(),
             PayrollSettings.findOne({ key: 'default' }).select('lateInRules').lean(),
             loadWorkingTimeDoc(),
             Attendance.find({
-                $or: [{ employeeMongoId: mongoId }, { employeeId: code }],
+                $or: [{ employeeMongoId: mongoId }, { employeeId: idPattern }],
                 date: { $gte: from, $lte: to },
             })
                 .select('date statusKey leavePayType timeIn timeOut')
@@ -357,7 +481,7 @@ export async function buildSalarySlipPayload({ employeeId, monthKey, emp: preloa
             Holiday.find({ date: { $gte: from, $lte: to } }).select('date appliesTo').lean(),
             Loan.find({
                 $and: [
-                    { $or: [{ employeeId: code }, { employeeObjectId: emp._id }] },
+                    { $or: [{ employeeId: idPattern }, { employeeObjectId: emp._id }] },
                     {
                         $or: [
                             { approvalStatus: { $in: APPROVED_LOAN_STATUSES } },
@@ -371,12 +495,12 @@ export async function buildSalarySlipPayload({ employeeId, monthKey, emp: preloa
             Fine.find({
                 fineStatus: { $in: APPROVED_FINE_STATUSES },
                 sourceOfIncome: { $ne: 'End of Service' },
-                'assignedEmployees.employeeId': code,
+                assignedEmployees: { $elemMatch: { employeeId: idPattern } },
             })
                 .select('fineType subCategory category assignedEmployees employeeAmount companyAmount serviceCharge discount totalFineAmount fineAmount fineStatus sourceOfIncome payableDuration monthStart originalMonthStart originalPayableDuration responsibleFor awardedDate createdAt paidAmount')
                 .lean(),
             Reward.find({
-                employeeId: code,
+                employeeId: idPattern,
                 $or: [
                     { rewardStatus: { $in: APPROVED_REWARD_STATUSES } },
                     { approvalStatus: { $in: APPROVED_REWARD_STATUSES } },
@@ -385,10 +509,17 @@ export async function buildSalarySlipPayload({ employeeId, monthKey, emp: preloa
                 .select('amount awardedDate approvedDate rewardStatus rewardType')
                 .lean(),
             UtilityBillPayment.find({
-                payByEmployeeId: code,
+                payByEmployeeId: idPattern,
                 status: { $in: ['Approved', 'Paid'] },
             })
                 .select('utilityType billMonth employeePayAmount employeeDiffAmount notes status')
+                .lean(),
+            PartyExpense.find({
+                partyType: 'employee',
+                employeeId: idPattern,
+                kind: { $in: ['loan', 'advance', 'fine'] },
+            })
+                .select('kind amount duration monthStart installments loanMongoId fineMongoId')
                 .lean(),
         ]);
 
@@ -405,6 +536,8 @@ export async function buildSalarySlipPayload({ employeeId, monthKey, emp: preloa
     let presentDays = 0;
     let workingDayLeaves = 0;
     let unauthorizedDays = 0;
+    let sickDays = 0;
+    let unpaidSickDays = 0;
     let annualDays = 0;
     let lateEvents = 0;
     let holidayMarks = 0;
@@ -424,6 +557,10 @@ export async function buildSalarySlipPayload({ employeeId, monthKey, emp: preloa
         if (PRESENT_KEYS.has(key)) presentDays += 1;
         if (LEAVE_KEYS.has(key)) workingDayLeaves += 1;
         if (key === 'unauthorized_leave') unauthorizedDays += 1;
+        if (key === 'sick_leave') {
+            sickDays += 1;
+            if (String(row.leavePayType || '').toLowerCase() === 'unpaid') unpaidSickDays += 1;
+        }
         if (key === 'on_leave') annualDays += 1;
 
         const isHolidayDate = holidaySet.has(date) || key === 'holiday';
@@ -456,25 +593,19 @@ export async function buildSalarySlipPayload({ employeeId, monthKey, emp: preloa
     const authorizedDeductionDays = unpaidAuthorized;
     const authorizedAmount = money(daily * authorizedDeductionDays);
     const unauthorizedAmount = money(daily * unauthorizedDays);
+    const sickAmount = money(daily * unpaidSickDays);
     const annualAmount = 0;
     const lateRate = lateRateFromPolicy(daily, policy?.lateInRules);
     const lateAmount = money(lateRate * lateEvents);
 
     const earnings = structureEarnings(entry);
-    if (otHoursAmount > 0) {
-        earnings.push({
-            component: 'Overtime Hours',
-            basis: hoursLabel(otHours).replace(/ hours?$/, ' h'),
-            amount: otHoursAmount,
-        });
-    }
-    if (otDaysAmount > 0) {
-        earnings.push({
-            component: 'Overtime Days',
-            basis: qtyLabel(otDays, 'day'),
-            amount: otDaysAmount,
-        });
-    }
+    upsertEarning(
+        earnings,
+        'Overtime Hours',
+        hoursLabel(otHours).replace(/ hours?$/, ' h'),
+        otHoursAmount,
+    );
+    upsertEarning(earnings, 'Overtime Days', qtyLabel(otDays, 'day'), otDaysAmount);
 
     let leaveSalaryAmount = 0;
     let leaveSalaryDays = 0;
@@ -493,16 +624,13 @@ export async function buildSalarySlipPayload({ employeeId, monthKey, emp: preloa
             ticketAmount = money(ticketAmount + money(cycle.ticketAmount));
         }
     }
-    if (leaveSalaryAmount > 0) {
-        earnings.push({
-            component: 'Leave Salary',
-            basis: leaveSalaryDays > 0 ? qtyLabel(leaveSalaryDays, 'day') : 'Annual',
-            amount: leaveSalaryAmount,
-        });
-    }
-    if (ticketAmount > 0) {
-        earnings.push({ component: 'Ticket', basis: 'Annual', amount: ticketAmount });
-    }
+    upsertEarning(
+        earnings,
+        'Leave Salary',
+        leaveSalaryDays > 0 ? qtyLabel(leaveSalaryDays, 'day') : 'Annual',
+        leaveSalaryAmount,
+    );
+    upsertEarning(earnings, 'Ticket', 'Annual', ticketAmount);
 
     let rewardAmount = 0;
     for (const reward of rewards || []) {
@@ -511,29 +639,77 @@ export async function buildSalarySlipPayload({ employeeId, monthKey, emp: preloa
         if (String(reward.rewardType || '') === 'Certificate') continue;
         rewardAmount = money(rewardAmount + money(reward.amount));
     }
-    if (rewardAmount > 0) {
-        earnings.push({ component: 'Reward', basis: 'Approved', amount: rewardAmount });
+    upsertEarning(earnings, 'Reward', 'Approved', rewardAmount);
+
+    const slipYear = Number(String(ym).slice(0, 4));
+    let yearlyRewardAmount = 0;
+    for (const reward of rewards || []) {
+        const when = reward.awardedDate || reward.approvedDate;
+        if (!inCalendarYear(when, slipYear)) continue;
+        if (String(reward.rewardType || '') === 'Certificate') continue;
+        yearlyRewardAmount = money(yearlyRewardAmount + money(reward.amount));
     }
+    let yearlyLeaveSalaryAmount = 0;
+    let yearlyTravelAmount = 0;
+    for (const cycle of profile?.paymentCycles || []) {
+        const status = String(cycle.paymentStatus || cycle.status || '').toLowerCase();
+        if (status === 'draft' || status === 'cancelled' || status === 'rejected') continue;
+        if (inCalendarYear(cycle.leaveSalaryPaymentDate || cycle.paymentDate, slipYear)) {
+            yearlyLeaveSalaryAmount = money(
+                yearlyLeaveSalaryAmount + money(cycle.leaveSalaryAmount || cycle.leaveSalary),
+            );
+        }
+        if (inCalendarYear(cycle.ticketPaymentDate || cycle.paymentDate, slipYear)) {
+            yearlyTravelAmount = money(yearlyTravelAmount + money(cycle.ticketAmount));
+        }
+    }
+    const yearlyEarnings = [
+        ...structureYearlySalary(entry),
+        { component: 'Reward', basis: 'Yearly', amount: yearlyRewardAmount },
+        {
+            component: 'End of Service Benefit',
+            basis: 'Yearly',
+            amount: yearlyEndOfServiceBenefit(entry?.basic, emp.dateOfJoining, slipYear),
+        },
+        { component: 'Leave Salary', basis: 'Yearly', amount: yearlyLeaveSalaryAmount },
+        { component: 'Travel Allowance', basis: 'Yearly', amount: yearlyTravelAmount },
+    ];
+    const yearlyGrossEarnings = money(yearlyEarnings.reduce((sum, row) => sum + money(row.amount), 0));
 
     let advanceMonth = 0;
     let loanMonth = 0;
     const loanSchedule = [];
+    const countedLoanIds = new Set();
+    const countedFineIds = new Set();
+    const codeKey = code.toLowerCase();
+
     for (const loan of loans || []) {
         const duration = loan.originalDuration ?? loan.duration;
-        const start = loan.originalMonthStart || loan.monthStart || toYearMonth(loan.approvedDate || loan.appliedDate);
+        const start =
+            payableMonthKey(loan.originalMonthStart || loan.monthStart) ||
+            payableMonthKey(loan.approvedDate || loan.appliedDate);
         const installments = buildLoanInstallments({
             ...loan,
             monthStart: start,
             duration,
         });
-        const part = installments.find((row) => row.monthKey === ym);
-        const thisMonthAmount = money(part?.amount);
+        const isAdvance = /advance/i.test(String(loan.type || ''));
+        const kind = isAdvance ? 'advance' : 'loan';
+        let thisMonthAmount = installmentAmountForMonth(installments, ym);
+        if (thisMonthAmount <= 0) {
+            thisMonthAmount = partyInstallmentThisMonth(partyExpenses, ym, {
+                kind,
+                mongoField: 'loanMongoId',
+                mongoId: loan._id,
+            });
+        }
         const total = money(loan.amount);
         const repaid = money(loan.repaidAmount ?? loan.paidAmount);
         const remaining = Math.max(0, money(total - repaid));
-        const type = loan.type === 'Advance' ? 'Salary Advance' : 'Loan';
+        const type = isAdvance ? 'Salary Advance' : 'Loan';
         if (type === 'Salary Advance') advanceMonth = money(advanceMonth + thisMonthAmount);
         else loanMonth = money(loanMonth + thisMonthAmount);
+        countedLoanIds.add(String(loan._id || ''));
         loanSchedule.push({
             type,
             original: formatAed(total),
@@ -544,26 +720,45 @@ export async function buildSalarySlipPayload({ employeeId, monthKey, emp: preloa
             thisMonthAmount,
         });
     }
-    if (!loanSchedule.some((row) => row.type === 'Salary Advance')) loanSchedule.unshift(emptyLoanRow('Salary Advance'));
-    if (!loanSchedule.some((row) => row.type === 'Loan')) loanSchedule.push(emptyLoanRow('Loan'));
 
     let fineMonth = 0;
     const fineRows = [];
     for (const fine of fines || []) {
+        const assignee = (fine.assignedEmployees || []).find((ae) => {
+            const id = String(ae?.employeeId || '').trim();
+            if (!id || ['VEGA-HR-0000', 'VEGA_INTERNAL', 'PENDING'].includes(id)) return false;
+            return id.toLowerCase() === codeKey;
+        });
+        if (!assignee) continue;
         const duration = Math.max(1, Number(fine.originalPayableDuration ?? fine.payableDuration) || 1);
-        const startFineYm = toYearMonth(fine.originalMonthStart || fine.monthStart || fine.awardedDate || fine.createdAt);
-        if (!scheduleHasMonth(startFineYm, duration, ym)) continue;
-        const payable = resolveEmployeeFinePayableAmount(fine, code);
+        const startFineYm =
+            payableMonthKey(fine.originalMonthStart || fine.monthStart) ||
+            payableMonthKey(fine.awardedDate || fine.approvedDate || fine.createdAt);
+        const payable = resolveEmployeeFinePayableAmount(fine, assignee.employeeId);
         if (payable <= 0) continue;
-        const thisMonthAmount = money(payable / duration);
+        let thisMonthAmount = 0;
+        if (scheduleHasMonth(startFineYm, duration, ym)) {
+            thisMonthAmount = money(payable / duration);
+        }
+        if (thisMonthAmount <= 0) {
+            thisMonthAmount = partyInstallmentThisMonth(partyExpenses, ym, {
+                kind: 'fine',
+                mongoField: 'fineMongoId',
+                mongoId: fine._id,
+            });
+        }
         const paid = money(fine.paidAmount);
         const remaining = Math.max(0, money(payable - paid));
-        fineMonth = money(fineMonth + thisMonthAmount);
+        const installment = money(payable / duration);
+        if (thisMonthAmount > 0) {
+            fineMonth = money(fineMonth + thisMonthAmount);
+        }
+        countedFineIds.add(String(fine._id || ''));
         const typeLabel = String(fine.fineType || fine.subCategory || fine.category || 'Fine').trim() || 'Fine';
         fineRows.push({
             type: typeLabel,
             amount: formatAed(payable),
-            schedule: `${formatAed(thisMonthAmount)} x ${duration} months`,
+            schedule: `${formatAed(installment)} x ${duration} months`,
             thisMonth: formatAed(thisMonthAmount),
             paid: formatAed(paid),
             unpaidStatus: `${formatAed(remaining)} / ${remaining > 0.009 ? 'Active' : 'Paid'}`,
@@ -571,10 +766,51 @@ export async function buildSalarySlipPayload({ employeeId, monthKey, emp: preloa
         });
     }
 
+    for (const exp of partyExpenses || []) {
+        const amt =
+            installmentAmountForMonth(exp.installments, ym) ||
+            (payableMonthKey(exp.monthStart) === ym
+                ? money(money(exp.amount) / Math.max(1, Number(exp.duration) || 1))
+                : 0);
+        if (amt <= 0) continue;
+        if (exp.kind === 'fine') {
+            if (countedFineIds.has(String(exp.fineMongoId || ''))) continue;
+            countedFineIds.add(String(exp.fineMongoId || ''));
+            fineMonth = money(fineMonth + amt);
+            fineRows.push({
+                type: 'Fine',
+                amount: formatAed(exp.amount),
+                schedule: `${formatAed(amt)} x ${Math.max(1, Number(exp.duration) || 1)} months`,
+                thisMonth: formatAed(amt),
+                paid: formatAed(0),
+                unpaidStatus: `${formatAed(amt)} / Active`,
+                thisMonthAmount: amt,
+            });
+            continue;
+        }
+        if (countedLoanIds.has(String(exp.loanMongoId || ''))) continue;
+        countedLoanIds.add(String(exp.loanMongoId || ''));
+        const isAdvance = exp.kind === 'advance';
+        if (isAdvance) advanceMonth = money(advanceMonth + amt);
+        else loanMonth = money(loanMonth + amt);
+        loanSchedule.push({
+            type: isAdvance ? 'Salary Advance' : 'Loan',
+            original: formatAed(exp.amount),
+            thisMonth: formatAed(amt),
+            paidToDate: formatAed(0),
+            remaining: formatAed(exp.amount),
+            schedule: `${formatAed(amt)} x ${Math.max(1, Number(exp.duration) || 1)} months`,
+            thisMonthAmount: amt,
+        });
+    }
+
+    if (!loanSchedule.some((row) => row.type === 'Salary Advance')) loanSchedule.unshift(emptyLoanRow('Salary Advance'));
+    if (!loanSchedule.some((row) => row.type === 'Loan')) loanSchedule.push(emptyLoanRow('Loan'));
+
     let utilityMonth = 0;
     const utilities = [];
     for (const bill of utilityBills || []) {
-        if (monthKeyOf(bill.billMonth) !== ym && toYearMonth(bill.billMonth) !== ym) continue;
+        if (payableMonthKey(bill.billMonth) !== ym) continue;
         const excess = Number(bill.employeeDiffAmount);
         const pay = Number(bill.employeePayAmount);
         const amount =
@@ -596,27 +832,21 @@ export async function buildSalarySlipPayload({ employeeId, monthKey, emp: preloa
     const deductions = [
         { component: 'Authorized Leave', basis: qtyLabel(authorizedDeductionDays, 'day'), amount: authorizedAmount },
         { component: 'Unauthorized Leave', basis: qtyLabel(unauthorizedDays, 'day'), amount: unauthorizedAmount },
+        { component: 'Sick Leave', basis: qtyLabel(sickDays, 'day'), amount: sickAmount },
         { component: 'Annual Leave', basis: qtyLabel(annualDays, 'day'), amount: annualAmount },
         { component: 'Late Arrival', basis: qtyLabel(lateEvents, 'event'), amount: lateAmount },
         { component: 'Salary Advance', basis: 'Schedule', amount: advanceMonth },
         { component: 'Loan', basis: 'Monthly', amount: loanMonth },
+        { component: 'Fine', basis: 'Installment', amount: fineMonth },
+        { component: 'Utility Excess', basis: utilities[0]?.details || 'Mobile', amount: utilityMonth },
     ];
-    if (fineMonth > 0) {
-        const firstFine = fineRows[0];
-        deductions.push({
-            component: firstFine?.type ? `Fine - ${firstFine.type}` : 'Fine',
-            basis: 'Installment',
-            amount: fineMonth,
-        });
-    } else {
-        deductions.push({ component: 'Fine', basis: 'Installment', amount: 0 });
-    }
-    deductions.push({ component: 'Utility Excess', basis: utilities[0]?.details || 'Mobile', amount: utilityMonth });
 
     const grossEarnings = money(earnings.reduce((sum, row) => sum + money(row.amount), 0));
     const totalDeductions = money(deductions.reduce((sum, row) => sum + money(row.amount), 0));
     const netSalary = money(Math.max(0, grossEarnings - totalDeductions));
-    const attendanceDeductionTotal = money(authorizedAmount + unauthorizedAmount + annualAmount + lateAmount);
+    const attendanceDeductionTotal = money(
+        authorizedAmount + unauthorizedAmount + sickAmount + annualAmount + lateAmount,
+    );
 
     const attendanceDeductions = [
         {
@@ -638,6 +868,17 @@ export async function buildSalarySlipPayload({ employeeId, monthKey, emp: preloa
             total: unauthorizedAmount,
         },
         {
+            category: 'Sick Leave',
+            qty: qtyLabel(sickDays, 'day'),
+            rate: formatAed(daily),
+            calculation: unpaidSickDays > 0
+                ? `${qtyLabel(unpaidSickDays, 'day')} unpaid x ${formatAed(daily)}`
+                : sickDays > 0
+                    ? 'Paid sick leave — no deduction'
+                    : 'No deduction for this month',
+            total: sickAmount,
+        },
+        {
             category: 'Annual Leave',
             qty: qtyLabel(annualDays, 'day'),
             rate: formatAed(annualDays > 0 ? daily : 0),
@@ -655,7 +896,7 @@ export async function buildSalarySlipPayload({ employeeId, monthKey, emp: preloa
         },
     ];
 
-    return {
+    const payload = {
         enabled: Boolean(profile?.salarySlip),
         logoDataUrl: getVegaLogoDataUrl(),
         companyName: companyNameOf(emp),
@@ -676,6 +917,8 @@ export async function buildSalarySlipPayload({ employeeId, monthKey, emp: preloa
             compOffLeave: qtyLabel(compOffDays, 'day'),
         },
         earnings,
+        yearlyEarnings,
+        yearlyGrossEarnings,
         deductions,
         grossEarnings,
         totalDeductions,
@@ -698,5 +941,249 @@ export async function buildSalarySlipPayload({ employeeId, monthKey, emp: preloa
             verifiedTotal: totalDeductions,
         },
         fileName: `Salary-Slip-${ym}-${code}.pdf`,
+    };
+
+    if (!skipOverride) {
+        try {
+            const stored = await SalarySlipMonth.findOne({ employeeId: code, monthKey: ym })
+                .select('slip')
+                .lean();
+            if (stored?.slip) {
+                return preferLiveComputed(applySalarySlipOverride(payload, stored.slip), payload);
+            }
+        } catch (error) {
+            console.error('[buildSalarySlipPayload] override', error?.message || error);
+        }
+    }
+    return payload;
+}
+
+export function serializeSalarySlipForClient(slip) {
+    if (!slip) return null;
+    const { logoDataUrl, ...rest } = slip;
+    return rest;
+}
+
+function rowNameKey(row) {
+    return String(row?.component || row?.type || '').trim().toLowerCase();
+}
+
+function mergeAmountRows(stored, live) {
+    const liveRows = Array.isArray(live) ? live : [];
+    const storedRows = Array.isArray(stored) ? stored : [];
+    const liveByKey = new Map(liveRows.map((row) => [rowNameKey(row), row]));
+    const used = new Set();
+    const merged = storedRows.map((row) => {
+        const liveRow = liveByKey.get(rowNameKey(row));
+        if (!liveRow) return row;
+        used.add(rowNameKey(row));
+        if (money(row.amount) > 0) return row;
+        if (money(liveRow.amount) <= 0) return { ...row, basis: row.basis || liveRow.basis };
+        return { ...row, amount: liveRow.amount, basis: row.basis || liveRow.basis };
+    });
+    for (const row of liveRows) {
+        if (!used.has(rowNameKey(row)) && !merged.some((item) => rowNameKey(item) === rowNameKey(row))) {
+            merged.push(row);
+        }
+    }
+    return merged;
+}
+
+function preferLiveComputed(merged, live) {
+    if (!merged) return live;
+    if (!live) return merged;
+    return recalcSalarySlip({
+        ...merged,
+        earnings: mergeAmountRows(merged.earnings, live.earnings),
+        yearlyEarnings: mergeAmountRows(merged.yearlyEarnings, live.yearlyEarnings),
+        deductions: mergeAmountRows(merged.deductions, live.deductions),
+        attendance: { ...(merged.attendance || {}), ...(live.attendance || {}) },
+        loanSchedule: Array.isArray(live.loanSchedule) ? live.loanSchedule : merged.loanSchedule,
+        fines: Array.isArray(live.fines) ? live.fines : merged.fines,
+        utilities: Array.isArray(live.utilities) ? live.utilities : merged.utilities,
+        attendanceDeductions: Array.isArray(live.attendanceDeductions)
+            ? live.attendanceDeductions
+            : merged.attendanceDeductions,
+    });
+}
+
+function deductionKey(name) {
+    return String(name || '').trim().toLowerCase();
+}
+
+function deductionMatches(component, name) {
+    const a = deductionKey(component);
+    const b = deductionKey(name);
+    if (!a || !b) return false;
+    if (a === b) return true;
+    if (b === 'fine' && a.startsWith('fine')) return true;
+    if (b === 'utility excess' && a.includes('utility')) return true;
+    if (b === 'sick leave' && (a === 'sick' || a.startsWith('sick'))) return true;
+    if (b === 'phone allowance' && a.includes('phone')) return true;
+    return false;
+}
+
+function setDeductionAmount(rows, name, amount) {
+    const list = Array.isArray(rows) ? rows.map((row) => ({ ...row })) : [];
+    const idx = list.findIndex((row) => deductionMatches(row.component, name));
+    if (idx >= 0) {
+        list[idx] = { ...list[idx], amount: money(amount) };
+        return list;
+    }
+    return list;
+}
+
+function pushDetailsIntoDeductions(slip) {
+    let deductions = Array.isArray(slip.deductions) ? slip.deductions.map((row) => ({ ...row })) : [];
+    for (const row of slip.attendanceDeductions || []) {
+        deductions = setDeductionAmount(deductions, row.category, row.total);
+    }
+    for (const loan of slip.loanSchedule || []) {
+        deductions = setDeductionAmount(deductions, loan.type, loan.thisMonthAmount ?? loan.thisMonth);
+    }
+    const fineTotal = (slip.fines || []).reduce(
+        (sum, row) => sum + money(row.thisMonthAmount ?? row.thisMonth),
+        0,
+    );
+    if (fineTotal > 0 || (slip.fines || []).length) {
+        deductions = setDeductionAmount(deductions, 'Fine', fineTotal);
+    }
+    const utilTotal = (slip.utilities || []).reduce((sum, row) => sum + money(row.total ?? row.amount), 0);
+    deductions = setDeductionAmount(deductions, 'Utility Excess', utilTotal);
+    return { ...slip, deductions };
+}
+
+/**
+ * Recompute totals that depend on earnings / deductions / detail rows.
+ */
+export function recalcSalarySlip(slip) {
+    if (!slip) return slip;
+    const earnings = (slip.earnings || []).map((row) => ({ ...row, amount: money(row.amount) }));
+    const yearlyEarnings = (slip.yearlyEarnings || []).map((row) => ({
+        ...row,
+        amount: money(row.amount),
+    }));
+    const deductions = (slip.deductions || []).map((row) => ({ ...row, amount: money(row.amount) }));
+    const grossEarnings = money(earnings.reduce((sum, row) => sum + money(row.amount), 0));
+    const yearlyGrossEarnings = money(yearlyEarnings.reduce((sum, row) => sum + money(row.amount), 0));
+    const totalDeductions = money(deductions.reduce((sum, row) => sum + money(row.amount), 0));
+    const netSalary = money(Math.max(0, grossEarnings - totalDeductions));
+    const attendanceDeductions = (slip.attendanceDeductions || []).map((row) => ({
+        ...row,
+        total: money(row.total),
+    }));
+    const attendanceDeductionTotal = money(
+        attendanceDeductions.reduce((sum, row) => sum + money(row.total), 0),
+    );
+    const loanSchedule = (slip.loanSchedule || []).map((row) => {
+        const thisMonthAmount = money(row.thisMonthAmount ?? row.thisMonth);
+        return { ...row, thisMonthAmount, thisMonth: formatAed(thisMonthAmount) };
+    });
+    const fines = (slip.fines || []).map((row) => {
+        const thisMonthAmount = money(row.thisMonthAmount ?? row.thisMonth);
+        return { ...row, thisMonthAmount, thisMonth: formatAed(thisMonthAmount) };
+    });
+    const utilities = (slip.utilities || []).map((row) => {
+        const total = money(row.total ?? row.amount);
+        return { ...row, total, amount: row.amount || formatAed(total) };
+    });
+    const salaryAdvance = money(
+        loanSchedule
+            .filter((row) => /advance/i.test(String(row.type || '')))
+            .reduce((sum, row) => sum + money(row.thisMonthAmount), 0),
+    );
+    const loan = money(
+        loanSchedule
+            .filter((row) => !/advance/i.test(String(row.type || '')))
+            .reduce((sum, row) => sum + money(row.thisMonthAmount), 0),
+    );
+    const fine = money(fines.reduce((sum, row) => sum + money(row.thisMonthAmount), 0));
+    const utilityExcess = money(utilities.reduce((sum, row) => sum + money(row.total), 0));
+    return {
+        ...slip,
+        earnings,
+        yearlyEarnings,
+        yearlyGrossEarnings,
+        deductions,
+        attendanceDeductions,
+        attendanceDeductionTotal,
+        loanSchedule,
+        fines,
+        utilities,
+        grossEarnings,
+        totalDeductions,
+        netSalary,
+        amountInWords: amountInWordsAed(netSalary),
+        reconciliation: {
+            attendance: attendanceDeductionTotal,
+            salaryAdvance,
+            loan,
+            fine,
+            utilityExcess,
+            verifiedTotal: totalDeductions,
+        },
+    };
+}
+
+export function applySalarySlipOverride(live, stored) {
+    if (!live) return stored || null;
+    if (!stored) return live;
+    const merged = {
+        ...live,
+        attendance: { ...(live.attendance || {}), ...(stored.attendance || {}) },
+        earnings: Array.isArray(stored.earnings) ? stored.earnings : live.earnings,
+        yearlyEarnings: Array.isArray(stored.yearlyEarnings) ? stored.yearlyEarnings : live.yearlyEarnings,
+        deductions: Array.isArray(stored.deductions) ? stored.deductions : live.deductions,
+        paymentMethod: stored.paymentMethod ?? live.paymentMethod,
+        paymentDate: stored.paymentDate ?? live.paymentDate,
+        currency: stored.currency ?? live.currency,
+        slipRef: stored.slipRef || live.slipRef,
+        attendanceDeductions: Array.isArray(stored.attendanceDeductions)
+            ? stored.attendanceDeductions
+            : live.attendanceDeductions,
+        loanSchedule: Array.isArray(stored.loanSchedule) ? stored.loanSchedule : live.loanSchedule,
+        fines: Array.isArray(stored.fines) ? stored.fines : live.fines,
+        utilities: Array.isArray(stored.utilities) ? stored.utilities : live.utilities,
+    };
+    return recalcSalarySlip(merged);
+}
+
+export function applySalarySlipSectionPatch(slip, section, updater) {
+    const draft = updater(JSON.parse(JSON.stringify(slip || {})));
+    const fromDetails = new Set(['attendanceDeductions', 'loans', 'fines', 'utilities']);
+    const synced = fromDetails.has(section) ? pushDetailsIntoDeductions(draft) : draft;
+    return recalcSalarySlip(synced);
+}
+
+const EXTRA_EARNING = /overtime|leave salary|ticket|reward/i;
+
+function moneyOrZero(value) {
+    return money(value);
+}
+
+/**
+ * Compact row for the enroll Salary slip tab (processed months list).
+ */
+export function summarizeSalarySlipListRow(slip) {
+    const ym = monthKeyOf(slip?.monthKey);
+    const match = String(ym || '').match(/^(\d{4})-(\d{2})$/);
+    const year = match ? Number(match[1]) : 0;
+    const monthName = match ? MONTH_FULL[Number(match[2]) - 1] || match[2] : '';
+    const extra = moneyOrZero(
+        (slip?.earnings || []).reduce((sum, row) => {
+            if (!EXTRA_EARNING.test(String(row?.component || ''))) return sum;
+            return sum + moneyOrZero(row?.amount);
+        }, 0),
+    );
+    const gross = moneyOrZero(slip?.grossEarnings);
+    return {
+        monthKey: ym,
+        month: monthName,
+        year,
+        salary: moneyOrZero(gross - extra),
+        extra,
+        deduction: moneyOrZero(slip?.totalDeductions),
+        totalSalary: moneyOrZero(slip?.netSalary),
+        type: /wps/i.test(String(slip?.paymentMethod || '')) ? 'WPS' : 'Cash',
     };
 }

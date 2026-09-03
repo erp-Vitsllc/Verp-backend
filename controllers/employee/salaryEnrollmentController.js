@@ -83,10 +83,16 @@ export async function getSalaryEnrollOptions(req, res) {
             if (!key) continue;
             const mol = String(row.companyMolCode || '').trim();
             if (mol && !molByKey.has(key)) molByKey.set(key, mol);
-            if (String(row.workflowStatus || '') === 'locked' && !enrollmentByKey.has(key)) {
+            const verpMonth = String(row.verpStartDate || '').slice(0, 7);
+            const prev = enrollmentByKey.get(key);
+            if (prev && /^\d{4}-\d{2}$/.test(verpMonth)) {
+                enrollmentByKey.set(key, { ...prev, fromMonth: verpMonth });
+                continue;
+            }
+            if (String(row.workflowStatus || '') === 'locked' && !prev) {
                 enrollmentByKey.set(key, {
                     ...row,
-                    fromMonth: String(row.verpStartDate || '').slice(0, 7),
+                    fromMonth: verpMonth,
                 });
             }
         }

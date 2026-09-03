@@ -49,6 +49,11 @@ export async function createAdminDeletionArchiveFromDeletion(req, opts = {}) {
     const attachmentCount = preservedAvailable || countDeletionAttachments(snapshot);
 
     const deletedAt = new Date();
+    const retentionDaysRaw = Number(opts.retentionDays);
+    const retentionDays =
+        Number.isFinite(retentionDaysRaw) && retentionDaysRaw > 0
+            ? retentionDaysRaw
+            : ADMIN_DELETION_ARCHIVE_RETENTION_DAYS;
     const doc = await AdminDeletionArchive.create({
         _id: archiveId,
         topModule: meta.topModule || 'other',
@@ -65,7 +70,8 @@ export async function createAdminDeletionArchiveFromDeletion(req, opts = {}) {
         deletedBy: deletedByFromReq(req),
         status: 'pending',
         deletedAt,
-        expiresAt: computeArchiveExpiresAt(deletedAt),
+        retentionDays,
+        expiresAt: computeArchiveExpiresAt(deletedAt, retentionDays),
         attachmentCount,
         preservedAttachments,
     });
@@ -115,7 +121,7 @@ export async function getArchiveTree() {
         expiresAt: { $gt: now },
     })
         .select(
-            'topModule category title subtitle recordId moduleName deletedAt entityType expiresAt attachmentCount status snapshot'
+            'topModule category title subtitle recordId moduleName deletedAt entityType expiresAt retentionDays attachmentCount status snapshot'
         )
         .sort({ deletedAt: -1 })
         .lean();
@@ -207,7 +213,7 @@ export async function restoreArchiveById(id, req) {
     if (isArchiveExpired(archive)) {
         await purgeExpiredAdminDeletionArchives();
         throw new Error(
-            `This record exceeded the ${ADMIN_DELETION_ARCHIVE_RETENTION_DAYS}-day recovery period and was permanently removed.`,
+            `This record exceeded the ${archive.retentionDays || ADMIN_DELETION_ARCHIVE_RETENTION_DAYS}-day recovery period and was permanently removed.`,
         );
     }
 
