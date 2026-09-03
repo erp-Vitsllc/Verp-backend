@@ -79,6 +79,14 @@ import { sendAssetCreationDecisionEmail, sendAssetCreatedByAdminInfoEmail } from
 import { notifyAssetCreationRejectedToCreator } from '../utils/notifyAssetCreationRejectedToCreator.js';
 import { notifyLossDamageRejectedToRequester } from '../utils/notifyLossDamageRejectedToRequester.js';
 import { resolveAssetCreatorEmployee } from '../utils/assetApprovalHelpers.js';
+import {
+    assigneeHasCompanyEmailOnRecord,
+    NO_PORTAL_NO_REPORTEE_OWNER_APPROVAL_MESSAGE,
+    resolveOwnerTransferApprover,
+    applyOwnerTransferApproverHealToAsset,
+    healMisroutedOwnerTransferApprovals,
+    buildPendingActionWaitingDisplay,
+} from '../utils/assetOwnerTransferApprover.js';
 import { hasPermission, isUserAdministrator } from '../services/permissionService.js';
 import { collectAssetDocumentIdsForDeletion } from '../utils/assetDocumentDeletion.js';
 import {
@@ -676,9 +684,6 @@ const buildAssetActionApprovalHandoverAttachments = async (req, assets) => {
     });
 };
 
-const assigneeHasCompanyEmailOnRecord = (emp) =>
-    !!(emp?.companyEmail && String(emp.companyEmail).trim().length > 0);
-
 /**
  * Can the assignee Accept in ERP themselves?
  * Rule: Active User account with portal enabled → assignee gets Accept / "Waiting for {assignee}".
@@ -883,200 +888,7 @@ const resolveEmployeeAssignmentActors = async (employeeToAssign, assignerEmpObje
 const NO_PORTAL_NO_REPORTEE_ASSIGN_MESSAGE =
     'This employee has no user account, and no primary reportee. Set a primary reportee (with a login) on their profile before assigning — otherwise Accept waits forever on someone who cannot log in.';
 
-const NO_PORTAL_NO_REPORTEE_OWNER_APPROVAL_MESSAGE =
-    'This assigned employee has no user account, and no primary reportee. Set a primary reportee (with a login) on their profile before sending Leave / End of Services — otherwise approval waits forever on someone who cannot log in.';
-
-const findActiveUserForEmployee = async (emp) => {
-    const empId = emp?.employeeId ? String(emp.employeeId).trim() : '';
-    if (!empId) return null;
-    const escaped = empId.replace(/[.*+?^${}()|[\]\\]/g, '\\$&').replace(/\s+/g, '\\s*');
-    return User.findOne({
-        employeeId: { $regex: new RegExp(`^${escaped}$`, 'i') },
-        status: 'Active',
-    })
-        .select('enablePortalAccess employeeId')
-        .lean()
-        .catch(() => null);
-};
-
-/** Leave / AC-return: employee can approve only if they can log in AND have a company email. */
-const assigneeCanSelfApproveOwnerTransfer = async (emp) => {
-    if (!emp) return false;
-    if (emp.enablePortalAccess === false) return false;
-    if (!assigneeHasCompanyEmailOnRecord(emp)) return false;
-    const linkedUser = await findActiveUserForEmployee(emp);
-    if (!linkedUser) return false;
-    return linkedUser.enablePortalAccess !== false;
-};
-
-const loadOwnerActionApproverDoc = async (empRef) => {
-    const id = empRef?._id || empRef;
-    if (!id) return null;
-    return EmployeeBasic.findById(id)
-        .select('_id employeeId firstName lastName companyEmail workEmail enablePortalAccess')
-        .lean()
-        .catch(() => null);
-};
-
-/**
- * When Asset Controller sends Leave / End of Services / Return to the holder:
- * holder with login + company email approves; otherwise primary reportee approves.
- */
-const resolveOwnerTransferApprover = async (ownerEmp) => {
-    const ownerId = ownerEmp?._id || ownerEmp;
-    if (!ownerId) {
-        return { ok: false, message: 'Asset has no assigned owner to approve this transfer.' };
-    }
-
-    const ownerDoc = await EmployeeBasic.findById(ownerId)
-        .select(
-            '_id employeeId firstName lastName companyEmail workEmail enablePortalAccess primaryReportee',
-        )
-        .populate(
-            'primaryReportee',
-            '_id employeeId firstName lastName companyEmail workEmail enablePortalAccess',
-        )
-        .lean()
-        .catch(() => null);
-    if (!ownerDoc?._id) {
-        return { ok: false, message: 'Asset has no assigned owner to approve this transfer.' };
-    }
-
-    if (await assigneeCanSelfApproveOwnerTransfer(ownerDoc)) {
-        const approver = await loadOwnerActionApproverDoc(ownerDoc);
-        return { ok: true, approver: approver || ownerDoc, delegatedFromOwner: false, owner: ownerDoc };
-    }
-
-    const pr = ownerDoc.primaryReportee;
-    const prId = pr?._id || pr;
-    if (!prId) {
-        return { ok: false, message: NO_PORTAL_NO_REPORTEE_OWNER_APPROVAL_MESSAGE };
-    }
-    const approver = await loadOwnerActionApproverDoc(prId);
-    if (!approver?._id) {
-        return { ok: false, message: NO_PORTAL_NO_REPORTEE_OWNER_APPROVAL_MESSAGE };
-    }
-    return {
-        ok: true,
-        approver,
-        delegatedFromOwner: true,
-        owner: ownerDoc,
-    };
-};
-
-const OWNER_TRANSFER_PENDING_ACTIONS = new Set(['Leave', 'Return Asset']);
-
-const looksLikeOwnerTransferApproval = (asset) => {
-    if (!OWNER_TRANSFER_PENDING_ACTIONS.has(String(asset?.pendingAction || ''))) return false;
-    if (!asset?.assignedTo) return false;
-    const role = String(asset.pendingActionDetails?.requestedByRole || '').toLowerCase();
-    if (role === 'assignee' || role === 'companycoordinator') return false;
-    const ownerId = asset.assignedTo?._id?.toString?.() || asset.assignedTo?.toString?.() || '';
-    const requestedById =
-        asset.pendingActionDetails?.requestedBy?._id?.toString?.() ||
-        asset.pendingActionDetails?.requestedBy?.toString?.() ||
-        '';
-    if (requestedById && ownerId && requestedById === ownerId) return false;
-    if (role === 'assetcontroller' || role === 'admin') return true;
-    return true;
-};
-
-const applyOwnerTransferApproverHealToAsset = async (asset) => {
-    if (!looksLikeOwnerTransferApproval(asset)) return false;
-    const ownerResolved = await resolveOwnerTransferApprover(asset.assignedTo);
-    if (!ownerResolved.ok || !ownerResolved.approver?._id) return false;
-    const expectedId = ownerResolved.approver._id.toString();
-    const currentAr =
-        asset.actionRequiredBy?._id?.toString?.() ||
-        asset.actionRequiredBy?.toString?.() ||
-        '';
-    const delegated = ownerResolved.delegatedFromOwner === true;
-    const flagNeedsHeal = delegated && asset.pendingActionDetails?.ownerApprovalDelegated !== true;
-    const nameNeedsHeal = !String(asset.pendingActionDetails?.waitingForName || '').trim();
-    if (currentAr === expectedId && !flagNeedsHeal && !nameNeedsHeal) return false;
-
-    const rawDetails = asset.pendingActionDetails;
-    const detailsBase =
-        rawDetails && typeof rawDetails === 'object'
-            ? typeof rawDetails.toObject === 'function'
-                ? rawDetails.toObject()
-                : { ...rawDetails }
-            : {};
-    const waitingName =
-        `${ownerResolved.approver.firstName || ''} ${ownerResolved.approver.lastName || ''}`.trim() ||
-        (ownerResolved.approver.employeeId ? String(ownerResolved.approver.employeeId) : '');
-    const nextDetails = {
-        ...detailsBase,
-        ownerApprovalDelegated: delegated,
-        waitingForId: ownerResolved.approver._id,
-        waitingForName: waitingName,
-    };
-    delete nextDetails._id;
-
-    await AssetItem.updateOne(
-        { _id: asset._id },
-        {
-            $set: {
-                actionRequiredBy: expectedId,
-                pendingActionDetails: nextDetails,
-            },
-        },
-    );
-    asset.actionRequiredBy = ownerResolved.approver;
-    asset.pendingActionDetails = nextDetails;
-
-    const dashFilter = {
-        requestId: asset._id,
-        status: 'Pending',
-        $or: [
-            { requestType: { $in: ['Asset Leave', 'Asset Return'] } },
-            { extra2: { $in: ['Leave', 'Return Asset'] } },
-        ],
-    };
-    await DashboardAction.updateMany(dashFilter, {
-        $set: {
-            assignedTo: expectedId,
-            ...(ownerResolved.approver.employeeId
-                ? { assignedToEmpId: ownerResolved.approver.employeeId }
-                : {}),
-        },
-    }).catch(() => null);
-
-    if (currentAr !== expectedId) {
-        await sendAssetActionApprovalEmail(
-            asset,
-            String(asset.pendingAction || 'Leave'),
-            ownerResolved.approver,
-            { name: 'Asset Controller' },
-            asset.pendingActionDetails?.reason || '',
-            [],
-        ).catch(() => null);
-    }
-    return true;
-};
-
-/** Re-route AC-raised Leave / Return sitting on a holder who cannot log in onto their primary reportee. */
-export const healMisroutedOwnerTransferApprovals = async () => {
-    try {
-        const pendingAssets = await AssetItem.find({
-            pendingAction: { $in: ['Leave', 'Return Asset'] },
-            assignedTo: { $ne: null },
-        })
-            .select('assetId pendingAction pendingActionDetails actionRequiredBy assignedTo')
-            .populate({
-                path: 'assignedTo',
-                select: '_id employeeId firstName lastName enablePortalAccess primaryReportee companyEmail workEmail',
-                populate: { path: 'primaryReportee', select: '_id employeeId firstName lastName' },
-            })
-            .limit(200)
-            .lean();
-        for (const asset of pendingAssets) {
-            await applyOwnerTransferApproverHealToAsset(asset);
-        }
-    } catch {
-        /* non-fatal */
-    }
-};
+export { healMisroutedOwnerTransferApprovals };
 
 const empAckDisplayName = (emp) => {
     if (!emp || typeof emp !== 'object') return '';
@@ -6596,6 +6408,13 @@ export const getAssetItemDetail = async (req, res) => {
         } else {
             itemObj.assetController = null;
             itemObj.assetControllerId = null;
+        }
+
+        if (itemObj.pendingAction) {
+            const waiting = buildPendingActionWaitingDisplay(itemObj, itemObj.assetController);
+            itemObj.waitingForName = waiting.waitingForName;
+            itemObj.waitingForKind = waiting.waitingForKind;
+            itemObj.waitingForId = waiting.waitingForId;
         }
 
         // Role-based creation approver (current flowchart holder) — used for the banner so the UI shows

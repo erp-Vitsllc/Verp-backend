@@ -5,6 +5,10 @@ import AssetHistory from '../models/AssetHistory.js';
 import DashboardAction from '../models/DashboardAction.js';
 import { getDepartmentHOD, isUserInFlowchart } from '../utils/getDepartmentHOD.js';
 import { isUserAdministrator } from '../services/permissionService.js';
+import {
+    healMisroutedOwnerTransferApprovals,
+    buildPendingActionWaitingDisplay,
+} from '../utils/assetOwnerTransferApprover.js';
 import { isJwtSystemSuperUser } from '../utils/systemSuperUser.js';
 import mongoose from 'mongoose';
 import { uploadDocumentToS3, signOrKeepAttachmentUrl, persistStoredAttachmentValue, normalizeS3Key } from '../utils/s3Upload.js';
@@ -794,6 +798,15 @@ function mapToolsListAssetRow(a, designatedAssetController) {
         onLeaveEndDate: a.onLeaveEndDate,
         onLeaveDuration: a.onLeaveDuration,
         services: [],
+        ...(() => {
+            if (!a.pendingAction) return {};
+            const waiting = buildPendingActionWaitingDisplay(a, designatedAssetController);
+            return {
+                waitingForName: waiting.waitingForName,
+                waitingForKind: waiting.waitingForKind,
+                waitingForId: waiting.waitingForId,
+            };
+        })(),
     };
 }
 
@@ -820,10 +833,9 @@ function mapToolsCatalogRows(categories, types, typeCategoryCounts) {
 
 async function loadToolsAssetUnifiedList(req, toolsView) {
     try {
-        const { healMisroutedOwnerTransferApprovals } = await import('./assetItemController.js');
         await healMisroutedOwnerTransferApprovals();
-    } catch {
-        /* non-fatal */
+    } catch (err) {
+        console.error('[AssetType] owner-transfer heal failed:', err?.message || err);
     }
     const uid = req.user?._id || req.user?.id;
     const employeeObjectId = await resolveToolsListEmployeeObjectId(req);
@@ -838,7 +850,7 @@ async function loadToolsAssetUnifiedList(req, toolsView) {
         .populate('assignedCompany', 'name nickName companyId companyEmail')
         .populate({
             path: 'assignedTo',
-            select: 'firstName lastName employeeId enablePortalAccess department primaryReportee reportingAuthority',
+            select: 'firstName lastName employeeId enablePortalAccess companyEmail department primaryReportee reportingAuthority',
             populate: [
                 { path: 'primaryReportee', select: 'firstName lastName employeeId' },
                 { path: 'reportingAuthority', select: 'firstName lastName' },
@@ -882,6 +894,7 @@ async function loadToolsAssetUnifiedList(req, toolsView) {
         const ln = flowAc.lastName ?? flowAc.employeeName?.split(/\s+/).slice(1).join(' ');
         if (fn || ln || flowAc.employeeId) {
             designatedAssetController = {
+                _id: flowAc._id || null,
                 firstName: fn || 'Unknown',
                 lastName: ln || '',
                 employeeId: flowAc.employeeId,
@@ -977,7 +990,7 @@ export const getAssetTypes = async (req, res) => {
                 .populate('assignedCompany', 'name nickName companyId companyEmail')
                 .populate({
                     path: 'assignedTo',
-                    select: 'firstName lastName employeeId enablePortalAccess department primaryReportee reportingAuthority',
+                    select: 'firstName lastName employeeId enablePortalAccess companyEmail department primaryReportee reportingAuthority',
                     populate: [
                         { path: 'primaryReportee', select: 'firstName lastName employeeId' },
                         { path: 'reportingAuthority', select: 'firstName lastName' }
@@ -992,6 +1005,7 @@ export const getAssetTypes = async (req, res) => {
                 const ln = flowAc.lastName ?? flowAc.employeeName?.split(/\s+/).slice(1).join(' ');
                 if (fn || ln || flowAc.employeeId) {
                     designatedAssetController = {
+                        _id: flowAc._id || null,
                         firstName: fn || 'Unknown',
                         lastName: ln || '',
                         employeeId: flowAc.employeeId
@@ -1217,6 +1231,16 @@ export const getAssetTypes = async (req, res) => {
                             onLeaveEndDate: a.onLeaveEndDate,
                             onLeaveDuration: a.onLeaveDuration,
                             services: Array.isArray(a.services) ? a.services : [],
+                            ...(a.pendingAction
+                                ? (() => {
+                                    const waiting = buildPendingActionWaitingDisplay(a, designatedAssetController);
+                                    return {
+                                        waitingForName: waiting.waitingForName,
+                                        waitingForKind: waiting.waitingForKind,
+                                        waitingForId: waiting.waitingForId,
+                                    };
+                                })()
+                                : {}),
                         };
                     }),
                 ),
