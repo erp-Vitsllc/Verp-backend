@@ -819,6 +819,12 @@ function mapToolsCatalogRows(categories, types, typeCategoryCounts) {
 }
 
 async function loadToolsAssetUnifiedList(req, toolsView) {
+    try {
+        const { healMisroutedOwnerTransferApprovals } = await import('./assetItemController.js');
+        await healMisroutedOwnerTransferApprovals();
+    } catch {
+        /* non-fatal */
+    }
     const uid = req.user?._id || req.user?.id;
     const employeeObjectId = await resolveToolsListEmployeeObjectId(req);
     const includeCatalog = toolsView !== 'rest';
