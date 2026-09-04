@@ -1,7 +1,7 @@
 import nodemailer from 'nodemailer';
 import AssetItem from '../models/AssetItem.js';
 import { getDepartmentHOD } from './getDepartmentHOD.js';
-import { resolveEmployeeEmailTargets } from './resolveEmployeeEmail.js';
+import { resolveEmployeeEmail } from './resolveEmployeeEmail.js';
 import { buildAcceptedAssetHandoverAttachments } from './buildAssignmentHandoverEmailAttachments.js';
 import { normalizePdfAttachments } from './normalizeEmailAttachments.js';
 

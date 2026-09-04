@@ -85,6 +85,7 @@ import {
     resolveOwnerTransferApprover,
     applyOwnerTransferApproverHealToAsset,
     healMisroutedOwnerTransferApprovals,
+    healStuckPendingLeaveAsset,
     buildPendingActionWaitingDisplay,
 } from '../utils/assetOwnerTransferApprover.js';
 import { hasPermission, isUserAdministrator } from '../services/permissionService.js';
@@ -5229,6 +5230,14 @@ export const getAssetItemDetail = async (req, res) => {
             return res.status(404).json({ message: 'Asset not found' });
         }
 
+        if (!skipInlineWriteHeals && String(item.pendingAction || '') === 'Leave' && typeof item.save === 'function') {
+            try {
+                await healStuckPendingLeaveAsset(item);
+            } catch (leaveHealErr) {
+                console.error('[getAssetItemDetail] pending leave heal failed:', leaveHealErr?.message || leaveHealErr);
+            }
+        }
+
         // ─── LIGHT FAST PATH ─────────────────────────────────────────────────
         // Vehicle / oil / service pages use ?light=1 for first paint. Return a
         // trimmed shell immediately — no heals, no S3, no flowchart HOD fan-out
@@ -9598,12 +9607,28 @@ export const bulkRespondToAssignment = async (req, res) => {
             return res.status(400).json({ message: 'Invalid action. Must be "Accept" or "Reject"' });
         }
 
+        const validIds = [...new Set(
+            assetIds
+                .map((id) => String(id || '').trim())
+                .filter((id) => {
+                    if (!mongoose.Types.ObjectId.isValid(id)) return false;
+                    try {
+                        return new mongoose.Types.ObjectId(id).toString() === id;
+                    } catch {
+                        return false;
+                    }
+                }),
+        )];
+        if (!validIds.length) {
+            return res.status(400).json({ message: 'No valid asset IDs were provided.' });
+        }
+
         const { isElevatedAdmin, employeeObjectId, actorId } = await getAssignmentRespondActor(req);
         if (!employeeObjectId && !isElevatedAdmin) {
             return res.status(403).json({ message: 'You are not linked to an employee profile.' });
         }
         const currentUser = employeeObjectId || actorId;
-        const items = await AssetItem.find({ _id: { $in: assetIds } })
+        const items = await AssetItem.find({ _id: { $in: validIds } })
             .populate({
                 path: 'assignedTo',
                 select: 'employeeId companyEmail primaryReportee enablePortalAccess',
@@ -9612,6 +9637,7 @@ export const bulkRespondToAssignment = async (req, res) => {
             .populate('assignedBy assignedCompany');
 
         const results = { success: [], failed: [] };
+        const reassignmentNotifyIds = [];
 
         for (const item of items) {
             const bulkAssignGroupId = item.pendingActionDetails?.bulkAssignment?.groupId || null;
@@ -9741,15 +9767,19 @@ export const bulkRespondToAssignment = async (req, res) => {
 
                 // Clear every pending Accept task for this asset (not only the actor's row).
                 // Do not close bulk-assignment batch bells — those resolve with the whole group.
-                await DashboardAction.updateMany(
-                    pendingPerAssetAssignmentDashboardFilter(item._id),
-                    {
-                        status: action === 'Accept' ? 'Approved' : 'Rejected',
-                        actionedDate: new Date(),
-                        actionedBy: currentUser,
-                        comment: comments || 'Bulk Action',
-                    },
-                );
+                try {
+                    await DashboardAction.updateMany(
+                        pendingPerAssetAssignmentDashboardFilter(item._id),
+                        {
+                            status: action === 'Accept' ? 'Approved' : 'Rejected',
+                            actionedDate: new Date(),
+                            actionedBy: currentUser,
+                            comment: comments || 'Bulk Action',
+                        },
+                    );
+                } catch (dashErr) {
+                    console.error('bulkRespondToAssignment dashboard update:', dashErr);
+                }
 
                 if (bulkAssignGroupId) {
                     try {
@@ -9773,14 +9803,14 @@ export const bulkRespondToAssignment = async (req, res) => {
                 });
 
                 if (action === 'Accept' && priorAcceptedCountForReassign >= 1) {
-                    void notifyAssetControllerReassignmentAcceptedWithHandover(req, { assetMongoId: item._id });
-                    void notifyPreviousAssigneeReassignmentAcceptedWithHandover(req, { assetMongoId: item._id });
+                    reassignmentNotifyIds.push(item._id);
                 }
 
                 results.success.push(item.assetId);
 
             } catch (err) {
-                results.failed.push({ id: item.assetId, message: err.message });
+                console.error(`bulkRespondToAssignment item ${item?.assetId || item?._id}:`, err);
+                results.failed.push({ id: item.assetId, message: err.message || 'Failed to process this asset' });
             }
         }
 
@@ -9788,7 +9818,13 @@ export const bulkRespondToAssignment = async (req, res) => {
             message: `Processed ${items.length} assets: ${results.success.length} successful, ${results.failed.length} failed.`,
             results
         });
+
+        for (const mongoId of reassignmentNotifyIds) {
+            void notifyAssetControllerReassignmentAcceptedWithHandover(req, { assetMongoId: mongoId });
+            void notifyPreviousAssigneeReassignmentAcceptedWithHandover(req, { assetMongoId: mongoId });
+        }
     } catch (error) {
+        console.error('bulkRespondToAssignment:', error);
         res.status(500).json({
             message: error?.message || 'Server Error',
         });
@@ -16612,7 +16648,7 @@ export const handleAssetActionApproval = async (req, res) => {
                 (!!waitingForId && waitingForId === currentUserEmpId));
 
         const isAuthorized = isTransferLeaveEos
-            ? isDesignatedApprover || isAdmin
+            ? isDesignatedApprover || isAdmin || (actionType === 'Leave' && isAssetController)
             : asset.actionRequiredBy?.toString() === currentUserEmpId
             || isAdmin
             || isAssetController
@@ -16721,7 +16757,7 @@ export const handleAssetActionApproval = async (req, res) => {
             // Handle "Leave" and "End of Life" and "Return Asset" — designated approver (AC or asset owner)
             if (
                 (actionType === 'Leave' || actionType === 'End of Life' || actionType === 'Return Asset') &&
-                (isDesignatedApprover || isAdmin)
+                (isDesignatedApprover || isAdmin || (actionType === 'Leave' && isAssetController))
             ) {
                 const approverEmp = await EmployeeBasic.findById(req.user.employeeObjectId).select(
                     'firstName lastName companyEmail workEmail signature employeeId department',

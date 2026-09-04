@@ -4,7 +4,14 @@ import EmployeeBasic from '../models/EmployeeBasic.js';
 import User from '../models/User.js';
 import DashboardAction from '../models/DashboardAction.js';
 import { sendAssetActionApprovalEmail } from './sendAssetActionApprovalEmail.js';
-import { applyParkingLeaveStatus, applyLeavePackToCustodian } from './assetOperationalFlags.js';
+import {
+    applyParkingLeaveStatus,
+    applyLeavePackToCustodian,
+    isLeaveActive,
+    MAX_ASSET_LEAVE_DAYS,
+} from './assetOperationalFlags.js';
+import { getDepartmentHOD } from './getDepartmentHOD.js';
+import { resolveAssetControllerEmployee } from './assetApprovalHelpers.js';
 
 export const NO_PORTAL_NO_REPORTEE_OWNER_APPROVAL_MESSAGE =
     'This assigned employee has no user account, and no primary reportee. Set a primary reportee (with a login) on their profile before sending Leave / End of Services — otherwise approval waits forever on someone who cannot log in.';
@@ -194,41 +201,155 @@ export const applyOwnerTransferApproverHealToAsset = async (asset) => {
     return true;
 };
 
+const HOLDER_REQUESTED_LEAVE_ROLES = new Set(['assignee', 'companycoordinator']);
+
+const PENDING_LEAVE_OWNER_POPULATE = {
+    path: 'assignedTo',
+    select: 'firstName lastName employeeId primaryReportee companyEmail workEmail enablePortalAccess',
+    populate: {
+        path: 'primaryReportee',
+        select: 'firstName lastName employeeId companyEmail workEmail enablePortalAccess',
+    },
+};
+
+const resolvePendingLeaveDays = (asset) => {
+    const details = asset?.pendingActionDetails || {};
+    const candidates = [details.duration, details.leaveDuration, asset?.onLeaveDuration];
+    for (const raw of candidates) {
+        const n = Number(raw);
+        if (Number.isFinite(n) && n >= 1) {
+            return Math.min(Math.round(n), MAX_ASSET_LEAVE_DAYS);
+        }
+    }
+    return null;
+};
+
+const isWaitingOnAssignedHolder = (asset) => {
+    const arId = idStr(asset?.actionRequiredBy);
+    const ownerId = idStr(asset?.assignedTo);
+    return !!(arId && ownerId && arId === ownerId);
+};
+
+const pendingLeaveRequestedByHolder = (asset) =>
+    HOLDER_REQUESTED_LEAVE_ROLES.has(String(asset?.pendingActionDetails?.requestedByRole || '').toLowerCase());
+
+/**
+ * Old Leave requests waited on the assigned employee. New flow: AC Leave applies immediately.
+ * Auto-complete when AC/admin raised it, or it is still waiting on a holder who cannot log in.
+ * Do not auto-complete employee-raised Leave (that still waits on Asset Controller).
+ */
+export const shouldAutoCompletePendingLeave = async (asset) => {
+    if (!asset || String(asset.pendingAction || '') !== 'Leave') return false;
+    if (pendingLeaveRequestedByHolder(asset)) return false;
+    const role = String(asset.pendingActionDetails?.requestedByRole || '').toLowerCase();
+    if (role === 'assetcontroller' || role === 'admin') return true;
+    if (!isWaitingOnAssignedHolder(asset)) return false;
+    const canSelf = await assigneeCanSelfApproveOwnerTransfer(asset.assignedTo);
+    return !canSelf;
+};
+
+const collectPendingLeaveHealIds = (asset) => {
+    const ids = new Set();
+    const selfId = asset?._id ? String(asset._id) : '';
+    if (selfId) ids.add(selfId);
+    const bulk = asset?.pendingActionDetails?.bulkAssetIds;
+    if (Array.isArray(bulk)) {
+        for (const id of bulk) {
+            if (id) ids.add(String(id));
+        }
+    }
+    return [...ids];
+};
+
+const finalizePendingLeaveAsset = async (asset, days, acEmp) => {
+    if (!asset || String(asset.pendingAction || '') !== 'Leave') return false;
+    if (!days) return false;
+
+    if (!isLeaveActive(asset)) {
+        const applied = applyParkingLeaveStatus(asset, days);
+        if (!applied) return false;
+    }
+
+    let ownerForPack = asset.assignedTo;
+    if (ownerForPack && (!ownerForPack.primaryReportee || !ownerForPack.employeeId)) {
+        ownerForPack = await EmployeeBasic.findById(ownerForPack._id || ownerForPack)
+            .select('firstName lastName employeeId primaryReportee')
+            .populate('primaryReportee', 'firstName lastName employeeId companyEmail workEmail')
+            .lean()
+            .catch(() => null);
+    }
+    applyLeavePackToCustodian(asset, {
+        hodEmployee: ownerForPack?.primaryReportee || null,
+        assetControllerEmployee: acEmp,
+    });
+    asset.pendingAction = null;
+    asset.pendingActionDetails = null;
+    asset.actionRequiredBy = null;
+    if (asset.assignedTo || asset.assignedCompany) asset.status = 'Assigned';
+    await asset.save();
+    await DashboardAction.deleteMany({ requestId: asset._id, status: 'Pending' }).catch(() => null);
+    await AssetHistory.create({
+        assetId: asset._id,
+        action: 'On Leave',
+        comments: 'On Leave applied (legacy leave waiting on an employee with no login).',
+        date: new Date(),
+        details: { status: 'LegacyLeaveHeal', duration: days },
+    }).catch(() => null);
+    return true;
+};
+
+/** Apply On Leave for one stuck pending Leave row and any bulk siblings. */
+export const healStuckPendingLeaveAsset = async (asset, acEmp = null) => {
+    if (!asset || typeof asset.save !== 'function') return false;
+    if (!(await shouldAutoCompletePendingLeave(asset))) return false;
+
+    const days = resolvePendingLeaveDays(asset);
+    if (!days) return false;
+
+    let controllerEmp = acEmp;
+    if (!controllerEmp) {
+        const raw = await getDepartmentHOD('assetcontroller').catch(() => null);
+        controllerEmp = raw ? await resolveAssetControllerEmployee(raw).catch(() => null) : null;
+    }
+
+    const ids = collectPendingLeaveHealIds(asset);
+    let healedAny = await finalizePendingLeaveAsset(asset, days, controllerEmp);
+
+    const siblingIds = ids.filter((id) => id !== String(asset._id));
+    if (!siblingIds.length) return healedAny;
+
+    const siblings = await AssetItem.find({
+        _id: { $in: siblingIds },
+        pendingAction: 'Leave',
+    }).populate(PENDING_LEAVE_OWNER_POPULATE);
+
+    for (const sibling of siblings) {
+        if (!(await shouldAutoCompletePendingLeave(sibling))) continue;
+        const siblingDays = resolvePendingLeaveDays(sibling) || days;
+        const ok = await finalizePendingLeaveAsset(sibling, siblingDays, controllerEmp);
+        if (ok) healedAny = true;
+    }
+    return healedAny;
+};
+
 /** AC already submitted Leave — apply On Leave; do not wait on the holder. */
 export const healAcDirectPendingLeaves = async () => {
     try {
-        const pending = await AssetItem.find({
-            pendingAction: 'Leave',
-            'pendingActionDetails.requestedByRole': 'assetcontroller',
-        })
-            .populate({
-                path: 'assignedTo',
-                select: 'firstName lastName employeeId primaryReportee',
-                populate: { path: 'primaryReportee', select: 'firstName lastName employeeId' },
-            })
-            .limit(200);
+        const pending = await AssetItem.find({ pendingAction: 'Leave' })
+            .populate(PENDING_LEAVE_OWNER_POPULATE)
+            .limit(500);
+
+        if (!pending.length) return;
+
+        const raw = await getDepartmentHOD('assetcontroller').catch(() => null);
+        const acEmp = raw ? await resolveAssetControllerEmployee(raw).catch(() => null) : null;
+        const seen = new Set();
+
         for (const asset of pending) {
-            const days = Number(
-                asset.pendingActionDetails?.duration ?? asset.pendingActionDetails?.leaveDuration,
-            );
-            if (!Number.isInteger(days) || days < 1) continue;
-            applyParkingLeaveStatus(asset, days);
-            applyLeavePackToCustodian(asset, {
-                hodEmployee: asset.assignedTo?.primaryReportee || null,
-            });
-            asset.pendingAction = null;
-            asset.pendingActionDetails = null;
-            asset.actionRequiredBy = null;
-            if (asset.assignedTo || asset.assignedCompany) asset.status = 'Assigned';
-            await asset.save();
-            await DashboardAction.deleteMany({ requestId: asset._id, status: 'Pending' }).catch(() => null);
-            await AssetHistory.create({
-                assetId: asset._id,
-                action: 'On Leave',
-                comments: `On Leave applied (Asset Controller request; no further approval).`,
-                date: new Date(),
-                details: { status: 'AcDirectLeaveHeal', duration: days },
-            }).catch(() => null);
+            const key = String(asset._id);
+            if (seen.has(key)) continue;
+            for (const id of collectPendingLeaveHealIds(asset)) seen.add(id);
+            await healStuckPendingLeaveAsset(asset, acEmp);
         }
     } catch (err) {
         console.error('[assetOwnerTransferApprover] AC leave heal failed:', err?.message || err);
