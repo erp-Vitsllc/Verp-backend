@@ -39,6 +39,7 @@ import { activityAuditMiddleware } from "./middleware/activityAuditMiddleware.js
 import { resolveFrontendBaseUrl, runWithRequestFrontendBaseUrl } from "./utils/resolveFrontendBaseUrl.js";
 import dotenv from "dotenv";
 import { connectDB } from "./config/db.js";
+import http from "http";
 import dns from "dns";
 import { processParkingAssets } from "./utils/processParkingAssets.js";
 import { processTemporaryAssignments } from "./utils/processTemporaryAssignments.js";
@@ -356,6 +357,37 @@ app.use("/api/WorkLocation", workLocationRoute);
 
 const PORT = process.env.PORT || 5000;
 
+function listenHttp(host, port) {
+    return new Promise((resolve, reject) => {
+        const server = http.createServer(app);
+        const onError = (err) => {
+            server.off("listening", onListening);
+            reject(err);
+        };
+        const onListening = () => {
+            server.off("error", onError);
+            resolve(server);
+        };
+        server.once("error", onError);
+        server.once("listening", onListening);
+        server.listen(port, host);
+    });
+}
+
+async function listenHttpRetry(host, port, { retries = 10, delayMs = 400 } = {}) {
+    let lastErr;
+    for (let attempt = 1; attempt <= retries; attempt++) {
+        try {
+            return await listenHttp(host, port);
+        } catch (err) {
+            lastErr = err;
+            if (err?.code !== "EADDRINUSE" || attempt === retries) throw err;
+            await new Promise((resolve) => setTimeout(resolve, delayMs));
+        }
+    }
+    throw lastErr;
+}
+
 async function startServer() {
     if (!process.env.MONGO_URI) {
         console.error("❌ MONGO_URI is missing. Add it to VERP_backend/.env");
@@ -383,25 +415,35 @@ async function startServer() {
     };
 
     // IPv4 (LAN + 127.0.0.1). Windows IPV6_V6ONLY is on, so this does not cover ::1.
-    const ipv4Server = app.listen(PORT, "0.0.0.0", () => {
-        console.log(`Server running at http://127.0.0.1:${PORT}`);
-        console.log(`Health check: http://127.0.0.1:${PORT}/api/health`);
-        startBackgroundJobs();
-    });
-    ipv4Server.on("error", (err) => {
+    // Do not use app.listen(cb): Express 5 also invokes that callback on bind errors.
+    let ipv4Server;
+    try {
+        ipv4Server = await listenHttpRetry("0.0.0.0", PORT);
+    } catch (err) {
         console.error(`❌ Failed to bind 0.0.0.0:${PORT}:`, err?.message || err);
         process.exit(1);
-    });
+    }
+    console.log(`Server running at http://127.0.0.1:${PORT}`);
+    console.log(`Health check: http://127.0.0.1:${PORT}/api/health`);
+    startBackgroundJobs();
 
     // IPv6 (::1). Edge/Chrome often resolve "localhost" here first; without this bind, login is ERR_CONNECTION_REFUSED.
-    const ipv6Server = app.listen(PORT, "::", () => {
+    let ipv6Server;
+    try {
+        ipv6Server = await listenHttp("::", PORT);
         console.log(`Server also listening on http://[::1]:${PORT} (localhost over IPv6)`);
-    });
-    ipv6Server.on("error", (err) => {
+    } catch (err) {
         console.warn(
             `IPv6 [::]:${PORT} bind skipped (${err.code || err.message}). If login fails in Edge, use http://127.0.0.1:3000`,
         );
-    });
+    }
+
+    const closeServers = () => {
+        ipv4Server?.close();
+        ipv6Server?.close();
+    };
+    process.once("SIGTERM", closeServers);
+    process.once("SIGINT", closeServers);
 }
 
 startServer().catch((err) => {

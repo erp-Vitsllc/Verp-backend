@@ -1,13 +1,15 @@
 import AssetItem from '../models/AssetItem.js';
+import AssetHistory from '../models/AssetHistory.js';
 import EmployeeBasic from '../models/EmployeeBasic.js';
 import User from '../models/User.js';
 import DashboardAction from '../models/DashboardAction.js';
 import { sendAssetActionApprovalEmail } from './sendAssetActionApprovalEmail.js';
+import { applyParkingLeaveStatus, applyLeavePackToCustodian } from './assetOperationalFlags.js';
 
 export const NO_PORTAL_NO_REPORTEE_OWNER_APPROVAL_MESSAGE =
     'This assigned employee has no user account, and no primary reportee. Set a primary reportee (with a login) on their profile before sending Leave / End of Services — otherwise approval waits forever on someone who cannot log in.';
 
-const OWNER_TRANSFER_PENDING_ACTIONS = new Set(['Leave', 'Return Asset']);
+const OWNER_TRANSFER_PENDING_ACTIONS = new Set(['Return Asset']);
 
 export const assigneeHasCompanyEmailOnRecord = (emp) =>
     !!(emp?.companyEmail && String(emp.companyEmail).trim().length > 0);
@@ -192,11 +194,53 @@ export const applyOwnerTransferApproverHealToAsset = async (asset) => {
     return true;
 };
 
-/** Re-route AC-raised Leave / Return sitting on a holder who cannot log in onto their primary reportee. */
+/** AC already submitted Leave — apply On Leave; do not wait on the holder. */
+export const healAcDirectPendingLeaves = async () => {
+    try {
+        const pending = await AssetItem.find({
+            pendingAction: 'Leave',
+            'pendingActionDetails.requestedByRole': 'assetcontroller',
+        })
+            .populate({
+                path: 'assignedTo',
+                select: 'firstName lastName employeeId primaryReportee',
+                populate: { path: 'primaryReportee', select: 'firstName lastName employeeId' },
+            })
+            .limit(200);
+        for (const asset of pending) {
+            const days = Number(
+                asset.pendingActionDetails?.duration ?? asset.pendingActionDetails?.leaveDuration,
+            );
+            if (!Number.isInteger(days) || days < 1) continue;
+            applyParkingLeaveStatus(asset, days);
+            applyLeavePackToCustodian(asset, {
+                hodEmployee: asset.assignedTo?.primaryReportee || null,
+            });
+            asset.pendingAction = null;
+            asset.pendingActionDetails = null;
+            asset.actionRequiredBy = null;
+            if (asset.assignedTo || asset.assignedCompany) asset.status = 'Assigned';
+            await asset.save();
+            await DashboardAction.deleteMany({ requestId: asset._id, status: 'Pending' }).catch(() => null);
+            await AssetHistory.create({
+                assetId: asset._id,
+                action: 'On Leave',
+                comments: `On Leave applied (Asset Controller request; no further approval).`,
+                date: new Date(),
+                details: { status: 'AcDirectLeaveHeal', duration: days },
+            }).catch(() => null);
+        }
+    } catch (err) {
+        console.error('[assetOwnerTransferApprover] AC leave heal failed:', err?.message || err);
+    }
+};
+
+/** Re-route AC-raised Return sitting on a holder who cannot log in onto their primary reportee. */
 export const healMisroutedOwnerTransferApprovals = async () => {
+    await healAcDirectPendingLeaves();
     try {
         const pendingAssets = await AssetItem.find({
-            pendingAction: { $in: ['Leave', 'Return Asset'] },
+            pendingAction: { $in: ['Return Asset'] },
             assignedTo: { $ne: null },
         })
             .select('assetId pendingAction pendingActionDetails actionRequiredBy assignedTo')
@@ -251,7 +295,12 @@ export const buildPendingActionWaitingDisplay = (asset, designatedAssetControlle
         waitingForId: id || '',
     });
 
-    if (pending === 'Leave' || pending === 'Return Asset') {
+    if (pending === 'Leave') {
+        const name = storedName || arName || empDisplayName(designatedAssetController);
+        return pack(name, 'other', waitingId || arId || acId);
+    }
+
+    if (pending === 'Return Asset') {
         if (!assigneeStarted) {
             const showingAc = !!(acId && ((waitingId && waitingId === acId) || (arId && arId === acId)));
             if (delegated && reporteeName) {

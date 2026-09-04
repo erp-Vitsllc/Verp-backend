@@ -8416,6 +8416,15 @@ export const downloadHandoverPdf = async (req, res) => {
 // @desc    Respond to asset assignment (Accept/Reject/Negotiate)
 // @route   PUT /api/AssetItem/:id/respond
 // @access  Private (Assigned User or Assigner)
+const getAssignmentRespondActor = async (req) => {
+    const isElevatedAdmin =
+        isJwtSystemSuperUser(req.user) ||
+        (await isUserAdministrator(req.user?.id).catch(() => false));
+    const employeeObjectId = req.user?.employeeObjectId || null;
+    const actorId = employeeObjectId || req.user?._id || req.user?.id || null;
+    return { isElevatedAdmin, employeeObjectId, actorId };
+};
+
 export const respondToAssignment = async (req, res) => {
     try {
         const { id } = req.params;
@@ -8439,11 +8448,12 @@ export const respondToAssignment = async (req, res) => {
 
         const assignmentBulkGroupId = item.pendingActionDetails?.bulkAssignment?.groupId || null;
 
-        const currentUser = req.user.employeeObjectId;
-        if (!currentUser) {
+        const { isElevatedAdmin, employeeObjectId, actorId } = await getAssignmentRespondActor(req);
+        if (!employeeObjectId && !isElevatedAdmin) {
             return res.status(403).json({ message: 'You are not linked to an employee profile.' });
         }
-        const cur = currentUser.toString();
+        const currentUser = employeeObjectId || actorId;
+        const cur = employeeObjectId ? employeeObjectId.toString() : '';
         const norm = (s) => (s || '').toString().toLowerCase().replace(/\s+/g, '');
 
         const isAssignee =
@@ -8524,13 +8534,18 @@ export const respondToAssignment = async (req, res) => {
 
         if (item.assignedToType === 'Company') {
             const isCompanyCoordinator = await isUserCompanyAssetCoordinator(req.user).catch(() => false);
-            if (!isHR && !isCompanyCoordinator) {
+            if (!isElevatedAdmin && !isHR && !isCompanyCoordinator) {
                 return res.status(403).json({ message: 'You are not authorized to respond to this company assignment.' });
             }
-            if (item.actionRequiredBy && item.actionRequiredBy.toString() !== cur && !isCompanyCoordinator) {
+            if (
+                !isElevatedAdmin &&
+                item.actionRequiredBy &&
+                item.actionRequiredBy.toString() !== cur &&
+                !isCompanyCoordinator
+            ) {
                 return res.status(403).json({ message: 'It is not your turn (designated company coordinator) to respond.' });
             }
-        } else {
+        } else if (!isElevatedAdmin) {
             if (
                 !isAssignee &&
                 !isAssigner &&
@@ -8558,7 +8573,7 @@ export const respondToAssignment = async (req, res) => {
             }
         }
 
-        if (action === 'Accept' && item.assignedToType === 'Employee' && item.assignedTo) {
+        if (action === 'Accept' && item.assignedToType === 'Employee' && item.assignedTo && !isElevatedAdmin) {
             const handoverFlowForSig = handoverFlow;
             const requiresAssigneeSignature =
                 !fleetVehicleRespond ||
@@ -9583,7 +9598,11 @@ export const bulkRespondToAssignment = async (req, res) => {
             return res.status(400).json({ message: 'Invalid action. Must be "Accept" or "Reject"' });
         }
 
-        const currentUser = req.user.employeeObjectId;
+        const { isElevatedAdmin, employeeObjectId, actorId } = await getAssignmentRespondActor(req);
+        if (!employeeObjectId && !isElevatedAdmin) {
+            return res.status(403).json({ message: 'You are not linked to an employee profile.' });
+        }
+        const currentUser = employeeObjectId || actorId;
         const items = await AssetItem.find({ _id: { $in: assetIds } })
             .populate({
                 path: 'assignedTo',
@@ -9598,21 +9617,23 @@ export const bulkRespondToAssignment = async (req, res) => {
             const bulkAssignGroupId = item.pendingActionDetails?.bulkAssignment?.groupId || null;
             try {
                 // Check if user is authorized for this specific asset
-                const curBulk = currentUser.toString();
+                const curBulk = employeeObjectId ? employeeObjectId.toString() : '';
                 const isAssignee =
+                    !!curBulk &&
                     item.assignedToType === 'Employee' &&
                     item.assignedTo &&
                     (item.assignedTo._id || item.assignedTo).toString() === curBulk;
-                const isHR = item.assignedToType === 'Company' && item.actionRequiredBy?.toString() === curBulk;
-                const isActionRequired = item.actionRequiredBy?.toString() === curBulk;
+                const isHR = !!curBulk && item.assignedToType === 'Company' && item.actionRequiredBy?.toString() === curBulk;
+                const isActionRequired = !!curBulk && item.actionRequiredBy?.toString() === curBulk;
 
                 // Assigner / delegated primaryReportee
                 const isAssigner =
+                    !!curBulk &&
                     !!item.assignedBy &&
                     (item.assignedBy._id || item.assignedBy).toString() === curBulk;
 
                 let isPrimaryReporteeDelegate = false;
-                if (item.assignedToType === 'Employee' && item.assignedTo && item.assignedTo.primaryReportee) {
+                if (curBulk && item.assignedToType === 'Employee' && item.assignedTo && item.assignedTo.primaryReportee) {
                     const assigneeHasCompanyEmail = !!(
                         item.assignedTo.companyEmail && String(item.assignedTo.companyEmail).trim().length > 0
                     );
@@ -9637,7 +9658,14 @@ export const bulkRespondToAssignment = async (req, res) => {
                     if (allowDelegate) isPrimaryReporteeDelegate = true;
                 }
 
-                if (!isAssignee && !isHR && !isActionRequired && !isAssigner && !isPrimaryReporteeDelegate) {
+                if (
+                    !isElevatedAdmin &&
+                    !isAssignee &&
+                    !isHR &&
+                    !isActionRequired &&
+                    !isAssigner &&
+                    !isPrimaryReporteeDelegate
+                ) {
                     results.failed.push({ id: item.assetId, message: 'Unauthorized' });
                     continue;
                 }
@@ -9657,7 +9685,11 @@ export const bulkRespondToAssignment = async (req, res) => {
                     item.status = 'Assigned';
                     item.acceptanceStatus = 'Accepted';
                     item.actionRequiredBy = null;
-                    item.acceptedBy = currentUser;
+                    item.acceptedBy =
+                        employeeObjectId ||
+                        item.assignedTo?._id ||
+                        item.assignedTo ||
+                        currentUser;
 
                     // Stamp assignment start for Permanent + Temporary (days-assigned + temp expiry).
                     stampAssignmentDatesOnAccept(item);
@@ -9757,7 +9789,9 @@ export const bulkRespondToAssignment = async (req, res) => {
             results
         });
     } catch (error) {
-        res.status(500).json({ message: 'Server Error' });
+        res.status(500).json({
+            message: error?.message || 'Server Error',
+        });
     }
 };
 
@@ -10446,11 +10480,11 @@ export const getBulkAssignmentPendingGroup = async (req, res) => {
             return res.status(400).json({ message: 'Invalid group id' });
         }
         const gid = String(groupId);
-        const currentUser = req.user.employeeObjectId;
-        if (!currentUser) {
+        const { isElevatedAdmin, employeeObjectId } = await getAssignmentRespondActor(req);
+        if (!employeeObjectId && !isElevatedAdmin) {
             return res.status(403).json({ message: 'You are not linked to an employee profile.' });
         }
-        const cur = currentUser.toString();
+        const cur = employeeObjectId ? employeeObjectId.toString() : '';
 
         const allInGroup = await AssetItem.find({
             'pendingActionDetails.bulkAssignment.groupId': gid,
@@ -10489,7 +10523,7 @@ export const getBulkAssignmentPendingGroup = async (req, res) => {
                 return res.status(400).json({ message: 'Batch data is inconsistent.' });
             }
             const canActCompany = await canUserActOnCompanyBulkAssignment(req, cur, allInGroup[0]);
-            if (!canActCompany) {
+            if (!isElevatedAdmin && !canActCompany) {
                 return res.status(403).json({ message: 'You are not authorized to review this batch.' });
             }
         } else {
@@ -10511,7 +10545,7 @@ export const getBulkAssignmentPendingGroup = async (req, res) => {
             const wrapItem = firstAsDoc ? firstAsDoc.toObject() : allInGroup[0];
             const { isAssignee, isPrimaryReporteeDelegate, isDesignatedResponder } =
                 canUserActAsAssigneeForBulkItem(cur, wrapItem);
-            if (!isAssignee && !isPrimaryReporteeDelegate && !isDesignatedResponder) {
+            if (!isElevatedAdmin && !isAssignee && !isPrimaryReporteeDelegate && !isDesignatedResponder) {
                 return res.status(403).json({ message: 'You are not authorized to review this batch.' });
             }
         }
@@ -10629,11 +10663,12 @@ export const respondBulkAssignmentGroup = async (req, res) => {
             return res.status(400).json({ message: 'Select at least one asset to accept or reject.' });
         }
 
-        const currentUser = req.user.employeeObjectId;
-        if (!currentUser) {
+        const { isElevatedAdmin, employeeObjectId, actorId } = await getAssignmentRespondActor(req);
+        if (!employeeObjectId && !isElevatedAdmin) {
             return res.status(403).json({ message: 'You are not linked to an employee profile.' });
         }
-        const cur = currentUser.toString();
+        const currentUser = employeeObjectId || actorId;
+        const cur = employeeObjectId ? employeeObjectId.toString() : '';
 
         const allInGroup = await AssetItem.find({
             'pendingActionDetails.bulkAssignment.groupId': gid,
@@ -10666,13 +10701,14 @@ export const respondBulkAssignmentGroup = async (req, res) => {
         let isPrimaryReporteeDelegate = false;
         if (isCompanyBatch) {
             const canActCompany = await canUserActOnCompanyBulkAssignment(req, cur, first);
-            if (!canActCompany) {
+            if (!isElevatedAdmin && !canActCompany) {
                 return res.status(403).json({ message: 'You are not authorized to respond to this batch.' });
             }
         } else {
             const delegateCheck = canUserActAsAssigneeForBulkItem(cur, first);
             isPrimaryReporteeDelegate = delegateCheck.isPrimaryReporteeDelegate;
             if (
+                !isElevatedAdmin &&
                 !delegateCheck.isAssignee &&
                 !delegateCheck.isPrimaryReporteeDelegate &&
                 !delegateCheck.isDesignatedResponder
@@ -10692,7 +10728,11 @@ export const respondBulkAssignmentGroup = async (req, res) => {
             item.status = 'Assigned';
             item.acceptanceStatus = 'Accepted';
             item.actionRequiredBy = null;
-            item.acceptedBy = currentUser;
+            item.acceptedBy =
+                employeeObjectId ||
+                item.assignedTo?._id ||
+                item.assignedTo ||
+                currentUser;
             item.pendingActionDetails = null;
             stampAssignmentDatesOnAccept(item);
             await item.save();
@@ -10918,6 +10958,8 @@ export const returnAssetItem = async (req, res) => {
             return res.status(404).json({ message: 'Asset not found' });
         }
 
+        const returnAttachmentUrl = await storePendingActionAttachment(req.body?.attachment);
+
         const fleetVehicle = isFleetVehicleAssetFields({
             plateNumber: item.plateNumber,
             typeName: item.typeId?.name,
@@ -11039,6 +11081,7 @@ export const returnAssetItem = async (req, res) => {
                 item.pendingAction = 'Return Asset';
                 item.pendingActionDetails = {
                     reason: req.body?.reason || 'Return requested by assigned employee',
+                    attachment: returnAttachmentUrl,
                     requestedBy: req.user.employeeObjectId || req.user._id,
                     requestedAt: new Date()
                 };
@@ -11122,6 +11165,7 @@ export const returnAssetItem = async (req, res) => {
                 a.pendingAction = 'Return Asset';
                 a.pendingActionDetails = {
                     reason,
+                    attachment: returnAttachmentUrl,
                     requestedBy: req.user.employeeObjectId || req.user._id,
                     requestedAt: new Date(),
                     isBulk: true,
@@ -11241,6 +11285,7 @@ export const returnAssetItem = async (req, res) => {
                 a.pendingAction = 'Return Asset';
                 a.pendingActionDetails = {
                     reason,
+                    attachment: returnAttachmentUrl,
                     requestedBy: req.user.employeeObjectId || req.user._id,
                     requestedAt: new Date(),
                     requestedByRole,
@@ -15388,7 +15433,63 @@ const sendEolEmail = async ({ toEmployee, ccEmployees = [], subject, bodyHtml, r
     }
 };
 
+const requesterIsFlowchartAssetController = async (reqUser, assetController) => {
+    const inFlow = await isUserInFlowchart(reqUser, 'assetcontroller').catch(() => false);
+    if (inFlow) return true;
+    const resolved = assetController ? await resolveAssetControllerEmployee(assetController) : null;
+    const empId = reqUser?.employeeObjectId?.toString();
+    return !!(empId && resolved?._id && empId === resolved._id.toString());
+};
+
+const applyDirectLeaveByAssetController = async (asset, {
+    leaveDays,
+    req,
+    reason = '',
+    isBulk = false,
+    assetControllerEmp = null,
+}) => {
+    if (hasActiveParkingContext(asset)) {
+        return { ok: false, message: ON_LEAVE_TRANSFER_BLOCKED_MESSAGE };
+    }
+    applyParkingLeaveStatus(asset, leaveDays);
+    let ownerForPack = asset.assignedTo;
+    if (ownerForPack && (!ownerForPack.primaryReportee || !ownerForPack.employeeId)) {
+        ownerForPack = await EmployeeBasic.findById(ownerForPack._id || ownerForPack)
+            .select('firstName lastName employeeId primaryReportee')
+            .populate('primaryReportee', 'firstName lastName employeeId companyEmail workEmail')
+            .lean()
+            .catch(() => null);
+    }
+    applyLeavePackToCustodian(asset, {
+        hodEmployee: ownerForPack?.primaryReportee || null,
+        assetControllerEmployee: assetControllerEmp,
+    });
+    asset.pendingAction = null;
+    asset.pendingActionDetails = null;
+    asset.actionRequiredBy = null;
+    if (asset.assignedTo || asset.assignedCompany) {
+        asset.status = 'Assigned';
+    }
+    await asset.save();
+    await DashboardAction.deleteMany({ requestId: asset._id, status: 'Pending' }).catch(() => null);
+    await AssetHistory.create({
+        assetId: asset._id,
+        action: 'On Leave',
+        performedBy: req.user._id,
+        comments: `Asset Controller set On Leave${leaveDays ? ` for ${leaveDays} day(s)` : ''}. ${reason || ''}`.trim(),
+        date: new Date(),
+        details: { status: 'AcDirectLeave', duration: leaveDays, isBulk },
+    });
+    return { ok: true };
+};
+
 // @desc    Request Asset Action (End of Life, Loss & Damage, or Leave)
+const storePendingActionAttachment = async (attachment) => {
+    if (typeof attachment !== 'string' || !attachment.startsWith('data:')) return null;
+    const uploadResult = await uploadDocumentToS3(attachment, 'asset-history');
+    return uploadResult?.publicId || null;
+};
+
 // @route   PUT /api/AssetItem/:id/request-action
 // @access  Private
 export const requestAssetAction = async (req, res) => {
@@ -15456,14 +15557,33 @@ export const requestAssetAction = async (req, res) => {
         // Upload attachment if present
         let fileUrl = null;
         if (attachment && attachment.startsWith('data:')) {
-            const uploadResult = await uploadDocumentToS3(attachment, 'asset-history');
-            fileUrl = uploadResult.publicId;
+            fileUrl = await storePendingActionAttachment(attachment);
         }
 
         const assetController = await getDepartmentHOD('assetcontroller');
 
         if (!assetController) {
             return res.status(400).json({ message: 'Asset Controller not found. Cannot request approval.' });
+        }
+
+        const isFlowchartAcActor = await requesterIsFlowchartAssetController(req.user, assetController);
+
+        if (originalActionType === 'Leave' && isFlowchartAcActor) {
+            const acEmp = await resolveAssetControllerEmployee(assetController);
+            const applied = await applyDirectLeaveByAssetController(asset, {
+                leaveDays,
+                req,
+                reason,
+                assetControllerEmp: acEmp,
+            });
+            if (!applied.ok) {
+                return res.status(400).json({ message: applied.message });
+            }
+            return res.status(200).json({
+                message: 'Asset placed On Leave.',
+                asset,
+                appliedDirectly: true,
+            });
         }
 
         if (pendingActionType === 'Loss and Damage') {
@@ -15503,7 +15623,7 @@ export const requestAssetAction = async (req, res) => {
 
         let nextApprover = assetController;
         if (isTransferAction) {
-            if (isAssigneeRequester) {
+            if (originalActionType === 'Leave' || isAssigneeRequester) {
                 nextApprover = await resolveAssetControllerEmployee(assetController);
             } else {
                 const ownerResolved = await resolveOwnerTransferApprover(asset.assignedTo);
@@ -15622,7 +15742,7 @@ export const requestAssetAction = async (req, res) => {
         }
 
         let approverLabel = 'Asset Controller';
-        if (isTransferAction && !isAssigneeRequester) {
+        if (isTransferAction && originalActionType !== 'Leave' && !isAssigneeRequester) {
             approverLabel = asset.pendingActionDetails?.ownerApprovalDelegated
                 ? 'primary reportee'
                 : 'asset owner';
@@ -15652,7 +15772,7 @@ export const requestAssetAction = async (req, res) => {
 // @access  Private
 export const bulkRequestAssetAction = async (req, res) => {
     try {
-        let { assetIds, actionType, reason, duration, leaveDuration } = req.body;
+        let { assetIds, actionType, reason, duration, leaveDuration, attachment } = req.body;
 
         if (!Array.isArray(assetIds) || assetIds.length === 0) {
             return res.status(400).json({ message: 'Please provide at least one asset ID' });
@@ -15718,6 +15838,45 @@ export const bulkRequestAssetAction = async (req, res) => {
         }
 
         const resolvedAssetController = await resolveAssetControllerEmployee(assetController);
+        const isFlowchartAcActor = await requesterIsFlowchartAssetController(req.user, assetController);
+
+        if (originalActionType === 'Leave' && isFlowchartAcActor) {
+            const results = [];
+            const errors = [];
+            for (const asset of assets) {
+                const applied = await applyDirectLeaveByAssetController(asset, {
+                    leaveDays,
+                    req,
+                    reason,
+                    isBulk: assets.length > 1,
+                    assetControllerEmp: resolvedAssetController,
+                });
+                if (!applied.ok) {
+                    errors.push({ assetId: asset.assetId, message: applied.message });
+                    continue;
+                }
+                results.push({
+                    assetId: asset._id,
+                    assetIdDisplay: asset.assetId,
+                    status: 'success',
+                    message: 'On Leave',
+                });
+            }
+            if (results.length === 0) {
+                return res.status(400).json({
+                    message: errors[0]?.message || 'No assets could be placed On Leave.',
+                    results,
+                    errors,
+                });
+            }
+            return res.status(200).json({
+                message: `${results.length} asset(s) placed On Leave.${errors.length ? ` ${errors.length} failed.` : ''}`,
+                results,
+                errors,
+                appliedDirectly: true,
+            });
+        }
+
         let bulkTransferApprover = resolvedAssetController;
         let ownerApprovalDelegated = false;
         if (isTransferBulk && allCompanyAssigned && isCompanyCoordinatorRequester) {
@@ -15732,13 +15891,20 @@ export const bulkRequestAssetAction = async (req, res) => {
                 });
             }
             bulkTransferApprover = coord;
-        } else if (isTransferBulk && !isAssigneeRequester && !allCompanyAssigned) {
+        } else if (
+            isTransferBulk &&
+            originalActionType !== 'Leave' &&
+            !isAssigneeRequester &&
+            !allCompanyAssigned
+        ) {
             const ownerResolved = await resolveOwnerTransferApprover(assets[0]?.assignedTo);
             if (!ownerResolved.ok) {
                 return res.status(400).json({ message: ownerResolved.message });
             }
             bulkTransferApprover = ownerResolved.approver;
             ownerApprovalDelegated = ownerResolved.delegatedFromOwner === true;
+        } else if (isTransferBulk && originalActionType === 'Leave') {
+            bulkTransferApprover = resolvedAssetController;
         }
 
         let companyCoordinator = null;
@@ -15756,7 +15922,7 @@ export const bulkRequestAssetAction = async (req, res) => {
         }
 
         // Upload attachment if present (for bulk, we'll use the same attachment for all)
-        let fileUrl = null;
+        let fileUrl = await storePendingActionAttachment(attachment);
         // Note: For bulk, attachment would need to be handled per asset if different
 
         const pdfIds = assetIds.map((id) => id.toString());
@@ -15921,7 +16087,7 @@ export const bulkRequestAssetAction = async (req, res) => {
         }
 
         const approverLabel =
-            isTransferBulk && !isAssigneeRequester
+            isTransferBulk && originalActionType !== 'Leave' && !isAssigneeRequester
                 ? (ownerApprovalDelegated ? 'primary reportee' : 'asset owner')
                 : 'Asset Controller';
 

@@ -23,6 +23,8 @@ import {
     bulkOnDutyFromLeave,
     requestOnDutyFromOwner,
     getPendingOnDutyRequestFromOwner,
+    getOwnerOnDutyStatus,
+    applyOnDutyDirectByController,
     respondOnDutyAcRequest,
 } from '../controllers/ownerOnDutyController.js';
 import {
@@ -862,6 +864,8 @@ router.get('/dashboard/pending-inbox', protect, getPendingAssetDashboardInbox);
 router.delete('/dashboard/pending-inbox/:id', protect, deletePendingAssetDashboardInboxItem);
 router.post('/owner-on-duty/request', protect, requestOwnerOnDuty);
 router.post('/owner-on-duty/request-from-owner', protect, requestOnDutyFromOwner);
+router.post('/owner-on-duty/apply-direct', protect, applyOnDutyDirectByController);
+router.get('/owner-on-duty/status/:ownerId', protect, getOwnerOnDutyStatus);
 router.get('/owner-on-duty/pending-owner-request/:assetId', protect, getPendingOnDutyRequestFromOwner);
 router.put('/owner-on-duty/respond-ac-request', protect, respondOnDutyAcRequest);
 router.put('/bulk/on-duty-from-leave', protect, requireAssetControllerOrAdmin, bulkOnDutyFromLeave);

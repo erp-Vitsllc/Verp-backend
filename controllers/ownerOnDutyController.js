@@ -8,6 +8,7 @@ import { sendOwnerOnDutyRequestEmail } from '../utils/sendOwnerOnDutyRequestEmai
 import { sendOwnerOnDutyResponseEmail } from '../utils/sendOwnerOnDutyResponseEmail.js';
 import { sendOwnerOnDutyAcRequestEmail } from '../utils/sendOwnerOnDutyAcRequestEmail.js';
 import { sendOwnerOnDutyAcDecisionEmail } from '../utils/sendOwnerOnDutyAcDecisionEmail.js';
+import { sendAssetControllerOnDutyEmail } from '../utils/sendAssetControllerOnDutyEmail.js';
 import { resolveAssetControllerEmployee } from '../utils/assetApprovalHelpers.js';
 import { resolveFrontendBaseUrl } from '../utils/resolveFrontendBaseUrl.js';
 import { applyOnDutyFromLeaveState, healStaleParkingFields, isLeaveActive, onLeaveQueryFilter, requiresOwnerOnDutyApproval } from '../utils/assetOperationalFlags.js';
@@ -68,6 +69,8 @@ const resolveOwnerEmployee = async (rawId) => {
         .lean();
 };
 
+const assignedToId = (asset) => String(asset?.assignedTo?._id || asset?.assignedTo || '');
+
 const findParkingAssetsForOwner = async (ownerId) => {
     const oid = mongoose.Types.ObjectId.isValid(String(ownerId))
         ? new mongoose.Types.ObjectId(String(ownerId))
@@ -96,10 +99,23 @@ const parseOwnerOnDutyMeta = (extra3) => {
 };
 
 const resolveScopedParkingAssets = async (ownerId, requestedAssetIds = null) => {
-    const all = await findParkingAssetsForOwner(ownerId);
-    if (!Array.isArray(requestedAssetIds) || !requestedAssetIds.length) return all;
-    const idSet = new Set(requestedAssetIds.map(String));
-    return all.filter((a) => idSet.has(a._id.toString()));
+    const ownerKey = String(ownerId || '');
+    if (Array.isArray(requestedAssetIds) && requestedAssetIds.length) {
+        const valid = requestedAssetIds.filter((id) => mongoose.Types.ObjectId.isValid(String(id)));
+        if (!valid.length) return [];
+        const rows = await AssetItem.find({ _id: { $in: valid } })
+            .select(
+                'assetId name status onLeaveActive onServiceActive assignedTo assignedToType onLeaveEndDate onLeaveStartDate onLeaveDuration services',
+            )
+            .lean();
+        return rows.filter(
+            (asset) =>
+                asset.assignedToType !== 'Company' &&
+                isLeaveActive(asset) &&
+                assignedToId(asset) === ownerKey,
+        );
+    }
+    return findParkingAssetsForOwner(ownerId);
 };
 
 /** Live parked assets still covered by a pending owner on-duty dashboard row. */
@@ -178,6 +194,96 @@ const applyDirectOnDutyFromLeave = async (item, performedBy) => {
     return dutyResult;
 };
 
+const closePendingOnDutyRequestsForAssets = async (assetIds, performedBy) => {
+    const ids = (assetIds || []).filter((id) => mongoose.Types.ObjectId.isValid(String(id)));
+    if (!ids.length) return;
+    await DashboardAction.updateMany(
+        {
+            status: 'Pending',
+            requestType: { $in: [OWNER_ON_DUTY_AC_REQUEST_TYPE, OWNER_ON_DUTY_REQUEST_TYPE] },
+            $or: [{ requestId: { $in: ids } }],
+        },
+        {
+            $set: {
+                status: 'Approved',
+                actionedDate: new Date(),
+                actionedBy: performedBy || null,
+                comment: 'Applied directly by Asset Controller',
+            },
+        },
+    );
+};
+
+/**
+ * @route POST /api/AssetItem/owner-on-duty/apply-direct
+ * Asset Controller sets parked asset(s) On Duty immediately (no owner confirmation).
+ */
+export const applyOnDutyDirectByController = async (req, res) => {
+    try {
+        await assertAssetController(req);
+
+        const rawIds = Array.isArray(req.body?.assetIds) ? req.body.assetIds : [];
+        const triggerAssetId = req.body?.triggerAssetId;
+        const assetIds = [...new Set(
+            [...rawIds, triggerAssetId]
+                .map((x) => String(x || '').trim())
+                .filter((id) => mongoose.Types.ObjectId.isValid(id)),
+        )];
+        if (!assetIds.length) {
+            return res.status(400).json({ message: 'triggerAssetId or assetIds is required.' });
+        }
+
+        const items = await AssetItem.find({ _id: { $in: assetIds } });
+        const performedBy = req.user?.employeeObjectId || req.user?._id;
+        const processed = [];
+        let ownerId = null;
+
+        for (const item of items) {
+            if (!item || !isLeaveActive(item)) continue;
+            if (!ownerId) ownerId = assignedToId(item) || null;
+            await applyDirectOnDutyFromLeave(item, performedBy);
+            processed.push({ _id: item._id, assetId: item.assetId, name: item.name });
+        }
+
+        if (!processed.length) {
+            return res.status(400).json({ message: 'No on-leave assets to set On Duty.' });
+        }
+
+        await closePendingOnDutyRequestsForAssets(
+            processed.map((p) => p._id),
+            performedBy,
+        );
+
+        const owner = ownerId
+            ? await EmployeeBasic.findById(ownerId)
+                .select('firstName lastName employeeId companyEmail primaryReportee status profileStatus')
+                .populate('primaryReportee', 'firstName lastName employeeId companyEmail status profileStatus')
+                .lean()
+            : null;
+        const approver = await EmployeeBasic.findById(req.user?.employeeObjectId)
+            .select('firstName lastName employeeId')
+            .lean();
+
+        if (owner) {
+            await sendAssetControllerOnDutyEmail({
+                owner,
+                parkingAssets: processed,
+                approver,
+            });
+        }
+
+        res.status(200).json({
+            message: processed.length === 1
+                ? 'Asset is now On Duty.'
+                : `${processed.length} assets are now On Duty.`,
+            processed,
+        });
+    } catch (error) {
+        console.error('applyOnDutyDirectByController:', error);
+        res.status(error.status || 500).json({ message: error.message || 'Server error' });
+    }
+};
+
 const createOwnerOnDutyRequest = async ({ req, owner, requestedAssetIds = null, triggerAssetId = null }) => {
     let parkingAssets = await resolveScopedParkingAssets(owner._id, requestedAssetIds);
     if (
@@ -190,7 +296,7 @@ const createOwnerOnDutyRequest = async ({ req, owner, requestedAssetIds = null, 
             trigger &&
             isLeaveActive(trigger) &&
             trigger.assignedToType !== 'Company' &&
-            String(trigger.assignedTo) === String(owner._id)
+            assignedToId(trigger) === String(owner._id)
         ) {
             parkingAssets = [trigger];
         }
@@ -288,7 +394,7 @@ const createOwnerInitiatedOnDutyAcRequest = async ({ req, owner, requestedAssetI
             trigger &&
             isLeaveActive(trigger) &&
             trigger.assignedToType !== 'Company' &&
-            String(trigger.assignedTo) === String(owner._id)
+            assignedToId(trigger) === String(owner._id)
         ) {
             parkingAssets = [trigger];
         }
@@ -391,12 +497,34 @@ const assertOwnerOrDelegate = async (req, ownerId) => {
 
 export const requestOnDutyFromOwner = async (req, res) => {
     try {
+        const { triggerAssetId, assetIds } = req.body;
+        const requestedAssetIds = Array.isArray(assetIds)
+            ? assetIds.map(String).filter(Boolean)
+            : triggerAssetId
+              ? [String(triggerAssetId)]
+              : [];
+
+        let isAc = false;
+        try {
+            await assertAssetController(req);
+            isAc = true;
+        } catch {
+            isAc = false;
+        }
+
+        if (isAc) {
+            req.body.assetIds = requestedAssetIds.length ? requestedAssetIds : assetIds;
+            if (!req.body.triggerAssetId && requestedAssetIds[0]) {
+                req.body.triggerAssetId = requestedAssetIds[0];
+            }
+            return applyOnDutyDirectByController(req, res);
+        }
+
         const actingId = req.user?.employeeObjectId;
         if (!actingId) {
             return res.status(403).json({ message: 'You are not linked to an employee profile.' });
         }
 
-        const { triggerAssetId, assetIds } = req.body;
         const owner = await EmployeeBasic.findById(actingId)
             .select('firstName lastName employeeId companyEmail workEmail personalEmail email primaryReportee')
             .lean();
@@ -404,16 +532,10 @@ export const requestOnDutyFromOwner = async (req, res) => {
 
         await assertOwnerAssignee(req, owner._id);
 
-        const requestedAssetIds = Array.isArray(assetIds)
-            ? assetIds.map(String).filter(Boolean)
-            : triggerAssetId
-              ? [String(triggerAssetId)]
-              : null;
-
         const result = await createOwnerInitiatedOnDutyAcRequest({
             req,
             owner,
-            requestedAssetIds,
+            requestedAssetIds: requestedAssetIds.length ? requestedAssetIds : null,
             triggerAssetId,
         });
         if (!result.ok) {
@@ -430,6 +552,90 @@ export const requestOnDutyFromOwner = async (req, res) => {
         });
     } catch (error) {
         console.error('requestOnDutyFromOwner:', error);
+        res.status(error.status || 500).json({ message: error.message || 'Server error' });
+    }
+};
+
+/**
+ * @route GET /api/AssetItem/owner-on-duty/status/:ownerId
+ * Owner / AC / admin: parked assets + pending On Duty request for this assignee.
+ */
+export const getOwnerOnDutyStatus = async (req, res) => {
+    try {
+        const owner = await resolveOwnerEmployee(req.params.ownerId);
+        if (!owner) return res.status(404).json({ message: 'Employee not found.' });
+
+        const actingId = req.user?.employeeObjectId?.toString?.();
+        const isOwner = !!(actingId && actingId === owner._id.toString());
+        const isAdmin = isJwtSystemSuperUser(req.user);
+        let isAc = false;
+        try {
+            await assertAssetController(req);
+            isAc = true;
+        } catch {
+            isAc = false;
+        }
+
+        let isDelegate = false;
+        if (!isOwner && !isAdmin && !isAc) {
+            try {
+                await assertOwnerOrDelegate(req, owner._id);
+                isDelegate = true;
+            } catch {
+                isDelegate = false;
+            }
+        }
+
+        const parkingAssets = await findParkingAssetsForOwner(owner._id);
+        const parkingIds = parkingAssets.map((a) => a._id);
+
+        const pendingAc = await DashboardAction.findOne({
+            requestType: OWNER_ON_DUTY_AC_REQUEST_TYPE,
+            status: 'Pending',
+            $or: [
+                { subjectEmployeeId: owner.employeeId },
+                ...(parkingIds.length ? [{ requestId: { $in: parkingIds } }] : []),
+            ],
+        })
+            .sort({ requestedDate: -1, createdAt: -1 })
+            .lean();
+
+        let pendingAcMatch = pendingAc;
+        if (pendingAcMatch) {
+            const meta = parseOwnerOnDutyMeta(pendingAcMatch.extra3);
+            const ownerFromMeta = String(meta.ownerEmployeeId || '');
+            const scopedIds = (meta.requestedAssetIds || meta.parkingAssetIds || []).map(String);
+            const matchesOwner =
+                !ownerFromMeta || ownerFromMeta === owner._id.toString();
+            const matchesAsset =
+                !scopedIds.length ||
+                scopedIds.some((id) => parkingIds.some((pid) => String(pid) === id));
+            if (!matchesOwner && !matchesAsset) pendingAcMatch = null;
+        }
+
+        const pendingOwnerReview = await DashboardAction.findOne({
+            assignedTo: owner._id,
+            requestType: OWNER_ON_DUTY_REQUEST_TYPE,
+            status: 'Pending',
+        })
+            .select('_id')
+            .lean();
+
+        res.json({
+            onLeave: parkingAssets.length > 0,
+            parkingAssets: parkingAssets.map((a) => ({
+                _id: a._id,
+                assetId: a.assetId,
+                name: a.name,
+            })),
+            pendingAcRequestId: pendingAcMatch?._id || null,
+            pendingOwnerReviewId: pendingOwnerReview?._id || null,
+            canRequest: isOwner,
+            canApproveAsAc: isAc || isAdmin,
+            canView: isOwner || isDelegate || isAc || isAdmin || parkingAssets.length > 0,
+        });
+    } catch (error) {
+        console.error('getOwnerOnDutyStatus:', error);
         res.status(error.status || 500).json({ message: error.message || 'Server error' });
     }
 };
