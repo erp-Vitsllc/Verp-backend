@@ -13,6 +13,7 @@ import { resolveEmployeeProfileStatusWrite } from "../../utils/employeeProfileSt
 import { isLeftUserStatus } from "../../utils/applyEmployeeLeftUserStatus.js";
 import { closePendingProbationChangeTasks } from "../../utils/sendProbationWorkflowEmail.js";
 import { resolveStoredStaffType } from "../../utils/workLocationHelpers.js";
+import { isRequestUserDesignatedFlowchartHr } from "../../utils/isDesignatedFlowchartHr.js";
 
 export const updateWorkDetails = async (req, res) => {
     try {
@@ -69,7 +70,7 @@ export const updateWorkDetails = async (req, res) => {
         }
 
         let employee = null;
-        const [loadedEmployee, isSystemAdmin] = await Promise.all([
+        const [loadedEmployee, isSystemAdmin, isFlowchartHr] = await Promise.all([
             (async () => {
                 if (typeof id === "string" && /^[a-fA-F0-9]{24}$/.test(id)) {
                     const byId = await EmployeeBasic.findOne({ _id: id }).lean();
@@ -78,6 +79,7 @@ export const updateWorkDetails = async (req, res) => {
                 return EmployeeBasic.findOne({ employeeId: id }).lean();
             })(),
             req.user?.id ? isUserAdministrator(req.user.id) : Promise.resolve(false),
+            isRequestUserDesignatedFlowchartHr(req),
         ]);
         employee = loadedEmployee;
         if (!employee) {
@@ -152,6 +154,15 @@ export const updateWorkDetails = async (req, res) => {
             );
         }
 
+        // Contract joining date auto-fills from the first visa issue date.
+        // Only the flowchart HR assignee may override it — admins and other roles cannot.
+        if (isFlowchartHr && Object.prototype.hasOwnProperty.call(req.body, "contractJoiningDate")) {
+            const raw = req.body.contractJoiningDate;
+            if (raw !== undefined && raw !== null && String(raw).trim() !== "") {
+                updatePayload.contractJoiningDate = raw;
+            }
+        }
+
         const validation = await validateEmployeeWorkDetailsPayload(
             { ...employee, ...updatePayload },
             { employee, employeeId },
@@ -174,8 +185,6 @@ export const updateWorkDetails = async (req, res) => {
             }
             updatePayload.staffType = nextStaffType;
         }
-
-        // Contract joining date is set from the first visa issue date only — not editable here.
 
         // 4. Probation workflow policy:
         // Do NOT auto-promote/revert status in this endpoint.

@@ -88,6 +88,14 @@ export async function validateEmployeeWorkDetailsPayload(payload = {}, { employe
         }
     }
 
+    if (p.contractJoiningDate !== undefined && p.contractJoiningDate !== null && String(p.contractJoiningDate).trim() !== "") {
+        const cjd = parseIsoDate(p.contractJoiningDate);
+        if (!cjd) return { ok: false, message: "Contract Joining Date must be a valid date" };
+        if (startOfDay(cjd) > startOfDay(new Date())) {
+            return { ok: false, message: "Contract Joining Date cannot be in the future" };
+        }
+    }
+
     if (p.company !== undefined) {
         if (!p.company || !mongoose.Types.ObjectId.isValid(p.company)) {
             return { ok: false, message: "Valid company is required" };
