@@ -201,8 +201,6 @@ export const applyOwnerTransferApproverHealToAsset = async (asset) => {
     return true;
 };
 
-const HOLDER_REQUESTED_LEAVE_ROLES = new Set(['assignee', 'companycoordinator']);
-
 const PENDING_LEAVE_OWNER_POPULATE = {
     path: 'assignedTo',
     select: 'firstName lastName employeeId primaryReportee companyEmail workEmail enablePortalAccess',
@@ -212,40 +210,88 @@ const PENDING_LEAVE_OWNER_POPULATE = {
     },
 };
 
+const LEGACY_LEAVE_HEAL_DEFAULT_DAYS = 7;
+
 const resolvePendingLeaveDays = (asset) => {
     const details = asset?.pendingActionDetails || {};
-    const candidates = [details.duration, details.leaveDuration, asset?.onLeaveDuration];
+    const candidates = [
+        details.duration,
+        details.leaveDuration,
+        details.leaveDays,
+        details.days,
+        details.parkingDuration,
+        asset?.onLeaveDuration,
+    ];
     for (const raw of candidates) {
         const n = Number(raw);
         if (Number.isFinite(n) && n >= 1) {
             return Math.min(Math.round(n), MAX_ASSET_LEAVE_DAYS);
         }
     }
-    return null;
+    return LEGACY_LEAVE_HEAL_DEFAULT_DAYS;
 };
 
+const waitingActorId = (asset) =>
+    idStr(asset?.actionRequiredBy) || idStr(asset?.pendingActionDetails?.waitingForId);
+
 const isWaitingOnAssignedHolder = (asset) => {
-    const arId = idStr(asset?.actionRequiredBy);
+    const arId = waitingActorId(asset);
     const ownerId = idStr(asset?.assignedTo);
     return !!(arId && ownerId && arId === ownerId);
 };
 
-const pendingLeaveRequestedByHolder = (asset) =>
-    HOLDER_REQUESTED_LEAVE_ROLES.has(String(asset?.pendingActionDetails?.requestedByRole || '').toLowerCase());
+const loadEmployeeForLeaveHeal = async (ref) => {
+    const id = idStr(ref);
+    if (!id) return null;
+    return EmployeeBasic.findById(id)
+        .select('employeeId firstName lastName companyEmail workEmail enablePortalAccess')
+        .lean()
+        .catch(() => null);
+};
 
 /**
- * Old Leave requests waited on the assigned employee. New flow: AC Leave applies immediately.
- * Auto-complete when AC/admin raised it, or it is still waiting on a holder who cannot log in.
- * Do not auto-complete employee-raised Leave (that still waits on Asset Controller).
+ * Old Leave sat on the assigned employee. Auto-complete when that person cannot log in,
+ * or when Asset Controller / admin already raised the request.
+ * Leave that is correctly waiting on Asset Controller is left for them to approve.
  */
 export const shouldAutoCompletePendingLeave = async (asset) => {
     if (!asset || String(asset.pendingAction || '') !== 'Leave') return false;
-    if (pendingLeaveRequestedByHolder(asset)) return false;
-    const role = String(asset.pendingActionDetails?.requestedByRole || '').toLowerCase();
+
+    const role = String(asset?.pendingActionDetails?.requestedByRole || '').toLowerCase();
     if (role === 'assetcontroller' || role === 'admin') return true;
-    if (!isWaitingOnAssignedHolder(asset)) return false;
-    const canSelf = await assigneeCanSelfApproveOwnerTransfer(asset.assignedTo);
-    return !canSelf;
+
+    const waitingId = waitingActorId(asset);
+    const ownerId = idStr(asset.assignedTo);
+    const waitingEmp = await loadEmployeeForLeaveHeal(waitingId || ownerId);
+    const waitingCanAct = waitingEmp
+        ? await assigneeCanSelfApproveOwnerTransfer(waitingEmp)
+        : false;
+
+    if (waitingId && waitingCanAct) return false;
+
+    if (waitingId && !waitingCanAct) {
+        const ac = await resolveAssetControllerEmployee(
+            await getDepartmentHOD('assetcontroller').catch(() => null),
+        ).catch(() => null);
+        if (ac && idStr(ac) === waitingId) return false;
+        return true;
+    }
+
+    if (isWaitingOnAssignedHolder(asset)) {
+        const ownerCanAct = await assigneeCanSelfApproveOwnerTransfer(
+            waitingEmp || asset.assignedTo,
+        );
+        return !ownerCanAct;
+    }
+
+    if (!waitingId && ownerId) {
+        const ownerCanAct = await assigneeCanSelfApproveOwnerTransfer(
+            waitingEmp || asset.assignedTo,
+        );
+        return !ownerCanAct;
+    }
+
+    return false;
 };
 
 const collectPendingLeaveHealIds = (asset) => {
@@ -286,6 +332,9 @@ const finalizePendingLeaveAsset = async (asset, days, acEmp) => {
     asset.pendingActionDetails = null;
     asset.actionRequiredBy = null;
     if (asset.assignedTo || asset.assignedCompany) asset.status = 'Assigned';
+    if (asset.assignedTo && String(asset.acceptanceStatus || '') === 'Pending') {
+        asset.acceptanceStatus = 'Accepted';
+    }
     await asset.save();
     await DashboardAction.deleteMany({ requestId: asset._id, status: 'Pending' }).catch(() => null);
     await AssetHistory.create({
@@ -337,7 +386,8 @@ export const healAcDirectPendingLeaves = async () => {
     try {
         const pending = await AssetItem.find({ pendingAction: 'Leave' })
             .populate(PENDING_LEAVE_OWNER_POPULATE)
-            .limit(500);
+            .populate('actionRequiredBy', 'firstName lastName employeeId companyEmail enablePortalAccess')
+            .limit(800);
 
         if (!pending.length) return;
 
@@ -417,8 +467,9 @@ export const buildPendingActionWaitingDisplay = (asset, designatedAssetControlle
     });
 
     if (pending === 'Leave') {
-        const name = storedName || arName || empDisplayName(designatedAssetController);
-        return pack(name, 'other', waitingId || arId || acId);
+        const name = arName || storedName || empDisplayName(designatedAssetController);
+        const kind = arId && assigneeId && arId === assigneeId ? 'employee' : 'other';
+        return pack(name, kind, waitingId || arId || acId);
     }
 
     if (pending === 'Return Asset') {

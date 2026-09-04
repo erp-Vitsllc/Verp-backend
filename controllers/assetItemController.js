@@ -85,6 +85,7 @@ import {
     resolveOwnerTransferApprover,
     applyOwnerTransferApproverHealToAsset,
     healMisroutedOwnerTransferApprovals,
+    healAcDirectPendingLeaves,
     healStuckPendingLeaveAsset,
     buildPendingActionWaitingDisplay,
 } from '../utils/assetOwnerTransferApprover.js';
@@ -5230,9 +5231,35 @@ export const getAssetItemDetail = async (req, res) => {
             return res.status(404).json({ message: 'Asset not found' });
         }
 
-        if (!skipInlineWriteHeals && String(item.pendingAction || '') === 'Leave' && typeof item.save === 'function') {
+        if (!skipInlineWriteHeals && String(item.pendingAction || '') === 'Leave') {
             try {
-                await healStuckPendingLeaveAsset(item);
+                await healAcDirectPendingLeaves();
+                if (typeof item.save === 'function') {
+                    await healStuckPendingLeaveAsset(item);
+                }
+                if (String(item.pendingAction || '') === 'Leave') {
+                    const fresh = await AssetItem.findById(item._id)
+                        .select(
+                            'pendingAction pendingActionDetails actionRequiredBy status acceptanceStatus onLeaveActive onLeaveStartDate onLeaveEndDate onLeaveDuration onLeavePackedTo onLeavePackedToRole onLeaveOriginalAssignee',
+                        )
+                        .lean();
+                    if (fresh && !fresh.pendingAction && typeof item.set === 'function') {
+                        item.set({
+                            pendingAction: null,
+                            pendingActionDetails: null,
+                            actionRequiredBy: null,
+                            status: fresh.status,
+                            acceptanceStatus: fresh.acceptanceStatus,
+                            onLeaveActive: fresh.onLeaveActive,
+                            onLeaveStartDate: fresh.onLeaveStartDate,
+                            onLeaveEndDate: fresh.onLeaveEndDate,
+                            onLeaveDuration: fresh.onLeaveDuration,
+                            onLeavePackedTo: fresh.onLeavePackedTo,
+                            onLeavePackedToRole: fresh.onLeavePackedToRole,
+                            onLeaveOriginalAssignee: fresh.onLeaveOriginalAssignee,
+                        });
+                    }
+                }
             } catch (leaveHealErr) {
                 console.error('[getAssetItemDetail] pending leave heal failed:', leaveHealErr?.message || leaveHealErr);
             }
