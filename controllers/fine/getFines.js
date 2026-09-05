@@ -25,6 +25,7 @@ const FINE_LIST_SELECT = [
     'serviceCharge',
     'sourceOfIncome',
     'paidAmount',
+    'accountsPaymentPath',
     'awardedDate',
     'zohoBillId',
     'vendorBillStatus',

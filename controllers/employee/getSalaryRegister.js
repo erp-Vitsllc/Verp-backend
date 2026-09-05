@@ -50,7 +50,6 @@ const MONTH_SHORT = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Se
 const MONTH_NAMES = MONTH_FULL.map((name) => name.toLowerCase());
 const APPROVED_LOAN_STATUSES = ['Approved', 'Pending Payment to Employee', 'Paid'];
 const APPROVED_FINE_STATUSES = ['Approved', 'Active', 'Paid', 'Completed'];
-const OT_MULTIPLIER = 1.25;
 
 function money(value) {
     const n = Number(value);
@@ -976,10 +975,10 @@ function isOvertimeEligible(emp) {
     return raw === 'true' || raw === 'yes' || raw === '1';
 }
 
-function overtimeAmountForPunch({ timeIn, timeOut, date, week, monthlySalary }) {
+function overtimePunchMeta({ timeIn, timeOut, date, week }) {
     const actualIn = clockTimeToMinutes(timeIn);
     const actualOut = clockTimeToMinutes(timeOut);
-    if (actualIn == null || actualOut == null || monthlySalary <= 0) return 0;
+    if (actualIn == null || actualOut == null) return { hours: 0, isOffDay: false };
 
     let worked = actualOut - actualIn;
     if (worked <= 0) worked += 24 * 60;
@@ -992,11 +991,37 @@ function overtimeAmountForPunch({ timeIn, timeOut, date, week, monthlySalary }) 
     }
 
     const otMinutes = scheduled.isOffDay ? worked : Math.max(0, worked - scheduledMinutes);
-    if (otMinutes <= 0) return 0;
+    if (otMinutes <= 0) return { hours: 0, isOffDay: Boolean(scheduled.isOffDay) };
+    return {
+        hours: otMinutes / 60,
+        isOffDay: Boolean(scheduled.isOffDay),
+    };
+}
 
-    const dayHours = (scheduledMinutes > 0 ? scheduledMinutes : 8 * 60) / 60;
-    const hourly = monthlySalary / 30 / dayHours;
-    return hourly * OT_MULTIPLIER * (otMinutes / 60);
+function daysInSalaryMonth(ym) {
+    const match = String(ym || '').match(/^(\d{4})-(\d{2})$/);
+    if (!match) return 30;
+    return lastDayOfMonth(Number(match[1]), Number(match[2]));
+}
+
+function daySalaryForMonth(monthlySalary, ym) {
+    const days = daysInSalaryMonth(ym);
+    if (!(monthlySalary > 0) || days <= 0) return 0;
+    return monthlySalary / days;
+}
+
+function policyTimes(value, fallback) {
+    const n = Number(value);
+    return Number.isFinite(n) && n >= 0 ? n : fallback;
+}
+
+function lateMultiplierFromPolicy(lateInRules) {
+    const rule = Array.isArray(lateInRules) ? lateInRules[0] : null;
+    const deduct = String(rule?.deduct || '').trim().toLowerCase();
+    if (deduct === 'full') return 1;
+    if (deduct === 'half') return 0.5;
+    if (deduct === 'quarter') return 0.25;
+    return 0;
 }
 
 function addMonthsYm(ym, months) {
@@ -1321,7 +1346,21 @@ export const getSalaryRegister = async (req, res) => {
         const salaryByCode = new Map(
             salaryDocs.map((doc) => [employeeCodeKey(doc.employeeId), doc]),
         );
-        const molByCode = await companyMolByEmployeeId(codes);
+        const staffKeys = [...new Set(employees.map((emp) => normalizeStaffTypeKey(emp.staffType)).filter(Boolean))];
+        const payrollKeys = ['default', ...staffKeys.map((key) => `group:${key}`)];
+        const [molByCode, payrollDocs] = await Promise.all([
+            companyMolByEmployeeId(codes),
+            PayrollSettings.find({ key: { $in: payrollKeys } })
+                .select('key authorizedLeaveDeductionDays unauthorizedLeaveDeductionDays lateInRules')
+                .lean()
+                .maxTimeMS(8000),
+        ]);
+        const payrollByKey = new Map(
+            (payrollDocs || []).map((doc) => [String(doc.key || ''), serializePayrollSettings(doc)]),
+        );
+        const defaultPolicy = payrollByKey.get('default') || serializePayrollSettings({});
+        const policyForEmployee = (emp) =>
+            payrollByKey.get(`group:${normalizeStaffTypeKey(emp?.staffType)}`) || defaultPolicy;
         const pendingEmployeeIds = new Set(
             (enrollmentOverview?.pendingRequests || [])
                 .map((row) => employeeCodeKey(row?.employeeId))
@@ -1358,13 +1397,15 @@ export const getSalaryRegister = async (req, res) => {
                 const salaryDoc = getByEmployeeCode(salaryByCode, code);
                 const monthlySalary = salaryAmountForMonth(salaryDoc, ym);
                 const week = getWeekForStaffType(workingTime, emp.staffType);
-                addOt(code, ym, overtimeAmountForPunch({
+                const ot = overtimePunchMeta({
                     timeIn: punch.timeIn,
                     timeOut: punch.timeOut,
                     date: punch.date,
                     week,
-                    monthlySalary,
-                }));
+                });
+                if (ot.hours <= 0) continue;
+                const daily = daySalaryForMonth(monthlySalary, ym);
+                addOt(code, ym, ot.isOffDay ? daily : (daily / 10) * ot.hours);
             }
         }
 
@@ -1381,7 +1422,7 @@ export const getSalaryRegister = async (req, res) => {
                     $match: {
                         employeeMongoId: { $in: mongoIds },
                         date: { $gte: from, $lte: to },
-                        statusKey: { $in: ['authorized_leave', 'unauthorized_leave'] },
+                        statusKey: { $in: ['authorized_leave', 'unauthorized_leave', 'late_arrived'] },
                     },
                 },
                 {
@@ -1400,16 +1441,26 @@ export const getSalaryRegister = async (req, res) => {
 
         for (const row of leaveRows) {
             const key = String(row?._id?.statusKey || '');
-            const pay = String(row?._id?.leavePayType || '').trim().toLowerCase();
             const count = Number(row?.count) || 0;
             const ym = String(row?._id?.month || '');
-            const isLop = key === 'unauthorized_leave' || (key === 'authorized_leave' && pay === 'unpaid');
-            if (!isLop || count <= 0 || !/^\d{4}-\d{2}$/.test(ym)) continue;
+            if (count <= 0 || !/^\d{4}-\d{2}$/.test(ym)) continue;
             const emp = empByMongo.get(String(row?._id?.employeeMongoId || ''));
             if (!emp) continue;
             const code = String(emp.employeeId || '').trim();
             const monthly = salaryAmountForMonth(getByEmployeeCode(salaryByCode, code), ym);
-            addDeduction(code, ym, (monthly / 30) * count);
+            const daily = daySalaryForMonth(monthly, ym);
+            const policy = policyForEmployee(emp);
+            let times = 0;
+            if (key === 'authorized_leave') {
+                times = policyTimes(policy.authorizedLeaveDeductionDays, 1);
+            } else if (key === 'unauthorized_leave') {
+                times = policyTimes(policy.unauthorizedLeaveDeductionDays, 2);
+            } else if (key === 'late_arrived') {
+                times = lateMultiplierFromPolicy(policy.lateInRules);
+            } else {
+                continue;
+            }
+            addDeduction(code, ym, daily * times * count);
         }
 
         const [loans, fines] = await Promise.all([
@@ -1526,6 +1577,7 @@ export const getSalaryRegister = async (req, res) => {
                         actualSalary: roundMoney(Math.max(0, empMonthly + empOt - empDeduction)),
                         basicSalary: roundMoney(empBasic),
                         ot: roundMoney(empOt),
+                        extra: roundMoney(empOt),
                         deduction: roundMoney(empDeduction),
                         paymentType: paymentTypeFromMol(getByEmployeeCode(molByCode, code)),
                         status: processedEmployeeIds.has(employeeCodeKey(code))

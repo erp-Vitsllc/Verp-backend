@@ -113,14 +113,49 @@ export const updateFine = async (req, res) => {
             }
         }
 
+        const isPartyPayableRoute = /\/party-payable(\?|$)/i.test(String(req.originalUrl || req.url || ''));
+        let isAccountsUser = false;
+        if (isApproved && isPartyPayableRoute && req.user) {
+            try {
+                const { isUserInFlowchart } = await import('../../utils/getDepartmentHOD.js');
+                isAccountsUser =
+                    (await isUserInFlowchart(req.user, 'accounts').catch(() => false)) ||
+                    (await isUserInFlowchart(req.user, 'finance').catch(() => false));
+            } catch {
+                isAccountsUser = false;
+            }
+            if (!isAccountsUser) {
+                const dept = String(req.user.department || '').toLowerCase();
+                isAccountsUser = dept === 'finance' || dept === 'account' || dept === 'accounts';
+            }
+            if (!isAccountsUser && req.user.isAdmin === true) isAccountsUser = true;
+        }
+
         if (
             isApproved &&
             !updates.resubmit &&
             updates.fineStatus !== 'Rejected'
         ) {
             const hrOk = await isUserHrForApprovedFineEdit(req, fine);
-            if (!hrOk && !isAssetController) {
+            if (!hrOk && !isAssetController && !isAccountsUser) {
                 return res.status(403).json({ message: 'Only HR and Asset Controller can edit approved fines.' });
+            }
+            if (!hrOk && isAccountsUser && !isAssetController) {
+                const keys = Object.keys(updates || {});
+                const allowed = new Set([
+                    'partyPayables',
+                    'expenseAccountId',
+                    'expenseAccountName',
+                    'payableConfirmed',
+                    'zohoVendorId',
+                    'zohoVendorName',
+                    'zohoOrganizationId',
+                ]);
+                if (keys.some((k) => !allowed.has(k))) {
+                    return res.status(400).json({
+                        message: 'Accounts can only update payable / vendor fields on approved fines.',
+                    });
+                }
             }
 
             if (!hrOk && isAssetController) {

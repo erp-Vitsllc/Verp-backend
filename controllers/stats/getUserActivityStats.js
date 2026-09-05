@@ -21,6 +21,7 @@ import {
 } from "../../utils/employeeLeftUserWorkflow.js";
 import { closeStaleProbationChangeTasksFromPendingRows } from "../../utils/sendProbationWorkflowEmail.js";
 import { isAcceptedAssignmentOutcomeNotification } from "../../utils/isAcceptedAssignmentOutcomeNotification.js";
+import { filterAndCloseCompletedAssetDutyDashboardRows } from "../../utils/closeCompletedAssignmentNotifications.js";
 import {
     buildProfileActivationApprovedMessage,
     buildProfileActivationEntityLine,
@@ -784,7 +785,8 @@ export const getUserActivityStats = async (req, res) => {
             assetCreationOutcomeItems,
         ] = dashboardSettled.map((r) => (r.status === "fulfilled" ? r.value : []));
 
-        const dashboardPendingItems = await closeStaleProbationChangeTasksFromPendingRows(
+        const dashboardPendingItems = await filterAndCloseCompletedAssetDutyDashboardRows(
+            await closeStaleProbationChangeTasksFromPendingRows(
             await filterStaleExpiryDashboardRows(
                 dedupeOwnerLinkedDocumentExpiryReminders(
                 dashboardPendingItemsRaw.filter((item) => {
@@ -808,6 +810,7 @@ export const getUserActivityStats = async (req, res) => {
                     return dashboardRowAssignedToViewer(item);
                 })
                 )
+            )
             )
         );
 

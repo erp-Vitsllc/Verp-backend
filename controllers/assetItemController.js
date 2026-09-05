@@ -277,6 +277,7 @@ import {
     VEHICLE_DASHBOARD_INBOX_TYPES,
 } from '../utils/cleanupAssetDashboardActions.js';
 import { isAcceptedAssignmentOutcomeNotification } from '../utils/isAcceptedAssignmentOutcomeNotification.js';
+import { closeCompletedAssignmentNotificationsForAssets } from '../utils/closeCompletedAssignmentNotifications.js';
 import { listPendingHubInboxItems } from '../utils/employeeHubRequestInbox.js';
 import {
     notifyAdminOfficerOnVehicleServiceCreated,
@@ -7345,6 +7346,11 @@ export const assignAssetItem = async (req, res) => {
                                 viewerRole: 'actor',
                             });
                         }
+                        const dashboardUpdate = { $set: dashboardPatch };
+                        // Tools rows must not keep leftover bulk/handover extra3 or Accept cannot close them.
+                        if (!dashboardPatch.extra3) {
+                            dashboardUpdate.$unset = { extra3: 1 };
+                        }
                         await DashboardAction.findOneAndUpdate(
                             {
                                 requestId: item._id,
@@ -7354,7 +7360,7 @@ export const assignAssetItem = async (req, res) => {
                                     ? { extra3: { $regex: '"handoverViewerRole"\\s*:\\s*"actor"', $options: 'i' } }
                                     : {}),
                             },
-                            dashboardPatch,
+                            dashboardUpdate,
                             { upsert: true, new: true, setDefaultsOnInsert: true },
                         );
                         await healDuplicatePendingAssignmentDashboardRows(item._id).catch(() => null);
@@ -9239,6 +9245,7 @@ export const respondToAssignment = async (req, res) => {
                         },
                     },
                 );
+                await closeCompletedAssignmentNotificationsForAssets(item._id, currentUser);
             } else {
                 const existingAction = await DashboardAction.findOne({
                     requestId: item._id,
@@ -9804,6 +9811,7 @@ export const bulkRespondToAssignment = async (req, res) => {
                             comment: comments || 'Bulk Action',
                         },
                     );
+                    await closeCompletedAssignmentNotificationsForAssets(item._id, currentUser);
                 } catch (dashErr) {
                     console.error('bulkRespondToAssignment dashboard update:', dashErr);
                 }
@@ -10950,6 +10958,7 @@ export const respondBulkAssignmentGroup = async (req, res) => {
             (comments ? `. ${comments}` : '.');
         // Inbox row stays until every asset in the group is accepted or rejected.
         await refreshBulkAssignmentDashboardIfGroupFullyResolved(gid, currentUser, summaryComment.trim());
+        await closeCompletedAssignmentNotificationsForAssets([...accepted, ...rejected], currentUser);
 
         const acceptedSummary = accepted.map((idStr) => {
             const item = byId.get(idStr);
@@ -20386,15 +20395,31 @@ export const getPendingAssetDashboardInbox = async (req, res) => {
             }
 
             if (row.requestType === 'Asset Assignment' || row.requestType === 'Asset') {
-                if (meta?.isBulkAssignment === true) {
-                    itemsAfterCompletedFilter.push(row);
-                    continue;
-                }
                 // Reject FYI stays visible. Accepted outcome bells are email-only — close and hide.
                 if (isAcceptedAssignmentOutcomeNotification(row)) {
                     if (row.dashboardActionId) {
                         staleAssignmentDashboardIds.add(String(row.dashboardActionId));
                     }
+                    continue;
+                }
+                if (meta?.isBulkAssignment === true) {
+                    const cacheKey = String(
+                        meta?.bulkAssignmentGroupId || row.dashboardActionId || JSON.stringify(row.bulkAssetIds || []),
+                    );
+                    let pendingCount = bulkPendingCountCache.get(cacheKey);
+                    if (pendingCount == null) {
+                        pendingCount = await countPendingBulkAssignmentBatch(meta, row.bulkAssetIds);
+                        bulkPendingCountCache.set(cacheKey, pendingCount);
+                    }
+                    if (pendingCount === 0) {
+                        if (meta?.bulkAssignmentGroupId) {
+                            staleBulkGroupIds.add(String(meta.bulkAssignmentGroupId));
+                        } else if (row.dashboardActionId) {
+                            staleAssignmentDashboardIds.add(String(row.dashboardActionId));
+                        }
+                        continue;
+                    }
+                    itemsAfterCompletedFilter.push(row);
                     continue;
                 }
                 if (meta?.assignmentOutcome === true) {

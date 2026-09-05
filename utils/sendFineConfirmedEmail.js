@@ -123,6 +123,14 @@ export const sendFineConfirmedEmail = async (fine, assignedEmployees, req = null
                 accountsHODName = accountsHOD ? `${accountsHOD.firstName || ''} ${accountsHOD.lastName || ''}`.trim() : '';
                 ceoName = managementHOD ? `${managementHOD.firstName || ''} ${managementHOD.lastName || ''}`.trim() : '';
 
+                if (options.ccOnlyHodAndHr) {
+                    ccEmails.clear();
+                    fullEmployees.forEach((emp) => {
+                        addEmployeeEmailToSet(ccEmails, emp.primaryReportee);
+                    });
+                    addEmployeeEmailToSet(ccEmails, hrHOD);
+                }
+
                 const ft = String(fine.fineType || '').toLowerCase();
                 const isLossDamageAssetFine =
                     !!(fine.assetId && String(fine.assetId).trim()) &&
@@ -130,7 +138,7 @@ export const sendFineConfirmedEmail = async (fine, assignedEmployees, req = null
                         fine.category === 'Damage' ||
                         ft.includes('loss & damage') ||
                         ft.includes('loss and damage'));
-                if (isLossDamageAssetFine) {
+                if (isLossDamageAssetFine && !options.ccOnlyHodAndHr) {
                     const acRaw = await getDepartmentHOD('assetcontroller');
                     const acEmp = acRaw ? await resolveAssetControllerEmployee(acRaw) : null;
                     addEmployeeEmailToSet(ccEmails, acEmp || acRaw);

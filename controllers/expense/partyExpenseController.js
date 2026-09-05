@@ -115,6 +115,19 @@ function resolveBalanceShare(bill, { forEmployee = false } = {}) {
         }
         return 0;
     }
+    const lines = Array.isArray(bill?.zohoLineItems) ? bill.zohoLineItems : [];
+    const employeeLineTotal = lines.reduce((sum, line) => {
+        const amt = money(line?.amount);
+        if (amt <= 0 || !lineIsEmployeePayable(line)) return sum;
+        return sum + amt;
+    }, 0);
+    // Item-table Payable To already assigned the extra to an employee.
+    if (employeeLineTotal > 0.009 && Math.min(overContract, employeeLineTotal) >= overContract - 0.009) {
+        return 0;
+    }
+    if (Number.isFinite(empDiff) && empDiff > 0 && !(Number.isFinite(coDiff) && coDiff > 0)) {
+        return 0;
+    }
     if (Number.isFinite(coDiff) && coDiff > 0) return money(coDiff);
     if (payBy === 'company') {
         return overContract > 0 ? overContract : money(bill?.companyPayAmount);
@@ -122,9 +135,7 @@ function resolveBalanceShare(bill, { forEmployee = false } = {}) {
     if (payBy === 'employee_and_company') {
         return Number.isFinite(coDiff) && coDiff > 0
             ? money(coDiff)
-            : money(bill?.companyPayAmount) > 0
-              ? Math.min(overContract, money(bill.companyPayAmount))
-              : 0;
+            : 0;
     }
     return 0;
 }
@@ -521,8 +532,9 @@ export async function listPartyExpenses(req, res) {
                 });
             }
 
-            // No over-contract balance for this party → skip balance row.
-            if (balanceShare <= 0) continue;
+            // Company list: payable share only. Over-contract extra is the
+            // Payable To party's deduction (usually employee salary payable).
+            if (!forEmployee || balanceShare <= 0) continue;
 
             seenBills.add(billId);
 
@@ -661,6 +673,7 @@ export async function listPartyExpenses(req, res) {
                 continue;
             }
             if (kind !== 'balance') continue;
+            if (isCompanyList) continue;
             const isPaid = expense.status === 'Paid';
             const forEmployeeStored = clean(expense.partyType) === 'employee';
             rows.push({

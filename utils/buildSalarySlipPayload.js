@@ -5,7 +5,6 @@ import Fine from '../models/Fine.js';
 import Holiday from '../models/Holiday.js';
 import Loan from '../models/Loan.js';
 import PartyExpense from '../models/PartyExpense.js';
-import PayrollSettings from '../models/PayrollSettings.js';
 import Reward from '../models/Reward.js';
 import SalaryHistoricalProfile from '../models/SalaryHistoricalProfile.js';
 import SalarySlipMonth from '../models/SalarySlipMonth.js';
@@ -13,7 +12,6 @@ import UtilityBillPayment from '../models/UtilityBillPayment.js';
 import { isCompanyShellEmployee } from './attendanceEmployeeFilters.js';
 import { resolveEmployeeFinePayableAmount } from './finePayableAmount.js';
 import { getScheduledEmailTimeZone, getZonedParts } from './scheduleDailyAtMidnight.js';
-import { buildLoanInstallments } from './upsertLoanPartyExpenseFromPayment.js';
 import {
     clockTimeToMinutes,
     getScheduledPunchMinutes,
@@ -22,6 +20,7 @@ import {
     loadWorkingTimeDoc,
 } from './workingTimeHelpers.js';
 import { getVegaLogoDataUrl } from './buildSalarySlipPdfHtml.js';
+import { resolveEmployeePayrollPolicy } from './employeeLeavePolicy.js';
 
 const MONTH_FULL = [
     'January', 'February', 'March', 'April', 'May', 'June',
@@ -111,6 +110,30 @@ function lastDayOfMonth(ym) {
     const match = String(ym || '').match(/^(\d{4})-(\d{2})$/);
     if (!match) return 30;
     return new Date(Number(match[1]), Number(match[2]), 0).getDate();
+}
+
+function salaryMonthWindow(ym) {
+    const key = monthKeyOf(ym);
+    const days = lastDayOfMonth(key);
+    return {
+        ym: key,
+        days,
+        from: key ? `${key}-01` : '',
+        to: key ? `${key}-${pad2(days)}` : '',
+    };
+}
+
+function dateKeyOf(value) {
+    const raw = String(value || '').trim();
+    if (/^\d{4}-\d{2}-\d{2}$/.test(raw)) return raw;
+    const iso = raw.match(/^(\d{4}-\d{2}-\d{2})/);
+    return iso ? iso[1] : '';
+}
+
+function isDateInSalaryMonth(dateValue, ym) {
+    const date = dateKeyOf(dateValue);
+    const { from, to } = salaryMonthWindow(ym);
+    return Boolean(date && from && to && date >= from && date <= to);
 }
 
 function paymentDateLabel(ym) {
@@ -229,6 +252,33 @@ function historyEntryForMonth(salaryDoc, ym) {
     return salaryDoc || null;
 }
 
+function pickAmount(primary, fallback) {
+    const fromPrimary = money(primary);
+    if (fromPrimary > 0) return fromPrimary;
+    return money(fallback);
+}
+
+/** History row for the slip month, with current salary-structure fields filled in. */
+function resolvedSalaryEntry(salaryDoc, ym) {
+    const history = historyEntryForMonth(salaryDoc, ym);
+    if (!history) return salaryDoc || null;
+    if (!salaryDoc || history === salaryDoc) return history;
+    const histExtras = Array.isArray(history.additionalAllowances) ? history.additionalAllowances : [];
+    const docExtras = Array.isArray(salaryDoc.additionalAllowances) ? salaryDoc.additionalAllowances : [];
+    return {
+        ...salaryDoc,
+        ...history,
+        basic: pickAmount(history.basic, salaryDoc.basic),
+        houseRentAllowance: pickAmount(history.houseRentAllowance, salaryDoc.houseRentAllowance),
+        otherAllowance: pickAmount(history.otherAllowance, salaryDoc.otherAllowance),
+        vehicleAllowance: pickAmount(history.vehicleAllowance, salaryDoc.vehicleAllowance),
+        fuelAllowance: pickAmount(history.fuelAllowance, salaryDoc.fuelAllowance),
+        totalSalary: pickAmount(history.totalSalary, salaryDoc.totalSalary),
+        monthlySalary: pickAmount(history.monthlySalary, salaryDoc.monthlySalary),
+        additionalAllowances: histExtras.length ? histExtras : docExtras,
+    };
+}
+
 function monthlySalaryOf(entry) {
     if (!entry) return 0;
     const extras = Array.isArray(entry.additionalAllowances) ? entry.additionalAllowances : [];
@@ -298,20 +348,12 @@ function structureEarnings(entry) {
     ];
 }
 
-const YEARLY_SALARY_COMPONENTS = new Set([
-    'Basic Salary',
-    'Other Allowance',
-    'House Rental Allowance',
-    'Vehicle Allowance',
-    'Fuel Allowance',
-]);
-
 function inCalendarYear(value, year) {
     const ym = payableMonthKey(value) || monthKeyOf(value);
     return Boolean(year && ym && ym.startsWith(`${year}-`));
 }
 
-function yearlyEndOfServiceBenefit(basicMonthly, joiningDate, year) {
+export function yearlyEndOfServiceBenefit(basicMonthly, joiningDate, year) {
     const basic = money(basicMonthly);
     if (basic <= 0 || !year) return 0;
     const daily = money(basic / 30);
@@ -332,13 +374,39 @@ function yearlyEndOfServiceBenefit(basicMonthly, joiningDate, year) {
     return money(daily * daysPerYear);
 }
 
+export function monthlyEndOfServiceBenefit(basicMonthly, joiningDate, year) {
+    return money(yearlyEndOfServiceBenefit(basicMonthly, joiningDate, year) / 12);
+}
+
+function isInactiveBenefitRow(row) {
+    const status = String(row?.paymentStatus || row?.status || '').toLowerCase();
+    return status === 'draft' || status === 'cancelled' || status === 'rejected';
+}
+
+function rowInYear(row, year, dateKeys) {
+    return (dateKeys || []).some((key) => inCalendarYear(row?.[key], year));
+}
+
+function sumBenefitInYear(rows, year, { amountKeys, dateKeys, includeFlag } = {}) {
+    let total = 0;
+    for (const row of rows || []) {
+        if (isInactiveBenefitRow(row)) continue;
+        if (includeFlag && row[includeFlag] === false) continue;
+        if (!rowInYear(row, year, dateKeys)) continue;
+        for (const key of amountKeys || []) {
+            total = money(total + money(row?.[key]));
+        }
+    }
+    return total;
+}
+
 function structureYearlySalary(entry) {
     return structureEarnings(entry)
-        .filter((row) => YEARLY_SALARY_COMPONENTS.has(row.component))
+        .filter((row) => row.component !== 'Phone Allowance')
         .map((row) => ({
             component: row.component,
-            basis: 'Yearly',
-            amount: money(row.amount * 12),
+            basis: 'Monthly',
+            amount: money(row.amount),
         }));
 }
 
@@ -374,6 +442,71 @@ function lateRateFromPolicy(dailyRate, lateInRules) {
     return money(dailyRate * fraction);
 }
 
+function lateMultiplierFromPolicy(lateInRules) {
+    const rule = Array.isArray(lateInRules) ? lateInRules[0] : null;
+    const deduct = String(rule?.deduct || '').trim().toLowerCase();
+    if (deduct === 'full') return 1;
+    if (deduct === 'half') return 0.5;
+    if (deduct === 'quarter') return 0.25;
+    return 0;
+}
+
+function policyTimes(value, fallback) {
+    const n = Number(value);
+    return Number.isFinite(n) && n >= 0 ? n : fallback;
+}
+
+function cycleStatus(cycle) {
+    return String(cycle?.paymentStatus || cycle?.status || '').trim().toLowerCase();
+}
+
+function cycleIsInactive(cycle) {
+    return ['draft', 'cancelled', 'rejected'].includes(cycleStatus(cycle));
+}
+
+function cycleIsPaid(cycle) {
+    return ['paid', 'completed'].includes(cycleStatus(cycle));
+}
+
+function benefitFromCycles(cycles, amountKeys, ym, dateKeys = []) {
+    let pendingCount = 0;
+    let pendingAmount = 0;
+    let totalCount = 0;
+    let totalAmount = 0;
+    for (const cycle of cycles || []) {
+        if (cycleIsInactive(cycle)) continue;
+        if (ym) {
+            const keys = dateKeys.length ? dateKeys : ['paymentDate'];
+            const inMonth = keys.some((key) => cycleInMonth(cycle?.[key], ym));
+            if (!inMonth) continue;
+        }
+        const amt = amountKeys.reduce((sum, key) => sum + money(cycle?.[key]), 0);
+        if (amt <= 0) continue;
+        totalCount += 1;
+        totalAmount += amt;
+        if (!cycleIsPaid(cycle)) {
+            pendingCount += 1;
+            pendingAmount += amt;
+        }
+    }
+    if (pendingCount > 0) {
+        return { count: pendingCount, amount: money(pendingAmount) };
+    }
+    return { count: totalCount, amount: money(totalAmount) };
+}
+
+function installmentTimes(rows, readAmount) {
+    const list = (Array.isArray(rows) ? rows : []).filter((row) => money(readAmount(row)) > 0);
+    if (list.length === 1) {
+        const match = String(list[0]?.schedule || '').match(/x\s+(\d+)/i);
+        if (match) return Number(match[1]) || 0;
+        const duration = Number(list[0]?.duration);
+        if (Number.isFinite(duration) && duration > 0) return duration;
+        return 1;
+    }
+    return list.length;
+}
+
 function cycleInMonth(dateValue, ym) {
     return monthKeyOf(dateValue) === ym || toYearMonth(dateValue) === ym;
 }
@@ -396,26 +529,89 @@ function scheduleHasMonth(startYm, duration, ym) {
     return false;
 }
 
-function installmentAmountForMonth(installments, ym) {
-    const target = payableMonthKey(ym);
-    const part = (installments || []).find((row) => payableMonthKey(row.monthKey) === target);
-    return part ? money(part.amount) : 0;
+function isEmployeeUnpaidStatus(value) {
+    const raw = String(value || '').trim().toLowerCase();
+    if (!raw) return true;
+    if (raw === 'paid' || raw === 'completed') return false;
+    return true;
 }
 
-function partyInstallmentThisMonth(expenses, ym, { kind, mongoField, mongoId } = {}) {
-    const wantId = mongoId ? String(mongoId) : '';
-    for (const exp of expenses || []) {
-        if (kind && exp.kind !== kind) continue;
-        if (wantId && String(exp[mongoField] || '') !== wantId) continue;
-        const fromParts = installmentAmountForMonth(exp.installments, ym);
-        if (fromParts > 0) return fromParts;
-        if (payableMonthKey(exp.monthStart) === payableMonthKey(ym)) {
-            const duration = Math.max(1, Number(exp.duration) || 1);
-            const sliced = money(money(exp.amount) / duration);
-            if (sliced > 0) return sliced;
-        }
+function unpaidInstallmentForMonth(exp, ym) {
+    if (!exp || !isEmployeeUnpaidStatus(exp.status)) return 0;
+    const target = payableMonthKey(ym);
+    const parts = Array.isArray(exp.installments) ? exp.installments : [];
+    if (parts.length) {
+        const part = parts.find((row) => payableMonthKey(row.monthKey) === target);
+        if (!part || !isEmployeeUnpaidStatus(part.status)) return 0;
+        return money(part.amount);
+    }
+    const expMonth = payableMonthKey(exp.billMonth || exp.monthStart);
+    if (!expMonth || expMonth !== target) return 0;
+    return money(exp.amount);
+}
+
+function unpaidSchedulePortion({ total, repaid, startYm, duration, ym }) {
+    const start = payableMonthKey(startYm);
+    const target = payableMonthKey(ym);
+    const months = Math.max(1, Number(duration) || 1);
+    const due = money(total);
+    if (!start || !target || due <= 0 || !scheduleHasMonth(start, months, target)) return 0;
+    let paidLeft = Math.max(0, money(repaid));
+    const base = money(due / months);
+    let allocated = 0;
+    for (let i = 0; i < months; i += 1) {
+        const key = addMonthsYm(start, i);
+        const portion = i === months - 1 ? money(due - allocated) : base;
+        allocated = money(allocated + portion);
+        const paidHere = Math.min(paidLeft, portion);
+        paidLeft = money(paidLeft - paidHere);
+        const unpaid = money(portion - paidHere);
+        if (key === target) return unpaid;
     }
     return 0;
+}
+
+function unpaidThisMonthFromPartyOrSchedule(party, schedule) {
+    if (party && !isEmployeeUnpaidStatus(party.status)) return 0;
+    const fromParty = unpaidInstallmentForMonth(party, schedule.ym);
+    if (fromParty > 0) return fromParty;
+    if (Array.isArray(party?.installments) && party.installments.length > 0) return 0;
+    return unpaidSchedulePortion(schedule);
+}
+
+function partyExpenseFor(expenses, { kind, mongoField, mongoId } = {}) {
+    const wantId = mongoId ? String(mongoId) : '';
+    return (expenses || []).find((exp) => {
+        if (kind && exp.kind !== kind) return false;
+        if (wantId && String(exp[mongoField] || '') !== wantId) return false;
+        return true;
+    }) || null;
+}
+
+function employeeExcessAmount(bill) {
+    if (String(bill?.paymentBy || '').toLowerCase() === 'company') return 0;
+    const excess = Number(bill?.employeeDiffAmount);
+    return Number.isFinite(excess) && excess > 0.009 ? money(excess) : 0;
+}
+
+function employeeExcessThisMonth(bill, ym) {
+    if (payableMonthKey(bill?.billMonth) !== payableMonthKey(ym)) return 0;
+    return employeeExcessAmount(bill);
+}
+
+function isApprovedAssignee(assignee) {
+    const status = String(assignee?.approvalStatus || '').trim();
+    if (!status) return true;
+    return status === 'Approved';
+}
+
+function paidFromPartyExpense(exp) {
+    if (!exp) return 0;
+    if (!isEmployeeUnpaidStatus(exp.status)) return money(exp.amount);
+    const parts = Array.isArray(exp.installments) ? exp.installments : [];
+    return money(
+        parts.reduce((sum, part) => sum + (isEmployeeUnpaidStatus(part.status) ? 0 : money(part.amount)), 0),
+    );
 }
 
 function emptyLoanRow(type) {
@@ -427,6 +623,10 @@ function emptyLoanRow(type) {
         remaining: formatAed(0),
         schedule: '—',
         thisMonthAmount: 0,
+        originalAmount: 0,
+        paidAmount: 0,
+        remainingAmount: 0,
+        approved: false,
     };
 }
 
@@ -456,9 +656,10 @@ export async function buildSalarySlipPayload({
     }
 
     const mongoId = String(emp._id);
-    const daysInMonth = lastDayOfMonth(ym);
-    const from = `${ym}-01`;
-    const to = `${ym}-${pad2(daysInMonth)}`;
+    const monthWindow = salaryMonthWindow(ym);
+    const daysInMonth = monthWindow.days;
+    const from = monthWindow.from;
+    const to = monthWindow.to;
     const idPattern = new RegExp(`^${escapeRegex(code)}$`, 'i');
 
     const [salaryDoc, profile, policy, workingTime, attendance, holidayDocs, loans, fines, rewards, utilityBills, partyExpenses] =
@@ -468,9 +669,9 @@ export async function buildSalarySlipPayload({
                     .select('-offerLetter.data -salaryHistory.attachment.data -salaryHistory.offerLetter.data')
                     .lean(),
             SalaryHistoricalProfile.findOne({ employeeId: idPattern })
-                .select('salarySlip companyMolCode paymentCycles')
+                .select('salarySlip companyMolCode paymentCycles annualLeaveRecords leaveRecords')
                 .lean(),
-            PayrollSettings.findOne({ key: 'default' }).select('lateInRules').lean(),
+            resolveEmployeePayrollPolicy(emp),
             loadWorkingTimeDoc(),
             Attendance.find({
                 $or: [{ employeeMongoId: mongoId }, { employeeId: idPattern }],
@@ -512,29 +713,34 @@ export async function buildSalarySlipPayload({
                 payByEmployeeId: idPattern,
                 status: { $in: ['Approved', 'Paid'] },
             })
-                .select('utilityType billMonth employeePayAmount employeeDiffAmount notes status')
+                .select('utilityType billMonth employeePayAmount employeeDiffAmount paymentBy notes status')
                 .lean(),
             PartyExpense.find({
                 partyType: 'employee',
                 employeeId: idPattern,
-                kind: { $in: ['loan', 'advance', 'fine'] },
+                kind: { $in: ['loan', 'advance', 'fine', 'balance'] },
             })
-                .select('kind amount duration monthStart installments loanMongoId fineMongoId')
+                .select('kind amount duration monthStart billMonth status installments loanMongoId fineMongoId utilityBillId utilityType')
                 .lean(),
         ]);
 
-    const entry = historyEntryForMonth(salaryDoc, ym);
+    const entry = resolvedSalaryEntry(salaryDoc, ym);
     const monthly = monthlySalaryOf(entry);
-    const daily = monthly > 0 ? money(monthly / 30) : 0;
+    const daily = monthly > 0 && daysInMonth > 0 ? money(monthly / daysInMonth) : 0;
+    const authTimes = policyTimes(policy?.authorizedLeaveDeductionDays, 1);
+    const unauthTimes = policyTimes(policy?.unauthorizedLeaveDeductionDays, 2);
+    const lateTimes = lateMultiplierFromPolicy(policy?.lateInRules);
     const week = getWeekForStaffType(workingTime, emp.staffType);
     const holidaySet = new Set(
         (holidayDocs || [])
             .filter((row) => holidayAppliesToStaff(row, emp.staffType))
-            .map((row) => String(row.date || '').trim()),
+            .map((row) => dateKeyOf(row.date))
+            .filter((date) => isDateInSalaryMonth(date, ym)),
     );
 
     let presentDays = 0;
     let workingDayLeaves = 0;
+    let authorizedDays = 0;
     let unauthorizedDays = 0;
     let sickDays = 0;
     let unpaidSickDays = 0;
@@ -544,18 +750,20 @@ export async function buildSalarySlipPayload({
     let holidaysWorked = 0;
     let compOffDays = 0;
     let otHours = 0;
-    let otHoursAmount = 0;
     let otDays = 0;
-    let otDaysAmount = 0;
+    const countedDates = new Set();
 
     for (const row of attendance || []) {
+        const date = dateKeyOf(row.date);
+        if (!isDateInSalaryMonth(date, ym) || countedDates.has(date)) continue;
+        countedDates.add(date);
         const key = String(row.statusKey || '');
-        const date = String(row.date || '');
         if (key === 'holiday') holidayMarks += 1;
         if (key === 'compoff_leave') compOffDays += 1;
         if (key === 'late_arrived') lateEvents += 1;
         if (PRESENT_KEYS.has(key)) presentDays += 1;
         if (LEAVE_KEYS.has(key)) workingDayLeaves += 1;
+        if (key === 'authorized_leave') authorizedDays += 1;
         if (key === 'unauthorized_leave') unauthorizedDays += 1;
         if (key === 'sick_leave') {
             sickDays += 1;
@@ -577,26 +785,20 @@ export async function buildSalarySlipPayload({
         if (ot.hours <= 0) continue;
         if (ot.isOffDay || isHolidayDate) {
             otDays += 1;
-            otDaysAmount = money(otDaysAmount + ot.amount);
         } else {
             otHours += ot.hours;
-            otHoursAmount = money(otHoursAmount + ot.amount);
         }
     }
 
     const holidays = Math.max(holidaySet.size, holidayMarks);
-    const unpaidAuthorized = (attendance || []).filter(
-        (row) =>
-            String(row.statusKey || '') === 'authorized_leave' &&
-            String(row.leavePayType || '').toLowerCase() === 'unpaid',
-    ).length;
-    const authorizedDeductionDays = unpaidAuthorized;
-    const authorizedAmount = money(daily * authorizedDeductionDays);
-    const unauthorizedAmount = money(daily * unauthorizedDays);
+    const authorizedDeductionDays = authorizedDays;
+    const otHoursAmount = money((daily / 10) * otHours);
+    const otDaysAmount = money(daily * otDays);
+    const authorizedAmount = money(daily * authTimes * authorizedDeductionDays);
+    const unauthorizedAmount = money(daily * unauthTimes * unauthorizedDays);
     const sickAmount = money(daily * unpaidSickDays);
     const annualAmount = 0;
-    const lateRate = lateRateFromPolicy(daily, policy?.lateInRules);
-    const lateAmount = money(lateRate * lateEvents);
+    const lateAmount = money(daily * lateTimes * lateEvents);
 
     const earnings = structureEarnings(entry);
     upsertEarning(
@@ -633,13 +835,15 @@ export async function buildSalarySlipPayload({
     upsertEarning(earnings, 'Ticket', 'Annual', ticketAmount);
 
     let rewardAmount = 0;
+    let rewardCount = 0;
     for (const reward of rewards || []) {
         const when = toYearMonth(reward.awardedDate || reward.approvedDate);
         if (when !== ym) continue;
         if (String(reward.rewardType || '') === 'Certificate') continue;
+        rewardCount += 1;
         rewardAmount = money(rewardAmount + money(reward.amount));
     }
-    upsertEarning(earnings, 'Reward', 'Approved', rewardAmount);
+    upsertEarning(earnings, 'Reward', rewardCount > 0 ? 'Reward scheduled' : 'Approved', rewardAmount);
 
     const slipYear = Number(String(ym).slice(0, 4));
     let yearlyRewardAmount = 0;
@@ -649,25 +853,67 @@ export async function buildSalarySlipPayload({
         if (String(reward.rewardType || '') === 'Certificate') continue;
         yearlyRewardAmount = money(yearlyRewardAmount + money(reward.amount));
     }
-    let yearlyLeaveSalaryAmount = 0;
-    let yearlyTravelAmount = 0;
-    for (const cycle of profile?.paymentCycles || []) {
-        const status = String(cycle.paymentStatus || cycle.status || '').toLowerCase();
-        if (status === 'draft' || status === 'cancelled' || status === 'rejected') continue;
-        if (inCalendarYear(cycle.leaveSalaryPaymentDate || cycle.paymentDate, slipYear)) {
-            yearlyLeaveSalaryAmount = money(
-                yearlyLeaveSalaryAmount + money(cycle.leaveSalaryAmount || cycle.leaveSalary),
-            );
-        }
-        if (inCalendarYear(cycle.ticketPaymentDate || cycle.paymentDate, slipYear)) {
-            yearlyTravelAmount = money(yearlyTravelAmount + money(cycle.ticketAmount));
-        }
+    const leaveSalaryDateKeys = [
+        'leaveSalaryPaymentDate',
+        'paymentDate',
+        'eligibilityEndDate',
+        'eligibilityStartDate',
+        'startDate',
+        'endDate',
+        'fromDate',
+        'toDate',
+    ];
+    const travelDateKeys = [
+        'ticketPaymentDate',
+        'paymentDate',
+        'eligibilityEndDate',
+        'eligibilityStartDate',
+        'startDate',
+        'endDate',
+        'fromDate',
+        'toDate',
+    ];
+    let yearlyLeaveSalaryAmount = sumBenefitInYear(profile?.paymentCycles, slipYear, {
+        amountKeys: ['leaveSalaryAmount', 'leaveSalary'],
+        dateKeys: leaveSalaryDateKeys,
+    });
+    if (yearlyLeaveSalaryAmount <= 0) {
+        yearlyLeaveSalaryAmount = money(
+            sumBenefitInYear(profile?.annualLeaveRecords, slipYear, {
+                amountKeys: ['leaveSalaryAmount', 'leaveSalary'],
+                dateKeys: leaveSalaryDateKeys,
+                includeFlag: 'includeLeave',
+            }) +
+                sumBenefitInYear(profile?.leaveRecords, slipYear, {
+                    amountKeys: ['leaveSalaryAmount', 'leaveSalary'],
+                    dateKeys: leaveSalaryDateKeys,
+                    includeFlag: 'includeLeave',
+                }),
+        );
+    }
+    let yearlyTravelAmount = sumBenefitInYear(profile?.paymentCycles, slipYear, {
+        amountKeys: ['ticketAmount'],
+        dateKeys: travelDateKeys,
+    });
+    if (yearlyTravelAmount <= 0) {
+        yearlyTravelAmount = money(
+            sumBenefitInYear(profile?.annualLeaveRecords, slipYear, {
+                amountKeys: ['ticketAmount'],
+                dateKeys: travelDateKeys,
+                includeFlag: 'includeTicket',
+            }) +
+                sumBenefitInYear(profile?.leaveRecords, slipYear, {
+                    amountKeys: ['ticketAmount'],
+                    dateKeys: travelDateKeys,
+                    includeFlag: 'includeTicket',
+                }),
+        );
     }
     const yearlyEarnings = [
         ...structureYearlySalary(entry),
         { component: 'Reward', basis: 'Yearly', amount: yearlyRewardAmount },
         {
-            component: 'End of Service Benefit',
+            component: 'End of Service Benefit(yearly)',
             basis: 'Yearly',
             amount: yearlyEndOfServiceBenefit(entry?.basic, emp.dateOfJoining, slipYear),
         },
@@ -681,6 +927,7 @@ export async function buildSalarySlipPayload({
     const loanSchedule = [];
     const countedLoanIds = new Set();
     const countedFineIds = new Set();
+    const countedUtilityIds = new Set();
     const codeKey = code.toLowerCase();
 
     for (const loan of loans || []) {
@@ -688,28 +935,29 @@ export async function buildSalarySlipPayload({
         const start =
             payableMonthKey(loan.originalMonthStart || loan.monthStart) ||
             payableMonthKey(loan.approvedDate || loan.appliedDate);
-        const installments = buildLoanInstallments({
-            ...loan,
-            monthStart: start,
-            duration,
-        });
         const isAdvance = /advance/i.test(String(loan.type || ''));
         const kind = isAdvance ? 'advance' : 'loan';
-        let thisMonthAmount = installmentAmountForMonth(installments, ym);
-        if (thisMonthAmount <= 0) {
-            thisMonthAmount = partyInstallmentThisMonth(partyExpenses, ym, {
-                kind,
-                mongoField: 'loanMongoId',
-                mongoId: loan._id,
-            });
-        }
+        const party = partyExpenseFor(partyExpenses, {
+            kind,
+            mongoField: 'loanMongoId',
+            mongoId: loan._id,
+        });
         const total = money(loan.amount);
-        const repaid = money(loan.repaidAmount ?? loan.paidAmount);
+        const repaid = money(loan.repaidAmount);
+        const thisMonthAmount = unpaidThisMonthFromPartyOrSchedule(party, {
+            total,
+            repaid,
+            startYm: start,
+            duration,
+            ym,
+        });
         const remaining = Math.max(0, money(total - repaid));
         const type = isAdvance ? 'Salary Advance' : 'Loan';
-        if (type === 'Salary Advance') advanceMonth = money(advanceMonth + thisMonthAmount);
-        else loanMonth = money(loanMonth + thisMonthAmount);
         countedLoanIds.add(String(loan._id || ''));
+        if (thisMonthAmount > 0) {
+            if (type === 'Salary Advance') advanceMonth = money(advanceMonth + thisMonthAmount);
+            else loanMonth = money(loanMonth + thisMonthAmount);
+        }
         loanSchedule.push({
             type,
             original: formatAed(total),
@@ -718,6 +966,10 @@ export async function buildSalarySlipPayload({
             remaining: formatAed(remaining),
             schedule: duration ? `${formatAed(money(total / Math.max(1, Number(duration) || 1)))} x ${duration} months` : '—',
             thisMonthAmount,
+            originalAmount: total,
+            paidAmount: repaid,
+            remainingAmount: remaining,
+            approved: true,
         });
     }
 
@@ -729,31 +981,30 @@ export async function buildSalarySlipPayload({
             if (!id || ['VEGA-HR-0000', 'VEGA_INTERNAL', 'PENDING'].includes(id)) return false;
             return id.toLowerCase() === codeKey;
         });
-        if (!assignee) continue;
+        if (!assignee || !isApprovedAssignee(assignee)) continue;
         const duration = Math.max(1, Number(fine.originalPayableDuration ?? fine.payableDuration) || 1);
         const startFineYm =
             payableMonthKey(fine.originalMonthStart || fine.monthStart) ||
             payableMonthKey(fine.awardedDate || fine.approvedDate || fine.createdAt);
         const payable = resolveEmployeeFinePayableAmount(fine, assignee.employeeId);
         if (payable <= 0) continue;
-        let thisMonthAmount = 0;
-        if (scheduleHasMonth(startFineYm, duration, ym)) {
-            thisMonthAmount = money(payable / duration);
-        }
-        if (thisMonthAmount <= 0) {
-            thisMonthAmount = partyInstallmentThisMonth(partyExpenses, ym, {
-                kind: 'fine',
-                mongoField: 'fineMongoId',
-                mongoId: fine._id,
-            });
-        }
+        const party = partyExpenseFor(partyExpenses, {
+            kind: 'fine',
+            mongoField: 'fineMongoId',
+            mongoId: fine._id,
+        });
         const paid = money(fine.paidAmount);
+        const thisMonthAmount = unpaidThisMonthFromPartyOrSchedule(party, {
+            total: payable,
+            repaid: paid,
+            startYm: startFineYm,
+            duration,
+            ym,
+        });
         const remaining = Math.max(0, money(payable - paid));
         const installment = money(payable / duration);
-        if (thisMonthAmount > 0) {
-            fineMonth = money(fineMonth + thisMonthAmount);
-        }
         countedFineIds.add(String(fine._id || ''));
+        if (thisMonthAmount > 0) fineMonth = money(fineMonth + thisMonthAmount);
         const typeLabel = String(fine.fineType || fine.subCategory || fine.category || 'Fine').trim() || 'Fine';
         fineRows.push({
             type: typeLabel,
@@ -761,71 +1012,115 @@ export async function buildSalarySlipPayload({
             schedule: `${formatAed(installment)} x ${duration} months`,
             thisMonth: formatAed(thisMonthAmount),
             paid: formatAed(paid),
-            unpaidStatus: `${formatAed(remaining)} / ${remaining > 0.009 ? 'Active' : 'Paid'}`,
+            unpaidStatus: `${formatAed(remaining)} / ${remaining > 0.009 ? 'Not Paid' : 'Paid'}`,
             thisMonthAmount,
+            originalAmount: payable,
+            paidAmount: paid,
+            remainingAmount: remaining,
+            approved: true,
         });
     }
 
+    let utilityMonth = 0;
+    const utilities = [];
     for (const exp of partyExpenses || []) {
-        const amt =
-            installmentAmountForMonth(exp.installments, ym) ||
-            (payableMonthKey(exp.monthStart) === ym
-                ? money(money(exp.amount) / Math.max(1, Number(exp.duration) || 1))
-                : 0);
-        if (amt <= 0) continue;
+        if (exp.kind === 'balance') continue;
+        const thisMonthAmount = unpaidInstallmentForMonth(exp, ym);
+        const total = money(exp.amount);
+        if (total <= 0 && thisMonthAmount <= 0) continue;
+        const paid = paidFromPartyExpense(exp);
+        const remaining = Math.max(0, money(total - paid));
         if (exp.kind === 'fine') {
             if (countedFineIds.has(String(exp.fineMongoId || ''))) continue;
             countedFineIds.add(String(exp.fineMongoId || ''));
-            fineMonth = money(fineMonth + amt);
+            if (thisMonthAmount > 0) fineMonth = money(fineMonth + thisMonthAmount);
             fineRows.push({
                 type: 'Fine',
-                amount: formatAed(exp.amount),
-                schedule: `${formatAed(amt)} x ${Math.max(1, Number(exp.duration) || 1)} months`,
-                thisMonth: formatAed(amt),
-                paid: formatAed(0),
-                unpaidStatus: `${formatAed(amt)} / Active`,
-                thisMonthAmount: amt,
+                amount: formatAed(total),
+                schedule: `${formatAed(thisMonthAmount || total)} x ${Math.max(1, Number(exp.duration) || 1)} months`,
+                thisMonth: formatAed(thisMonthAmount),
+                paid: formatAed(paid),
+                unpaidStatus: `${formatAed(remaining)} / ${remaining > 0.009 ? 'Not Paid' : 'Paid'}`,
+                thisMonthAmount,
+                originalAmount: total,
+                paidAmount: paid,
+                remainingAmount: remaining,
+                approved: true,
             });
             continue;
         }
-        if (countedLoanIds.has(String(exp.loanMongoId || ''))) continue;
-        countedLoanIds.add(String(exp.loanMongoId || ''));
-        const isAdvance = exp.kind === 'advance';
-        if (isAdvance) advanceMonth = money(advanceMonth + amt);
-        else loanMonth = money(loanMonth + amt);
-        loanSchedule.push({
-            type: isAdvance ? 'Salary Advance' : 'Loan',
-            original: formatAed(exp.amount),
-            thisMonth: formatAed(amt),
-            paidToDate: formatAed(0),
-            remaining: formatAed(exp.amount),
-            schedule: `${formatAed(amt)} x ${Math.max(1, Number(exp.duration) || 1)} months`,
-            thisMonthAmount: amt,
-        });
+        if (exp.kind === 'loan' || exp.kind === 'advance') {
+            if (countedLoanIds.has(String(exp.loanMongoId || ''))) continue;
+            countedLoanIds.add(String(exp.loanMongoId || ''));
+            const isAdvance = exp.kind === 'advance';
+            if (thisMonthAmount > 0) {
+                if (isAdvance) advanceMonth = money(advanceMonth + thisMonthAmount);
+                else loanMonth = money(loanMonth + thisMonthAmount);
+            }
+            loanSchedule.push({
+                type: isAdvance ? 'Salary Advance' : 'Loan',
+                original: formatAed(total),
+                thisMonth: formatAed(thisMonthAmount),
+                paidToDate: formatAed(paid),
+                remaining: formatAed(remaining),
+                schedule: `${formatAed(thisMonthAmount || total)} x ${Math.max(1, Number(exp.duration) || 1)} months`,
+                thisMonthAmount,
+                originalAmount: total,
+                paidAmount: paid,
+                remainingAmount: remaining,
+                approved: true,
+            });
+        }
     }
 
     if (!loanSchedule.some((row) => row.type === 'Salary Advance')) loanSchedule.unshift(emptyLoanRow('Salary Advance'));
     if (!loanSchedule.some((row) => row.type === 'Loan')) loanSchedule.push(emptyLoanRow('Loan'));
 
-    let utilityMonth = 0;
-    const utilities = [];
     for (const bill of utilityBills || []) {
-        if (payableMonthKey(bill.billMonth) !== ym) continue;
-        const excess = Number(bill.employeeDiffAmount);
-        const pay = Number(bill.employeePayAmount);
-        const amount =
-            Number.isFinite(excess) && excess > 0.009
-                ? money(excess)
-                : Number.isFinite(pay) && pay > 0.009
-                    ? money(pay)
-                    : 0;
-        if (amount <= 0) continue;
-        utilityMonth = money(utilityMonth + amount);
+        const billId = String(bill._id || '');
+        const total = employeeExcessAmount(bill);
+        if (total <= 0) continue;
+        if (billId && countedUtilityIds.has(billId)) continue;
+        if (billId) countedUtilityIds.add(billId);
+        const party = partyExpenseFor(partyExpenses, {
+            kind: 'balance',
+            mongoField: 'utilityBillId',
+            mongoId: bill._id,
+        });
+        const paid = paidFromPartyExpense(party);
+        const thisMonthAmount = unpaidInstallmentForMonth(party, ym) || (paid > 0 ? 0 : employeeExcessThisMonth(bill, ym));
+        if (thisMonthAmount > 0) utilityMonth = money(utilityMonth + thisMonthAmount);
         utilities.push({
             details: String(bill.utilityType || 'Utility').trim() || 'Utility',
-            amount: formatAed(amount),
+            amount: formatAed(total),
             reason: String(bill.notes || 'Usage exceeded the approved monthly plan limit.').trim(),
-            total: amount,
+            total,
+            paid,
+            thisMonthAmount,
+            thisMonth: formatAed(thisMonthAmount),
+            approved: true,
+        });
+    }
+
+    for (const exp of partyExpenses || []) {
+        if (exp.kind !== 'balance') continue;
+        const billId = String(exp.utilityBillId || '');
+        if (billId && countedUtilityIds.has(billId)) continue;
+        const total = money(exp.amount);
+        const thisMonthAmount = unpaidInstallmentForMonth(exp, ym);
+        if (total <= 0 && thisMonthAmount <= 0) continue;
+        if (billId) countedUtilityIds.add(billId);
+        const paid = paidFromPartyExpense(exp);
+        if (thisMonthAmount > 0) utilityMonth = money(utilityMonth + thisMonthAmount);
+        utilities.push({
+            details: String(exp.utilityType || 'Utility').trim() || 'Utility',
+            amount: formatAed(total),
+            reason: 'Employee excess',
+            total,
+            paid,
+            thisMonthAmount,
+            thisMonth: formatAed(thisMonthAmount),
+            approved: true,
         });
     }
 
@@ -852,18 +1147,18 @@ export async function buildSalarySlipPayload({
         {
             category: 'Authorized Leave',
             qty: qtyLabel(authorizedDeductionDays, 'day'),
-            rate: formatAed(daily),
+            rate: formatAed(money(daily * authTimes)),
             calculation: authorizedDeductionDays > 0
-                ? `${qtyLabel(authorizedDeductionDays, 'day')} x ${formatAed(daily)}`
+                ? `${qtyLabel(authorizedDeductionDays, 'day')} x ${authTimes} x ${formatAed(daily)}`
                 : 'No deduction for this month',
             total: authorizedAmount,
         },
         {
             category: 'Unauthorized Leave',
             qty: qtyLabel(unauthorizedDays, 'day'),
-            rate: formatAed(daily),
+            rate: formatAed(money(daily * unauthTimes)),
             calculation: unauthorizedDays > 0
-                ? `${qtyLabel(unauthorizedDays, 'day')} x ${formatAed(daily)}`
+                ? `${qtyLabel(unauthorizedDays, 'day')} x ${unauthTimes} x ${formatAed(daily)}`
                 : 'No deduction for this month',
             total: unauthorizedAmount,
         },
@@ -888,9 +1183,9 @@ export async function buildSalarySlipPayload({
         {
             category: 'Late Arrival',
             qty: qtyLabel(lateEvents, 'event'),
-            rate: formatAed(lateRate),
-            calculation: lateEvents > 0 && lateRate > 0
-                ? `${qtyLabel(lateEvents, 'event')} x ${formatAed(lateRate)}`
+            rate: formatAed(money(daily * lateTimes)),
+            calculation: lateEvents > 0 && lateTimes > 0
+                ? `${qtyLabel(lateEvents, 'event')} x ${lateTimes} x ${formatAed(daily)}`
                 : 'No deduction for this month',
             total: lateAmount,
         },
@@ -940,6 +1235,51 @@ export async function buildSalarySlipPayload({
             utilityExcess: utilityMonth,
             verifiedTotal: totalDeductions,
         },
+        summary: {
+            monthDays: daysInMonth,
+            monthlySalary: monthly,
+            daySalary: daily,
+            overtimeHoursCount: money(otHours),
+            overtimeDaysCount: otDays,
+            rewardCount,
+            leaveSalary: benefitFromCycles(
+                profile?.paymentCycles,
+                ['leaveSalaryAmount', 'leaveSalary'],
+                ym,
+                ['leaveSalaryPaymentDate', 'paymentDate'],
+            ),
+            airTicket: benefitFromCycles(
+                profile?.paymentCycles,
+                ['ticketAmount'],
+                ym,
+                ['ticketPaymentDate', 'paymentDate'],
+            ),
+            leaveMultipliers: {
+                authorized: authTimes,
+                unauthorized: unauthTimes,
+                annual: 1,
+                late: lateTimes,
+            },
+            lossOfPayDays: {
+                authorized: authorizedDeductionDays,
+                unauthorized: unauthorizedDays,
+                late: lateEvents,
+                annual: annualDays,
+                compOff: compOffDays,
+            },
+            otherDeductionTimes: {
+                loan: installmentTimes(
+                    loanSchedule.filter((row) => !/advance/i.test(String(row.type || ''))),
+                    (row) => row.thisMonthAmount,
+                ),
+                fine: installmentTimes(fineRows, (row) => row.thisMonthAmount),
+                utilityExcess: installmentTimes(utilities, (row) => row.total ?? row.amount),
+                salaryAdvance: installmentTimes(
+                    loanSchedule.filter((row) => /advance/i.test(String(row.type || ''))),
+                    (row) => row.thisMonthAmount,
+                ),
+            },
+        },
         fileName: `Salary-Slip-${ym}-${code}.pdf`,
     };
 
@@ -965,26 +1305,32 @@ export function serializeSalarySlipForClient(slip) {
 }
 
 function rowNameKey(row) {
-    return String(row?.component || row?.type || '').trim().toLowerCase();
+    const raw = String(row?.component || row?.type || '').trim().toLowerCase();
+    if (raw.includes('end of service') || raw.includes('gratuity') || raw === 'eosb') {
+        return 'end of service benefit';
+    }
+    return raw;
 }
 
 function mergeAmountRows(stored, live) {
     const liveRows = Array.isArray(live) ? live : [];
     const storedRows = Array.isArray(stored) ? stored : [];
-    const liveByKey = new Map(liveRows.map((row) => [rowNameKey(row), row]));
+    const storedByKey = new Map(storedRows.map((row) => [rowNameKey(row), row]));
     const used = new Set();
-    const merged = storedRows.map((row) => {
-        const liveRow = liveByKey.get(rowNameKey(row));
-        if (!liveRow) return row;
-        used.add(rowNameKey(row));
-        if (money(row.amount) > 0) return row;
-        if (money(liveRow.amount) <= 0) return { ...row, basis: row.basis || liveRow.basis };
-        return { ...row, amount: liveRow.amount, basis: row.basis || liveRow.basis };
+    const merged = liveRows.map((liveRow) => {
+        const key = rowNameKey(liveRow);
+        used.add(key);
+        const storedRow = storedByKey.get(key);
+        if (!storedRow) return liveRow;
+        return {
+            ...storedRow,
+            ...liveRow,
+            basis: liveRow.basis || storedRow.basis,
+            amount: money(liveRow.amount),
+        };
     });
-    for (const row of liveRows) {
-        if (!used.has(rowNameKey(row)) && !merged.some((item) => rowNameKey(item) === rowNameKey(row))) {
-            merged.push(row);
-        }
+    for (const row of storedRows) {
+        if (!used.has(rowNameKey(row))) merged.push(row);
     }
     return merged;
 }
@@ -1004,6 +1350,7 @@ function preferLiveComputed(merged, live) {
         attendanceDeductions: Array.isArray(live.attendanceDeductions)
             ? live.attendanceDeductions
             : merged.attendanceDeductions,
+        summary: live.summary || merged.summary,
     });
 }
 

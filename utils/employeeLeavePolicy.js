@@ -71,6 +71,10 @@ export function dateKeysInRange(fromKey, toKey) {
     return keys;
 }
 
+function lateRulesHaveDeduct(rules) {
+    return (Array.isArray(rules) ? rules : []).some((row) => String(row?.deduct || '').trim());
+}
+
 export async function resolveEmployeePayrollPolicy(employee) {
     const employeeId = String(employee?.employeeId || '').trim();
     const staffType = normalizeStaffTypeKey(employee?.staffType);
@@ -79,10 +83,20 @@ export async function resolveEmployeePayrollPolicy(employee) {
         staffType ? PayrollSettings.findOne({ key: `group:${staffType}` }).lean() : null,
         PayrollSettings.findOne({ key: 'default' }).lean(),
     ]);
-    if (enrollment?.policy && typeof enrollment.policy === 'object') {
-        return serializePayrollSettings(enrollment.policy);
+    const groupPolicy = serializePayrollSettings(group || main || {});
+    if (!enrollment?.policy || typeof enrollment.policy !== 'object') {
+        return groupPolicy;
     }
-    return serializePayrollSettings(group || main || {});
+    const own = serializePayrollSettings(enrollment.policy);
+    return {
+        ...groupPolicy,
+        ...own,
+        authorizedLeaveDeductionDays:
+            own.authorizedLeaveDeductionDays ?? groupPolicy.authorizedLeaveDeductionDays,
+        unauthorizedLeaveDeductionDays:
+            own.unauthorizedLeaveDeductionDays ?? groupPolicy.unauthorizedLeaveDeductionDays,
+        lateInRules: lateRulesHaveDeduct(own.lateInRules) ? own.lateInRules : groupPolicy.lateInRules,
+    };
 }
 
 export function leavePolicyEntitlements(policy) {

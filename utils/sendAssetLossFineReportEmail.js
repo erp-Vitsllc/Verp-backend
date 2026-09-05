@@ -94,7 +94,7 @@ async function resolveAssetOwnerEmployee(fine, assignedEmployees) {
         .lean();
 }
 
-function buildCcEmails(stakeholders, assetOwner, skipEmail, coAssignedEmployees = []) {
+function buildCcEmails(stakeholders, assetOwner, skipEmail, coAssignedEmployees = [], options = {}) {
     const cc = new Set();
     const skip = String(skipEmail || '').toLowerCase();
 
@@ -102,6 +102,14 @@ function buildCcEmails(stakeholders, assetOwner, skipEmail, coAssignedEmployees 
         const { email } = resolveEmployeeEmail(emp);
         if (email && email.toLowerCase() !== skip) cc.add(email);
     };
+
+    if (options.ccOnlyHodAndHr) {
+        add(stakeholders.hrHOD);
+        for (const emp of coAssignedEmployees || []) {
+            add(emp?.primaryReportee);
+        }
+        return Array.from(cc);
+    }
 
     add(stakeholders.hrHOD);
     add(stakeholders.adminHOD);
@@ -229,7 +237,7 @@ export async function sendAssetLossFineReportEmail(fine, assignedEmployees, req 
                 }),
             });
 
-            const ccRecipients = buildCcEmails(stakeholders, assetOwner, toMail, fullEmployees);
+            const ccRecipients = buildCcEmails(stakeholders, assetOwner, toMail, fullEmployees, options);
 
             await transporter.sendMail({
                 fromName,
@@ -296,6 +304,7 @@ export async function sendAssetLossFineReportEmail(fine, assignedEmployees, req 
                 assetOwner,
                 adminRecipient.email,
                 fullEmployees,
+                options,
             );
 
             await transporter.sendMail({
@@ -374,10 +383,12 @@ export async function sendAssetLossFineReportEmail(fine, assignedEmployees, req 
 
                     const stakeholderCc = new Set();
                     addEmployeeEmailToSet(stakeholderCc, stakeholders.hrHOD);
-                    addEmployeeEmailToSet(stakeholderCc, stakeholders.adminHOD);
-                    addEmployeeEmailToSet(stakeholderCc, stakeholders.accountsHOD);
-                    addEmployeeEmailToSet(stakeholderCc, stakeholders.managementHOD);
-                    addEmployeeEmailToSet(stakeholderCc, stakeholders.assetController);
+                    if (!options.ccOnlyHodAndHr) {
+                        addEmployeeEmailToSet(stakeholderCc, stakeholders.adminHOD);
+                        addEmployeeEmailToSet(stakeholderCc, stakeholders.accountsHOD);
+                        addEmployeeEmailToSet(stakeholderCc, stakeholders.managementHOD);
+                        addEmployeeEmailToSet(stakeholderCc, stakeholders.assetController);
+                    }
                     stakeholderCc.delete(ownerResolved.email);
 
                     await transporter.sendMail({

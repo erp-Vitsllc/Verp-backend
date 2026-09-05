@@ -420,9 +420,9 @@ export const addFine = async (req, res) => {
                     finePayload.handoverHrApproval = true;
                 }
 
-                // BULK: Route directly to HR (no reportee step)
+                // BULK: HR already approved on handover — next is Management
                 if (commonData.handoverHrApproval === true) {
-                    finePayload.fineStatus = commonData.fineStatus === 'Approved' ? 'Approved' : 'Pending Accounts';
+                    finePayload.fineStatus = commonData.fineStatus === 'Approved' ? 'Approved' : 'Pending Authorization';
                     finePayload.workflow = [
                         {
                             role: 'HR',
@@ -432,6 +432,24 @@ export const addFine = async (req, res) => {
                             actionedAt: new Date(),
                         },
                     ];
+                    try {
+                        const { getManagementHOD } = await import('../../utils/getManagementHOD.js');
+                        const managementHOD = await getManagementHOD(empData.employeeId);
+                        if (managementHOD) {
+                            const mgmtUser = await User.findOne({ employeeId: managementHOD.employeeId });
+                            if (mgmtUser) {
+                                finePayload.submittedTo = mgmtUser._id;
+                                finePayload.workflow.push({
+                                    role: 'Management',
+                                    assignedTo: mgmtUser._id,
+                                    status: 'Pending',
+                                    assignedAt: new Date(),
+                                });
+                            }
+                        }
+                    } catch (mgmtErr) {
+                        console.error('[AddFine] Handover Management routing failed:', mgmtErr);
+                    }
                 } else if (finePayload.fineStatus !== 'Draft' && hrHOD) {
                     try {
                         const hrUser = await User.findOne({ employeeId: hrHOD.employeeId });

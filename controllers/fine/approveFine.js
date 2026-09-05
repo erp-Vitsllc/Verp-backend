@@ -3,10 +3,15 @@ import EmployeeBasic from "../../models/EmployeeBasic.js";
 import { dispatchFineApprovedNotification } from "../../utils/dispatchFineApprovedNotification.js";
 import { getManagementHOD } from "../../utils/getManagementHOD.js";
 import { sendHODAuthorizationEmail } from "../../utils/sendHODAuthorizationEmail.js";
-import { sendFineStageEmail } from "../../utils/sendFineStageEmail.js";
 import { isValidStorageUrl } from "../../utils/validationHelper.js";
 import { canUserActOnFineStageAsync } from "../../utils/fineStageAuth.js";
 import { runAfterResponse } from "../../utils/runAfterResponse.js";
+import {
+    openAccountsPaymentInbox,
+    emailAccountsPaymentRequest,
+    resolveFineManagementActor,
+    resolveFineAccountsActor,
+} from "../../utils/fineAccountsPaymentFlow.js";
 
 /**
  * Approve Fine - Sequential Workflow
@@ -82,71 +87,66 @@ export const approveFine = async (req, res) => {
 
         console.log("ApproveFine:", { fineId: fine.fineId, status: currentStatus, userId: req.user._id });
 
-        // --- STAGE 1: HR (Pending HR -> Pending Accounts) ---
-        // Handle synonyms for better robustness
+        // --- STAGE 1: HR (Pending HR -> Pending Authorization / Management) ---
         const isHRStage = currentStatus === 'Pending HR' || currentStatus === 'Pending Review' ||
             (currentStatus === 'Pending' && (!fine.workflow || fine.workflow.length === 0 || fine.workflow.some(w => w.status === 'Pending' && w.role === 'HR')));
 
         if (isHRStage) {
             if (await canActOnFine()) {
-                fine.fineStatus = 'Pending Accounts';
+                fine.fineStatus = 'Pending Authorization';
                 fine.hrApprovedBy = req.user._id;
                 modified = true;
 
-                const realEmp = fine.assignedEmployees?.find(e => e.employeeId && e.employeeId !== 'VEGA-HR-0000');
-                const applicantId = realEmp?.employeeId || fine.assignedEmployees?.[0]?.employeeId;
-                const accountsHOD = await import("../../utils/getDepartmentHOD.js")
-                    .then(m => m.getDepartmentHOD('finance', applicantId));
-                const accEmails = accountsHOD?.companyEmail ? [accountsHOD.companyEmail] : [];
-                if (accEmails.length === 0) accEmails.push(process.env.ACCOUNTS_EMAIL || 'accounts@verp.com');
-
+                const { managementHOD, mgmtUser } = await resolveFineManagementActor(fine);
                 let nextApproverFound = false;
-                if (accountsHOD) {
-                    const accUser = await import("../../models/User.js")
-                        .then(m => m.default.findOne({ employeeId: accountsHOD.employeeId }));
-                    if (accUser) {
-                        fine.submittedTo = accUser._id;
-                        nextApproverFound = true;
 
-                        const hrEntry = fine.workflow?.find(w =>
-                            w.status === 'Pending' &&
-                            (w.assignedTo?.toString() === req.user._id.toString() || w.role === 'HR')
-                        );
-                        if (hrEntry) { hrEntry.status = 'Approved'; hrEntry.actionedAt = new Date(); }
-                        else { fine.workflow.push({ role: 'HR', assignedTo: req.user._id, status: 'Approved', assignedAt: new Date(), actionedAt: new Date() }); }
-
-                        const nextStepExists = fine.workflow.some(w => w.role === 'Accounts' && w.status === 'Pending');
-                        if (!nextStepExists) {
-                            fine.workflow.push({ role: 'Accounts', assignedTo: accUser._id, status: 'Pending', assignedAt: new Date() });
-                        }
-                    }
+                const hrEntry = fine.workflow?.find(w =>
+                    w.status === 'Pending' &&
+                    (w.assignedTo?.toString() === req.user._id.toString() || w.role === 'HR')
+                );
+                if (hrEntry) { hrEntry.status = 'Approved'; hrEntry.actionedAt = new Date(); }
+                else {
+                    if (!fine.workflow) fine.workflow = [];
+                    fine.workflow.push({ role: 'HR', assignedTo: req.user._id, status: 'Approved', assignedAt: new Date(), actionedAt: new Date() });
                 }
 
-                if (!nextApproverFound) {
-                    console.warn(`[Fine ${fine.fineId}] Accounts Approver NOT FOUND. Releasing submittedTo.`);
-                    fine.submittedTo = null;
-                    const hrEntry = fine.workflow?.find(w =>
-                        w.status === 'Pending' &&
-                        (w.assignedTo?.toString() === req.user._id.toString() || w.role === 'HR')
+                if (mgmtUser) {
+                    fine.submittedTo = mgmtUser._id;
+                    nextApproverFound = true;
+                    const nextStepExists = fine.workflow.some(w =>
+                        (w.role === 'Management' || w.role === 'CEO') && w.status === 'Pending'
                     );
-                    if (hrEntry) { hrEntry.status = 'Approved'; hrEntry.actionedAt = new Date(); }
+                    if (!nextStepExists) {
+                        fine.workflow.push({
+                            role: 'Management',
+                            assignedTo: mgmtUser._id,
+                            status: 'Pending',
+                            assignedAt: new Date(),
+                        });
+                    }
+                } else {
+                    console.warn(`[Fine ${fine.fineId}] Management Approver NOT FOUND after HR. Releasing submittedTo.`);
+                    fine.submittedTo = null;
                 }
 
                 for (const f of fines) {
-                    f.fineStatus = 'Pending Accounts';
+                    f.fineStatus = 'Pending Authorization';
                     f.hrApprovedBy = req.user._id;
                     f.submittedTo = fine.submittedTo;
                     f.workflow = fine.workflow;
                     await f.save();
                 }
 
-                console.log(`[Fine ${fine.fineId}] HR Approved. Next Finance: ${nextApproverFound}`);
-                const allAssignedEmployees = fines.flatMap(f => f.assignedEmployees);
-                const fineSnapshot = fine.toObject?.() ? fine.toObject() : { ...fine };
-                const accEmailsCopy = [...accEmails];
-                runAfterResponse('approveFine-hr-email', () =>
-                    sendFineStageEmail(fineSnapshot, accEmailsCopy, 'Accounts', allAssignedEmployees),
-                );
+                console.log(`[Fine ${fine.fineId}] HR Approved. Next Management: ${nextApproverFound}`);
+                if (managementHOD) {
+                    const fineSnapshot = fine.toObject?.() ? fine.toObject() : { ...fine };
+                    runAfterResponse('approveFine-hr-email', () =>
+                        sendHODAuthorizationEmail('Fine', fineSnapshot, managementHOD, {
+                            name: req.user.name || `${req.user.firstName || ''} ${req.user.lastName || ''}`.trim() || 'HR',
+                            designation: 'HR',
+                        }),
+                    );
+                }
             } else {
                 return res.status(403).json({ message: "Only the assigned HR approver can approve at this stage." });
             }
@@ -261,65 +261,12 @@ export const approveFine = async (req, res) => {
         else if (currentStatus === 'Pending Authorization' || currentStatus === 'Pending Management' ||
             (currentStatus === 'Pending' && fine.workflow?.some(w => w.status === 'Pending' && (w.role === 'Management' || w.role === 'CEO')))) {
             if (await canActOnFine()) {
-                const {
-                    zohoVendorId = '',
-                    zohoVendorName = '',
-                    expenseAccountId = '',
-                    expenseAccountName = '',
-                    zohoOrganizationId = '',
-                    billNumber = '',
-                    billDate = '',
-                } = req.body || {};
-
-                let vendorId = String(zohoVendorId || fine.zohoVendorId || '').trim();
-                const vendorNameHint = String(
-                    zohoVendorName || fine.zohoVendorName || fine.fineSource || '',
-                ).trim();
-
-                // Status first — do not block Approved on live Zoho vendor fetch (resolve in background).
-                const accountId = String(expenseAccountId || fine.expenseAccountId || '').trim();
-                const allPartiesHavePayable = fines.every((f) => String(f.expenseAccountId || '').trim());
-                if (!vendorId && !vendorNameHint) {
-                    return res.status(400).json({
-                        message:
-                            'Management approval requires a Zoho vendor. Set Vendor (Fine Source) in Accounts on the Group Fine Parties card first.',
-                    });
-                }
-                if (!accountId && !allPartiesHavePayable) {
-                    return res.status(400).json({
-                        message:
-                            'Management approval requires expense accounts: fill Payable (Chart of Accounts) for every party in Accounts first.',
-                    });
-                }
-
-                // Update ALL siblings
+                // Update ALL siblings — no Zoho at Management. Accounts settles payment next.
                 for (const f of fines) {
                     const { snapshotDeductionScheduleOnApproval } = await import('../../utils/fineDeductionScheduleSnapshot.js');
                     const { syncFinePartyPayableAmounts } = await import('../../utils/finePayableAmount.js');
                     snapshotDeductionScheduleOnApproval(f);
                     syncFinePartyPayableAmounts(f);
-
-                    f.zohoVendorId = vendorId;
-                    f.zohoVendorName = String(
-                        zohoVendorName || fine.zohoVendorName || fine.fineSource || '',
-                    ).trim();
-                    if (accountId) {
-                        // Only overwrite party payable when a default account is explicitly provided
-                        // and this sibling still has none
-                        if (!String(f.expenseAccountId || '').trim()) {
-                            f.expenseAccountId = accountId;
-                            f.expenseAccountName = String(expenseAccountName || '').trim();
-                        }
-                    }
-                    if (String(zohoOrganizationId || '').trim()) {
-                        f.zohoOrganizationId = String(zohoOrganizationId).trim();
-                    }
-                    if (String(billNumber || '').trim()) {
-                        f.billNumber = String(billNumber).trim();
-                    }
-                    if (String(billDate || '').trim()) {
-                        f.billDate = String(billDate).trim();
-                    }
 
                     f.fineStatus = 'Approved';
                     f.approvedBy = req.user._id;
@@ -345,81 +292,27 @@ export const approveFine = async (req, res) => {
                 modified = true;
                 Object.assign(fine, fines[0].toObject?.() ? fines[0].toObject() : fines[0]);
 
-                // Zoho + vendor resolve + PDF + email — after response (status already Approved).
-                const fineIdsForZoho = fines.map((f) => f._id);
+                // PDF + employee email (CC HOD, HR) + Accounts payment request — no Zoho here.
+                const fineIdsForNotify = fines.map((f) => f._id);
                 const primaryFineId = fines[0]._id;
                 const reqSnapshot = req;
-                const vendorNameForBg = vendorNameHint;
-                const orgIdForBg = String(zohoOrganizationId || fine.zohoOrganizationId || '').trim();
-                runAfterResponse('approveFine-zoho-pdf-email', async () => {
-                    const freshFines = await Fine.find({ _id: { $in: fineIdsForZoho } });
+                runAfterResponse('approveFine-pdf-email-accounts', async () => {
+                    const freshFines = await Fine.find({ _id: { $in: fineIdsForNotify } });
                     if (!freshFines.length) return;
                     const primary =
                         freshFines.find((f) => String(f._id) === String(primaryFineId)) || freshFines[0];
 
-                    if (!String(primary.zohoVendorId || '').trim() && vendorNameForBg) {
-                        try {
-                            const { fetchVendors } = await import('../../services/zohoService.js');
-                            const { withZohoOrganization } = await import('../../utils/zohoOrgContext.js');
-                            const vendors = orgIdForBg
-                                ? await withZohoOrganization(orgIdForBg, () => fetchVendors())
-                                : await fetchVendors();
-                            const normalize = (s) =>
-                                String(s || '')
-                                    .trim()
-                                    .toLowerCase()
-                                    .replace(/\u00a0/g, ' ')
-                                    .replace(/\s+/g, ' ')
-                                    .replace(/\s*&\s*/g, ' and ')
-                                    .replace(/[^a-z0-9\u0600-\u06FF\s]/g, ' ')
-                                    .replace(/\s+/g, ' ')
-                                    .trim();
-                            const hint = normalize(vendorNameForBg);
-                            const list = Array.isArray(vendors) ? vendors : [];
-                            let match = list.find((v) => {
-                                const names = [v.contact_name, v.vendor_name, v.company_name]
-                                    .map(normalize)
-                                    .filter(Boolean);
-                                return names.some((n) => n === hint);
-                            });
-                            if (!match) {
-                                match = list.find((v) => {
-                                    const names = [v.contact_name, v.vendor_name, v.company_name]
-                                        .map(normalize)
-                                        .filter(Boolean);
-                                    return names.some((n) => n.includes(hint) || hint.includes(n));
-                                });
-                            }
-                            const resolvedId = String(
-                                match?.contact_id || match?.vendor_id || match?.id || '',
-                            ).trim();
-                            if (resolvedId) {
-                                for (const f of freshFines) {
-                                    f.zohoVendorId = resolvedId;
-                                    if (!f.zohoVendorName) f.zohoVendorName = vendorNameForBg;
-                                    await f.save();
-                                }
-                                primary.zohoVendorId = resolvedId;
-                            }
-                        } catch (lookupErr) {
-                            console.warn(
-                                '[approveFine] Background vendor lookup failed:',
-                                lookupErr?.message || lookupErr,
-                            );
-                        }
-                    }
-
-                    const { syncApprovedFineToZoho } = await import('../../utils/syncApprovedFineToZoho.js');
-                    const zohoResult = await syncApprovedFineToZoho(primary, freshFines);
-                    if (zohoResult && zohoResult.ok === false && !zohoResult.skipped) {
-                        console.warn('[ApproveFine] Zoho bill sync issues:', zohoResult);
-                    }
                     const allAssignedEmployees = freshFines.flatMap((f) => f.assignedEmployees);
                     const { persistFineApprovalAttachments } = await import(
                         '../../utils/persistFineApprovalAttachments.js'
                     );
                     await persistFineApprovalAttachments(primary, { req: reqSnapshot });
-                    await dispatchFineApprovedNotification(primary, allAssignedEmployees, reqSnapshot);
+                    await dispatchFineApprovedNotification(primary, allAssignedEmployees, reqSnapshot, {
+                        ccOnlyHodAndHr: true,
+                    });
+
+                    const { accountsHOD } = await resolveFineAccountsActor(primary);
+                    await emailAccountsPaymentRequest(primary, accountsHOD);
                 });
 
                 // Update Asset Status if Loss & Damage — only for the main asset case.
@@ -535,6 +428,8 @@ export const approveFine = async (req, res) => {
                     extra1: fine.fineType,
                     extra2: `Total: AED ${fines.reduce((sum, f) => sum + (f.fineAmount || 0), 0)}` // total for group
                 });
+            } else if (fine.fineStatus === 'Approved') {
+                await openAccountsPaymentInbox(fine, fines);
             }
         } catch (syncErr) {
             console.error("[ApproveFine] Dashboard Sync Error:", syncErr);

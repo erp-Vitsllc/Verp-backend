@@ -314,7 +314,15 @@ const fineSchema = new mongoose.Schema(
             },
             addedAt: { type: Date, default: Date.now },
         }],
-        /** Zoho Books vendor bill (created on management approval). */
+        /** After Management approve: Accounts chose Zoho bill or paid-by-employee. */
+        accountsPaymentPath: { type: String, default: '' },
+        accountsPaymentAt: { type: Date, default: null },
+        accountsPaymentBy: {
+            type: mongoose.Schema.Types.ObjectId,
+            ref: 'User',
+            default: null,
+        },
+        /** Zoho Books vendor bill (created when Accounts chooses Enter in Zoho). */
         zohoVendorId: { type: String, default: '' },
         zohoVendorName: { type: String, default: '' },
         expenseAccountId: { type: String, default: '' },
