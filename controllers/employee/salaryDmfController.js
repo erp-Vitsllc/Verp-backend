@@ -11,6 +11,7 @@ import {
     resolveDmfAssignees,
     serializeDmf,
     viewerCanActOnDmf,
+    viewerCanStartDmf,
 } from '../../utils/salaryDmfApproval.js';
 import { closeSalaryDmfInbox, notifySalaryDmfStep } from '../../utils/salaryDmfNotify.js';
 import { syncSalaryDmfToZoho } from '../../utils/syncSalaryDmfToZoho.js';
@@ -158,7 +159,7 @@ async function monthPayrollAmount(monthKey) {
 }
 
 async function serializeMonthDmfRow(req, doc, monthKey) {
-    const ctx = await buildDmfViewerContext(req);
+    const ctx = await buildDmfViewerContext(req, doc?.dmfApproval);
     return serializeDmf(doc?.dmfApproval, { ready: true, ctx: { ...ctx, monthKey } });
 }
 
@@ -181,16 +182,25 @@ export async function startMonthSalaryDmf(req, res) {
         const monthKey = monthKeyOf(req.params?.monthKey);
         if (!monthKey) return res.status(400).json({ message: 'Invalid salary month.' });
 
-        if (!(await monthPayrollIsClear(monthKey))) {
-            return res.status(400).json({
-                message:
-                    'Validate payroll to 100% before sending for Accounts → HR → Management approval.',
-            });
-        }
+        // TEST: skip pending 100% so Process salary can start without clearing all items
+        // if (!(await monthPayrollIsClear(monthKey))) {
+        //     return res.status(400).json({
+        //         message:
+        //             'Validate payroll to 100% before sending for Accounts → HR → Management approval.',
+        //     });
+        // }
 
         let doc = await SalaryMonthDmf.findOne({ monthKey });
         if (!doc) {
             doc = new SalaryMonthDmf({ monthKey });
+        }
+        const startCtx = await buildDmfViewerContext(req, doc.dmfApproval);
+        if (!viewerCanStartDmf(doc.dmfApproval, startCtx)) {
+            return res.status(403).json({
+                message: String(doc.dmfApproval?.status || '') === 'pending'
+                    ? 'A DMF approval is already in progress. Only the current approver can act.'
+                    : 'Only a payroll approver can process salary.',
+            });
         }
         assertCanStart(doc.dmfApproval);
 

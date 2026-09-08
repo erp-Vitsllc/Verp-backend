@@ -65,6 +65,10 @@ import {
 import { awaitAdminDeletionArchive } from '../../utils/adminDeletionArchiveRun.js';
 import { verifyFlowchartHrUserPassword } from '../../utils/verifyCurrentUserPassword.js';
 import { SALARY_ENROLLMENT_RESET_RETENTION_DAYS } from '../../constants/adminDeletionArchiveConstants.js';
+import {
+    resolveExistingSalaryEnrollmentFromMonth,
+    resolveNewSalaryEnrollmentFromMonth,
+} from '../../utils/salaryEnrollmentStartMonth.js';
 
 const ISO = /^\d{4}-\d{2}-\d{2}$/;
 const LEAVE_TYPES = new Set(['sick', 'authorized', 'unauthorized', 'annual']);
@@ -1498,10 +1502,11 @@ async function applySalaryEnrollmentFromProfile({ employee, profile, employeeId,
         err.statusCode = 400;
         throw err;
     }
-    const fromMonth = verpStartDate.slice(0, 7);
+    const verpStartYm = verpStartDate.slice(0, 7);
     const salaryDay = String(Math.min(28, Math.max(1, Number(verpStartDate.slice(8, 10)) || 1)));
     let enrollment = await SalaryEnrollment.findOne({ employeeId });
     if (!enrollment) {
+        const fromMonth = resolveNewSalaryEnrollmentFromMonth({ verpStartYm });
         const policy = await policyCopyForEmployee(employee, salaryDay);
         enrollment = await SalaryEnrollment.create({
             employeeId,
@@ -1512,7 +1517,10 @@ async function applySalaryEnrollmentFromProfile({ employee, profile, employeeId,
             enrolledBy: who.id || null,
         });
     } else {
-        enrollment.fromMonth = fromMonth;
+        enrollment.fromMonth = resolveExistingSalaryEnrollmentFromMonth({
+            verpStartYm,
+            currentFromMonth: enrollment.fromMonth,
+        });
         enrollment.salaryDate = salaryDay;
         enrollment.processDate = salaryDay;
         await enrollment.save();

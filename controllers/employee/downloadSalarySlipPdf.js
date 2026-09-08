@@ -16,7 +16,11 @@ import {
     serializeSalarySlipForClient,
     summarizeSalarySlipListRow,
 } from '../../utils/buildSalarySlipPayload.js';
-import { getScheduledEmailTimeZone, getZonedParts } from '../../utils/scheduleDailyAtMidnight.js';
+import {
+    salarySlipMonthAllowed,
+    salarySlipMonthRange,
+    salaryYearMonth,
+} from '../../utils/salaryEnrollmentStartMonth.js';
 
 async function userCanViewSalarySetup(req) {
     const userId = req.user?.id || req.user?._id;
@@ -55,6 +59,10 @@ export async function downloadSalarySlipPdf(req, res) {
         }
 
         const monthKey = monthKeyOf(req.query.month || req.query.monthKey) || defaultSalarySlipMonthKey();
+        const gate = await loadSalarySlipEnrollment(employeeId);
+        if (!salarySlipMonthAllowed(monthKey, gate)) {
+            return res.status(400).json({ message: slipMonthDeniedMessage(gate.enrolled, gate.fromMonth) });
+        }
         if (String(req.query.format || '').toLowerCase() === 'json') {
             const slip = await buildSalarySlipPayload({ employeeId, monthKey });
             return res.json({ slip: serializeSalarySlipForClient(slip) });
@@ -85,45 +93,35 @@ function escapeRegex(value) {
     return String(value || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
-function pad2(n) {
-    return String(n).padStart(2, '0');
+async function loadSalarySlipEnrollment(employeeId) {
+    const emp = await EmployeeBasic.findOne({ employeeId }).select('employeeId').lean();
+    const code = String(emp?.employeeId || employeeId).trim();
+    const enrollment = await SalaryEnrollment.findOne({
+        employeeId: new RegExp(`^${escapeRegex(code)}$`, 'i'),
+    })
+        .select('fromMonth')
+        .lean();
+    return {
+        code,
+        enrolled: Boolean(enrollment),
+        fromMonth: salaryYearMonth(enrollment?.fromMonth),
+    };
 }
 
-function addMonthsYm(ym, delta) {
-    const match = String(ym || '').match(/^(\d{4})-(\d{2})$/);
-    if (!match) return '';
-    const date = new Date(Number(match[1]), Number(match[2]) - 1 + delta, 1);
-    return `${date.getFullYear()}-${pad2(date.getMonth() + 1)}`;
-}
-
-function listMonthsInclusive(fromYm, toYm) {
-    const months = [];
-    let cursor = fromYm;
-    while (cursor && cursor <= toYm) {
-        months.push(cursor);
-        const next = addMonthsYm(cursor, 1);
-        if (!next || next === cursor) break;
-        cursor = next;
+function slipMonthDeniedMessage(enrolled, fromMonth) {
+    if (!enrolled) {
+        return 'Salary slips start on the 1st of the month after this employee is enrolled.';
     }
-    return months;
-}
-
-/** Latest salary-processing month. That month's row opens on the 1st. */
-function currentSalaryMonthKey(now = new Date()) {
-    const dubai = getZonedParts(now, getScheduledEmailTimeZone());
-    return `${dubai.year}-${pad2(dubai.month)}`;
-}
-
-function laterMonth(a, b) {
-    if (!a) return b || '';
-    if (!b) return a;
-    return a >= b ? a : b;
+    const start = salaryYearMonth(fromMonth);
+    return start
+        ? `Salary slips start from ${start}.`
+        : 'Salary slips start on the 1st of the month after enrollment.';
 }
 
 /**
  * GET /api/Employee/salary-enroll/:employeeId/historical/salary-slips
- * Months from this employee's salary start through the current processing month.
- * Each month appears on its 1st, so the current month shows from 1 Sep onward.
+ * Unenrolled employees have no months. After enroll, the first slip appears
+ * on the 1st of the following month, then each later month on its 1st.
  */
 export async function listEmployeeSalarySlipMonths(req, res) {
     try {
@@ -149,12 +147,14 @@ export async function listEmployeeSalarySlipMonths(req, res) {
             PayrollSettings.findOne({ key: 'default' }).select('salaryProcessStartMonth').lean(),
         ]);
 
-        const currentYm = currentSalaryMonthKey();
-        const policyStartYm = monthKeyOf(payrollDoc?.salaryProcessStartMonth);
-        const employeeStartYm = monthKeyOf(profile?.verpStartDate) || monthKeyOf(enrollment?.fromMonth);
-        let fromYm = laterMonth(employeeStartYm, policyStartYm) || currentYm;
-        if (fromYm > currentYm) fromYm = currentYm;
-        const monthKeys = listMonthsInclusive(fromYm, currentYm).reverse();
+        const enrolled = Boolean(enrollment);
+        const fromMonth = salaryYearMonth(enrollment?.fromMonth);
+        const monthKeys = salarySlipMonthRange({
+            enrolled,
+            fromMonth,
+            verpStartYm: monthKeyOf(profile?.verpStartDate),
+            policyStartYm: monthKeyOf(payrollDoc?.salaryProcessStartMonth),
+        }).reverse();
 
         const paymentByMonth = new Map();
         for (const doc of payments || []) {
@@ -183,7 +183,12 @@ export async function listEmployeeSalarySlipMonths(req, res) {
             }
         }
 
-        return res.json({ employeeId: code, months });
+        return res.json({
+            employeeId: code,
+            enrolled,
+            fromMonth,
+            months,
+        });
     } catch (error) {
         console.error('[listEmployeeSalarySlipMonths]', error?.message || error);
         return res.status(500).json({ message: error.message || 'Failed to load salary months.' });
@@ -211,6 +216,10 @@ export async function saveSalarySlipMonth(req, res) {
 
         const emp = await EmployeeBasic.findOne({ employeeId }).select('employeeId').lean();
         const code = String(emp?.employeeId || employeeId).trim();
+        const gate = await loadSalarySlipEnrollment(code);
+        if (!salarySlipMonthAllowed(monthKey, gate)) {
+            return res.status(400).json({ message: slipMonthDeniedMessage(gate.enrolled, gate.fromMonth) });
+        }
         const live = await buildSalarySlipPayload({ employeeId: code, monthKey, skipOverride: true });
         const next = applySalarySlipOverride(live, req.body?.slip || {});
         const savedSlip = serializeSalarySlipForClient(next);

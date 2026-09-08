@@ -46,6 +46,7 @@ export const VEHICLE_DASHBOARD_INBOX_TYPES = [
     'Vehicle Delete Request',
     'Vehicle Document Expiry Reminder',
     'Vehicle Profile Incomplete',
+    'Vehicle Access Fuel Reminder',
     'Asset Approval',
     'Asset Assignment',
     'Asset Return',

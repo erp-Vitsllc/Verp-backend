@@ -106,6 +106,8 @@ const paymentSchema = new mongoose.Schema(
         expenseAccountName: { type: String, default: '' },
         zohoJournalId: { type: String, default: '' },
         zohoExpenseId: { type: String, default: '' },
+        zohoVendorCreditId: { type: String, default: '' },
+        zohoVendorCreditNumber: { type: String, default: '' },
         zohoSyncError: { type: String, default: '' },
         /** Persisted for Zoho Expense Refund retry */
         locationId: { type: String, default: '' },

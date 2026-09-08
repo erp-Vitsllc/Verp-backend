@@ -91,8 +91,16 @@ async function upsertChunkRows({
     }
 
     let deactivated = 0;
+    let removedIds = [];
     if (!hasMore && token) {
         // Keep only rows stamped by this Refresh — delete everything else for the org.
+        const stale = await Model.find({
+            organizationId,
+            $nor: [{ lastSyncToken: token }],
+        })
+            .select(idField)
+            .lean();
+        removedIds = stale.map((row) => String(row?.[idField] || '').trim()).filter(Boolean);
         const result = await Model.deleteMany({
             organizationId,
             $nor: [{ lastSyncToken: token }],
@@ -109,6 +117,7 @@ async function upsertChunkRows({
         data: apiRows.filter(Boolean),
         upserted: syncedIds.length,
         deactivated,
+        removedIds,
         syncedAt,
     };
 }
@@ -184,6 +193,32 @@ export async function syncZohoBillsChunk(query = {}) {
             '[ZohoPurchaseSync] Vehicle service Paid stamp after bills chunk failed:',
             err?.message || err,
         );
+    }
+
+    const removedZohoBillIds = [
+        ...new Set([
+            ...(stats.removedIds || []),
+            ...((chunk.rows || [])
+                .map((row) => {
+                    const status = String(row?.status || '').toLowerCase();
+                    if (status !== 'void' && status !== 'deleted') return '';
+                    return String(row?.bill_id || row?.id || '').trim();
+                })
+                .filter(Boolean)),
+        ]),
+    ];
+    if (removedZohoBillIds.length) {
+        try {
+            const { deleteUtilityBillsForRemovedZohoBills } = await import(
+                '../utils/deleteUtilityBillsForRemovedZohoBills.js'
+            );
+            await deleteUtilityBillsForRemovedZohoBills(removedZohoBillIds);
+        } catch (err) {
+            console.warn(
+                '[ZohoPurchaseSync] Utility bill delete after Zoho bill remove failed:',
+                err?.message || err,
+            );
+        }
     }
 
     return {
@@ -291,7 +326,12 @@ export async function upsertZohoBillFromApi(bill, extras = {}) {
         const balance = Number(doc.balance ?? bill?.balance ?? NaN);
         const paid =
             status === 'paid' || (Number.isFinite(balance) && Math.abs(balance) < 0.01 && status !== 'draft');
-        if (paid && doc.zohoBillId) {
+        if ((status === 'void' || status === 'deleted') && doc.zohoBillId) {
+            const { deleteUtilityBillsForRemovedZohoBills } = await import(
+                '../utils/deleteUtilityBillsForRemovedZohoBills.js'
+            );
+            await deleteUtilityBillsForRemovedZohoBills([doc.zohoBillId]);
+        } else if (paid && doc.zohoBillId) {
             const { markVehicleGarageServicesPaidFromZohoBillIds } = await import(
                 '../utils/markVehicleGarageServicesPaidFromZoho.js'
             );

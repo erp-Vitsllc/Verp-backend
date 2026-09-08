@@ -1,7 +1,7 @@
 {
-  "watch": ["."],
+  "watch": ["index.js", "routes", "controllers", "models", "middleware", "services", "utils", "config"],
   "ext": "js,mjs,cjs",
-  "delay": 1000,
+  "delay": 2000,
   "ignore": [
     "data/**",
     "node_modules/**",

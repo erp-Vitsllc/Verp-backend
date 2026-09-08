@@ -125,19 +125,22 @@ export async function notifySalaryMonthApprovedEmployees({ monthKey } = {}) {
     ]);
 
     const enrolledCodes = new Set();
+    const storedCodes = new Set();
     for (const row of storedEnrollments || []) {
         const from =
             toYearMonth(row.fromMonth) ||
             toYearMonth(row.monthKey) ||
             toYearMonth(row.createdAt);
         const code = String(row.employeeId || '').trim();
+        if (code) storedCodes.add(code);
         if (code && from && from <= ym) enrolledCodes.add(code);
     }
     for (const row of historicalRows || []) {
         if (String(row.workflowStatus || '') !== 'locked') continue;
-        const from = toYearMonth(row.verpStartDate) || toYearMonth(row.fromMonth);
         const code = String(row.employeeId || '').trim();
-        if (code && from && from <= ym) enrolledCodes.add(code);
+        if (!code || storedCodes.has(code)) continue;
+        const from = toYearMonth(row.verpStartDate) || toYearMonth(row.fromMonth);
+        if (from && from <= ym) enrolledCodes.add(code);
     }
 
     const codes = [...enrolledCodes].filter(Boolean);

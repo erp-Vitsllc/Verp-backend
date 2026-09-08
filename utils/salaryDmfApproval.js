@@ -257,19 +257,37 @@ export function currentDmfStep(dmf) {
     return steps.find((step) => step.status === 'pending') || null;
 }
 
-/** User-facing payroll status: Pending → Pending Accounts → Pending HR → Pending Management → Approved. */
+export function dmfPendingForWho(dmf) {
+    if (String(dmf?.status || '').toLowerCase() !== 'pending') return '';
+    const step = currentDmfStep(dmf);
+    const name = String(step?.assignedTo?.name || '').trim();
+    const label = String(step?.label || step?.role || '').trim();
+    if (name && label) return `${name} (${label})`;
+    if (name) return name;
+    if (label) return label;
+    const key = String(step?.key || dmf?.currentStepKey || '').toLowerCase();
+    if (key === 'hr') return 'HR';
+    if (key === 'management') return 'Management';
+    if (key === 'user1') return step?.label || 'User';
+    if (key === 'accounts') return 'Accounts';
+    return '';
+}
+
+/** User-facing payroll status: Pending → Pending for Accounts → Pending for HR → Pending for Management → Approved. */
 export function payrollApprovalStatusLabel(dmf) {
     const status = String(dmf?.status || 'idle').toLowerCase();
     if (status === 'approved') return 'Approved';
     if (status === 'pending') {
-        const step = currentDmfStep(dmf);
-        const key = String(step?.key || dmf?.currentStepKey || '').toLowerCase();
-        if (key === 'hr') return 'Pending HR';
-        if (key === 'management') return 'Pending Management';
-        if (key === 'user1') return `Pending ${step?.label || 'User'}`;
-        return 'Pending Accounts';
+        const who = dmfPendingForWho(dmf);
+        return who ? `Pending for ${who}` : 'Pending';
     }
     return 'Pending';
+}
+
+export function monthPayrollProcessStatusLabel(dmf) {
+    const status = String(dmf?.status || '').toLowerCase();
+    if (status === 'approved') return 'Processed';
+    return payrollApprovalStatusLabel(dmf);
 }
 
 function personMatchesViewer(viewer, person) {
@@ -280,13 +298,40 @@ function personMatchesViewer(viewer, person) {
     );
 }
 
-export async function buildDmfViewerContext(req) {
+async function loadFlowchartEmployee(departmentKey) {
+    try {
+        const hod =
+            departmentKey === 'management'
+                ? await getManagementHOD()
+                : await getDepartmentHOD(departmentKey);
+        return loadEmployeeByRef(hod);
+    } catch {
+        return null;
+    }
+}
+
+async function viewerMatchesSalaryFlowchartApprover(viewer) {
+    if (!viewer) return false;
+    const people = await Promise.all([
+        loadFlowchartEmployee('accounts'),
+        loadFlowchartEmployee('hr'),
+        loadFlowchartEmployee('management'),
+    ]);
+    return people.some((emp) => personMatchesViewer(viewer, toDmfPerson(emp)));
+}
+
+export async function buildDmfViewerContext(req, dmf) {
     const [viewer, canBypass, isHr] = await Promise.all([
         resolveViewerEmployee(req),
         viewerCanBypassDmf(req),
         viewerIsSalaryFlowchartHr(req).catch(() => false),
     ]);
-    return { viewer, canBypass, isHr: Boolean(isHr) };
+    const status = String(dmf?.status || 'idle') || 'idle';
+    let isApprover = Boolean(canBypass || isHr);
+    if (!isApprover && (status === 'idle' || status === 'rejected' || !status)) {
+        isApprover = await viewerMatchesSalaryFlowchartApprover(viewer);
+    }
+    return { viewer, canBypass, isHr: Boolean(isHr), isApprover };
 }
 
 export function viewerCanActOnDmf(dmf, ctx) {
@@ -297,6 +342,14 @@ export function viewerCanActOnDmf(dmf, ctx) {
     if (personMatchesViewer(ctx?.viewer, step.assignedTo)) return true;
     if (step.key === 'hr' && ctx?.isHr) return true;
     return false;
+}
+
+export function viewerCanStartDmf(dmf, ctx) {
+    const status = String(dmf?.status || 'idle') || 'idle';
+    if (status === 'pending' || status === 'approved') return false;
+    if (!ctx) return true;
+    if (ctx.canBypass) return true;
+    return Boolean(ctx.isApprover || ctx.isHr);
 }
 
 export function serializeDmf(dmf, { ready = false, ctx = null } = {}) {
@@ -317,9 +370,11 @@ export function serializeDmf(dmf, { ready = false, ctx = null } = {}) {
         comment: step.comment || '',
     }));
     const canAct = viewerCanActOnDmf(row, ctx);
+    const pendingFor = dmfPendingForWho(row);
     return {
         status,
         statusLabel: payrollApprovalStatusLabel(row),
+        pendingFor,
         currentStepKey: row.currentStepKey || '',
         submittedByName: row.submittedByName || '',
         submittedAt: row.submittedAt || null,
@@ -336,7 +391,7 @@ export function serializeDmf(dmf, { ready = false, ctx = null } = {}) {
         zohoSyncError: row.zohoSyncError || '',
         zohoSkipped: Boolean(row.zohoSkipped),
         ready: Boolean(ready),
-        canStart: Boolean(ready) && (status === 'idle' || status === 'rejected' || !status),
+        canStart: Boolean(ready) && viewerCanStartDmf(row, ctx),
         canAct,
         canReject: canAct,
     };

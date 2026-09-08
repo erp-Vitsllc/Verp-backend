@@ -57,7 +57,7 @@ export async function notifySalaryDmfStep({
         },
         requestedByName: requestedByName || dmf.submittedByName || '',
         extra1,
-        extra2: `Pending ${step.label}`,
+        extra2: `Pending for ${step.label}`,
         extra3: extraPayload({ kind, employeeId, monthKey, href }),
     });
 

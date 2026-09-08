@@ -6,6 +6,7 @@ import {
     isCompanyShellEmployee,
     REAL_EMPLOYEE_MONGO_FILTER,
 } from '../../utils/attendanceEmployeeFilters.js';
+import { resolveNewSalaryEnrollmentFromMonth } from '../../utils/salaryEnrollmentStartMonth.js';
 import { normalizeStaffTypeKey } from '../../utils/workLocationHelpers.js';
 import {
     buildPayrollPolicyPayload,
@@ -85,8 +86,10 @@ export async function getSalaryEnrollOptions(req, res) {
             if (mol && !molByKey.has(key)) molByKey.set(key, mol);
             const verpMonth = String(row.verpStartDate || '').slice(0, 7);
             const prev = enrollmentByKey.get(key);
-            if (prev && /^\d{4}-\d{2}$/.test(verpMonth)) {
-                enrollmentByKey.set(key, { ...prev, fromMonth: verpMonth });
+            if (prev) {
+                if (!prev.fromMonth && /^\d{4}-\d{2}$/.test(verpMonth)) {
+                    enrollmentByKey.set(key, { ...prev, fromMonth: verpMonth });
+                }
                 continue;
             }
             if (String(row.workflowStatus || '') === 'locked' && !prev) {
@@ -140,9 +143,9 @@ export async function createSalaryEnrollment(req, res) {
         const employeeId = String(req.body?.employeeId || '').trim();
         const salaryDay = toMonthDay(req.body?.salaryDate);
         const requestedMonth = String(req.body?.fromMonth || '').trim();
-        const now = new Date();
-        const currentYm = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
-        const fromMonth = YEAR_MONTH.test(requestedMonth) ? requestedMonth : currentYm;
+        const fromMonth = resolveNewSalaryEnrollmentFromMonth({
+            requestedYm: YEAR_MONTH.test(requestedMonth) ? requestedMonth : '',
+        });
 
         if (!employeeId) {
             return res.status(400).json({ message: 'Select an employee to enroll.' });

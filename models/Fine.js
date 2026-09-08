@@ -348,6 +348,8 @@ const fineSchema = new mongoose.Schema(
         },
         zohoVendorPaymentId: { type: String, default: '' },
         zohoVendorPaymentNumber: { type: String, default: '' },
+        zohoVendorCreditId: { type: String, default: '' },
+        zohoVendorCreditNumber: { type: String, default: '' },
         vendorBillPaidAt: { type: Date, default: null },
         /** Full log of every approval PDF generation (initial + each HR / edit regeneration). */
         approvalAttachmentHistory: [{

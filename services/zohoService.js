@@ -26,6 +26,9 @@ const DEFAULT_OAUTH_SCOPE = [
     // Banking list + Expense Refund (Money In) bank transactions
     'ZohoBooks.banking.READ',
     'ZohoBooks.banking.CREATE',
+    'ZohoBooks.vendorcredits.READ',
+    'ZohoBooks.vendorcredits.CREATE',
+    'ZohoBooks.vendorcredits.UPDATE',
 ].join(',');
 
 export function getZohoConfig() {
@@ -610,6 +613,29 @@ export async function fetchVendorPayments(params = {}) {
         maxPages: syncAllPages ? Infinity : 3,
         timeout: syncAllPages ? 120000 : 45000,
     });
+}
+
+export async function createVendorCredit(payload = {}, requestParams = {}) {
+    const response = await requestZohoBooks('/vendorcredits', {
+        method: 'post',
+        data: payload,
+        params: requestParams,
+        timeout: 30000,
+    });
+
+    return response.vendor_credit || response.vendorcredit || response;
+}
+
+export async function markVendorCreditOpen(vendorCreditId) {
+    const id = String(vendorCreditId || '').trim();
+    if (!id) throw new Error('Vendor credit id is required.');
+
+    const response = await requestZohoBooks(
+        `/vendorcredits/${encodeURIComponent(id)}/status/open`,
+        { method: 'post', timeout: 30000 },
+    );
+
+    return response.vendor_credit || response.vendorcredit || response;
 }
 
 export async function createVendorPayment(payload = {}) {

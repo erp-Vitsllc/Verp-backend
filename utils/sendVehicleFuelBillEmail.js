@@ -327,8 +327,7 @@ function sectionTitleHtml(title) {
 }
 
 /**
- * Notify assignee / Admin Officer / (reportee if no user) / company email on fuel add,
- * and the form report on 80% / 100% / close.
+ * Fuel add / close / 80% / 100%: employee company email only, or HOD when the employee has none.
  */
 export async function sendVehicleFuelBillEmail({
     to,
@@ -409,6 +408,83 @@ export async function sendVehicleFuelBillEmail({
         return result;
     } catch (error) {
         console.error('[VehicleFuelBill] Email error:', error.message);
+        return null;
+    }
+}
+
+export function unassignedVehicleFuelHrSubject(monthLabel, plate) {
+    const month = monthLabel || 'This month';
+    const vehicle = String(plate || '').trim();
+    return vehicle
+        ? `${month} fuel added on unassigned vehicle ${vehicle}`
+        : `${month} fuel added on unassigned vehicle`;
+}
+
+export function buildUnassignedVehicleFuelHrEmailHtml({
+    asset,
+    monthLabel,
+    monthlyLimit,
+    amountUsed,
+    greetingName = 'HR',
+} = {}) {
+    const title = unassignedVehicleFuelHrSubject(monthLabel, plateOf(asset));
+    const bodyHtml = `
+        <p style="margin:0 0 16px;font-family:Arial,Helvetica,sans-serif;font-size:14px;color:#334155;line-height:1.6;">
+            Dear ${esc(greetingName || 'HR')},
+        </p>
+        ${noticeBoxHtml({
+            icon: '!',
+            title: 'For your concern',
+            body: 'Fuel has been added for this vehicle while its assignment status is Unassigned. Please review and take any action required.',
+            bg: '#fde8e8',
+            border: '#f0a0a0',
+            titleColor: '#b91c1c',
+            bodyColor: '#7f1d1d',
+        })}
+        ${vehicleDetailsSectionHtml(asset)}
+        ${sectionTitleHtml('Fuel added')}
+        ${sectionBoxHtml([
+            `${inputFieldHtml('Month', monthLabel || '—')}${inputFieldHtml('Amount added', formatAed(amountUsed))}${inputFieldHtml('Assignment status', String(asset?.status || '').trim() || 'Unassigned')}`,
+            `${inputFieldHtml('Approved usage limit', formatAed(monthlyLimit), '50%')}${emptyFieldHtml('50%')}`,
+        ])}`;
+    return wrapFuelReportEmail({ title, bodyHtml });
+}
+
+export async function sendUnassignedVehicleFuelHrEmail({
+    to,
+    asset,
+    monthLabel,
+    monthlyLimit,
+    amountUsed,
+    greetingName,
+}) {
+    try {
+        const emailUser = process.env.EMAIL_USER?.trim();
+        const emailPass = process.env.EMAIL_PASS?.trim();
+        const toAddr = String(to || '').trim();
+        if (!emailUser || !emailPass || !toAddr) return;
+
+        const transporter = nodemailer.createTransport({
+            host: 'smtp.office365.com',
+            port: 587,
+            secure: false,
+            auth: { user: emailUser, pass: emailPass },
+        });
+
+        return transporter.sendMail({
+            from: `"VeRP Portal" <${emailUser}>`,
+            to: toAddr,
+            subject: unassignedVehicleFuelHrSubject(monthLabel, plateOf(asset)),
+            html: buildUnassignedVehicleFuelHrEmailHtml({
+                asset,
+                monthLabel,
+                monthlyLimit,
+                amountUsed,
+                greetingName,
+            }),
+        });
+    } catch (error) {
+        console.error('[VehicleFuelBill] Unassigned HR email error:', error.message);
         return null;
     }
 }

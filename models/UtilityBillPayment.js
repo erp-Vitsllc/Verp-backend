@@ -63,6 +63,15 @@ const utilityBillPaymentSchema = new mongoose.Schema(
             default: null,
         },
         requestedByName: { type: String, default: '' },
+        /**
+         * First approver after submit (hr | accounts). Creator Edit and Resend
+         * stays available only while still waiting on this role.
+         */
+        firstPendingRole: {
+            type: String,
+            enum: ['accounts', 'hr', ''],
+            default: '',
+        },
         accountsApprovedBy: {
             type: mongoose.Schema.Types.ObjectId,
             ref: 'EmployeeBasic',

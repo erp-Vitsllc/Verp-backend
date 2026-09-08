@@ -11,6 +11,17 @@ export const getZohoBillById = async (req, res) => {
 
         const bill = await fetchBillById(billId);
         if (!bill) {
+            try {
+                const { deleteUtilityBillsForRemovedZohoBills } = await import(
+                    '../../utils/deleteUtilityBillsForRemovedZohoBills.js'
+                );
+                await deleteUtilityBillsForRemovedZohoBills([billId]);
+            } catch (syncError) {
+                console.warn(
+                    '[ZohoBillById] Utility delete after missing Zoho bill failed:',
+                    syncError?.message || syncError,
+                );
+            }
             return res.status(404).json({ success: false, message: 'Bill not found in Zoho Books.' });
         }
 
@@ -27,6 +38,19 @@ export const getZohoBillById = async (req, res) => {
     } catch (error) {
         console.error('[ZohoBillById] Failed:', error?.message || error);
         const message = error?.message || 'Failed to fetch bill from Zoho Books';
+        if (/not found|does not exist|deleted|invalid.*bill/i.test(message)) {
+            try {
+                const { deleteUtilityBillsForRemovedZohoBills } = await import(
+                    '../../utils/deleteUtilityBillsForRemovedZohoBills.js'
+                );
+                await deleteUtilityBillsForRemovedZohoBills([String(req.params?.billId || '').trim()]);
+            } catch (syncError) {
+                console.warn(
+                    '[ZohoBillById] Utility delete after Zoho bill error failed:',
+                    syncError?.message || syncError,
+                );
+            }
+        }
         return res.status(mapZohoErrorStatus(message)).json({
             success: false,
             message,

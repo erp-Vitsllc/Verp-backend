@@ -15,16 +15,20 @@ import {
 import { isLocatorConfigured } from '../services/locatorService.js';
 import { getDepartmentHOD, isUserInFlowchart } from '../utils/getDepartmentHOD.js';
 import {
-    employeeHasActivePortalUser,
-    resolveAdminOfficerEmployee,
-    resolveHrEmployee,
-} from '../utils/vehicleHandoverApprovalFlow.js';
-import {
-    pickEffectiveEmail,
     resolveEmployeeEmailWithReporteeLoaded,
     employeeDisplayName,
+    getFallbackEmailNote,
 } from '../utils/resolveEmployeeEmail.js';
-import { sendVehicleFuelBillEmail } from '../utils/sendVehicleFuelBillEmail.js';
+import {
+    sendVehicleFuelBillEmail,
+    sendUnassignedVehicleFuelHrEmail,
+} from '../utils/sendVehicleFuelBillEmail.js';
+import {
+    isAssignedVehicleForAccessFuel,
+    syncVehicleAccessFuelReminder,
+} from '../utils/processVehicleAccessFuelReminders.js';
+import { accessFuelMonthlyLimitGate, accessFuelMonthlyCloseGate, isAccessFuelMonthlyCloseWindowOpen } from '../utils/accessFuelMonthlyLimitGate.js';
+import VehicleAccessFuelMonthlyLimitLog from '../models/VehicleAccessFuelMonthlyLimitLog.js';
 import { getUserPermissions, isUserAdministrator } from '../services/permissionService.js';
 import { isJwtSystemSuperUser } from '../utils/systemSuperUser.js';
 import { isReqUserAdmin } from '../utils/sendAdminDeletionNotificationEmails.js';
@@ -248,88 +252,95 @@ function parseAttachment(raw) {
     };
 }
 
-function noUserAccountFallbackNote(employeeName, reporteeName) {
-    return `
-    <div style="background-color: #fff3cd; border: 1px solid #ffc107; padding: 12px; border-radius: 6px; margin-bottom: 20px; font-size: 13px;">
-        <strong>Note:</strong> This notification was sent to you (${reporteeName}) because <strong>${employeeName}</strong> does not have a user account. Please ensure they are informed.
-    </div>`;
+function employeeCompanyEmail(emp) {
+    return String(emp?.companyEmail || '').trim();
 }
 
-async function collectAssigneeAndAdminFuelEmails(asset, { includeHr = false } = {}) {
-    const emails = [];
-    const seen = new Set();
-    let greetingName = '';
-    let fallbackNoteHtml = '';
-
-    const add = (addr) => {
-        const mail = String(addr || '').trim();
-        if (!mail) return;
-        const key = mail.toLowerCase();
-        if (seen.has(key)) return;
-        seen.add(key);
-        emails.push(mail);
-    };
-
+/** Fuel mail: employee company email, or HOD only when the employee has none. */
+async function collectAssigneeAndAdminFuelEmails(asset) {
     if (asset?.assignedToType === 'Company' && asset?.assignedCompany) {
         const company =
             typeof asset.assignedCompany === 'object'
                 ? asset.assignedCompany
                 : await Company.findById(asset.assignedCompany).select('name email').lean();
-        add(company?.email);
-        if (!greetingName) greetingName = company?.name || 'there';
+        const email = String(company?.email || '').trim();
+        return {
+            to: email || null,
+            cc: [],
+            greetingName: company?.name || 'there',
+            fallbackNoteHtml: '',
+        };
     }
 
     const assignee = asset?.assignedTo;
-    if (assignee) {
-        const emp = typeof assignee === 'object' && assignee.employeeId ? assignee : null;
-        if (emp) {
-            const hasUser = await employeeHasActivePortalUser(emp);
-            if (hasUser) {
-                const { email, employee } = await resolveEmployeeEmailWithReporteeLoaded(emp);
-                add(email);
-                if (!greetingName) greetingName = employeeDisplayName(employee || emp);
-            } else {
-                const { employee } = await resolveEmployeeEmailWithReporteeLoaded(emp);
-                const reportee = employee?.primaryReportee;
-                const reporteeEmail = pickEffectiveEmail(reportee);
-                add(reporteeEmail);
-                if (reportee) {
-                    fallbackNoteHtml = noUserAccountFallbackNote(
-                        employeeDisplayName(employee || emp),
-                        employeeDisplayName(reportee),
-                    );
-                    if (!greetingName) greetingName = reportee.firstName || employeeDisplayName(reportee);
-                }
-            }
-        }
+    const emp = assignee && typeof assignee === 'object' && assignee.employeeId ? assignee : null;
+    if (!emp) {
+        return { to: null, cc: [], greetingName: 'there', fallbackNoteHtml: '' };
     }
 
-    const adminOfficer = await resolveAdminOfficerEmployee().catch(() => null);
-    add(pickEffectiveEmail(adminOfficer));
-    if (!greetingName && adminOfficer) {
-        greetingName = adminOfficer.firstName || employeeDisplayName(adminOfficer);
+    const { employee } = await resolveEmployeeEmailWithReporteeLoaded(emp);
+    let person = employee || emp;
+    const companyEmail = employeeCompanyEmail(person);
+    if (companyEmail) {
+        return {
+            to: companyEmail,
+            cc: [],
+            greetingName: employeeDisplayName(person),
+            fallbackNoteHtml: '',
+        };
     }
 
-    if (includeHr) {
-        const hr = await resolveHrEmployee().catch(() => null);
-        add(pickEffectiveEmail(hr));
-        if (!greetingName && hr) greetingName = hr.firstName || employeeDisplayName(hr);
+    const hodLooksUnloaded =
+        person?.primaryReportee &&
+        (typeof person.primaryReportee === 'string' ||
+            (typeof person.primaryReportee === 'object' &&
+                person.primaryReportee._id &&
+                !person.primaryReportee.companyEmail &&
+                !person.primaryReportee.workEmail));
+    if (hodLooksUnloaded && person._id) {
+        const EmployeeBasic = (await import('../models/EmployeeBasic.js')).default;
+        const full = await EmployeeBasic.findById(person._id)
+            .select('firstName lastName employeeId companyEmail primaryReportee')
+            .populate('primaryReportee', 'firstName lastName employeeId companyEmail workEmail')
+            .lean();
+        if (full) person = full;
+    }
+
+    const hod = person?.primaryReportee;
+    const hodEmail = String(hod?.companyEmail || hod?.workEmail || '').trim();
+    if (!hodEmail) {
+        return { to: null, cc: [], greetingName: 'there', fallbackNoteHtml: '' };
     }
 
     return {
-        to: emails[0] || null,
-        cc: emails.slice(1),
-        greetingName: greetingName || 'there',
-        fallbackNoteHtml,
+        to: hodEmail,
+        cc: [],
+        greetingName: employeeDisplayName(hod) || 'there',
+        fallbackNoteHtml: getFallbackEmailNote(employeeDisplayName(person), employeeDisplayName(hod)),
     };
 }
 
 async function collectFuelEmailTargets(asset) {
-    return collectAssigneeAndAdminFuelEmails(asset, { includeHr: true });
+    return collectAssigneeAndAdminFuelEmails(asset);
 }
 
-async function collectFuelLimitEmailTargets(asset) {
-    return collectAssigneeAndAdminFuelEmails(asset, { includeHr: false });
+function isUnassignedVehicleStatus(asset) {
+    return String(asset?.status || '').trim().toLowerCase() === 'unassigned';
+}
+
+async function notifyHrUnassignedFuelAdded(asset, bill) {
+    if (!isUnassignedVehicleStatus(asset) || !bill) return;
+    const hr = await getDepartmentHOD('hr');
+    const to = String(hr?.companyEmail || hr?.workEmail || '').trim();
+    if (!to) return;
+    await sendUnassignedVehicleFuelHrEmail({
+        to,
+        asset,
+        monthLabel: monthLabelFromKey(bill.monthKey),
+        monthlyLimit: bill.monthlyLimit,
+        amountUsed: bill.amountUsed,
+        greetingName: employeeDisplayName(hr),
+    });
 }
 
 async function actorIsFlowchartHr(user) {
@@ -362,6 +373,10 @@ async function actorCanManageFuel(user) {
     return actorIsFlowchartHr(user);
 }
 
+async function actorCanEditFuelEntry(user) {
+    return actorIsFlowchartHr(user);
+}
+
 async function actorCanDeleteFuel(user) {
     if (!user) return false;
     if (isJwtSystemSuperUser(user)) return true;
@@ -373,8 +388,26 @@ async function actorCanEditFuelMonthlyLimit(user) {
     return actorCanDeleteFuel(user);
 }
 
-async function notifyFuelLimitThreshold(asset, bill, action) {
-    const targets = await collectFuelLimitEmailTargets(asset);
+async function hrFuelBusinessEmail() {
+    const hr = await getDepartmentHOD('hr');
+    return String(hr?.companyEmail || hr?.workEmail || '').trim();
+}
+
+async function collectFuelCloseEmailTargets(asset) {
+    const targets = await collectFuelEmailTargets(asset);
+    const hrEmail = await hrFuelBusinessEmail();
+    const to = String(targets.to || '').trim();
+    const cc = [];
+    if (hrEmail && hrEmail.toLowerCase() !== to.toLowerCase()) cc.push(hrEmail);
+    if (to) return { ...targets, cc };
+    if (hrEmail) {
+        return { to: hrEmail, cc: [], greetingName: 'HR', fallbackNoteHtml: '' };
+    }
+    return targets;
+}
+
+async function notifyFuelBillClosedWithHr(asset, bill) {
+    const targets = await collectFuelCloseEmailTargets(asset);
     if (!targets.to) return;
     const stats = await locatorStatsForVehicle(asset, bill.monthKey);
     await sendVehicleFuelBillEmail({
@@ -384,42 +417,20 @@ async function notifyFuelLimitThreshold(asset, bill, action) {
         monthLabel: monthLabelFromKey(bill.monthKey),
         amountUsed: bill.amountUsed,
         monthlyLimit: bill.monthlyLimit,
-        kmRun: stats.kmRun,
-        idleTimeLabel: formatIdleTimeHoursMinutes(stats.idleTimeMinutes, stats.idleTimeSeconds),
+        kmRun: stats?.kmRun ?? bill.kmRun,
+        idleTimeLabel: formatIdleTimeHoursMinutes(
+            stats?.idleTimeMinutes ?? bill.idleTimeMinutes,
+            stats?.idleTimeSeconds,
+        ),
         lastFuelUpdateAt: lastFuelUpdateAtFromBill(bill),
-        action,
+        action: 'closed',
         fallbackNoteHtml: targets.fallbackNoteHtml,
         greetingName: targets.greetingName,
     });
 }
 
-async function maybeNotifyFuelLimitThresholds(asset, bill) {
-    const ratio = fuelUsageRatio(bill.amountUsed, bill.monthlyLimit);
-    if (ratio < 0.8) return;
-
-    const sent80 = Boolean(bill.limitAlert80SentAt);
-    const sent100 = Boolean(bill.limitAlert100SentAt);
-    const reached100 = ratio >= 1;
-    const need100 = reached100 && !sent100;
-    const need80 = ratio >= 0.8 && !sent80 && !reached100;
-
-    if (!need80 && !need100) return;
-
-    await notifyFuelLimitThreshold(asset, bill, need100 ? 'limitExceeded' : 'limitWarning80');
-
-    const patch = {};
-    if (need80 || need100) patch.limitAlert80SentAt = new Date();
-    if (need100) patch.limitAlert100SentAt = new Date();
-    if (Object.keys(patch).length) {
-        await VehicleFuelBill.updateOne({ _id: bill._id }, { $set: patch });
-    }
-}
-
 async function notifyFuelBill(asset, bill, action) {
-    const targets =
-        action === 'added'
-            ? await collectAssigneeAndAdminFuelEmails(asset, { includeHr: false })
-            : await collectFuelEmailTargets(asset);
+    const targets = await collectFuelEmailTargets(asset);
     if (!targets.to) return;
     const stats =
         action === 'closed' ? await locatorStatsForVehicle(asset, bill.monthKey) : null;
@@ -472,7 +483,7 @@ export async function listAccessFuel(req, res) {
             ? String(req.query.monthKey).trim()
             : currentMonthKey();
 
-        const vehicles = await loadFuelFleetVehicles(req);
+        const vehicles = (await loadFuelFleetVehicles(req)).filter(isAssignedVehicleForAccessFuel);
 
         const bills = await VehicleFuelBill.find({ monthKey }).lean();
         const billsByVehicle = new Map(bills.map((bill) => [String(bill.vehicleId), bill]));
@@ -527,6 +538,17 @@ export async function listAccessFuel(req, res) {
             });
         }
 
+        const monthlyLimitGate = accessFuelMonthlyLimitGate({
+            monthKey,
+            assignedCount: vehicles.length,
+            notAddedCount: notAdded.length,
+            alreadyCreated: Boolean(await VehicleAccessFuelMonthlyLimitLog.exists({ monthKey })),
+        });
+        const monthlyCloseGate = accessFuelMonthlyCloseGate({
+            monthKey,
+            openAddedCount: added.filter((row) => row.status !== 'closed').length,
+        });
+
         return res.json({
             monthKey,
             monthLabel: monthLabelFromKey(monthKey),
@@ -541,9 +563,127 @@ export async function listAccessFuel(req, res) {
             },
             canManage: await actorCanManageFuel(req.user),
             canDelete: await actorCanDeleteFuel(req.user),
+            canCreateMonthlyLimit: monthlyLimitGate.canCreate,
+            monthlyLimitDisabledReason: monthlyLimitGate.reason,
+            canCloseMonthlyFuel: monthlyCloseGate.canClose,
+            closeMonthlyDisabledReason: monthlyCloseGate.reason,
+            canEditFuel: await actorCanEditFuelEntry(req.user),
         });
     } catch (error) {
         return res.status(500).json({ message: error.message || 'Failed to load access fuel.' });
+    }
+}
+
+export async function createAccessFuelMonthlyLimits(req, res) {
+    try {
+        const monthKey = String(req.body?.monthKey || '').trim();
+        if (!MONTH_KEY_RE.test(monthKey)) {
+            return res.status(400).json({ message: 'Select a valid month.' });
+        }
+
+        const rows = Array.isArray(req.body?.limits) ? req.body.limits : [];
+        if (!rows.length) {
+            return res.status(400).json({ message: 'Add a monthly limit for at least one vehicle.' });
+        }
+
+        const parsed = [];
+        const seen = new Set();
+        for (const row of rows) {
+            const vehicleId = String(row?.vehicleId || '').trim();
+            const monthlyLimit = parseAmount(row?.monthlyLimit);
+            if (!vehicleId || !mongoose.Types.ObjectId.isValid(vehicleId)) {
+                return res.status(400).json({ message: 'Each row needs a valid vehicle.' });
+            }
+            if (seen.has(vehicleId)) continue;
+            if (monthlyLimit == null || monthlyLimit <= 0) {
+                return res.status(400).json({ message: 'Enter a valid monthly limit for every vehicle.' });
+            }
+            seen.add(vehicleId);
+            parsed.push({ vehicleId, monthlyLimit });
+        }
+
+        const assignedVehicles = (await loadFuelFleetVehicles(req)).filter(isAssignedVehicleForAccessFuel);
+        const assignedIds = new Set(assignedVehicles.map((vehicle) => String(vehicle._id)));
+        const addedCount = assignedVehicles.length
+            ? await VehicleFuelBill.countDocuments({
+                  monthKey,
+                  vehicleId: { $in: assignedVehicles.map((vehicle) => vehicle._id) },
+              })
+            : 0;
+        const monthlyLimitGate = accessFuelMonthlyLimitGate({
+            monthKey,
+            assignedCount: assignedVehicles.length,
+            notAddedCount: Math.max(0, assignedVehicles.length - addedCount),
+            alreadyCreated: Boolean(await VehicleAccessFuelMonthlyLimitLog.exists({ monthKey })),
+        });
+        if (!monthlyLimitGate.canCreate) {
+            return res.status(400).json({ message: monthlyLimitGate.reason });
+        }
+
+        for (const row of parsed) {
+            if (!assignedIds.has(row.vehicleId)) {
+                return res.status(400).json({ message: 'Monthly limits can only be set for assigned vehicles.' });
+            }
+        }
+
+        const bills = await VehicleFuelBill.find({
+            vehicleId: { $in: parsed.map((row) => row.vehicleId) },
+            monthKey,
+        })
+            .select('_id vehicleId status amountUsed monthKey')
+            .lean();
+        const billByVehicle = new Map(bills.map((bill) => [String(bill.vehicleId), bill]));
+
+        for (const row of parsed) {
+            await AssetItem.updateOne({ _id: row.vehicleId }, { $set: { fuelMonthlyLimit: row.monthlyLimit } });
+            const bill = billByVehicle.get(row.vehicleId);
+            if (bill && bill.status !== 'closed') {
+                await VehicleFuelBill.updateOne(
+                    { _id: bill._id },
+                    { $set: { monthlyLimit: row.monthlyLimit, updatedBy: req.user?._id || null } },
+                );
+            }
+        }
+
+        try {
+            await VehicleAccessFuelMonthlyLimitLog.create({
+                monthKey,
+                vehicleCount: parsed.length,
+                createdBy: req.user?._id || null,
+            });
+        } catch (error) {
+            if (error?.code !== 11000) throw error;
+            return res.status(400).json({ message: 'Monthly limits already created for this month.' });
+        }
+
+        let emailed = 0;
+        for (const row of parsed) {
+            const asset = await loadFleetVehicle(row.vehicleId);
+            if (!asset) continue;
+            const existing = billByVehicle.get(row.vehicleId);
+            try {
+                await notifyFuelBill(
+                    asset,
+                    {
+                        monthKey,
+                        monthlyLimit: row.monthlyLimit,
+                        amountUsed: existing?.amountUsed || 0,
+                    },
+                    'added',
+                );
+                emailed += 1;
+            } catch (err) {
+                console.error('[VehicleFuel] monthly limit email failed:', err?.message || err);
+            }
+        }
+
+        return res.json({
+            message: `Monthly limits created for ${parsed.length} vehicle${parsed.length === 1 ? '' : 's'}. Assignees have been emailed.`,
+            saved: parsed.length,
+            emailed,
+        });
+    } catch (error) {
+        return res.status(500).json({ message: error.message || 'Failed to create monthly limits.' });
     }
 }
 
@@ -614,6 +754,7 @@ export async function listVehicleFuelBills(req, res) {
             totalAmount,
             canManage: await actorCanManageFuel(req.user),
             canDelete: await actorCanDeleteFuel(req.user),
+            canEditFuel: await actorCanEditFuelEntry(req.user),
         });
     } catch (error) {
         return res.status(500).json({ message: error.message || 'Failed to load fuel bills.' });
@@ -707,8 +848,11 @@ export async function addVehicleFuel(req, res) {
         notifyFuelBill(asset, lean, 'added').catch((err) => {
             console.error('[VehicleFuel] add email failed:', err?.message || err);
         });
-        maybeNotifyFuelLimitThresholds(asset, lean).catch((err) => {
-            console.error('[VehicleFuel] limit email failed:', err?.message || err);
+        notifyHrUnassignedFuelAdded(asset, lean).catch((err) => {
+            console.error('[VehicleFuel] unassigned HR email failed:', err?.message || err);
+        });
+        syncVehicleAccessFuelReminder().catch((err) => {
+            console.error('[VehicleFuel] access fuel reminder sync failed:', err?.message || err);
         });
 
         return res.status(201).json({
@@ -759,9 +903,6 @@ export async function updateVehicleFuel(req, res) {
 
         await bill.save();
         const lean = bill.toObject();
-        maybeNotifyFuelLimitThresholds(asset, lean).catch((err) => {
-            console.error('[VehicleFuel] limit email failed:', err?.message || err);
-        });
 
         return res.json({
             message: 'Fuel bill updated.',
@@ -784,6 +925,11 @@ function findFuelEntry(bill, entryId) {
 
 export async function updateVehicleFuelEntry(req, res) {
     try {
+        const allowed = await actorCanEditFuelEntry(req.user);
+        if (!allowed) {
+            return res.status(403).json({ message: 'Only flowchart HR can edit fuel entries.' });
+        }
+
         const bill = await VehicleFuelBill.findById(req.params.id);
         if (!bill) return res.status(404).json({ message: 'Fuel bill not found.' });
 
@@ -820,9 +966,6 @@ export async function updateVehicleFuelEntry(req, res) {
 
         await bill.save();
         const lean = bill.toObject();
-        maybeNotifyFuelLimitThresholds(asset, lean).catch((err) => {
-            console.error('[VehicleFuel] limit email failed:', err?.message || err);
-        });
 
         return res.json({
             message: 'Fuel entry updated.',
@@ -877,6 +1020,62 @@ export async function closeVehicleFuel(req, res) {
     }
 }
 
+export async function closeAccessFuelMonthlyBills(req, res) {
+    try {
+        const monthKey = String(req.body?.monthKey || '').trim();
+        if (!MONTH_KEY_RE.test(monthKey)) {
+            return res.status(400).json({ message: 'Select a valid month.' });
+        }
+        if (!isAccessFuelMonthlyCloseWindowOpen(monthKey)) {
+            return res.status(400).json({ message: 'Available only on the 2nd of the next month.' });
+        }
+
+        const ids = (Array.isArray(req.body?.billIds) ? req.body.billIds : [])
+            .map((id) => String(id || '').trim())
+            .filter((id) => mongoose.Types.ObjectId.isValid(id));
+        if (!ids.length) {
+            return res.status(400).json({ message: 'Select at least one fuel-added vehicle to close.' });
+        }
+
+        const bills = await VehicleFuelBill.find({
+            _id: { $in: ids },
+            monthKey,
+            status: { $ne: 'closed' },
+        });
+        if (!bills.length) {
+            return res.status(400).json({ message: 'No open fuel bills were selected for this month.' });
+        }
+
+        let closed = 0;
+        for (const bill of bills) {
+            const asset = await loadFleetVehicle(bill.vehicleId);
+            if (!asset) continue;
+
+            const stats = await locatorStatsForVehicle(asset, bill.monthKey);
+            bill.status = 'closed';
+            bill.closedAt = new Date();
+            bill.closedBy = req.user?._id || null;
+            bill.kmRun = stats.kmRun;
+            bill.idleTimeMinutes = stats.idleTimeMinutes;
+            bill.updatedBy = req.user?._id || null;
+            await bill.save();
+            closed += 1;
+
+            const lean = bill.toObject();
+            notifyFuelBillClosedWithHr(asset, lean).catch((err) => {
+                console.error('[VehicleFuel] monthly close email failed:', err?.message || err);
+            });
+        }
+
+        return res.json({
+            message: `Closed ${closed} fuel bill${closed === 1 ? '' : 's'} for ${monthLabelFromKey(monthKey)}. Owners have been emailed.`,
+            closed,
+        });
+    } catch (error) {
+        return res.status(500).json({ message: error.message || 'Failed to close monthly fuel.' });
+    }
+}
+
 export async function deleteVehicleFuel(req, res) {
     try {
         const allowed = await actorCanDeleteFuel(req.user);
@@ -911,6 +1110,9 @@ export async function deleteVehicleFuel(req, res) {
         });
 
         await VehicleFuelBill.deleteOne({ _id: bill._id });
+        syncVehicleAccessFuelReminder().catch((err) => {
+            console.error('[VehicleFuel] access fuel reminder sync failed:', err?.message || err);
+        });
         return res.json({ message: `Fuel bill deleted for ${monthLabel}. Management has been notified.` });
     } catch (error) {
         return res.status(500).json({ message: error.message || 'Failed to delete fuel bill.' });

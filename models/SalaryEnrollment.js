@@ -2,6 +2,7 @@ import mongoose from 'mongoose';
 
 /**
  * One enrollment per employee. They appear on every salary month from fromMonth onward.
+ * New enrollments start the month after the enroll month (first slip on that 1st).
  * salaryDate / processDate are the per-employee values copied from policy at enroll (editable).
  */
 const salaryEnrollmentSchema = new mongoose.Schema(

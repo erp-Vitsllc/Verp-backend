@@ -4,6 +4,7 @@ import {
     requireCanManageFuel,
     listFuelVehicles,
     listAccessFuel,
+    createAccessFuelMonthlyLimits,
     listFuelGpsStats,
     listVehicleFuelBills,
     lookupVehicleFuel,
@@ -11,6 +12,7 @@ import {
     updateVehicleFuel,
     updateVehicleFuelEntry,
     closeVehicleFuel,
+    closeAccessFuelMonthlyBills,
     deleteVehicleFuel,
     getVehicleFuelAttachment,
 } from '../controllers/vehicleFuelController.js';
@@ -19,11 +21,13 @@ const router = express.Router();
 
 router.get('/vehicles', protect, listFuelVehicles);
 router.get('/access-list', protect, listAccessFuel);
+router.post('/monthly-limits', protect, requireCanManageFuel, createAccessFuelMonthlyLimits);
 router.get('/gps-stats', protect, listFuelGpsStats);
 router.get('/lookup', protect, lookupVehicleFuel);
 router.get('/vehicle/:vehicleId', protect, listVehicleFuelBills);
 router.post('/', protect, requireCanManageFuel, addVehicleFuel);
 router.post('/close', protect, requireCanManageFuel, closeVehicleFuel);
+router.post('/close-monthly', protect, requireCanManageFuel, closeAccessFuelMonthlyBills);
 router.put('/:id/entries/:entryId', protect, requireCanManageFuel, updateVehicleFuelEntry);
 router.put('/:id', protect, requireCanManageFuel, updateVehicleFuel);
 router.post('/:id/close', protect, requireCanManageFuel, closeVehicleFuel);

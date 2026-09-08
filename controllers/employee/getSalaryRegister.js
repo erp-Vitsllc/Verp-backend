@@ -33,6 +33,7 @@ import {
 } from '../../utils/scheduleDailyAtMidnight.js';
 import { isJwtSystemSuperUser } from '../../utils/systemSuperUser.js';
 import { viewerIsSalaryFlowchartHr } from '../../utils/viewerIsSalaryFlowchartHr.js';
+import { monthPayrollProcessStatusLabel } from '../../utils/salaryDmfApproval.js';
 import { sendMailLater } from '../../utils/salaryEnrollmentApprovalNotify.js';
 import { withFrontendPath } from '../../utils/resolveFrontendBaseUrl.js';
 import {
@@ -99,12 +100,21 @@ function normalizeEnrollmentRows(rows) {
         if (!key) continue;
         const fromMonth = enrollmentFromMonth(raw);
         const prev = byKey.get(key);
-        if (!prev || (fromMonth && (!prev.fromMonth || fromMonth < prev.fromMonth))) {
+        if (!prev) {
             byKey.set(key, {
                 employeeId,
-                fromMonth: fromMonth || prev?.fromMonth || '',
+                fromMonth: fromMonth || '',
                 salaryDate: raw.salaryDate,
                 processDate: raw.processDate,
+            });
+            continue;
+        }
+        if (!prev.fromMonth && fromMonth) {
+            byKey.set(key, {
+                ...prev,
+                fromMonth,
+                salaryDate: prev.salaryDate ?? raw.salaryDate,
+                processDate: prev.processDate ?? raw.processDate,
             });
         }
     }
@@ -1613,6 +1623,18 @@ export const getSalaryRegister = async (req, res) => {
             visibleMonths = visibleMonths.filter((row) => Number(row.enrollUser) > 0);
         }
         visibleMonths = visibleMonths.map((row, index) => ({ ...row, slNo: index + 1 }));
+        const dmfRows = await SalaryMonthDmf.find({
+            monthKey: { $in: visibleMonths.map((row) => row.monthKey).filter(Boolean) },
+        })
+            .select('monthKey dmfApproval')
+            .lean();
+        const dmfByMonth = new Map(
+            (dmfRows || []).map((row) => [String(row.monthKey), row.dmfApproval]),
+        );
+        visibleMonths = visibleMonths.map((row) => ({
+            ...row,
+            processStatus: monthPayrollProcessStatusLabel(dmfByMonth.get(String(row.monthKey))),
+        }));
 
         const enrolledUsers = buildEnrolledUserRows(enrollments, {
             employees,
@@ -2007,7 +2029,7 @@ export const createSalaryMonthPayment = async (req, res) => {
         const monthDmf = await SalaryMonthDmf.findOne({ monthKey }).select('dmfApproval.status').lean();
         if (String(monthDmf?.dmfApproval?.status || '') !== 'approved') {
             return res.status(400).json({
-                message: 'Salary slots open after Management approves Accounts → HR → Management.',
+                message: 'Salary slots open after Process salary is approved (Accounts → HR → Management).',
             });
         }
 

@@ -3,6 +3,7 @@ import cors from "cors";
 import compression from "compression";
 import mongoose from "mongoose";
 import path from "path";
+import fs from "fs";
 import { fileURLToPath } from "url";
 // import { connectDB } from "./config/db.js"; // <-- Import DB connection
 import loginRoute from "./routes/loginRoutes.js"; // <-- Add routes
@@ -47,6 +48,7 @@ import { processAccidentAssets } from "./utils/processAccidentAssets.js";
 import { processDocumentExpiryReminders } from "./utils/processDocumentExpiryReminders.js";
 import { processUtilityBillPaymentDayReminders } from "./utils/processUtilityBillPaymentDayReminders.js";
 import { processSalaryProcessReminders } from "./utils/processSalaryProcessReminders.js";
+import { processVehicleAccessFuelReminders } from "./utils/processVehicleAccessFuelReminders.js";
 import { processUtilityContractExpiryReminders } from "./utils/processUtilityContractExpiryReminders.js";
 import { processVehicleServiceHoldReminders } from "./utils/processVehicleServiceHoldReminders.js";
 import { processVehicleServiceScheduledPhase } from "./utils/processVehicleServiceScheduledPhase.js";
@@ -71,6 +73,27 @@ setupEmailSubjectTag();
 // Atlas SRV resolution on Windows can fail with system DNS; Google DNS is more reliable.
 dns.setServers(["8.8.8.8", "8.8.4.4"]);
 
+const crashLogPath = path.join(__dirname, "data", "server-crash.log");
+function appendCrashLog(kind, err) {
+    const text = `[${new Date().toISOString()}] ${kind}: ${err?.stack || err?.message || err}\n`;
+    console.error(text.trim());
+    try {
+        fs.mkdirSync(path.dirname(crashLogPath), { recursive: true });
+        fs.appendFileSync(crashLogPath, text);
+    } catch {
+        // Logging must never throw.
+    }
+}
+
+// Node 18+ treats unhandled rejections as crashes. Background jobs / Atlas blips
+// were taking down port 5000 (ERR_CONNECTION_RESET → ERR_CONNECTION_REFUSED).
+process.on("unhandledRejection", (reason) => {
+    appendCrashLog("unhandledRejection", reason);
+});
+process.on("uncaughtException", (err) => {
+    appendCrashLog("uncaughtException", err);
+});
+
 const app = express();
 app.disable("x-powered-by");
 
@@ -85,150 +108,7 @@ if (process.env.TRUST_PROXY === '1' || process.env.TRUST_PROXY === 'true') {
     app.set('trust proxy', Number.isFinite(hops) && hops > 0 ? hops : 1);
 }
 
-// Run parking lifecycle checks (reminders + auto-unassign) periodically.
-setTimeout(() => { processParkingAssets(); }, 30 * 1000);
-setInterval(() => { processParkingAssets(); }, 6 * 60 * 60 * 1000);
-
-setTimeout(() => { processTemporaryAssignments(); }, 45 * 1000);
-// Run more frequently so "ends on date" feels accurate to users.
-setInterval(() => { processTemporaryAssignments(); }, 60 * 60 * 1000);
-
-setTimeout(() => {
-    processFleetHandoverEscalation().catch((e) =>
-        console.error('[processFleetHandoverEscalation] startup failed:', e?.message || e),
-    );
-}, 75 * 1000);
-setInterval(() => {
-    processFleetHandoverEscalation().catch((e) =>
-        console.error('[processFleetHandoverEscalation] scheduled run failed:', e?.message || e),
-    );
-}, 24 * 60 * 60 * 1000);
-
-setTimeout(() => { processAccidentAssets(); }, 60 * 1000);
-scheduleDailyAtMidnight(
-    () => processAccidentAssets(),
-    { name: "AccidentAssets" },
-);
-
-// Date-based auto emails at 12:00 AM (Asia/Dubai by default).
-// Startup catch-up still runs shortly after boot so overnight downtime does not skip the day;
-// reminder logs keep sends idempotent (no duplicate emails).
-const scheduledEmailTz = getScheduledEmailTimeZone();
-console.log(`[ScheduledEmail] daily jobs armed for ${scheduledEmailTz} midnight`);
-
-// Company / employee / vehicle document expiry (30/20/10/0 day emails + HR tasks).
-setTimeout(() => { processDocumentExpiryReminders(); }, 90 * 1000);
-scheduleDailyAtMidnight(
-    () => processDocumentExpiryReminders(),
-    { name: "DocumentExpiryReminders" },
-);
-
-// Utility bill payment-day reminders (current + previous month; bell when overdue, email on payment day).
-setTimeout(() => {
-    processUtilityBillPaymentDayReminders().catch((e) =>
-        console.error("[UtilityBillPaymentDayReminders] startup failed:", e?.message || e),
-    );
-}, 110 * 1000);
-scheduleDailyAtMidnight(
-    () => processUtilityBillPaymentDayReminders(),
-    { name: "UtilityBillPaymentDayReminders" },
-);
-
-// Salary process reminders (days before processing date + on the processing day).
-setTimeout(() => {
-    processSalaryProcessReminders().catch((e) =>
-        console.error("[SalaryProcessReminders] startup failed:", e?.message || e),
-    );
-}, 118 * 1000);
-scheduleDailyAtMidnight(
-    () => processSalaryProcessReminders(),
-    { name: "SalaryProcessReminders" },
-);
-
-// Utility contract end-date expiry (T-10 / T-5 / due-or-past → Accounts flowchart; sticky until done).
-setTimeout(() => {
-    processUtilityContractExpiryReminders().catch((e) =>
-        console.error("[UtilityContractExpiryReminders] startup failed:", e?.message || e),
-    );
-}, 125 * 1000);
-scheduleDailyAtMidnight(
-    () => processUtilityContractExpiryReminders(),
-    { name: "UtilityContractExpiryReminders" },
-);
-
-// Birthday wishes for active employees (personal email only).
-setTimeout(() => {
-    processBirthdayWishes().catch((e) =>
-        console.error("[BirthdayWish] startup run failed:", e?.message || e),
-    );
-}, 100 * 1000);
-scheduleDailyAtMidnight(
-    () => processBirthdayWishes(),
-    { name: "BirthdayWish" },
-);
-
-// Run vehicle service hold reminders (creates deferred task/email near hold date).
-setTimeout(() => { processVehicleServiceHoldReminders(); }, 120 * 1000);
-setInterval(() => { processVehicleServiceHoldReminders(); }, 24 * 60 * 60 * 1000);
-
-// Scheduled vehicle service window: flip to "On Service" on the first day, email AC after window ends.
-setTimeout(() => { processVehicleServiceScheduledPhase(); }, 150 * 1000);
-setInterval(() => { processVehicleServiceScheduledPhase(); }, 2 * 60 * 60 * 1000);
-setTimeout(() => { processOilServiceOverdue(); }, 180 * 1000);
-setInterval(() => { processOilServiceOverdue(); }, 2 * 60 * 60 * 1000);
-setTimeout(() => { processOilServiceCompleteDueReminder(); }, 185 * 1000);
-setInterval(() => { processOilServiceCompleteDueReminder(); }, 2 * 60 * 60 * 1000);
-setTimeout(() => { processOilServiceStartDateActivation(); }, 165 * 1000);
-setInterval(() => { processOilServiceStartDateActivation(); }, 2 * 60 * 60 * 1000);
-setTimeout(() => { processShopServiceStartDateActivation(); }, 170 * 1000);
-setInterval(() => { processShopServiceStartDateActivation(); }, 2 * 60 * 60 * 1000);
-setTimeout(() => { processOilServiceDueAutoCreate(); }, 195 * 1000);
-setInterval(() => { processOilServiceDueAutoCreate(); }, 2 * 60 * 60 * 1000);
-
-// Tools/equipment on service: expiry-day email, overdue tasks for bell + dashboard.
-setTimeout(() => {
-    processAssetServiceOverdue().catch((e) =>
-        console.error('[processAssetServiceOverdue] startup failed:', e?.message || e),
-    );
-}, 210 * 1000);
-setInterval(() => {
-    processAssetServiceOverdue().catch((e) =>
-        console.error('[processAssetServiceOverdue] scheduled run failed:', e?.message || e),
-    );
-}, 2 * 60 * 60 * 1000);
-
-setTimeout(() => {
-    purgeExpiredAdminDeletionArchives().catch((e) =>
-        console.error('[AdminDeletionArchive] startup purge failed:', e?.message || e),
-    );
-}, 180 * 1000);
-scheduleDailyAtMidnight(
-    () => purgeExpiredAdminDeletionArchives(),
-    { name: "AdminDeletionArchive" },
-);
-
-// Attendance daily routine: close previous day (marks stay in DB), open new day empty for marking.
-setTimeout(() => {
-    processAttendanceDailyRoutine().catch((e) =>
-        console.error("[AttendanceDailyRoutine] startup failed:", e?.message || e),
-    );
-}, 140 * 1000);
-scheduleDailyAtMidnight(
-    () => processAttendanceDailyRoutine(),
-    { name: "AttendanceDailyRoutine" },
-);
-
-setTimeout(() => {
-    rerouteAllPendingAssetCreationApprovals()
-        .then((counts) => {
-            console.log(
-                `[AssetApproval] startup re-route: fleet=${counts.fleetUpdated} tools=${counts.toolsUpdated}`
-            );
-        })
-        .catch((e) =>
-            console.error('[AssetApproval] startup re-route failed:', e?.message || e),
-        );
-}, 20 * 1000);
+// Background jobs start after Mongo is connected (see startScheduledJobs).
 
 // CORS Configuration - MUST BE FIRST
 const staticAllowedOrigins = [
@@ -355,6 +235,12 @@ app.use("/api/Holiday", holidayRoute);
 app.use("/api/WorkingTime", workingTimeRoute);
 app.use("/api/WorkLocation", workLocationRoute);
 
+app.use((err, req, res, next) => {
+    console.error("Express error:", err?.stack || err?.message || err);
+    if (res.headersSent) return next(err);
+    res.status(err.status || 500).json({ message: err.message || "Server error" });
+});
+
 const PORT = process.env.PORT || 5000;
 
 function listenHttp(host, port) {
@@ -374,7 +260,7 @@ function listenHttp(host, port) {
     });
 }
 
-async function listenHttpRetry(host, port, { retries = 10, delayMs = 400 } = {}) {
+async function listenHttpRetry(host, port, { retries = 20, delayMs = 500 } = {}) {
     let lastErr;
     for (let attempt = 1; attempt <= retries; attempt++) {
         try {
@@ -386,6 +272,94 @@ async function listenHttpRetry(host, port, { retries = 10, delayMs = 400 } = {})
         }
     }
     throw lastErr;
+}
+
+function runJob(name, fn) {
+    Promise.resolve()
+        .then(() => fn())
+        .catch((err) => {
+            console.error(`[${name}] failed:`, err?.stack || err?.message || err);
+        });
+}
+
+function startScheduledJobs() {
+    const scheduledEmailTz = getScheduledEmailTimeZone();
+    console.log(`[ScheduledEmail] daily jobs armed for ${scheduledEmailTz} midnight`);
+
+    const later = (ms, name, fn) => setTimeout(() => runJob(name, fn), ms);
+    const every = (ms, name, fn) => setInterval(() => runJob(name, fn), ms);
+
+    // Parking lifecycle checks (reminders + auto-unassign).
+    later(30 * 1000, "ParkingAssets", processParkingAssets);
+    every(6 * 60 * 60 * 1000, "ParkingAssets", processParkingAssets);
+
+    later(45 * 1000, "TemporaryAssignments", processTemporaryAssignments);
+    every(60 * 60 * 1000, "TemporaryAssignments", processTemporaryAssignments);
+
+    later(75 * 1000, "FleetHandoverEscalation", processFleetHandoverEscalation);
+    every(24 * 60 * 60 * 1000, "FleetHandoverEscalation", processFleetHandoverEscalation);
+
+    later(60 * 1000, "AccidentAssets", processAccidentAssets);
+    scheduleDailyAtMidnight(() => processAccidentAssets(), { name: "AccidentAssets" });
+
+    // Date-based auto emails at 12:00 AM (Asia/Dubai by default).
+    // Startup catch-up still runs shortly after boot so overnight downtime does not skip the day;
+    // reminder logs keep sends idempotent (no duplicate emails).
+    later(90 * 1000, "DocumentExpiryReminders", processDocumentExpiryReminders);
+    scheduleDailyAtMidnight(() => processDocumentExpiryReminders(), { name: "DocumentExpiryReminders" });
+
+    later(110 * 1000, "UtilityBillPaymentDayReminders", processUtilityBillPaymentDayReminders);
+    scheduleDailyAtMidnight(() => processUtilityBillPaymentDayReminders(), {
+        name: "UtilityBillPaymentDayReminders",
+    });
+
+    later(118 * 1000, "SalaryProcessReminders", processSalaryProcessReminders);
+    scheduleDailyAtMidnight(() => processSalaryProcessReminders(), { name: "SalaryProcessReminders" });
+
+    later(128 * 1000, "VehicleAccessFuelReminders", processVehicleAccessFuelReminders);
+    scheduleDailyAtMidnight(() => processVehicleAccessFuelReminders(), {
+        name: "VehicleAccessFuelReminders",
+    });
+
+    later(125 * 1000, "UtilityContractExpiryReminders", processUtilityContractExpiryReminders);
+    scheduleDailyAtMidnight(() => processUtilityContractExpiryReminders(), {
+        name: "UtilityContractExpiryReminders",
+    });
+
+    later(100 * 1000, "BirthdayWish", processBirthdayWishes);
+    scheduleDailyAtMidnight(() => processBirthdayWishes(), { name: "BirthdayWish" });
+
+    later(120 * 1000, "VehicleServiceHoldReminders", processVehicleServiceHoldReminders);
+    every(24 * 60 * 60 * 1000, "VehicleServiceHoldReminders", processVehicleServiceHoldReminders);
+
+    later(150 * 1000, "VehicleServiceScheduledPhase", processVehicleServiceScheduledPhase);
+    every(2 * 60 * 60 * 1000, "VehicleServiceScheduledPhase", processVehicleServiceScheduledPhase);
+    later(180 * 1000, "OilServiceOverdue", processOilServiceOverdue);
+    every(2 * 60 * 60 * 1000, "OilServiceOverdue", processOilServiceOverdue);
+    later(185 * 1000, "OilServiceCompleteDueReminder", processOilServiceCompleteDueReminder);
+    every(2 * 60 * 60 * 1000, "OilServiceCompleteDueReminder", processOilServiceCompleteDueReminder);
+    later(165 * 1000, "OilServiceStartDateActivation", processOilServiceStartDateActivation);
+    every(2 * 60 * 60 * 1000, "OilServiceStartDateActivation", processOilServiceStartDateActivation);
+    later(170 * 1000, "ShopServiceStartDateActivation", processShopServiceStartDateActivation);
+    every(2 * 60 * 60 * 1000, "ShopServiceStartDateActivation", processShopServiceStartDateActivation);
+    later(195 * 1000, "OilServiceDueAutoCreate", processOilServiceDueAutoCreate);
+    every(2 * 60 * 60 * 1000, "OilServiceDueAutoCreate", processOilServiceDueAutoCreate);
+
+    later(210 * 1000, "AssetServiceOverdue", processAssetServiceOverdue);
+    every(2 * 60 * 60 * 1000, "AssetServiceOverdue", processAssetServiceOverdue);
+
+    later(180 * 1000, "AdminDeletionArchive", purgeExpiredAdminDeletionArchives);
+    scheduleDailyAtMidnight(() => purgeExpiredAdminDeletionArchives(), { name: "AdminDeletionArchive" });
+
+    later(140 * 1000, "AttendanceDailyRoutine", processAttendanceDailyRoutine);
+    scheduleDailyAtMidnight(() => processAttendanceDailyRoutine(), { name: "AttendanceDailyRoutine" });
+
+    later(20 * 1000, "AssetApprovalReroute", async () => {
+        const counts = await rerouteAllPendingAssetCreationApprovals();
+        console.log(
+            `[AssetApproval] startup re-route: fleet=${counts.fleetUpdated} tools=${counts.toolsUpdated}`,
+        );
+    });
 }
 
 async function startServer() {
@@ -426,6 +400,7 @@ async function startServer() {
     console.log(`Server running at http://127.0.0.1:${PORT}`);
     console.log(`Health check: http://127.0.0.1:${PORT}/api/health`);
     startBackgroundJobs();
+    startScheduledJobs();
 
     // IPv6 (::1). Edge/Chrome often resolve "localhost" here first; without this bind, login is ERR_CONNECTION_REFUSED.
     let ipv6Server;
@@ -437,6 +412,9 @@ async function startServer() {
             `IPv6 [::]:${PORT} bind skipped (${err.code || err.message}). If login fails in Edge, use http://127.0.0.1:3000`,
         );
     }
+
+    ipv4Server.on("error", (err) => appendCrashLog("ipv4Server", err));
+    ipv6Server?.on("error", (err) => appendCrashLog("ipv6Server", err));
 
     const closeServers = () => {
         ipv4Server?.close();
