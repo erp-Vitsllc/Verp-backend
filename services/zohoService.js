@@ -8,7 +8,7 @@ import {
 import { getZohoOrgContext, withZohoOrganization } from '../utils/zohoOrgContext.js';
 
 const TOKEN_EXPIRY_BUFFER_MS = 5 * 60 * 1000;
-const DEFAULT_OAUTH_SCOPE = [
+const DEFAULT_OAUTH_SCOPES = [
     'ZohoBooks.contacts.READ',
     'ZohoBooks.contacts.CREATE',
     'ZohoBooks.contacts.UPDATE',
@@ -26,10 +26,47 @@ const DEFAULT_OAUTH_SCOPE = [
     // Banking list + Expense Refund (Money In) bank transactions
     'ZohoBooks.banking.READ',
     'ZohoBooks.banking.CREATE',
-    'ZohoBooks.vendorcredits.READ',
-    'ZohoBooks.vendorcredits.CREATE',
-    'ZohoBooks.vendorcredits.UPDATE',
-].join(',');
+    // Vendor Credits API is /vendorcredits; OAuth module name is debitnotes
+    'ZohoBooks.debitnotes.READ',
+    'ZohoBooks.debitnotes.CREATE',
+    'ZohoBooks.debitnotes.UPDATE',
+];
+
+function splitOAuthScopes(value) {
+    return String(value || '')
+        .split(/[,\s]+/)
+        .map((scope) =>
+            scope
+                .trim()
+                .replace(/^ZohoBooks\.vendorcredits\./i, 'ZohoBooks.debitnotes.'),
+        )
+        .filter(Boolean);
+}
+
+/** Env scopes plus required defaults (vendor credits must not be dropped by an old .env). */
+function mergeOAuthScopes(envScope) {
+    const seen = new Set();
+    const merged = [];
+    [...DEFAULT_OAUTH_SCOPES, ...splitOAuthScopes(envScope)].forEach((scope) => {
+        const key = scope.toLowerCase();
+        if (!key || seen.has(key)) return;
+        seen.add(key);
+        merged.push(scope);
+    });
+    return merged.join(',');
+}
+
+export function tokenHasScope(grantedScope, required) {
+    const granted = splitOAuthScopes(grantedScope).map((scope) => scope.toLowerCase());
+    if (!granted.length) return null;
+    const need = String(required || '').trim().toLowerCase();
+    if (!need) return true;
+    if (granted.includes(need)) return true;
+    if (granted.some((scope) => scope === 'zohobooks.fullaccess.all' || scope.endsWith('.fullaccess'))) {
+        return true;
+    }
+    return false;
+}
 
 export function getZohoConfig() {
     return {
@@ -38,7 +75,7 @@ export function getZohoConfig() {
         redirectUri: process.env.ZOHO_REDIRECT_URI || '',
         organizationId: process.env.ZOHO_ORGANIZATION_ID || '',
         nnitOrganizationId: process.env.ZOHO_ORGANIZATION_ID_NNIT || '',
-        oauthScope: process.env.ZOHO_OAUTH_SCOPE || DEFAULT_OAUTH_SCOPE,
+        oauthScope: mergeOAuthScopes(process.env.ZOHO_OAUTH_SCOPE),
         accountsBaseUrl: (process.env.ZOHO_ACCOUNTS_BASE_URL || 'https://accounts.zoho.com').replace(
             /\/$/,
             '',
@@ -616,11 +653,12 @@ export async function fetchVendorPayments(params = {}) {
     });
 }
 
-function wrapVendorCreditAuthError(error) {
+function wrapVendorCreditAuthError(error, organizationId = '') {
     const message = String(error?.message || '');
     if (/not authorized|unauthorized|invalid oauth scope|code.?57|permission|access denied/i.test(message)) {
+        const org = String(organizationId || '').trim();
         return new Error(
-            'Zoho blocked Vendor Credit (not authorized). This is not an ERP Accounts flowchart permission. Reconnect Zoho for this org (Accounts → Zoho) with a Zoho user who can create Vendor Credits, so the token includes ZohoBooks.vendorcredits.CREATE.',
+            `Zoho blocked Vendor Credit (not authorized${org ? ` for org ${org}` : ''}). This is not an ERP Accounts flowchart permission. Click Reconnect Zoho, sign in as a Zoho user who can create Vendor Credits, and accept ZohoBooks.debitnotes.CREATE. Then try Save again.`,
         );
     }
     return error instanceof Error ? error : new Error(message || 'Zoho vendor credit failed');
@@ -628,6 +666,13 @@ function wrapVendorCreditAuthError(error) {
 
 export async function createVendorCredit(payload = {}, requestParams = {}) {
     try {
+        const { grantedScope, organizationId } = await getBooksRequestContext();
+        if (tokenHasScope(grantedScope, 'ZohoBooks.debitnotes.CREATE') === false) {
+            throw wrapVendorCreditAuthError(
+                new Error('not authorized: missing ZohoBooks.debitnotes.CREATE'),
+                organizationId,
+            );
+        }
         const response = await requestZohoBooks('/vendorcredits', {
             method: 'post',
             data: payload,
@@ -636,7 +681,8 @@ export async function createVendorCredit(payload = {}, requestParams = {}) {
         });
         return response.vendor_credit || response.vendorcredit || response;
     } catch (error) {
-        throw wrapVendorCreditAuthError(error);
+        const org = String(getZohoOrgContext()?.organizationId || '').trim();
+        throw wrapVendorCreditAuthError(error, org);
     }
 }
 
