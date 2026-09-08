@@ -1372,19 +1372,7 @@ async function notifyStakeholders({
             pendingStage,
             { completeTrack: isAdmin },
         );
-        // When formal scheduled/completed letter already went out, keep inbox tasks only.
-        if (!skipEmail) {
-            await sendOilEmail({
-                recipient,
-                asset,
-                actionLabel: copy.actionLabel,
-                detailLine: copy.detailLine,
-                detailRows,
-                serviceRecordId,
-                linkPath,
-                stageLabel: copy.stageLabel,
-            });
-        }
+        // Inbox row first so page-refresh heal/restore sees it before SMTP finishes.
         if (recipient?._id) {
             await syncDashboardAction({
                 requestId: asset._id,
@@ -1396,6 +1384,19 @@ async function notifyStakeholders({
                 extra1: copy.extra1,
                 extra2: copy.extra2,
                 extra3: oilServiceDashboardMeta(asset, serviceRecordId, oilStage),
+            });
+        }
+        // When formal scheduled/completed letter already went out, keep inbox tasks only.
+        if (!skipEmail) {
+            await sendOilEmail({
+                recipient,
+                asset,
+                actionLabel: copy.actionLabel,
+                detailLine: copy.detailLine,
+                detailRows,
+                serviceRecordId,
+                linkPath,
+                stageLabel: copy.stageLabel,
             });
         }
     }
@@ -2197,13 +2198,8 @@ export async function submitOilServiceDetails(asset, serviceId, serviceUpdates, 
             actionedBy: req.user?.employeeObjectId || req.user?._id || null,
         });
 
-        await sendVehicleServiceCompletedNotificationEmail({
-            asset: populated || asset,
-            remark,
-            service: asset.services?.id?.(serviceId) || serviceRow || null,
-        });
-
-        // Accounts: email + dashboard task + Vehicle list badge → oil service Make Payment (Zoho).
+        // Accounts inbox row first, then emails. Otherwise vehicle/inbox refresh
+        // restore-sends a second Make Payment mail while SMTP is still running.
         await notifyStakeholders({
             asset: populated,
             serviceRecordId: serviceId,
@@ -2211,6 +2207,12 @@ export async function submitOilServiceDetails(asset, serviceId, serviceUpdates, 
             actionLabel: 'Oil service — Make Payment (Zoho)',
             detailLine,
             oilStage: 'accounts_payment',
+        });
+
+        await sendVehicleServiceCompletedNotificationEmail({
+            asset: populated || asset,
+            remark,
+            service: asset.services?.id?.(serviceId) || serviceRow || null,
         });
 
         // Complete Service → clear Admin inbox; Make Payment / Zoho stays Accounts-only.
@@ -2294,8 +2296,9 @@ function resolvePendingAccountsOilServiceId(assetDoc) {
 }
 
 /**
- * Re-open Accounts Make Payment bell/email if cash oil is pending_accounts but the
+ * Re-open the Accounts Make Payment inbox row if cash oil is pending_accounts but the
  * dashboard row was incorrectly auto-closed (legacy heal bug).
+ * Inbox only — do not email again; Complete Service already notified Accounts.
  */
 export async function ensureOilAccountsMakePaymentNotification(assetDoc) {
     try {
@@ -2347,9 +2350,10 @@ export async function ensureOilAccountsMakePaymentNotification(assetDoc) {
             actionLabel: 'Oil service — Make Payment (Zoho)',
             detailLine,
             oilStage: 'accounts_payment',
+            skipEmail: true,
         });
         console.log(
-            `[OilService] Restored Accounts Make Payment notification for asset ${populated?.assetId || assetDoc._id}`,
+            `[OilService] Restored Accounts Make Payment inbox for asset ${populated?.assetId || assetDoc._id}`,
         );
         return true;
     } catch (err) {

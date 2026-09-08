@@ -109,13 +109,23 @@ function pageFooter(page, total) {
       </div>`;
 }
 
-function approvalBox(role, title) {
+function approvalBox(row = {}) {
+    const role = row.role || '';
+    const title = row.title || '';
+    const name = String(row.name || '').trim();
+    const date = String(row.date || '').trim();
+    const url = String(row.signatureUrl || '').trim();
+    const signature = url
+        ? `<img src="${esc(url)}" alt="" style="display:block;height:28px;max-width:100%;width:auto;object-fit:contain;margin:8px 0 6px;" />`
+        : `<div style="height:28px;margin:8px 0 6px;"></div>`;
     return `
       <td width="25%" valign="top" style="padding:6px 8px;border:1px solid ${LINE};">
         <div style="font-size:8.5px;font-weight:700;letter-spacing:0.08em;color:${MUTED};">${esc(role)}</div>
-        <div style="font-size:11.5px;font-weight:700;color:${NAVY};margin:4px 0 18px;">${esc(title)}</div>
+        <div style="font-size:11.5px;font-weight:700;color:${NAVY};margin:4px 0 0;">${esc(title)}</div>
+        ${signature}
         <div style="font-size:9.5px;color:${MUTED};border-top:1px solid ${LINE};padding-top:6px;">Signature</div>
-        <div style="font-size:9.5px;color:${MUTED};margin-top:10px;">Date: __________________</div>
+        ${name ? `<div style="font-size:8.5px;font-weight:600;color:${NAVY};margin-top:4px;">${esc(name)}</div>` : ''}
+        <div style="font-size:9.5px;color:${MUTED};margin-top:8px;">Date: ${date ? esc(date) : '__________________'}</div>
       </td>`;
 }
 
@@ -452,7 +462,7 @@ export function buildSalarySlipPdfHtml(slip = {}) {
       ${sectionTitle('APPROVAL & ACKNOWLEDGEMENT')}
       <table width="100%" cellpadding="0" cellspacing="0" style="border-collapse:collapse;margin-top:0;">
         <tr>
-          ${approvers.map((row) => approvalBox(row.role, row.title)).join('')}
+          ${approvers.map((row) => approvalBox(row)).join('')}
         </tr>
       </table>
       ${pageFooter(2, 2)}

@@ -58,6 +58,10 @@ function attachmentPayload(attachment) {
     return { name: '', mime: '', dataUrl: '' };
 }
 
+function attachmentIsPresent(attachment) {
+    return Boolean(String(attachment?.name || '').trim());
+}
+
 async function resolveRequesterEmployee(user) {
     if (!user) return null;
     const oid = user.employeeObjectId || user.employeeId;
@@ -936,6 +940,11 @@ export async function createUtilityBillBatch(req, res) {
             if (!billNumber) {
                 return res.status(400).json({
                     message: `Bill number is required for account ${row.accountNo || entryId}.`,
+                });
+            }
+            if (!attachmentIsPresent(row.attachment)) {
+                return res.status(400).json({
+                    message: `Upload an attachment for account ${row.accountNo || entryId}.`,
                 });
             }
             if (!expenseAccountId) {

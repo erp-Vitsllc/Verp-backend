@@ -33,7 +33,11 @@ import {
 } from '../../utils/scheduleDailyAtMidnight.js';
 import { isJwtSystemSuperUser } from '../../utils/systemSuperUser.js';
 import { viewerIsSalaryFlowchartHr } from '../../utils/viewerIsSalaryFlowchartHr.js';
-import { monthPayrollProcessStatusLabel } from '../../utils/salaryDmfApproval.js';
+import {
+    buildDmfViewerContext,
+    monthPayrollProcessStatusLabel,
+    serializeDmf,
+} from '../../utils/salaryDmfApproval.js';
 import { sendMailLater } from '../../utils/salaryEnrollmentApprovalNotify.js';
 import { withFrontendPath } from '../../utils/resolveFrontendBaseUrl.js';
 import {
@@ -621,10 +625,13 @@ async function buildGroupPendingRequests(people, monthKey) {
             pushItem(emp, {
                 id: `fine-${fine._id}-${emp.employeeId}`,
                 requestId: String(fine._id),
+                fineId: String(fine.fineId || '').trim(),
+                isGroup: assignees.filter((row) => String(row?.employeeId || '').trim()).length > 1,
                 category: 'finance',
                 title: 'Fine approval',
                 detail: String(fine.fineStatus || 'Pending'),
                 dateKey: '',
+                path: '/HRM/Fine',
                 notifiedAt: pendingStep?.assignedAt || fine.updatedAt || fine.createdAt,
                 assigneeMongoId: pendingStep?.assignedTo || '',
                 responsibleRole: roleForPendingStatus(fine.fineStatus) || 'HR',
@@ -1631,10 +1638,18 @@ export const getSalaryRegister = async (req, res) => {
         const dmfByMonth = new Map(
             (dmfRows || []).map((row) => [String(row.monthKey), row.dmfApproval]),
         );
-        visibleMonths = visibleMonths.map((row) => ({
-            ...row,
-            processStatus: monthPayrollProcessStatusLabel(dmfByMonth.get(String(row.monthKey))),
-        }));
+        const dmfCtx = await buildDmfViewerContext(req);
+        visibleMonths = visibleMonths.map((row) => {
+            const dmf = dmfByMonth.get(String(row.monthKey));
+            const serialized = serializeDmf(dmf, { ready: true, ctx: dmfCtx });
+            return {
+                ...row,
+                processStatus: monthPayrollProcessStatusLabel(dmf),
+                canAct: Boolean(serialized.canAct),
+                dmfStatus: serialized.status,
+                currentStepKey: serialized.currentStepKey,
+            };
+        });
 
         const enrolledUsers = buildEnrolledUserRows(enrollments, {
             employees,
@@ -1653,6 +1668,9 @@ export const getSalaryRegister = async (req, res) => {
             enrolledUsers,
             employees: detailYm ? employeesForMonth : undefined,
             payments: detailYm ? monthPayments : undefined,
+            dmf: detailYm
+                ? serializeDmf(dmfByMonth.get(String(detailYm)), { ready: true, ctx: dmfCtx })
+                : undefined,
             ...registerMeta,
             waitingForProcessingDate: Boolean(processDay && todayDay < processDay && endYm < currentYm),
             enrollmentOverview,
@@ -1738,11 +1756,18 @@ function payrollBlockerPath(item) {
     const id = encodeURIComponent(String(item?.employeeId || '').trim());
     const key = String(item?.id || '');
     const category = String(item?.category || '');
+    const title = String(item?.title || '');
+    if (key.startsWith('fine-') || (/fine/i.test(title) && !key.startsWith('hub-') && !key.startsWith('loan-'))) {
+        const params = new URLSearchParams({ status: 'Pending' });
+        params.set('tab', item?.isGroup ? 'group' : 'individual');
+        const focus = String(item?.fineId || item?.requestId || '').trim();
+        if (focus) params.set('focusFine', focus);
+        return `/HRM/Fine?${params.toString()}`;
+    }
     if (key.startsWith('hub-')) {
         const hubId = key.slice(4);
         return hubId ? `/dashboard?hubRequestId=${encodeURIComponent(hubId)}` : '/dashboard';
     }
-    if (key.startsWith('fine-')) return '/HRM/Fine';
     if (key.startsWith('loan-') || category === 'finance') return '/HRM/LoanAndAdvance';
     if (category === 'attendance' || category === 'leave' || category === 'overtime' || category === 'compoff') {
         return id ? `/HRM/Leave?employee=${id}` : '/HRM/Leave';

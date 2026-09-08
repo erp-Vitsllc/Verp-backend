@@ -167,7 +167,7 @@ export async function getMonthSalaryDmf(req, res) {
     try {
         const monthKey = monthKeyOf(req.params?.monthKey);
         if (!monthKey) return res.status(400).json({ message: 'Invalid salary month.' });
-        const doc = await SalaryMonthDmf.findOne({ monthKey });
+        const doc = await SalaryMonthDmf.findOne({ monthKey }).lean();
         return res.status(200).json({ monthKey, dmf: await serializeMonthDmfRow(req, doc, monthKey) });
     } catch (error) {
         console.error('[getMonthSalaryDmf]', error);

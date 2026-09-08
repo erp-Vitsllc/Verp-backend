@@ -21,6 +21,7 @@ import {
 } from './workingTimeHelpers.js';
 import { getVegaLogoDataUrl } from './buildSalarySlipPdfHtml.js';
 import { resolveEmployeePayrollPolicy } from './employeeLeavePolicy.js';
+import { resolveSalarySlipApprovers } from './resolveSalarySlipApprovers.js';
 
 const MONTH_FULL = [
     'January', 'February', 'March', 'April', 'May', 'June',
@@ -1316,13 +1317,17 @@ export async function buildSalarySlipPayload({
         fileName: `Salary-Slip-${ym}-${code}.pdf`,
     };
 
+    payload.approvers = await resolveSalarySlipApprovers({ monthKey: ym, employeeId: code });
+
     if (!skipOverride) {
         try {
             const stored = await SalarySlipMonth.findOne({ employeeId: code, monthKey: ym })
                 .select('slip')
                 .lean();
             if (stored?.slip) {
-                return preferLiveComputed(applySalarySlipOverride(payload, stored.slip), payload);
+                const merged = preferLiveComputed(applySalarySlipOverride(payload, stored.slip), payload);
+                merged.approvers = payload.approvers;
+                return merged;
             }
         } catch (error) {
             console.error('[buildSalarySlipPayload] override', error?.message || error);

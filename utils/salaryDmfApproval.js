@@ -290,12 +290,37 @@ export function monthPayrollProcessStatusLabel(dmf) {
     return payrollApprovalStatusLabel(dmf);
 }
 
+function personId(value) {
+    if (!value || typeof value !== 'object') return value;
+    return value._id || value.employeeObjectId || value;
+}
+
 function personMatchesViewer(viewer, person) {
     if (!viewer || !person) return false;
     return (
-        idsMatch(viewer._id, person.employeeObjectId) ||
+        idsMatch(viewer._id, personId(person.employeeObjectId)) ||
+        idsMatch(viewer.employeeObjectId, personId(person.employeeObjectId)) ||
         codesMatch(viewer.employeeId, person.employeeId)
     );
+}
+
+function toPlain(value) {
+    if (!value || typeof value !== 'object') return value;
+    if (typeof value.toObject === 'function') return value.toObject();
+    if (value._doc && typeof value._doc === 'object') return { ...value._doc };
+    return { ...value };
+}
+
+function toPlainDmf(dmf) {
+    if (!dmf || typeof dmf !== 'object') return emptyDmfApproval();
+    const raw = toPlain(dmf) || {};
+    const steps = Array.isArray(raw.steps)
+        ? raw.steps.map((step) => {
+              const row = toPlain(step) || {};
+              return { ...row, assignedTo: toPlain(row.assignedTo) || {} };
+          })
+        : [];
+    return { ...emptyDmfApproval(), ...raw, steps };
 }
 
 async function loadFlowchartEmployee(departmentKey) {
@@ -310,28 +335,36 @@ async function loadFlowchartEmployee(departmentKey) {
     }
 }
 
-async function viewerMatchesSalaryFlowchartApprover(viewer) {
-    if (!viewer) return false;
-    const people = await Promise.all([
-        loadFlowchartEmployee('accounts'),
-        loadFlowchartEmployee('hr'),
-        loadFlowchartEmployee('management'),
-    ]);
-    return people.some((emp) => personMatchesViewer(viewer, toDmfPerson(emp)));
-}
-
-export async function buildDmfViewerContext(req, dmf) {
-    const [viewer, canBypass, isHr] = await Promise.all([
+export async function buildDmfViewerContext(req) {
+    const [viewer, canBypass, isHr, accounts, management] = await Promise.all([
         resolveViewerEmployee(req),
         viewerCanBypassDmf(req),
         viewerIsSalaryFlowchartHr(req).catch(() => false),
+        loadFlowchartEmployee('accounts'),
+        loadFlowchartEmployee('management'),
     ]);
-    const status = String(dmf?.status || 'idle') || 'idle';
-    let isApprover = Boolean(canBypass || isHr);
-    if (!isApprover && (status === 'idle' || status === 'rejected' || !status)) {
-        isApprover = await viewerMatchesSalaryFlowchartApprover(viewer);
-    }
-    return { viewer, canBypass, isHr: Boolean(isHr), isApprover };
+    const reqUser = {
+        _id: req?.user?.employeeObjectId || req?.user?.empObjectId || null,
+        employeeObjectId: req?.user?.employeeObjectId || req?.user?.empObjectId || null,
+        employeeId: req?.user?.employeeId || '',
+    };
+    const isAccounts = personMatchesViewer(viewer, toDmfPerson(accounts)) || personMatchesViewer(reqUser, toDmfPerson(accounts));
+    const isManagement =
+        personMatchesViewer(viewer, toDmfPerson(management)) ||
+        personMatchesViewer(reqUser, toDmfPerson(management));
+    return {
+        viewer,
+        reqUser,
+        canBypass,
+        isHr: Boolean(isHr),
+        isAccounts,
+        isManagement,
+        isApprover: Boolean(canBypass || isHr || isAccounts || isManagement),
+    };
+}
+
+function viewerMatchesAssigned(ctx, person) {
+    return personMatchesViewer(ctx?.viewer, person) || personMatchesViewer(ctx?.reqUser, person);
 }
 
 export function viewerCanActOnDmf(dmf, ctx) {
@@ -339,8 +372,11 @@ export function viewerCanActOnDmf(dmf, ctx) {
     if (ctx?.canBypass) return true;
     const step = currentDmfStep(dmf);
     if (!step) return false;
-    if (personMatchesViewer(ctx?.viewer, step.assignedTo)) return true;
-    if (step.key === 'hr' && ctx?.isHr) return true;
+    if (viewerMatchesAssigned(ctx, step.assignedTo)) return true;
+    const key = String(step.key || '').toLowerCase();
+    if (key === 'hr' && ctx?.isHr) return true;
+    if (key === 'accounts' && ctx?.isAccounts) return true;
+    if (key === 'management' && ctx?.isManagement) return true;
     return false;
 }
 
@@ -353,7 +389,7 @@ export function viewerCanStartDmf(dmf, ctx) {
 }
 
 export function serializeDmf(dmf, { ready = false, ctx = null } = {}) {
-    const row = dmf && typeof dmf === 'object' ? { ...dmf } : emptyDmfApproval();
+    const row = toPlainDmf(dmf);
     dropLegacyUser2Step(row);
     const status = String(row.status || 'idle') || 'idle';
     const steps = (Array.isArray(row.steps) ? row.steps : [])

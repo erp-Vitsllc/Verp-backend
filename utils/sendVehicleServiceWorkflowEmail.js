@@ -1,6 +1,7 @@
 import nodemailer from 'nodemailer';
-import { resolveFrontendBaseUrl, emailFrontendUrl } from './resolveFrontendBaseUrl.js';
+import { resolveFrontendBaseUrl } from './resolveFrontendBaseUrl.js';
 import { resolveEmployeeEmailWithReporteeLoaded, getFallbackEmailNote, employeeDisplayName } from './resolveEmployeeEmail.js';
+import { buildEmailDedupeKey, sendErpEmail } from './emailDispatch.js';
 
 /**
  * Notify flowchart role when a vehicle service workflow step is waiting or completed.
@@ -108,13 +109,31 @@ export async function sendVehicleServiceWorkflowEmail({
             .map((addr) => String(addr || '').trim())
             .filter((addr) => addr && addr.toLowerCase() !== to.toLowerCase());
 
-        await transporter.sendMail({
+        const assetId = String(asset?._id || asset?.id || '');
+        const dedupeKey = buildEmailDedupeKey([
+            'VehicleServiceWorkflow',
+            assetId,
+            vsr,
+            String(stageLabel || '').trim(),
+            String(actionLabel || '').trim(),
+            to,
+        ]);
+
+        const result = await sendErpEmail({
+            transporter,
             from: `"VeRP Portal" <${emailUser}>`,
             to,
-            ...(ccList.length ? { cc: ccList } : {}),
+            cc: ccList,
             subject,
-            html
+            html,
+            dedupeKey,
+            module: 'VehicleService',
+            emailType: 'workflow',
+            recordId: vsr || assetId,
         });
+        if (!result.sent && result.reason === 'duplicate') {
+            console.log(`[VehicleServiceWorkflow] Duplicate suppressed for ${to} (${actionLabel})`);
+        }
     } catch (e) {
         console.error('[VehicleServiceWorkflow] Email error:', e.message);
     }
