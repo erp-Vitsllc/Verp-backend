@@ -74,6 +74,62 @@ const generateInvoicePDF = async (data) => {
     });
     const page = await browser.newPage();
 
+    const isFinePdf = String(payment.relatedEntityType || '') === 'Fine';
+    const durationVal = Math.max(
+        1,
+        parseInt(isFinePdf ? currentItem?.payableDuration : currentItem?.duration, 10) || 1,
+    );
+    const monthlyAmount = durationVal > 0 ? currentShare / durationVal : currentShare;
+    let startDateForBoxes = null;
+    const startMonth = String(currentItem?.monthStart || currentItem?.startDate || '').trim();
+    if (startMonth.includes('-')) {
+        const parts = startMonth.split('-');
+        startDateForBoxes =
+            parts[0].length === 4
+                ? new Date(parseInt(parts[0], 10), parseInt(parts[1], 10) - 1, 1)
+                : new Date(parseInt(parts[1], 10), parseInt(parts[0], 10) - 1, 1);
+    } else if (startMonth) {
+        const parsed = new Date(startMonth);
+        if (!Number.isNaN(parsed.getTime())) startDateForBoxes = parsed;
+    }
+    let applyPool = Math.max(0, Number(paidEarlier || 0) + Number(paidNow || 0));
+    const scheduleBoxes = [];
+    if (startDateForBoxes && !Number.isNaN(startDateForBoxes.getTime())) {
+        for (let i = 0; i < durationVal; i += 1) {
+            const monthDate = new Date(startDateForBoxes);
+            monthDate.setMonth(startDateForBoxes.getMonth() + i);
+            const label = monthDate.toLocaleDateString('en-US', { month: 'short', year: 'numeric' });
+            const applied = Math.min(monthlyAmount, applyPool);
+            applyPool = Math.max(0, applyPool - applied);
+            const isPaid = applied >= monthlyAmount - 0.5;
+            scheduleBoxes.push({ label, isPaid, applied, monthlyAmount });
+        }
+    }
+    const scheduleHtml = scheduleBoxes.length
+        ? `<div style="margin-bottom: 28px;">
+            <h3 style="font-size: 11px; color: #999; text-transform: uppercase; letter-spacing: 1px; margin: 0 0 12px;">Payment Schedule Status</h3>
+            <div style="display: flex; flex-wrap: wrap; gap: 8px;">
+                ${scheduleBoxes
+                    .map(
+                        (box) => `
+                    <div style="min-width: 88px; padding: 10px 8px; border-radius: 10px; text-align: center; border: 1px solid ${
+                        box.isPaid ? '#86efac' : '#fecaca'
+                    }; background: ${box.isPaid ? '#ecfdf5' : '#fff'};">
+                        <div style="font-size: 10px; font-weight: 800; letter-spacing: 0.6px; color: ${
+                            box.isPaid ? '#047857' : '#b91c1c'
+                        };">${box.label.toUpperCase()}</div>
+                        <div style="margin-top: 6px; font-size: 11px; font-weight: 700; color: ${
+                            box.isPaid ? '#047857' : '#b91c1c'
+                        };">
+                            ${box.isPaid ? '✓ PAID' : `${Math.round(box.applied)} / ${Math.round(box.monthlyAmount)}`}
+                        </div>
+                    </div>`,
+                    )
+                    .join('')}
+            </div>
+        </div>`
+        : '';
+
     const htmlContent = `
     <html>
     <head>
@@ -114,7 +170,7 @@ const generateInvoicePDF = async (data) => {
         <div class="invoice-container">
             <div class="header">
                 <div>
-                    <h1>INVOICE</h1>
+                    <h1>RECEIPT</h1>
                     <p style="margin: 5px 0; color: #777; font-size: 13px;">Reference: <strong>${payment.paymentId}</strong></p>
                 </div>
                 <div class="company">
@@ -158,6 +214,8 @@ const generateInvoicePDF = async (data) => {
                     </tr>
                 </tbody>
             </table>
+
+            ${scheduleHtml}
 
             <div class="summary-section">
                 <table class="summary-table">

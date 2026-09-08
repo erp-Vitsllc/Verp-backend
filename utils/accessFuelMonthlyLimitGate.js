@@ -49,29 +49,58 @@ export function isAccessFuelMonthlyLimitWindowOpen(monthKey, now = new Date()) {
     return selectedIndex < currentIndex;
 }
 
+export function limitedVehicleIdsFromLog(log, assignedVehicles = []) {
+    if (!log) return [];
+    const fromLog = (Array.isArray(log.vehicleIds) ? log.vehicleIds : [])
+        .map((id) => String(id || '').trim())
+        .filter(Boolean);
+    if (fromLog.length) return fromLog;
+    // Legacy month batch stored no vehicle ids — hide assigned vehicles that already have a limit.
+    return (assignedVehicles || [])
+        .filter((vehicle) => Number(vehicle?.fuelMonthlyLimit) > 0)
+        .map((vehicle) => String(vehicle._id || '').trim())
+        .filter(Boolean);
+}
+
+export function assignedVehiclesMissingMonthlyLimit({
+    assignedVehicles = [],
+    limitLog = null,
+} = {}) {
+    const limited = new Set(limitedVehicleIdsFromLog(limitLog, assignedVehicles));
+    return (assignedVehicles || []).filter((vehicle) => {
+        const id = String(vehicle?._id || '').trim();
+        return id && !limited.has(id);
+    });
+}
+
+export function pendingAccessFuelLimitVehicles({
+    assignedVehicles = [],
+    billedVehicleIds = [],
+    limitLog = null,
+} = {}) {
+    const billed = new Set((billedVehicleIds || []).map((id) => String(id || '').trim()).filter(Boolean));
+    return assignedVehiclesMissingMonthlyLimit({ assignedVehicles, limitLog }).filter((vehicle) => {
+        const id = String(vehicle?._id || '').trim();
+        return id && !billed.has(id);
+    });
+}
+
 export function accessFuelMonthlyLimitGate({
     monthKey,
     assignedCount = 0,
-    notAddedCount = 0,
-    alreadyCreated = false,
+    pendingLimitCount = 0,
     now = new Date(),
 } = {}) {
     const assigned = Math.max(0, Number(assignedCount) || 0);
-    const notAdded = Math.max(0, Number(notAddedCount) || 0);
+    const pending = Math.max(0, Number(pendingLimitCount) || 0);
 
     if (assigned <= 0) {
         return { canCreate: false, reason: 'No assigned vehicles.' };
     }
-    if (alreadyCreated) {
+    if (pending <= 0) {
         return {
             canCreate: false,
-            reason: 'Monthly limits already created for this month.',
-        };
-    }
-    if (notAdded === 0) {
-        return {
-            canCreate: false,
-            reason: 'Fuel is already added for every assigned vehicle.',
+            reason: 'Monthly limits already created for all assigned vehicles.',
         };
     }
     if (!isAccessFuelMonthlyLimitWindowOpen(monthKey, now)) {

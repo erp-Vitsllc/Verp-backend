@@ -27,7 +27,13 @@ import {
     isAssignedVehicleForAccessFuel,
     syncVehicleAccessFuelReminder,
 } from '../utils/processVehicleAccessFuelReminders.js';
-import { accessFuelMonthlyLimitGate, accessFuelMonthlyCloseGate, isAccessFuelMonthlyCloseWindowOpen } from '../utils/accessFuelMonthlyLimitGate.js';
+import {
+    accessFuelMonthlyLimitGate,
+    accessFuelMonthlyCloseGate,
+    isAccessFuelMonthlyCloseWindowOpen,
+    limitedVehicleIdsFromLog,
+    pendingAccessFuelLimitVehicles,
+} from '../utils/accessFuelMonthlyLimitGate.js';
 import VehicleAccessFuelMonthlyLimitLog from '../models/VehicleAccessFuelMonthlyLimitLog.js';
 import { getUserPermissions, isUserAdministrator } from '../services/permissionService.js';
 import { isJwtSystemSuperUser } from '../utils/systemSuperUser.js';
@@ -231,14 +237,34 @@ function resolveVehicleMonthlyLimit(asset, fromBody = null) {
 }
 
 function serializeFuelVehicle(v) {
+    const assigned = isAssignedVehicleForAccessFuel(v);
     return {
         _id: v._id,
         assetId: v.assetId,
         name: v.name,
         plate: plateOf(v) || v.assetId,
         owner: ownerOf(v),
+        status: v.status || (assigned ? 'Assigned' : 'Unassigned'),
+        assigned,
         fuelMonthlyLimit: resolveVehicleMonthlyLimit(v) || 0,
     };
+}
+
+function serializePendingLimitVehicle(v) {
+    return {
+        _id: v._id,
+        vehicleId: v._id,
+        name: v.name || '—',
+        plate: plateOf(v) || v.assetId || '—',
+        fuelMonthlyLimit: resolveVehicleMonthlyLimit(v) || 0,
+    };
+}
+
+function assignedVehiclesForLimitLog(assignedVehicles) {
+    return assignedVehicles.map((vehicle) => ({
+        _id: vehicle._id,
+        fuelMonthlyLimit: resolveVehicleMonthlyLimit(vehicle) || 0,
+    }));
 }
 
 function parseAttachment(raw) {
@@ -483,22 +509,40 @@ export async function listAccessFuel(req, res) {
             ? String(req.query.monthKey).trim()
             : currentMonthKey();
 
-        const vehicles = (await loadFuelFleetVehicles(req)).filter(isAssignedVehicleForAccessFuel);
+        await syncVehicleAccessFuelReminder().catch((err) => {
+            console.error('[VehicleFuel] access fuel reminder sync failed:', err?.message || err);
+        });
+
+        const fleetVehicles = await loadFuelFleetVehicles(req);
+        const assignedVehicles = fleetVehicles.filter(isAssignedVehicleForAccessFuel);
+        const fuelVehicles = [
+            ...assignedVehicles,
+            ...fleetVehicles.filter((vehicle) => !isAssignedVehicleForAccessFuel(vehicle)),
+        ];
 
         const bills = await VehicleFuelBill.find({ monthKey }).lean();
         const billsByVehicle = new Map(bills.map((bill) => [String(bill.vehicleId), bill]));
-
+        const limitLog = await VehicleAccessFuelMonthlyLimitLog.findOne({ monthKey }).select('vehicleIds vehicleCount').lean();
+        const pendingLimitVehicles = pendingAccessFuelLimitVehicles({
+            assignedVehicles: assignedVehiclesForLimitLog(assignedVehicles),
+            billedVehicleIds: assignedVehicles
+                .map((vehicle) => String(vehicle._id))
+                .filter((id) => billsByVehicle.has(id)),
+            limitLog,
+        });
+        const pendingLimitIds = new Set(pendingLimitVehicles.map((vehicle) => String(vehicle._id)));
         const added = [];
         const notAdded = [];
         let totalAmount = 0;
         let exceedCount = 0;
 
         const gpsByDevice = await getLocatorMonthStatsByDevices(
-            vehicles.map((vehicle) => vehicle.locatorDeviceId),
+            fleetVehicles.map((vehicle) => vehicle.locatorDeviceId),
             monthKey,
         );
 
-        for (const vehicle of vehicles) {
+        for (const vehicle of fleetVehicles) {
+            const assigned = isAssignedVehicleForAccessFuel(vehicle);
             const bill = billsByVehicle.get(String(vehicle._id));
             const gpsStats = gpsByDevice[String(vehicle.locatorDeviceId || '')] || {
                 kmRun: 0,
@@ -511,6 +555,7 @@ export async function listAccessFuel(req, res) {
                 if (row.limitExceeded) exceedCount += 1;
                 continue;
             }
+            if (!assigned) continue;
             notAdded.push({
                 _id: `missing-${vehicle._id}`,
                 vehicleId: vehicle._id,
@@ -540,9 +585,8 @@ export async function listAccessFuel(req, res) {
 
         const monthlyLimitGate = accessFuelMonthlyLimitGate({
             monthKey,
-            assignedCount: vehicles.length,
-            notAddedCount: notAdded.length,
-            alreadyCreated: Boolean(await VehicleAccessFuelMonthlyLimitLog.exists({ monthKey })),
+            assignedCount: assignedVehicles.length,
+            pendingLimitCount: pendingLimitVehicles.length,
         });
         const monthlyCloseGate = accessFuelMonthlyCloseGate({
             monthKey,
@@ -552,7 +596,10 @@ export async function listAccessFuel(req, res) {
         return res.json({
             monthKey,
             monthLabel: monthLabelFromKey(monthKey),
-            vehicles: vehicles.map(serializeFuelVehicle),
+            vehicles: fuelVehicles.map(serializeFuelVehicle),
+            pendingLimit: assignedVehicles
+                .filter((vehicle) => pendingLimitIds.has(String(vehicle._id)))
+                .map(serializePendingLimitVehicle),
             added,
             notAdded,
             summary: {
@@ -604,17 +651,25 @@ export async function createAccessFuelMonthlyLimits(req, res) {
 
         const assignedVehicles = (await loadFuelFleetVehicles(req)).filter(isAssignedVehicleForAccessFuel);
         const assignedIds = new Set(assignedVehicles.map((vehicle) => String(vehicle._id)));
-        const addedCount = assignedVehicles.length
-            ? await VehicleFuelBill.countDocuments({
+        const billedRows = assignedVehicles.length
+            ? await VehicleFuelBill.find({
                   monthKey,
                   vehicleId: { $in: assignedVehicles.map((vehicle) => vehicle._id) },
               })
-            : 0;
+                  .select('_id vehicleId status amountUsed monthKey')
+                  .lean()
+            : [];
+        const limitLog = await VehicleAccessFuelMonthlyLimitLog.findOne({ monthKey }).select('vehicleIds vehicleCount').lean();
+        const pendingLimitVehicles = pendingAccessFuelLimitVehicles({
+            assignedVehicles: assignedVehiclesForLimitLog(assignedVehicles),
+            billedVehicleIds: billedRows.map((bill) => String(bill.vehicleId)),
+            limitLog,
+        });
+        const pendingIds = new Set(pendingLimitVehicles.map((vehicle) => String(vehicle._id)));
         const monthlyLimitGate = accessFuelMonthlyLimitGate({
             monthKey,
             assignedCount: assignedVehicles.length,
-            notAddedCount: Math.max(0, assignedVehicles.length - addedCount),
-            alreadyCreated: Boolean(await VehicleAccessFuelMonthlyLimitLog.exists({ monthKey })),
+            pendingLimitCount: pendingLimitVehicles.length,
         });
         if (!monthlyLimitGate.canCreate) {
             return res.status(400).json({ message: monthlyLimitGate.reason });
@@ -624,15 +679,14 @@ export async function createAccessFuelMonthlyLimits(req, res) {
             if (!assignedIds.has(row.vehicleId)) {
                 return res.status(400).json({ message: 'Monthly limits can only be set for assigned vehicles.' });
             }
+            if (!pendingIds.has(row.vehicleId)) {
+                return res.status(400).json({
+                    message: 'A monthly limit is already set for one of the selected vehicles this month.',
+                });
+            }
         }
 
-        const bills = await VehicleFuelBill.find({
-            vehicleId: { $in: parsed.map((row) => row.vehicleId) },
-            monthKey,
-        })
-            .select('_id vehicleId status amountUsed monthKey')
-            .lean();
-        const billByVehicle = new Map(bills.map((bill) => [String(bill.vehicleId), bill]));
+        const billByVehicle = new Map(billedRows.map((bill) => [String(bill.vehicleId), bill]));
 
         for (const row of parsed) {
             await AssetItem.updateOne({ _id: row.vehicleId }, { $set: { fuelMonthlyLimit: row.monthlyLimit } });
@@ -645,16 +699,23 @@ export async function createAccessFuelMonthlyLimits(req, res) {
             }
         }
 
-        try {
-            await VehicleAccessFuelMonthlyLimitLog.create({
-                monthKey,
-                vehicleCount: parsed.length,
-                createdBy: req.user?._id || null,
-            });
-        } catch (error) {
-            if (error?.code !== 11000) throw error;
-            return res.status(400).json({ message: 'Monthly limits already created for this month.' });
-        }
+        const seedIds = limitedVehicleIdsFromLog(limitLog, assignedVehiclesForLimitLog(assignedVehicles))
+            .filter((id) => mongoose.Types.ObjectId.isValid(id))
+            .map((id) => new mongoose.Types.ObjectId(id));
+        const vehicleObjectIds = [
+            ...seedIds,
+            ...parsed.map((row) => new mongoose.Types.ObjectId(row.vehicleId)),
+        ];
+        await VehicleAccessFuelMonthlyLimitLog.updateOne(
+            { monthKey },
+            {
+                $addToSet: { vehicleIds: { $each: vehicleObjectIds } },
+                $set: { createdBy: req.user?._id || null },
+                $inc: { vehicleCount: parsed.length },
+                $setOnInsert: { monthKey, createdAt: new Date() },
+            },
+            { upsert: true },
+        );
 
         let emailed = 0;
         for (const row of parsed) {
@@ -676,6 +737,10 @@ export async function createAccessFuelMonthlyLimits(req, res) {
                 console.error('[VehicleFuel] monthly limit email failed:', err?.message || err);
             }
         }
+
+        await syncVehicleAccessFuelReminder().catch((err) => {
+            console.error('[VehicleFuel] access fuel reminder sync failed:', err?.message || err);
+        });
 
         return res.json({
             message: `Monthly limits created for ${parsed.length} vehicle${parsed.length === 1 ? '' : 's'}. Assignees have been emailed.`,

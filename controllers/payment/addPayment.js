@@ -43,10 +43,21 @@ export const addPayment = async (req, res) => {
             vendorId = '',
             vendorName = '',
             attachments = [],
+            employeePaySettlement = false,
         } = req.body;
+
+        const isEmployeeFinePay = Boolean(employeePaySettlement);
         
         // CHECK IF CREATOR IS ACCOUNTS PERSON
         const isAccountsUser = await isUserInFlowchart(req.user, 'accounts');
+        const isFinanceUser = isEmployeeFinePay
+            ? await isUserInFlowchart(req.user, 'finance').catch(() => false)
+            : false;
+        const isAccountsLike =
+            isAccountsUser ||
+            isFinanceUser ||
+            req.user?.isAdmin === true ||
+            String(req.user?.role || '').toLowerCase() === 'admin';
         
         // DEFAULT STATUS logic:
         // If Accounts user creates it, it can be 'Completed' immediately
@@ -54,6 +65,15 @@ export const addPayment = async (req, res) => {
         let finalStatus = status;
         if (!isAccountsUser) {
             finalStatus = 'Processing';
+        }
+        if (isEmployeeFinePay) {
+            if (!isAccountsLike) {
+                return res.status(403).json({
+                    success: false,
+                    message: 'Only Accounts can record employee fine payment.',
+                });
+            }
+            finalStatus = 'Completed';
         }
 
         // Validate required fields
@@ -103,6 +123,33 @@ export const addPayment = async (req, res) => {
             });
         }
 
+        if (isEmployeeFinePay) {
+            if (String(relatedEntityType || '').trim() !== 'Fine') {
+                return res.status(400).json({
+                    success: false,
+                    message: 'Employee pay is only for fines.',
+                });
+            }
+            if (!['Salary', 'Cash'].includes(normalizedSource)) {
+                return res.status(400).json({
+                    success: false,
+                    message: 'Source must be Salary or Cash.',
+                });
+            }
+            if (!paymentDate) {
+                return res.status(400).json({
+                    success: false,
+                    message: 'Payment date is required.',
+                });
+            }
+            if (!hasAttachment) {
+                return res.status(400).json({
+                    success: false,
+                    message: 'Attachment is required.',
+                });
+            }
+        }
+
         // Find employee by employeeId or ObjectId
         let employee;
         if (typeof paidBy === 'string') {
@@ -136,6 +183,38 @@ export const addPayment = async (req, res) => {
                 success: false,
                 message: 'Employee not found'
             });
+        }
+
+        if (isEmployeeFinePay) {
+            let settleFine = relatedEntityId ? await Fine.findById(relatedEntityId) : null;
+            if (!settleFine && referenceId) {
+                settleFine = await Fine.findOne({ fineId: referenceId });
+            }
+            if (!settleFine) {
+                return res.status(404).json({
+                    success: false,
+                    message: 'Fine not found',
+                });
+            }
+            const payable = resolveEmployeeFinePayableAmount(
+                settleFine,
+                employee.employeeId,
+            );
+            const paidSoFar = Number(settleFine.paidAmount) || 0;
+            const expected = Math.round(Math.max(0, payable - paidSoFar) * 100) / 100;
+            const entered = Math.round((parseFloat(amount) || 0) * 100) / 100;
+            if (expected <= 0.01) {
+                return res.status(400).json({
+                    success: false,
+                    message: 'This employee fine is already fully paid.',
+                });
+            }
+            if (Math.abs(entered - expected) > 0.009) {
+                return res.status(400).json({
+                    success: false,
+                    message: `Amount Pay must equal employee fine pay amount (AED ${expected.toFixed(2)}).`,
+                });
+            }
         }
 
         // Generate paymentId before creating payment
@@ -231,6 +310,11 @@ export const addPayment = async (req, res) => {
                         
                         if (remainingAmount <= 0.01) { // Small tolerance for floating point
                             fine.fineStatus = 'Paid';
+                            if (isEmployeeFinePay && !String(fine.accountsPaymentPath || '').trim()) {
+                                fine.accountsPaymentPath = 'employee';
+                                fine.accountsPaymentAt = new Date();
+                                fine.accountsPaymentBy = req.user._id;
+                            }
                             console.log('[AddPayment] Fine status updated to Paid:', fine.fineId);
                         }
 
@@ -1034,7 +1118,7 @@ export const addPayment = async (req, res) => {
         }
 
         // Populate for response
-        await payment.populate('paidBy', 'employeeId firstName lastName');
+        await payment.populate('paidBy', 'employeeId firstName lastName companyEmail');
         await payment.populate('createdBy', 'firstName lastName');
 
         const loanZoho = req._loanZohoSyncResult;
@@ -1043,6 +1127,9 @@ export const addPayment = async (req, res) => {
         const loanRepaymentZoho = req._loanRepaymentZohoSyncResult;
         const zohoSync = loanRepaymentZoho || loanZoho || fineZoho || utilityZoho;
         let message = 'Payment created successfully';
+        if (isEmployeeFinePay) {
+            message = 'Payment recorded. Invoice emailed to the fined employee.';
+        }
         if (zohoSync) {
             if (zohoSync.ok && zohoSync.expenseId) {
                 message =

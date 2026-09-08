@@ -5,6 +5,9 @@ import {
     isAccessFuelMonthlyLimitWindowOpen,
     isAccessFuelMonthlyCloseWindowOpen,
     accessFuelMonthlyCloseGate,
+    assignedVehiclesMissingMonthlyLimit,
+    limitedVehicleIdsFromLog,
+    pendingAccessFuelLimitVehicles,
 } from './accessFuelMonthlyLimitGate.js';
 
 function dubaiDate(isoUtc) {
@@ -25,14 +28,13 @@ describe('Access Fuel monthly limit window', () => {
         assert.equal(isAccessFuelMonthlyLimitWindowOpen('2026-10', dubaiDate('2026-10-01T08:00:00.000Z')), true);
     });
 
-    it('enables when assigned vehicles still need fuel this month', () => {
+    it('enables while assigned vehicles still need a monthly limit', () => {
         const now = dubaiDate('2026-09-08T08:00:00.000Z');
         assert.equal(
             accessFuelMonthlyLimitGate({
                 monthKey: '2026-09',
                 assignedCount: 13,
-                notAddedCount: 10,
-                alreadyCreated: false,
+                pendingLimitCount: 10,
                 now,
             }).canCreate,
             true,
@@ -41,8 +43,7 @@ describe('Access Fuel monthly limit window', () => {
             accessFuelMonthlyLimitGate({
                 monthKey: '2026-09',
                 assignedCount: 13,
-                notAddedCount: 10,
-                alreadyCreated: true,
+                pendingLimitCount: 0,
                 now,
             }).canCreate,
             false,
@@ -50,12 +51,36 @@ describe('Access Fuel monthly limit window', () => {
         assert.equal(
             accessFuelMonthlyLimitGate({
                 monthKey: '2026-09',
-                assignedCount: 13,
-                notAddedCount: 0,
-                alreadyCreated: false,
+                assignedCount: 0,
+                pendingLimitCount: 0,
                 now,
             }).canCreate,
             false,
+        );
+    });
+
+    it('hides vehicles already checked or limited for the month', () => {
+        const assigned = [
+            { _id: 'a', fuelMonthlyLimit: 0 },
+            { _id: 'b', fuelMonthlyLimit: 800 },
+            { _id: 'c', fuelMonthlyLimit: 0 },
+        ];
+        assert.deepEqual(
+            pendingAccessFuelLimitVehicles({
+                assignedVehicles: assigned,
+                billedVehicleIds: ['c'],
+                limitLog: { vehicleIds: ['a'] },
+            }).map((row) => String(row._id)),
+            ['b'],
+        );
+        assert.deepEqual(limitedVehicleIdsFromLog({ vehicleIds: ['a'] }, assigned), ['a']);
+        assert.deepEqual(limitedVehicleIdsFromLog({ vehicleCount: 1 }, assigned), ['b']);
+        assert.deepEqual(
+            assignedVehiclesMissingMonthlyLimit({
+                assignedVehicles: assigned,
+                limitLog: { vehicleIds: ['a'] },
+            }).map((row) => String(row._id)),
+            ['b', 'c'],
         );
     });
 });

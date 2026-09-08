@@ -3,8 +3,9 @@ import AssetItem from '../models/AssetItem.js';
 import AssetType from '../models/AssetType.js';
 import DashboardAction from '../models/DashboardAction.js';
 import VehicleAccessFuelReminderLog from '../models/VehicleAccessFuelReminderLog.js';
-import VehicleFuelBill from '../models/VehicleFuelBill.js';
+import VehicleAccessFuelMonthlyLimitLog from '../models/VehicleAccessFuelMonthlyLimitLog.js';
 import { isFleetVehicleAsset } from './assetApprovalHelpers.js';
+import { assignedVehiclesMissingMonthlyLimit } from './accessFuelMonthlyLimitGate.js';
 import { buildFleetVehicleMongoScope } from './fleetVehicleAssetId.js';
 import { pickEffectiveEmail } from './resolveEmployeeEmail.js';
 import { withFrontendPath } from './resolveFrontendBaseUrl.js';
@@ -45,14 +46,14 @@ export function accessFuelMonthKeyFromDate(now = new Date(), timeZone = getSched
 }
 
 export function accessFuelEmailSubject(monthKey) {
-    return `${accessFuelMonthLabel(monthKey, 'short')} vehicle fuel add`;
+    return `${accessFuelMonthLabel(monthKey, 'short')} vehicle monthly limit`;
 }
 
 export function accessFuelInboxMessage(count, monthKey) {
     const n = Math.max(0, Number(count) || 0);
     const month = accessFuelMonthLabel(monthKey, 'long');
     const vehicleWord = n === 1 ? 'vehicle has' : 'vehicles have';
-    return `${n} ${vehicleWord} to add ${month} bill to be added`;
+    return `${n} ${vehicleWord} to add ${month} monthly limit`;
 }
 
 export function isAssignedVehicleForAccessFuel(vehicle) {
@@ -72,25 +73,34 @@ async function loadAssignedFleetVehicles() {
         $and: [buildFleetVehicleMongoScope({ vehicleTypeIds })],
     })
         .select(
-            '_id assetId name plateNumber plateEmirate vehicleBrand vehicleCode typeId status locatorDeviceId',
+            '_id assetId name plateNumber plateEmirate vehicleBrand vehicleCode typeId status fuelMonthlyLimit locatorDeviceId',
         )
         .populate('typeId', 'name')
         .lean();
     return items.filter(isFleetVehicleAsset);
 }
 
-export async function listAssignedVehiclesMissingFuel(monthKey) {
-    const vehicles = await loadAssignedFleetVehicles();
+export async function listAssignedVehiclesMissingMonthlyLimit(monthKey) {
+    const vehicles = (await loadAssignedFleetVehicles()).filter(isAssignedVehicleForAccessFuel);
     if (!vehicles.length) return [];
-    const ids = vehicles.map((row) => row._id);
-    const bills = await VehicleFuelBill.find({
-        monthKey,
-        vehicleId: { $in: ids },
-    })
-        .select('vehicleId')
+    const limitLog = await VehicleAccessFuelMonthlyLimitLog.findOne({ monthKey })
+        .select('vehicleIds vehicleCount')
         .lean();
-    const added = new Set(bills.map((row) => String(row.vehicleId)));
-    return vehicles.filter((row) => !added.has(String(row._id)));
+    const missingIds = new Set(
+        assignedVehiclesMissingMonthlyLimit({
+            assignedVehicles: vehicles.map((vehicle) => ({
+                _id: vehicle._id,
+                fuelMonthlyLimit: Number(vehicle.fuelMonthlyLimit) || 0,
+            })),
+            limitLog,
+        }).map((row) => String(row._id)),
+    );
+    return vehicles.filter((row) => missingIds.has(String(row._id)));
+}
+
+/** @deprecated Use listAssignedVehiclesMissingMonthlyLimit */
+export async function listAssignedVehiclesMissingFuel(monthKey) {
+    return listAssignedVehiclesMissingMonthlyLimit(monthKey);
 }
 
 function reminderMeta(monthKey, missingCount) {
@@ -121,7 +131,7 @@ async function closePendingReminders(filter, comment) {
 
 export async function syncVehicleAccessFuelReminder(now = new Date()) {
     const monthKey = accessFuelMonthKeyFromDate(now);
-    const missing = await listAssignedVehiclesMissingFuel(monthKey);
+    const missing = await listAssignedVehiclesMissingMonthlyLimit(monthKey);
     const missingCount = missing.length;
     const adminOfficer = await resolveAdminOfficerEmployee().catch(() => null);
 
@@ -136,7 +146,7 @@ export async function syncVehicleAccessFuelReminder(now = new Date()) {
     );
 
     if (!adminOfficer?._id || missingCount <= 0) {
-        await closePendingReminders({ extra2: monthKey }, 'All assigned vehicles have fuel for this month');
+        await closePendingReminders({ extra2: monthKey }, 'All assigned vehicles have a monthly limit for this month');
         return { monthKey, missingCount, adminOfficer };
     }
 
@@ -196,8 +206,8 @@ function reminderEmailHtml({ name, monthLabel, missingCount, href }) {
         missingCount === 1 ? '1 assigned vehicle is' : `${missingCount} assigned vehicles are`;
     return `
         <p>Hello ${escapeHtml(name)},</p>
-        <p>${escapeHtml(countLabel)} missing fuel for <strong>${escapeHtml(monthLabel)}</strong>.</p>
-        <p>Add this month's fuel bill on Access Fuel. This email is sent once per month.</p>
+        <p>${escapeHtml(countLabel)} missing a monthly limit for <strong>${escapeHtml(monthLabel)}</strong>.</p>
+        <p>Create this month's monthly limit on Access Fuel. This email is sent once per month.</p>
         <p><a href="${escapeHtml(href)}">Open Access Fuel</a></p>
     `;
 }
@@ -238,9 +248,9 @@ async function sendMonthlyEmailOnce({ monthKey, missingCount, adminOfficer }) {
 }
 
 /**
- * Daily job: on the 1st (and catch-up later in the month) email Admin Officer once
- * if any assigned vehicle is missing this month's fuel. The vehicle-list bell stays
- * until every assigned vehicle has fuel for the current month.
+ * Daily job and inbox reload: re-check every Assigned vehicle. The bell shows when
+ * any still need this month's monthly limit, and hides once every Assigned vehicle
+ * already has that month's limit.
  */
 export async function processVehicleAccessFuelReminders(now = new Date()) {
     try {

@@ -277,6 +277,7 @@ import {
     VEHICLE_DASHBOARD_INBOX_TYPES,
 } from '../utils/cleanupAssetDashboardActions.js';
 import { isAcceptedAssignmentOutcomeNotification } from '../utils/isAcceptedAssignmentOutcomeNotification.js';
+import { syncVehicleAccessFuelReminder } from '../utils/processVehicleAccessFuelReminders.js';
 import { closeCompletedAssignmentNotificationsForAssets } from '../utils/closeCompletedAssignmentNotifications.js';
 import { listPendingHubInboxItems } from '../utils/employeeHubRequestInbox.js';
 import {
@@ -19961,6 +19962,11 @@ export const getPendingAssetDashboardInbox = async (req, res) => {
         if (!skipSync) {
             await syncPendingAssignmentDashboardRowsForUser(relevantIds, targetEmployeeId);
             await healStaleOilServicePendingDashboardActions();
+        }
+        if (scope !== 'tools') {
+            await syncVehicleAccessFuelReminder().catch((err) => {
+                console.error('[getPendingAssetDashboardInbox] access fuel reminder sync failed:', err?.message || err);
+            });
         }
         // Accounts inbox: restore Make Payment bells wiped by the old "live = done" heal bug.
         if (isAccountsRoleHolder) {
