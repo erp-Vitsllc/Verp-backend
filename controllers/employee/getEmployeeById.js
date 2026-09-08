@@ -3,7 +3,7 @@ import AssetItem from "../../models/AssetItem.js";
 import Fine from "../../models/Fine.js";
 import Reward from "../../models/Reward.js";
 import Loan from "../../models/Loan.js";
-import { getSignedFileUrl, signOrKeepAttachmentUrl } from "../../utils/s3Upload.js";
+import { getSignedFileUrl, refreshStoredAttachmentUrls, signOrKeepAttachmentUrl } from "../../utils/s3Upload.js";
 import EmployeeBasic from "../../models/EmployeeBasic.js";
 import { isRequestUserDesignatedFlowchartHr } from "../../utils/isDesignatedFlowchartHr.js";
 import { mapPendingReactivationEntriesWithIds } from "../../utils/pendingReactivationEntryId.js";
@@ -82,29 +82,19 @@ export const getEmployeeById = async (req, res) => {
 
             const finesWithSignedAttachments = await Promise.all(
                 (fines || []).map(async (fine) => {
-                    if (!fine?.attachment) return fine;
                     try {
-                        const attachment = { ...fine.attachment };
-                        if (attachment.data || (attachment.url && String(attachment.url).startsWith('data:'))) {
-                            return { ...fine, attachment };
-                        }
-                        if (attachment.url && /^https?:\/\//i.test(String(attachment.url))) {
-                            return { ...fine, attachment };
-                        }
-                        if (attachment.publicId) {
-                            const signedUrl = await getSignedFileUrl(attachment.publicId);
-                            if (signedUrl) {
-                                attachment.url = signedUrl;
-                            }
-                            return { ...fine, attachment };
-                        }
-                        if (attachment.url) {
-                            const signedUrl = await getSignedFileUrl(attachment.url);
-                            if (signedUrl) {
-                                attachment.url = signedUrl;
+                        if (fine?.attachment && typeof fine.attachment === 'object') {
+                            fine.attachment = { ...fine.attachment };
+                            if (!(fine.attachment.data || (fine.attachment.url && String(fine.attachment.url).startsWith('data:')))) {
+                                await refreshStoredAttachmentUrls([fine.attachment]);
                             }
                         }
-                        return { ...fine, attachment };
+                        if (Array.isArray(fine.attachments) && fine.attachments.length > 0) {
+                            await refreshStoredAttachmentUrls(fine.attachments);
+                        }
+                        if (Array.isArray(fine.approvalAttachments) && fine.approvalAttachments.length > 0) {
+                            await refreshStoredAttachmentUrls(fine.approvalAttachments);
+                        }
                     } catch (signErr) {
                         console.error(`[getEmployeeById] Failed to sign fine attachment for ${fine.fineId}:`, signErr);
                     }

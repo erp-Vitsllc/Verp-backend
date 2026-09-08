@@ -56,7 +56,7 @@ function buildFormTable(fields, signatureUrls, rawPayableAmount) {
     <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="border-collapse:collapse;background:transparent;border:2px solid #000000;">
         <tr>
             <td colspan="4" style="padding:12px;border:${BORDER};text-align:center;font-size:16px;font-weight:bold;background:rgba(255,255,255,0.3);">
-                <div style="font-size:16px;font-weight:bold;">${esc(fields.reportTitle || 'FINE REPORT')}</div>
+                <div style="font-size:16px;font-weight:bold;">${esc(fields.reportTitle || 'FINE REPORT')}${fields.assetNumber ? ` · ${esc(fields.assetNumber)}` : ''}</div>
                 <div style="font-size:11px;margin-top:4px;">Employee payroll deduction authorization · ${esc(fields.fineCategory || '')}</div>
             </td>
         </tr>

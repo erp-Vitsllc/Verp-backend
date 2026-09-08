@@ -127,6 +127,12 @@ export async function fillFineRedesignedReportPdf({
         color: WHITE,
     });
 
+    const assetNumber = String(raw.assetNumber || '').trim();
+    if (assetNumber) {
+        cover(page, 328, 708, 92, 18, NAVY);
+        drawLeft(page, fontBold, assetNumber, 330, 713.5, 7, 88, WHITE);
+    }
+
     cover(page, 424, 708, 82, 18, NAVY);
     drawLeft(page, fontBold, String(raw.fineCategory || 'Single Fine').toUpperCase(), 428, 713.5, 7.5, 76, WHITE);
 

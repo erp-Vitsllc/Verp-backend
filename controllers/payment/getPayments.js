@@ -39,18 +39,18 @@ export const getPayments = async (req, res) => {
         if (paidByKey) {
             let employee = null;
             if (/^[a-fA-F0-9]{24}$/.test(paidByKey)) {
-                employee = await EmployeeBasic.findById(paidByKey).select('_id').lean();
+                employee = await EmployeeBasic.findById(paidByKey).select('_id employeeId').lean();
             }
             if (!employee) {
                 employee = await EmployeeBasic.findOne({ employeeId: paidByKey })
-                    .select('_id')
+                    .select('_id employeeId')
                     .lean();
             }
-            if (employee?._id) {
-                query.paidBy = employee._id;
-            } else {
-                query.paidBy = paidByKey;
-            }
+            const paidByMatch = employee?._id
+                ? [{ paidBy: employee._id }, { settleEmployeeId: String(employee.employeeId || paidByKey) }]
+                : [{ paidBy: paidByKey }, { settleEmployeeId: paidByKey }];
+            query.$and = query.$and || [];
+            query.$and.push({ $or: paidByMatch });
         }
         
         // Filter by related entity (for fine/loan/advance).
@@ -74,8 +74,10 @@ export const getPayments = async (req, res) => {
                 { referenceId },
             ];
             if (query.$or) {
-                query.$and = [{ $or: query.$or }, { $or: entityOr }];
+                query.$and = [...(query.$and || []), { $or: query.$or }, { $or: entityOr }];
                 delete query.$or;
+            } else if (query.$and) {
+                query.$and.push({ $or: entityOr });
             } else {
                 query.$or = entityOr;
             }

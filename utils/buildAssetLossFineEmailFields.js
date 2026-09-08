@@ -95,6 +95,39 @@ export function reportTitleForFine(fine) {
     return `${type.toUpperCase()} REPORT`;
 }
 
+const MONGO_OBJECT_ID = /^[a-f0-9]{24}$/i;
+const ASSET_CODE = /VEGA-ASSET-\d+/i;
+
+function looksLikeAssetCode(value) {
+    const text = String(value || '').trim();
+    if (!text || MONGO_OBJECT_ID.test(text)) return '';
+    const match = text.match(ASSET_CODE);
+    if (match) return match[0].toUpperCase();
+    if (/^VEGA-/i.test(text) && text.length <= 40) return text.toUpperCase();
+    return '';
+}
+
+/** Human asset number for reports (VEGA-ASSET-048), never a Mongo id. */
+export function reportAssetNumber(fine) {
+    if (!fine) return '';
+    const populated = fine.assetObjectId && typeof fine.assetObjectId === 'object'
+        ? fine.assetObjectId.assetId
+        : '';
+    const candidates = [
+        fine.assetId,
+        populated,
+        fine.assetName,
+        fine.vehicleId,
+        fine.vehicleAssetId,
+        fine.description,
+    ];
+    for (const raw of candidates) {
+        const code = looksLikeAssetCode(raw);
+        if (code) return code;
+    }
+    return '';
+}
+
 export function reportPdfFileSlug(fine) {
     return String(fine?.fineType || 'Fine')
         .replace(/[^a-zA-Z0-9]+/g, '')
@@ -147,6 +180,7 @@ export function buildAssetLossFineEmailFields(
         description: fine.description || '—',
         reportTitle: reportTitleForFine(fine),
         fineType: fine.fineType || 'Fine',
+        assetNumber: reportAssetNumber(fine),
         assetPurchaseDate: purchaseDate ? fmt(purchaseDate) : '—',
         assetPurchaseCost: purchaseCost,
         assetAging: computeAssetAging(purchaseDate),

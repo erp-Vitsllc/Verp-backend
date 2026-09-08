@@ -94,6 +94,7 @@ function buildTokenPayload(tokenResponse, existing = {}) {
         expires_in: expiresIn,
         expires_at: Date.now() + expiresIn * 1000,
         api_domain: apiDomain,
+        scope: tokenResponse.scope || existing.scope || '',
     };
 }
 
@@ -615,27 +616,146 @@ export async function fetchVendorPayments(params = {}) {
     });
 }
 
-export async function createVendorCredit(payload = {}, requestParams = {}) {
-    const response = await requestZohoBooks('/vendorcredits', {
-        method: 'post',
-        data: payload,
-        params: requestParams,
-        timeout: 30000,
-    });
+function wrapVendorCreditAuthError(error) {
+    const message = String(error?.message || '');
+    if (/not authorized|unauthorized|invalid oauth scope|code.?57|permission|access denied/i.test(message)) {
+        return new Error(
+            'Zoho blocked Vendor Credit (not authorized). This is not an ERP Accounts flowchart permission. Reconnect Zoho for this org (Accounts → Zoho) with a Zoho user who can create Vendor Credits, so the token includes ZohoBooks.vendorcredits.CREATE.',
+        );
+    }
+    return error instanceof Error ? error : new Error(message || 'Zoho vendor credit failed');
+}
 
-    return response.vendor_credit || response.vendorcredit || response;
+export async function createVendorCredit(payload = {}, requestParams = {}) {
+    try {
+        const response = await requestZohoBooks('/vendorcredits', {
+            method: 'post',
+            data: payload,
+            params: requestParams,
+            timeout: 30000,
+        });
+        return response.vendor_credit || response.vendorcredit || response;
+    } catch (error) {
+        throw wrapVendorCreditAuthError(error);
+    }
 }
 
 export async function markVendorCreditOpen(vendorCreditId) {
     const id = String(vendorCreditId || '').trim();
     if (!id) throw new Error('Vendor credit id is required.');
 
-    const response = await requestZohoBooks(
-        `/vendorcredits/${encodeURIComponent(id)}/status/open`,
-        { method: 'post', timeout: 30000 },
+    const openCredit = async () => {
+        const response = await requestZohoBooks(
+            `/vendorcredits/${encodeURIComponent(id)}/status/open`,
+            { method: 'post', timeout: 30000 },
+        );
+        return response.vendor_credit || response.vendorcredit || response;
+    };
+
+    try {
+        return await openCredit();
+    } catch (error) {
+        const message = String(error?.message || '');
+        if (/has not been approved/i.test(message)) {
+            try {
+                await requestZohoBooks(`/vendorcredits/${encodeURIComponent(id)}/submit`, {
+                    method: 'post',
+                    timeout: 30000,
+                });
+            } catch (submitErr) {
+                console.warn('[ZohoBooks] Vendor credit submit skipped:', submitErr?.message || submitErr);
+            }
+            await requestZohoBooks(`/vendorcredits/${encodeURIComponent(id)}/approve`, {
+                method: 'post',
+                timeout: 30000,
+            });
+            try {
+                return await openCredit();
+            } catch (openErr) {
+                if (/already|approved|open/i.test(String(openErr?.message || ''))) {
+                    return { code: 0, message: 'Vendor credit approved in Zoho.' };
+                }
+                throw wrapVendorCreditAuthError(openErr);
+            }
+        }
+        throw wrapVendorCreditAuthError(error);
+    }
+}
+
+/**
+ * Upload a file to an existing Zoho Books vendor credit.
+ * POST /vendorcredits/{vendor_credit_id}/attachment (multipart field name: attachment).
+ */
+export async function uploadVendorCreditAttachment(
+    vendorCreditId,
+    { buffer, filename = 'attachment.pdf', mimeType = 'application/pdf' } = {},
+) {
+    const id = String(vendorCreditId || '').trim();
+    if (!id) throw new Error('Vendor credit id is required.');
+    if (!Buffer.isBuffer(buffer) || buffer.length === 0) {
+        throw new Error('Attachment file is empty.');
+    }
+
+    const safeName = String(filename || 'attachment.pdf')
+        .replace(/[\\"\r\n]/g, '_')
+        .trim()
+        .slice(0, 200) || 'attachment.pdf';
+    const contentType = String(mimeType || 'application/pdf').trim() || 'application/pdf';
+    const boundary = `----ZohoVendorCreditAttachment${Date.now()}${Math.random().toString(36).slice(2)}`;
+    const preamble = Buffer.from(
+        `--${boundary}\r\n` +
+            `Content-Disposition: form-data; name="attachment"; filename="${safeName}"\r\n` +
+            `Content-Type: ${contentType}\r\n\r\n`,
+        'utf8',
+    );
+    const epilogue = Buffer.from(`\r\n--${boundary}--\r\n`, 'utf8');
+    const body = Buffer.concat([preamble, buffer, epilogue]);
+
+    const { organizationId, booksApiBase, accessToken } = await getBooksRequestContext();
+    const pathname = `/vendorcredits/${encodeURIComponent(id)}/attachment`;
+
+    console.log(
+        `[ZohoBooks →] POST ${booksApiBase}${pathname}`,
+        `org=${organizationId}`,
+        `file=${safeName}`,
+        `bytes=${buffer.length}`,
     );
 
-    return response.vendor_credit || response.vendorcredit || response;
+    try {
+        const response = await axios({
+            method: 'post',
+            url: `${booksApiBase}${pathname}`,
+            params: { organization_id: organizationId },
+            data: body,
+            headers: {
+                Authorization: `Zoho-oauthtoken ${accessToken}`,
+                'Content-Type': `multipart/form-data; boundary=${boundary}`,
+                'Content-Length': body.length,
+            },
+            timeout: 90000,
+            maxBodyLength: Infinity,
+            maxContentLength: Infinity,
+        });
+
+        const responseBody = response.data || {};
+        if (Number(responseBody.code) !== 0) {
+            throw new Error(responseBody.message || 'Zoho vendor credit attachment upload failed');
+        }
+
+        console.log(
+            `[ZohoBooks ✓] POST ${pathname} org=${organizationId} attachment="${safeName}"`,
+        );
+        return responseBody;
+    } catch (error) {
+        const zohoMessage = error?.response?.data?.message || error?.message;
+        console.error(
+            `[ZohoBooks ✗] POST ${pathname} org=${organizationId}:`,
+            typeof error?.response?.data === 'object'
+                ? JSON.stringify(error.response.data)
+                : String(zohoMessage || error),
+        );
+        throw new Error(zohoMessage || 'Zoho vendor credit attachment upload failed');
+    }
 }
 
 export async function createVendorPayment(payload = {}) {

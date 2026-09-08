@@ -54,6 +54,9 @@ export function resolveFineNetTotal(fine) {
     if (computed <= 0 && stored > 0) return stored;
     if (stored <= 0) return computed;
 
+    // Stored total often omits service charge; never prefer a lower stored figure.
+    if (computed > stored + 0.01) return computed;
+
     // Stored matches pre-discount gross while a discount exists → use net total
     if (discount > 0 && Math.abs(stored - gross) < 0.02) return computed;
     if (discount > 0 && stored > computed + 0.01) return computed;
@@ -140,6 +143,16 @@ export function resolveEmployeeFinePayableAmount(fine, employeeId) {
     return 0;
 }
 
+function assignedPartyCount(fine) {
+    return (fine?.assignedEmployees || []).filter(
+        (ae) => ae?.employeeId && ae.employeeId !== 'PENDING',
+    ).length;
+}
+
+function isMultiPartyFineDoc(fine) {
+    return Boolean(fine?.isGroupView) || assignedPartyCount(fine) > 1;
+}
+
 function applyEmployeeDiscountShare(fine, partyGross) {
     const netTotal = resolveFineNetTotal(fine);
     const rf = String(fine?.responsibleFor || 'Employee').trim();
@@ -147,12 +160,21 @@ function applyEmployeeDiscountShare(fine, partyGross) {
     const comp = parseFloat(fine?.companyAmount || 0) || 0;
     const sc = parseFloat(fine?.serviceCharge || 0) || 0;
     const gross = emp + comp + sc;
+    const share = Number((Number(partyGross) || 0).toFixed(2));
 
-    if (rf === 'Employee') return netTotal > 0 ? netTotal : partyGross;
-    if (rf === 'Employee & Company' && gross > 0 && netTotal >= 0) {
-        return Number((netTotal * (partyGross / gross)).toFixed(2));
+    // Group fines: each employee/company row is a share of the total — never the whole fine.
+    if (isMultiPartyFineDoc(fine)) {
+        if (rf === 'Employee & Company' && gross > 0 && netTotal >= 0) {
+            return Number((netTotal * (share / gross)).toFixed(2));
+        }
+        return share;
     }
-    return partyGross;
+
+    if (rf === 'Employee') return netTotal > 0 ? netTotal : share;
+    if (rf === 'Employee & Company' && gross > 0 && netTotal >= 0) {
+        return Number((netTotal * (share / gross)).toFixed(2));
+    }
+    return share;
 }
 
 export function resolveCompanyFinePayableAmount(fine, companyEntry = null) {
@@ -217,12 +239,20 @@ function applyCompanyDiscountShare(fine, partyGross) {
     const comp = parseFloat(fine?.companyAmount || 0) || 0;
     const sc = parseFloat(fine?.serviceCharge || 0) || 0;
     const gross = emp + comp + sc;
+    const share = Number((Number(partyGross) || 0).toFixed(2));
 
-    if (rf === 'Company') return netTotal > 0 ? netTotal : partyGross;
-    if (rf === 'Employee & Company' && gross > 0 && netTotal >= 0) {
-        return Number((netTotal * (partyGross / gross)).toFixed(2));
+    if (isMultiPartyFineDoc(fine)) {
+        if (rf === 'Employee & Company' && gross > 0 && netTotal >= 0) {
+            return Number((netTotal * (share / gross)).toFixed(2));
+        }
+        return share;
     }
-    return partyGross;
+
+    if (rf === 'Company') return netTotal > 0 ? netTotal : share;
+    if (rf === 'Employee & Company' && gross > 0 && netTotal >= 0) {
+        return Number((netTotal * (share / gross)).toFixed(2));
+    }
+    return share;
 }
 
 /** Resolve employee id from fine when only one human assignee exists. */

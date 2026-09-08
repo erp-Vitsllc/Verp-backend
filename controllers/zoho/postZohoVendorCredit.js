@@ -1,4 +1,8 @@
-import { createVendorCredit, markVendorCreditOpen } from '../../services/zohoService.js';
+import {
+    createVendorCredit,
+    markVendorCreditOpen,
+    uploadVendorCreditAttachment,
+} from '../../services/zohoService.js';
 import { mapZohoErrorStatus, toFiniteAmount } from './zohoVendorPaymentUtils.js';
 
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
@@ -9,6 +13,40 @@ function isDraftStatus(value) {
 
 function vendorCreditIdOf(doc) {
     return String(doc?.vendor_credit_id || doc?.vendorcredit_id || doc?.id || '').trim();
+}
+
+function bufferFromBase64(data) {
+    const raw = String(data || '').trim();
+    if (!raw) return null;
+    let base64 = raw;
+    let mimeType = '';
+    const dataMatch = raw.match(/^data:([^;,]+)?(?:;[^,]*)?;base64,(.+)$/is);
+    if (dataMatch) {
+        if (dataMatch[1]) mimeType = String(dataMatch[1]).trim();
+        base64 = dataMatch[2];
+    } else if (raw.includes(',')) {
+        base64 = raw.split(',').pop();
+    }
+    try {
+        const buffer = Buffer.from(String(base64 || '').replace(/\s/g, ''), 'base64');
+        if (!buffer.length) return null;
+        return { buffer, mimeType };
+    } catch {
+        return null;
+    }
+}
+
+function parseVendorCreditAttachment(raw) {
+    if (!raw || typeof raw !== 'object') return null;
+    const name = String(raw.name || raw.filename || 'attachment.pdf').trim() || 'attachment.pdf';
+    const mimeHint = String(raw.mimeType || raw.mime || '').trim();
+    const parsed = bufferFromBase64(raw.data || raw.base64);
+    if (!parsed?.buffer?.length) return null;
+    return {
+        buffer: parsed.buffer,
+        filename: name,
+        mimeType: mimeHint || parsed.mimeType || 'application/pdf',
+    };
 }
 
 function cleanLineItems(lineItems) {
@@ -119,6 +157,20 @@ export async function createOpenZohoVendorCredit(body = {}) {
         }
     }
 
+    let attachment = { ok: true, skipped: true };
+    const file = parseVendorCreditAttachment(body.attachment);
+    if (file) {
+        try {
+            await uploadVendorCreditAttachment(creditId, file);
+            attachment = { ok: true, filename: file.filename };
+        } catch (err) {
+            attachment = {
+                ok: false,
+                message: err?.message || 'Failed to upload attachment to Zoho vendor credit.',
+            };
+        }
+    }
+
     return {
         vendorCredit: created,
         vendorCreditId: creditId,
@@ -127,19 +179,25 @@ export async function createOpenZohoVendorCredit(body = {}) {
         ).trim(),
         status: String(created?.status || 'open').trim() || 'open',
         total: Number(created?.total ?? created?.bcy_total ?? 0) || 0,
+        attachment,
     };
 }
 
 export const postZohoVendorCredit = async (req, res) => {
     try {
         const result = await createOpenZohoVendorCredit(req.body || {});
+        const attachWarning =
+            result.attachment?.ok === false
+                ? ` Attachment was not uploaded: ${result.attachment.message}`
+                : '';
         return res.status(201).json({
             success: true,
             data: result.vendorCredit,
             vendorCreditId: result.vendorCreditId,
             vendorCreditNumber: result.vendorCreditNumber,
             status: result.status,
-            message: `Vendor credit ${result.vendorCreditNumber || result.vendorCreditId} created in Zoho as Open.`,
+            attachment: result.attachment,
+            message: `Vendor credit ${result.vendorCreditNumber || result.vendorCreditId} created in Zoho as Open.${attachWarning}`,
         });
     } catch (error) {
         console.error('[ZohoVendorCreditCreate] Failed:', error?.message || error);

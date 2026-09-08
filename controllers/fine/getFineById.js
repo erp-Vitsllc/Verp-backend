@@ -187,6 +187,7 @@ export const getFineById = async (req, res) => {
                             fineAmount: individualAmt,
                             employeeAmount: baseAmount,
                             serviceCharge: sc,
+                            paidAmount: Number(rf.paidAmount || 0) || 0,
                             payableDuration: rf.payableDuration || e.payableDuration,
                             expenseAccountId: rf.expenseAccountId || e.expenseAccountId || '',
                             expenseAccountName: rf.expenseAccountName || e.expenseAccountName || '',

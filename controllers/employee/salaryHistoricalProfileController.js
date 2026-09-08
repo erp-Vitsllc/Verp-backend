@@ -717,6 +717,7 @@ export async function buildPayload(req, employeeId, overlay = {}) {
     );
     const joiningDate =
         toDateKey(overlay.contractJoiningDate) ||
+        toDateKey(req.query?.contractJoiningDate) ||
         toDateKey(profile?.contractJoiningDate) ||
         originalJoining;
     let verpStartDate =
@@ -989,11 +990,6 @@ async function upsertFromBody(req, employeeId, extra = {}) {
             err.statusCode = 403;
             throw err;
         }
-        if (!String(body.joiningDateReason || '').trim()) {
-            const err = new Error(MESSAGES.joiningReasonRequired);
-            err.statusCode = 400;
-            throw err;
-        }
     }
 
     const verpStartDate =
@@ -1136,7 +1132,10 @@ export async function getSalaryHistoricalProfile(req, res) {
     try {
         const employeeId = String(req.params?.employeeId || '').trim();
         if (!employeeId) return res.status(400).json({ message: 'Employee is required.' });
-        const payload = await buildPayload(req, employeeId);
+        const payload = await buildPayload(req, employeeId, {
+            contractJoiningDate: req.query?.contractJoiningDate,
+            verpStartDate: req.query?.verpStartDate,
+        });
         return res.status(200).json(payload);
     } catch (error) {
         console.error('[getSalaryHistoricalProfile]', error);

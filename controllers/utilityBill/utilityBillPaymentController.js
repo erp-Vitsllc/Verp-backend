@@ -239,11 +239,151 @@ function creatorWaitingOnFirstApprover(bill = {}) {
     return false;
 }
 
-function actorCanCreatorResend(actor, bill, canApproveReject = false) {
+function actorCanCreatorResend(actor, bill, canApproveReject = false, { isAdmin = false } = {}) {
     if (canApproveReject) return false;
     if (!actor || !bill) return false;
-    if (!isSameEmployee(actor, bill.requestedBy)) return false;
+    const isCreator = isSameEmployee(actor, bill.requestedBy);
+    if (String(bill.status || '') === 'Rejected') {
+        return isCreator || isAdmin === true;
+    }
+    if (!isCreator) return false;
     return creatorWaitingOnFirstApprover(bill);
+}
+
+function clearUtilityBillZohoFields(bill) {
+    if (!bill) return;
+    bill.zohoBillId = '';
+    bill.zohoBillIds = [];
+    bill.zohoBillStatus = '';
+    bill.zohoSyncError = '';
+    bill.zohoSyncedAt = null;
+    if (Array.isArray(bill.zohoLineItems)) {
+        bill.zohoLineItems.forEach((line) => {
+            if (line && typeof line === 'object') line.zohoBillId = '';
+        });
+    }
+}
+
+function applySubmitStageToBills(bills, { stage, actor, accounts, hr, needsHr, now }) {
+    const accountsName = empDisplayName(accounts);
+    const hrName = empDisplayName(hr);
+    let pendingWithName = accountsName;
+    let pendingWithRole = 'accounts';
+    if (stage.status === 'Pending HR') {
+        pendingWithName = hrName;
+        pendingWithRole = 'hr';
+    } else if (stage.status === 'Approved') {
+        pendingWithName = accountsName;
+        pendingWithRole = 'accounts';
+    }
+
+    for (const bill of bills) {
+        clearUtilityBillZohoFields(bill);
+        bill.status = stage.status;
+        bill.pendingWithName = pendingWithName;
+        bill.pendingWithRole = pendingWithRole;
+        bill.firstPendingRole =
+            stage.status === 'Pending HR'
+                ? 'hr'
+                : stage.status === 'Pending Accounts'
+                  ? 'accounts'
+                  : '';
+        bill.accountsApprovedBy = null;
+        bill.accountsApprovedAt = null;
+        bill.hrApprovedBy = null;
+        bill.hrApprovedAt = null;
+        bill.actionedBy = actor?._id || null;
+        bill.actionedAt = now;
+        bill.comment = 'Resubmitted after rejection — sent through approval again';
+        if (stage.skipped.includes('accounts')) {
+            bill.accountsApprovedBy = actor?._id || null;
+            bill.accountsApprovedAt = now;
+            bill.comment = needsHr
+                ? 'Accounts submitted difference — waiting HR; Zoho after HR approve'
+                : 'Accounts step skipped (submitter is Accounts)';
+        }
+        if (stage.skipped.includes('hr')) {
+            bill.hrApprovedBy = actor?._id || null;
+            bill.hrApprovedAt = now;
+            bill.comment = stage.skipped.includes('accounts')
+                ? 'Accounts & HR skipped (submitter is Accounts; no difference) — Zoho / awaiting Pay'
+                : needsHr
+                  ? 'HR step skipped (submitter is HR) — sent to Accounts for Zoho'
+                  : 'HR skipped (no difference) — sent to Accounts for Zoho';
+        }
+    }
+
+    return { pendingWithName, pendingWithRole };
+}
+
+async function notifyAfterSubmitStage({
+    bills,
+    stage,
+    requester,
+    requestedByName,
+    accounts,
+    hr,
+}) {
+    const leanBills = bills.map((b) => (typeof b.toObject === 'function' ? b.toObject() : b));
+    const first = leanBills[0];
+    if (!first) return { path: '', leanBills };
+    const batchId = first.batchId;
+    const path = reviewPath(batchId, first.utilityType, first.billMonth, first);
+    const totalAmount = leanBills.reduce((s, b) => s + Number(b.amount || 0), 0);
+    const accountsName = empDisplayName(accounts);
+    const hrName = empDisplayName(hr);
+
+    if (stage.status === 'Pending Accounts') {
+        await syncBatchDashboard({
+            batchId,
+            bills: leanBills,
+            assignedTo: accounts._id,
+            status: 'Pending',
+            subjectEmployee: requester,
+            requestedByName,
+            extra2: statusLabel('Pending Accounts', accountsName),
+        });
+        await sendUtilityBillPaymentEmail({
+            recipient: accounts,
+            bill: { ...leanBills[0], amount: totalAmount },
+            kind: 'pending_accounts',
+            batchMeta: { batchId: String(batchId), billCount: leanBills.length, reviewPath: path },
+        });
+    } else if (stage.status === 'Pending HR') {
+        await syncBatchDashboard({
+            batchId,
+            bills: leanBills,
+            assignedTo: hr._id,
+            status: 'Pending',
+            subjectEmployee: requester,
+            requestedByName,
+            extra2: statusLabel('Pending HR', hrName),
+        });
+        await sendUtilityBillPaymentEmail({
+            recipient: hr,
+            bill: { ...leanBills[0], amount: totalAmount },
+            kind: 'pending_hr',
+            batchMeta: { batchId: String(batchId), billCount: leanBills.length, reviewPath: path },
+        });
+    } else {
+        await syncBatchDashboard({
+            batchId,
+            bills: leanBills,
+            assignedTo: accounts._id,
+            status: 'Pending',
+            subjectEmployee: requester,
+            requestedByName,
+            extra2: 'not paid — awaiting Accounts payment',
+        });
+        await sendUtilityBillPaymentEmail({
+            recipient: accounts,
+            bill: { ...leanBills[0], amount: totalAmount },
+            kind: 'pending_pay',
+            batchMeta: { batchId: String(batchId), billCount: leanBills.length, reviewPath: path },
+        });
+    }
+
+    return { path, leanBills };
 }
 
 /**
@@ -460,7 +600,7 @@ export async function listUtilityBillPayments(req, res) {
             }
             const overviewBills = await UtilityBillPayment.find(overviewFilter)
                 .select(
-                    '_id entryId batchId utilityType provider accountNo billMonth amount status paymentDay payByCompanyName payByEmployeeName',
+                    '_id entryId batchId utilityType provider accountNo billMonth amount monthlyRental differenceAmount status paymentDay payByCompanyName payByEmployeeName companyPayAmount employeePayAmount zohoBillId zohoBillIds zohoBillStatus zohoLineItems.zohoBillId createdAt',
                 )
                 .lean();
             return res.status(200).json({ bills: overviewBills });
@@ -496,7 +636,9 @@ export async function listUtilityBillPayments(req, res) {
                 (bill.status === 'Pending HR' && hrGate.allowed);
             // Pay only after approve → not paid; Accounts flowchart user (or admin)
             const canPay = bill.status === 'Approved' && accountsGate.allowed;
-            const canCreatorResend = actorCanCreatorResend(actor, bill, canApproveReject);
+            const canCreatorResend = actorCanCreatorResend(actor, bill, canApproveReject, {
+                isAdmin: isUtilityAdminSuperUser(req),
+            });
             return { ...decorated, canApproveReject, canPay, canCreatorResend };
         };
 
@@ -689,6 +831,7 @@ export async function getUtilityBillBatch(req, res) {
         const hrGate = await isActorHrOrAdmin(actor, req.user);
 
         // Prefer a stage this user can act on (mixed-status batches after partial approve)
+        const isAdmin = isUtilityAdminSuperUser(req);
         const focus =
             bills.find((b) => b.status === 'Pending Accounts' && accountsGate.allowed) ||
             bills.find((b) => b.status === 'Pending HR' && hrGate.allowed) ||
@@ -696,6 +839,11 @@ export async function getUtilityBillBatch(req, res) {
             bills.find((b) => b.status === 'Pending Accounts') ||
             bills.find((b) => b.status === 'Pending HR') ||
             bills.find((b) => b.status === 'Approved') ||
+            bills.find(
+                (b) =>
+                    b.status === 'Rejected' &&
+                    actorCanCreatorResend(actor, b, false, { isAdmin }),
+            ) ||
             bills[0];
 
         const stageStatus = focus.status;
@@ -711,7 +859,9 @@ export async function getUtilityBillBatch(req, res) {
         const canPay =
             stageStatus === 'Approved' && accountsGate.allowed && !hasZohoDraft;
         const canApproveReject = canEdit;
-        const canCreatorResend = actorCanCreatorResend(actor, focus, canApproveReject);
+        const canCreatorResend = actorCanCreatorResend(actor, focus, canApproveReject, {
+            isAdmin,
+        });
         const needsZohoOpen = hasZohoDraft && (accountsGate.allowed || hrGate.allowed);
 
         const paidCount = bills.filter((b) => b.status === 'Paid').length;
@@ -1345,17 +1495,218 @@ export async function updateUtilityBillBatch(req, res) {
         const actor = await resolveRequesterEmployee(req.user);
         const accountsGate = await isActorAccountsOrAdmin(actor, req.user);
         const hrGate = await isActorHrOrAdmin(actor, req.user);
-        const existingBills = await UtilityBillPayment.find({
+        const isAdmin = isUtilityAdminSuperUser(req);
+        let existingBills = await UtilityBillPayment.find({
             batchId,
-            status: { $in: ['Pending Accounts', 'Pending HR', 'Approved'] },
+            status: { $in: ['Pending Accounts', 'Pending HR', 'Approved', 'Rejected'] },
         });
+        if (!existingBills.length) {
+            const single = await UtilityBillPayment.findById(batchId);
+            if (single?.batchId) {
+                existingBills = await UtilityBillPayment.find({
+                    batchId: single.batchId,
+                    status: { $in: ['Pending Accounts', 'Pending HR', 'Approved', 'Rejected'] },
+                });
+            } else if (
+                single &&
+                ['Pending Accounts', 'Pending HR', 'Approved', 'Rejected'].includes(
+                    String(single.status),
+                )
+            ) {
+                existingBills = [single];
+            }
+        }
         if (!existingBills.length) {
             return res.status(404).json({
                 message: 'No editable bills found for this batch (Paid bills cannot be edited).',
             });
         }
+
+        const requestedIds = rows
+            .map((row) => String(row.billId || row._id || '').trim())
+            .filter(Boolean);
+        const requestedBills = requestedIds.length
+            ? existingBills.filter((bill) => requestedIds.includes(String(bill._id)))
+            : [];
+        if (
+            requestedBills.some((bill) => String(bill.status) === 'Rejected') &&
+            requestedBills.some((bill) => String(bill.status) !== 'Rejected')
+        ) {
+            return res.status(400).json({
+                message: 'Rejected bills must be edited and sent again on their own.',
+            });
+        }
+
+        const rejectedTargets = existingBills.filter(
+            (bill) =>
+                String(bill.status) === 'Rejected' &&
+                actorCanCreatorResend(actor, bill, false, { isAdmin }) &&
+                (!requestedIds.length || requestedIds.includes(String(bill._id))),
+        );
+        const resubmitRejected =
+            rejectedTargets.length > 0 &&
+            (requestedBills.length
+                ? requestedBills.every((bill) => String(bill.status) === 'Rejected')
+                : existingBills.every((bill) => String(bill.status) === 'Rejected'));
+
+        if (resubmitRejected) {
+            const accounts = await getDepartmentHOD('accounts');
+            if (!accounts?._id) {
+                return res.status(400).json({
+                    message: 'Accounts responsible person is not configured in Flowchart.',
+                });
+            }
+            const hr = await getDepartmentHOD('hr');
+            if (!hr?._id) {
+                return res.status(400).json({
+                    message: 'HR responsible person is not configured in Flowchart.',
+                });
+            }
+
+            const modalDuplicate = findCurrentBatchVendorBillDuplicate(rows);
+            if (modalDuplicate) {
+                return res.status(400).json({ message: modalDuplicate.message });
+            }
+            const remoteDuplicates = await lookupVendorBillDuplicates(rows, {
+                excludeIds: rejectedTargets.map((bill) => bill._id),
+            });
+            const remoteHit = remoteDuplicates.find((row) => row.source);
+            if (remoteHit) {
+                return res.status(400).json({ message: remoteHit.message });
+            }
+
+            applyRowEdits(rejectedTargets, rows);
+
+            const leftoverLive = existingBills.filter(
+                (bill) =>
+                    !rejectedTargets.some((target) => String(target._id) === String(bill._id)) &&
+                    ['Pending Accounts', 'Pending HR', 'Approved'].includes(String(bill.status)),
+            );
+            if (leftoverLive.length) {
+                const newBatchId = new mongoose.Types.ObjectId();
+                for (const bill of rejectedTargets) {
+                    bill.batchId = newBatchId;
+                }
+            }
+
+            const originalRequesterId = rejectedTargets[0]?.requestedBy;
+            const submitter =
+                originalRequesterId && isSameEmployee(actor, originalRequesterId)
+                    ? actor
+                    : originalRequesterId
+                      ? await EmployeeBasic.findById(originalRequesterId)
+                            .select(
+                                'firstName lastName companyEmail workEmail personalEmail email employeeId',
+                            )
+                            .lean()
+                      : actor;
+            const needsHr = batchNeedsHrApproval(rejectedTargets);
+            const stage = resolveStageAfterActor({
+                actor: submitter || actor,
+                accounts,
+                hr,
+                from: 'submit',
+                needsHr,
+            });
+            const now = new Date();
+            applySubmitStageToBills(rejectedTargets, {
+                stage,
+                actor,
+                accounts,
+                hr,
+                needsHr,
+                now,
+            });
+
+            let zohoSync = null;
+            if (stage.status === 'Approved') {
+                const splitCheck = applyPaySplitToBills(
+                    rejectedTargets,
+                    rejectedTargets[0]?.paymentBy,
+                );
+                if (!splitCheck.ok) {
+                    return res.status(400).json({ message: splitCheck.message });
+                }
+            }
+
+            for (const bill of rejectedTargets) {
+                await bill.save();
+            }
+
+            if (stage.status === 'Approved') {
+                zohoSync = await syncApprovedUtilityBillsToZoho(rejectedTargets, {
+                    markAsOpen: true,
+                });
+                try {
+                    await upsertUtilityBalancePartyExpensesFromBills(
+                        rejectedTargets,
+                        actor?._id || req.user?._id || null,
+                    );
+                } catch (balanceErr) {
+                    console.warn(
+                        '[updateUtilityBillBatch] PartyExpense balance upsert failed:',
+                        balanceErr?.message || balanceErr,
+                    );
+                }
+                notifyUtilityBillZohoPayableParties({
+                    bills: rejectedTargets,
+                    batchMeta: {
+                        batchId: String(rejectedTargets[0]?.batchId || batchId),
+                        billCount: rejectedTargets.length,
+                        reviewPath: reviewPath(
+                            rejectedTargets[0]?.batchId || batchId,
+                            rejectedTargets[0]?.utilityType,
+                            rejectedTargets[0]?.billMonth,
+                            rejectedTargets[0],
+                        ),
+                    },
+                }).catch((err) =>
+                    console.warn(
+                        '[updateUtilityBillBatch] Zoho payable notify failed:',
+                        err?.message || err,
+                    ),
+                );
+            }
+
+            const requesterDoc =
+                originalRequesterId && !isSameEmployee(actor, originalRequesterId)
+                    ? submitter
+                    : actor;
+            await notifyAfterSubmitStage({
+                bills: rejectedTargets,
+                stage,
+                requester: requesterDoc,
+                requestedByName: rejectedTargets[0]?.requestedByName || '',
+                accounts,
+                hr,
+            });
+
+            const outBatchId = String(rejectedTargets[0]?.batchId || batchId);
+            const refreshed = await UtilityBillPayment.find({
+                _id: { $in: rejectedTargets.map((bill) => bill._id) },
+            }).lean();
+            return res.status(200).json({
+                batchId: outBatchId,
+                updatedCount: rejectedTargets.length,
+                bills: refreshed.map((b) => decorateBill(b)),
+                resent: true,
+                resubmitted: true,
+                status: stage.status,
+                skippedStages: stage.skipped,
+                zohoSync,
+                message: 'Edited and sent again through the approval flow.',
+            });
+        }
+
+        const liveBills = existingBills.filter((bill) => String(bill.status) !== 'Rejected');
+        if (!liveBills.length) {
+            return res.status(403).json({
+                message:
+                    'This rejected bill can be edited and sent again by the person who submitted it.',
+            });
+        }
         const stageStatus = resolveBatchStageStatus(
-            existingBills,
+            liveBills,
             accountsGate,
             hrGate,
         );
@@ -1363,11 +1714,12 @@ export async function updateUtilityBillBatch(req, res) {
         const canEditHr = stageStatus === 'Pending HR' && hrGate.allowed;
         const canEditApproved = stageStatus === 'Approved' && accountsGate.allowed;
         const permissionFocus =
-            existingBills.find((b) => creatorWaitingOnFirstApprover(b)) || existingBills[0];
+            liveBills.find((b) => creatorWaitingOnFirstApprover(b)) || liveBills[0];
         const canCreatorResend = actorCanCreatorResend(
             actor,
             permissionFocus,
             canEditAccounts || canEditHr,
+            { isAdmin },
         );
         if (!canEditAccounts && !canEditHr && !canEditApproved && !canCreatorResend) {
             return res.status(403).json({
@@ -1380,9 +1732,12 @@ export async function updateUtilityBillBatch(req, res) {
 
         const creatorOnly =
             canCreatorResend && !canEditAccounts && !canEditHr && !canEditApproved;
-        const bills = creatorOnly
-            ? existingBills.filter((b) => creatorWaitingOnFirstApprover(b))
-            : existingBills;
+        let bills = creatorOnly
+            ? liveBills.filter((b) => creatorWaitingOnFirstApprover(b))
+            : liveBills;
+        if (requestedIds.length) {
+            bills = bills.filter((bill) => requestedIds.includes(String(bill._id)));
+        }
         if (!bills.length) {
             return res.status(404).json({
                 message: 'No editable bills found for this batch (Paid bills cannot be edited).',
@@ -1404,17 +1759,7 @@ export async function updateUtilityBillBatch(req, res) {
         applyRowEdits(bills, rows);
         const creatorResend = Boolean(canCreatorResend && !canEditAccounts && !canEditHr && !canEditApproved);
         for (const bill of bills) {
-            // Invalidate prior Zoho bill so Retry / Pay recreates with updated accounts.
-            bill.zohoBillId = '';
-            bill.zohoBillIds = [];
-            bill.zohoBillStatus = '';
-            bill.zohoSyncError = '';
-            bill.zohoSyncedAt = null;
-            if (Array.isArray(bill.zohoLineItems)) {
-                bill.zohoLineItems.forEach((line) => {
-                    if (line && typeof line === 'object') line.zohoBillId = '';
-                });
-            }
+            clearUtilityBillZohoFields(bill);
             if (creatorResend) {
                 bill.comment = 'Edited and resent by creator — still awaiting first approver';
                 bill.actionedBy = actor?._id || null;
@@ -1489,7 +1834,7 @@ async function resolveSelectedBillsForRespond({
 }) {
     const template = allBills[0];
     if (!Array.isArray(rows) || !rows.length) {
-        return allBills.filter((b) => b.status === stageStatus);
+        throw new Error('Select at least one bill.');
     }
 
     const selectedWithId = rows.filter((r) => r.billId || r._id);
@@ -2474,7 +2819,9 @@ export async function getUtilityBillPayment(req, res) {
             (numbered.status === 'Pending Accounts' && accountsGate.allowed) ||
             (numbered.status === 'Pending HR' && hrGate.allowed);
         const canPay = numbered.status === 'Approved' && accountsGate.allowed;
-        const canCreatorResend = actorCanCreatorResend(actor, numbered, canApproveReject);
+        const canCreatorResend = actorCanCreatorResend(actor, numbered, canApproveReject, {
+            isAdmin: isUtilityAdminSuperUser(req),
+        });
         return res.status(200).json({
             bill: {
                 ...decorateBill(numbered),

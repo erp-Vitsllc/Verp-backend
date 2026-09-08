@@ -9,9 +9,44 @@ import { syncDashboardAction } from "../../utils/syncDashboard.js";
 import { sendPaymentApprovalEmail } from "../../utils/sendPaymentApprovalEmail.js";
 import { sendPaymentNotificationEmail } from "../../utils/sendCombinedPaymentEmail.js";
 import {
+    resolveCompanyFinePayableAmount,
     resolveEmployeeFinePayableAmount,
     resolvePrimaryEmployeeId,
 } from "../../utils/finePayableAmount.js";
+
+const COMPANY_PARTY_IDS = new Set(['VEGA-HR-0000', 'VEGA_INTERNAL']);
+
+function fineBaseId(fineId) {
+    const id = String(fineId || '').trim().toUpperCase();
+    const match = id.match(/^(VEGA-FINE-\d+)/i);
+    return match ? match[1].toUpperCase() : id;
+}
+
+function fineHasParty(fine, settleId) {
+    const sid = String(settleId || '').trim();
+    if (!fine || !sid) return false;
+    return (fine.assignedEmployees || []).some((ae) => String(ae.employeeId || '') === sid);
+}
+
+async function findPartySettleFine({ relatedEntityId, referenceId, settleId }) {
+    let settleFine = relatedEntityId ? await Fine.findById(relatedEntityId) : null;
+    if (!settleFine && referenceId) {
+        settleFine = await Fine.findOne({ fineId: referenceId });
+    }
+    if (!settleFine) return null;
+
+    const sid = String(settleId || '').trim();
+    if (!sid || fineHasParty(settleFine, sid)) return settleFine;
+
+    const baseId = fineBaseId(settleFine.fineId);
+    if (!baseId) return settleFine;
+
+    const escaped = baseId.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const siblings = await Fine.find({
+        fineId: { $regex: new RegExp(`^${escaped}(-[A-Z0-9]+)?$`, 'i') },
+    });
+    return siblings.find((row) => fineHasParty(row, sid)) || settleFine;
+}
 
 export const addPayment = async (req, res) => {
     try {
@@ -44,6 +79,7 @@ export const addPayment = async (req, res) => {
             vendorName = '',
             attachments = [],
             employeePaySettlement = false,
+            settleEmployeeId = '',
         } = req.body;
 
         const isEmployeeFinePay = Boolean(employeePaySettlement);
@@ -185,22 +221,24 @@ export const addPayment = async (req, res) => {
             });
         }
 
+        let employeeFineSettle = null;
         if (isEmployeeFinePay) {
-            let settleFine = relatedEntityId ? await Fine.findById(relatedEntityId) : null;
-            if (!settleFine && referenceId) {
-                settleFine = await Fine.findOne({ fineId: referenceId });
-            }
-            if (!settleFine) {
+            const settleId = String(settleEmployeeId || employee.employeeId || '').trim();
+            employeeFineSettle = await findPartySettleFine({
+                relatedEntityId,
+                referenceId,
+                settleId,
+            });
+            if (!employeeFineSettle) {
                 return res.status(404).json({
                     success: false,
                     message: 'Fine not found',
                 });
             }
-            const payable = resolveEmployeeFinePayableAmount(
-                settleFine,
-                employee.employeeId,
-            );
-            const paidSoFar = Number(settleFine.paidAmount) || 0;
+            const payable = COMPANY_PARTY_IDS.has(settleId)
+                ? resolveCompanyFinePayableAmount(employeeFineSettle)
+                : resolveEmployeeFinePayableAmount(employeeFineSettle, settleId);
+            const paidSoFar = Number(employeeFineSettle.paidAmount) || 0;
             const expected = Math.round(Math.max(0, payable - paidSoFar) * 100) / 100;
             const entered = Math.round((parseFloat(amount) || 0) * 100) / 100;
             if (expected <= 0.01) {
@@ -214,6 +252,32 @@ export const addPayment = async (req, res) => {
                     success: false,
                     message: `Amount Pay must equal employee fine pay amount (AED ${expected.toFixed(2)}).`,
                 });
+            }
+
+            // Invoice + profile Paid belong to the settled party, not the selected Paid By person.
+            if (COMPANY_PARTY_IDS.has(settleId)) {
+                if (!employee || employee.employeeId !== settleId) {
+                    let companyParty = await EmployeeBasic.findOne({ employeeId: settleId });
+                    if (!companyParty) {
+                        companyParty = new EmployeeBasic({
+                            employeeId: settleId,
+                            firstName: 'Vega Digital IT Solutions',
+                            lastName: '(Company)',
+                            email: `${settleId.toLowerCase()}@internal.vega`,
+                            dateOfJoining: new Date(),
+                            status: 'Permanent',
+                            profileApprovalStatus: 'active',
+                            profileStatus: 'active',
+                        });
+                        await companyParty.save();
+                    }
+                    employee = companyParty;
+                }
+            } else if (settleId && settleId !== employee.employeeId) {
+                const settlePerson = await EmployeeBasic.findOne({ employeeId: settleId });
+                if (settlePerson) {
+                    employee = settlePerson;
+                }
             }
         }
 
@@ -231,9 +295,12 @@ export const addPayment = async (req, res) => {
             status: finalStatus,
             paymentDate: paymentDate ? new Date(paymentDate) : new Date(),
             description: description || '',
-            referenceId: referenceId || null,
+            referenceId: employeeFineSettle?.fineId || referenceId || null,
             relatedEntityType: relatedEntityType || null,
-            relatedEntityId: relatedEntityId || null,
+            relatedEntityId: employeeFineSettle?._id || relatedEntityId || null,
+            settleEmployeeId: isEmployeeFinePay
+                ? String(settleEmployeeId || employee.employeeId || '').trim()
+                : '',
             createdBy: req.user._id,
             remarks: remarks || '',
             paymentSource: normalizedSource,
@@ -291,11 +358,15 @@ export const addPayment = async (req, res) => {
                         // Update fine's paidAmount field
                         fine.paidAmount = totalPaid;
                         
-                        // Calculate employee's share (what they actually owe)
-                        const employeeShare = resolveEmployeeFinePayableAmount(
-                            fine,
-                            employee.employeeId || resolvePrimaryEmployeeId(fine),
-                        );
+                        const settleIdForShare = String(
+                            settleEmployeeId || employee.employeeId || resolvePrimaryEmployeeId(fine) || '',
+                        ).trim();
+                        const employeeShare = COMPANY_PARTY_IDS.has(settleIdForShare)
+                            ? resolveCompanyFinePayableAmount(fine)
+                            : resolveEmployeeFinePayableAmount(
+                                fine,
+                                settleIdForShare || employee.employeeId,
+                            );
                         
                         // If fully paid (remaining amount is 0 or less), update fine status to 'Paid'
                         const remainingAmount = employeeShare - totalPaid;
@@ -1080,10 +1151,16 @@ export const addPayment = async (req, res) => {
         // Send Combined Status & Invoice Email if payment is completed immediately (by Accounts)
         if (payment.status === 'Completed') {
             try {
-                // We don't await this to avoid slowing down the response
-                sendPaymentNotificationEmail(payment, 'Completed').catch(err => 
-                    console.error('[AddPayment] Failed to send notification email:', err)
-                );
+                const settleMailId = String(
+                    payment.settleEmployeeId || employee.employeeId || '',
+                ).trim();
+                const skipCompanyInvoiceEmail =
+                    isEmployeeFinePay && COMPANY_PARTY_IDS.has(settleMailId);
+                if (!skipCompanyInvoiceEmail) {
+                    sendPaymentNotificationEmail(payment, 'Completed').catch(err =>
+                        console.error('[AddPayment] Failed to send notification email:', err)
+                    );
+                }
             } catch (emailErr) {
                 console.error('[AddPayment] Error initializing notification email:', emailErr);
             }

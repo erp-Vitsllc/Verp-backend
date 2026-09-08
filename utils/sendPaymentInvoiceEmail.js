@@ -127,7 +127,6 @@ export const sendPaymentInvoiceEmail = async (payment, relatedEntity = null) => 
                                 <p style="margin: 0 0 8px 0; color: #999; font-size: 12px; text-transform: uppercase; font-weight: bold;">Bill To</p>
                                 <p style="margin: 0; font-size: 16px; font-weight: 700;">${employee.firstName} ${employee.lastName}</p>
                                 <p style="margin: 4px 0 0 0; font-size: 14px; color: #666;">Employee ID: ${employee.employeeId}</p>
-                                <p style="margin: 2px 0 0 0; font-size: 14px; color: #666;">${employee.companyEmail || ''}</p>
                             </td>
                             <td style="width: 50%; vertical-align: top; text-align: right;">
                                 <p style="margin: 0 0 8px 0; color: #999; font-size: 12px; text-transform: uppercase; font-weight: bold;">Details</p>

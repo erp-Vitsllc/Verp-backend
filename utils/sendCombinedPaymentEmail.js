@@ -7,6 +7,8 @@ import Payment from '../models/Payment.js';
 import { resolveEmployeeEmail } from './resolveEmployeeEmail.js';
 import { resolveEmployeeFinePayableAmount } from './finePayableAmount.js';
 
+const COMPANY_PARTY_IDS = new Set(['VEGA-HR-0000', 'VEGA_INTERNAL']);
+
 const isUsableEmail = (value) => {
     const v = String(value || '').trim().toLowerCase();
     if (!v) return false;
@@ -184,7 +186,6 @@ const generateInvoicePDF = async (data) => {
                     <h3>Bill To</h3>
                     <p class="val">${employee.firstName} ${employee.lastName}</p>
                     <p>Employee ID: ${employee.employeeId}</p>
-                    <p style="color: #0056b3; text-decoration: underline;">${recipientEmail || ''}</p>
                 </div>
                 <div style="text-align: right;">
                     <h3>Details</h3>
@@ -291,6 +292,9 @@ export const sendPaymentNotificationEmail = async (payment, status, comment = ''
             .populate('primaryReportee', 'firstName lastName companyEmail workEmail');
 
         if (!employee) return;
+        if (COMPANY_PARTY_IDS.has(String(employee.employeeId || '').trim())) {
+            return;
+        }
 
         const toEmail = resolvePaymentRecipientEmail(employee);
         if (!toEmail) return;
@@ -375,6 +379,11 @@ export const sendPaymentNotificationEmail = async (payment, status, comment = ''
             });
             paidEarlier = paidEarlierAtTime;
             balance = Math.max(0, currentShare - totalPaidAtTime);
+
+            if (String(payment.relatedEntityType || '') === 'Fine') {
+                otherDebts.length = 0;
+                totalRemainingAll = balance;
+            }
 
             // Generate PDF
             try {

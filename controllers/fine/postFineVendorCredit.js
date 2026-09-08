@@ -21,6 +21,17 @@ async function findFine(id) {
     return Fine.findOne({ fineId: raw });
 }
 
+async function isAccountsActor(user) {
+    if (!user) return false;
+    if (user.isAdmin === true || user.isAdministrator === true || user.role === 'admin') return true;
+    const inAccounts =
+        (await isUserInFlowchart(user, 'accounts').catch(() => false)) ||
+        (await isUserInFlowchart(user, 'finance').catch(() => false));
+    if (inAccounts) return true;
+    const dept = String(user.department || '').toLowerCase();
+    return dept === 'finance' || dept === 'account' || dept === 'accounts';
+}
+
 async function findEmployee(paidBy) {
     if (!paidBy) return null;
     const value = String(paidBy).trim();
@@ -33,8 +44,8 @@ async function findEmployee(paidBy) {
 
 export const postFineVendorCredit = async (req, res) => {
     try {
-        const isAccountsUser = await isUserInFlowchart(req.user, 'accounts');
-        if (!isAccountsUser && req.user?.isAdmin !== true) {
+        const isAccountsUser = await isAccountsActor(req.user);
+        if (!isAccountsUser) {
             return res.status(403).json({
                 success: false,
                 message: 'Only Accounts can create a Zoho vendor credit from a fine.',
@@ -88,6 +99,16 @@ export const postFineVendorCredit = async (req, res) => {
         }
 
         const paymentCount = await Payment.countDocuments();
+        const incomingAttachment =
+            body.attachment && typeof body.attachment === 'object'
+                ? {
+                      data: String(body.attachment.data || '').trim(),
+                      name: String(body.attachment.name || '').trim(),
+                      mimeType: String(body.attachment.mimeType || '').trim(),
+                  }
+                : null;
+        const hasAttachment = Boolean(incomingAttachment?.data || incomingAttachment?.name);
+
         const payment = new Payment({
             paymentId: `PAY-${String(paymentCount + 1).padStart(6, '0')}`,
             paymentType: 'Fine',
@@ -106,6 +127,7 @@ export const postFineVendorCredit = async (req, res) => {
             createdBy: req.user?._id,
             updatedBy: req.user?._id,
             paymentSource: 'Cash',
+            ...(hasAttachment ? { attachment: incomingAttachment } : {}),
             zohoOrganizationId: organizationId,
             expenseAccountId: String(
                 body.expenseAccountId || body.line_items?.[0]?.account_id || '',
@@ -143,9 +165,14 @@ export const postFineVendorCredit = async (req, res) => {
         }
         await fine.save();
 
+        const attachWarning =
+            result.attachment?.ok === false
+                ? ` Attachment was not uploaded: ${result.attachment.message}`
+                : '';
+
         return res.status(201).json({
             success: true,
-            message: `Vendor credit ${result.vendorCreditNumber || result.vendorCreditId} created in Zoho as Open.`,
+            message: `Vendor credit ${result.vendorCreditNumber || result.vendorCreditId} created in Zoho as Open.${attachWarning}`,
             payment,
             fine,
             zohoSync: {
@@ -153,6 +180,7 @@ export const postFineVendorCredit = async (req, res) => {
                 vendorCreditId: result.vendorCreditId,
                 vendorCreditNumber: result.vendorCreditNumber,
                 status: result.status,
+                attachment: result.attachment,
             },
         });
     } catch (error) {

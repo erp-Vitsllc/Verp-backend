@@ -79,6 +79,12 @@ const paymentSchema = new mongoose.Schema(
             type: mongoose.Schema.Types.ObjectId,
             default: null
         },
+        /** Fine party this payment settles (employeeId or VEGA-HR-0000). */
+        settleEmployeeId: {
+            type: String,
+            default: '',
+            index: true,
+        },
         createdBy: {
             type: mongoose.Schema.Types.ObjectId,
             ref: 'User',

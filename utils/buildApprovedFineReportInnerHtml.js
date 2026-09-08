@@ -135,6 +135,7 @@ export function buildApprovedFineReportInnerHtml(
 ) {
     const title = fields?.reportTitle || 'FINE REPORT';
     const category = String(fields?.fineCategory || 'Single Fine').toUpperCase();
+    const assetNumber = String(fields?.assetNumber || '').trim();
     const fineId = fields?.fineId || '—';
     const payable = employeePayableAmount(fields, rawPayableAmount);
     const monthly = monthlyAmount(fields, payable);
@@ -179,12 +180,25 @@ export function buildApprovedFineReportInnerHtml(
                 <td style="background:${NAVY};padding:11px 14px 12px;">
                     <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="width:100%;">
                         <tr>
-                            <td valign="middle">
+                            <td valign="middle" style="padding-right:12px;">
                                 <div style="font-size:16px;font-weight:bold;letter-spacing:0.06em;color:#ffffff;line-height:1.2;">${esc(title)}</div>
                                 <div style="font-size:9px;color:#ffffff;margin-top:4px;opacity:0.95;">Employee payroll deduction authorization</div>
                             </td>
-                            <td width="118" valign="middle" align="right" style="width:118px;text-align:right;">
-                                <div style="display:inline-block;border:1px solid #ffffff;background:#ffffff;color:${NAVY};padding:5px 10px;border-radius:4px;font-size:8px;font-weight:bold;letter-spacing:0.08em;">${esc(category)}</div>
+                            <td valign="middle" align="right" style="text-align:right;white-space:nowrap;">
+                                <table role="presentation" cellspacing="0" cellpadding="0" style="border-collapse:collapse;margin-left:auto;">
+                                    <tr>
+                                        ${
+                                            assetNumber
+                                                ? `<td valign="middle" style="padding-right:8px;">
+                                            <div style="display:inline-block;border:1px solid rgba(255,255,255,0.85);color:#ffffff;padding:5px 10px;border-radius:4px;font-size:8px;font-weight:bold;letter-spacing:0.06em;">${esc(assetNumber)}</div>
+                                        </td>`
+                                                : ''
+                                        }
+                                        <td valign="middle">
+                                            <div style="display:inline-block;border:1px solid #ffffff;background:#ffffff;color:${NAVY};padding:5px 10px;border-radius:4px;font-size:8px;font-weight:bold;letter-spacing:0.08em;">${esc(category)}</div>
+                                        </td>
+                                    </tr>
+                                </table>
                             </td>
                         </tr>
                     </table>
