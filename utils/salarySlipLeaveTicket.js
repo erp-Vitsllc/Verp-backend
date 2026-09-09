@@ -172,6 +172,8 @@ export function syncSalarySlipPaymentCycles({
 
     const leaveAlloc = allocateAmountAcrossEntitlements(entitlements, others, 'leave', leavePay);
     const ticketAlloc = allocateAmountAcrossEntitlements(entitlements, others, 'ticket', ticketPay);
+    const leftoverLeave = roundMoney(leaveAlloc.leftover);
+    const leftoverTicket = roundMoney(ticketAlloc.leftover);
     const byKey = new Map();
     const rowKey = (part) =>
         String(part.entitlementDate || '') || `no:${part.entitlementNo || ''}`;
@@ -187,6 +189,19 @@ export function syncSalarySlipPaymentCycles({
             continue;
         }
         byKey.set(key, { ...part, leaveAmount: 0, ticketAmount: part.amount });
+    }
+    if (leftoverLeave > 0 || leftoverTicket > 0) {
+        const fallback = byKey.get(ym) || {
+            entitlementNo: 0,
+            entitlementDate: payDatePlaceholder(ym),
+            eligibilityStartDate: '',
+            eligibilityEndDate: '',
+            leaveAmount: 0,
+            ticketAmount: 0,
+        };
+        fallback.leaveAmount = roundMoney((fallback.leaveAmount || 0) + leftoverLeave);
+        fallback.ticketAmount = roundMoney((fallback.ticketAmount || 0) + leftoverTicket);
+        byKey.set(ym, fallback);
     }
 
     const payDate = String(paymentDate || monthEndDateKey(ym) || '').trim();

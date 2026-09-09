@@ -84,7 +84,8 @@ function resolveCompanyAccountEmail(emp) {
 /**
  * Utility bill workflow emails (Accounts / HR / Pay / requester updates).
  * kind: pending_accounts | pending_hr | pending_pay | approved | rejected |
- *       returned_accounts | returned_creator | paid | partially_paid | zoho_payable
+ *       returned_accounts | returned_creator | paid | partially_paid | zoho_payable |
+ *       deleted
  */
 export async function sendUtilityBillPaymentEmail({
     recipient,
@@ -139,6 +140,7 @@ export async function sendUtilityBillPaymentEmail({
             paid: 'Utility Bill Paid',
             partially_paid: 'Utility Bill — Partially Paid',
             zoho_payable: 'Utility Bill — Entered in Zoho (Payable Notice)',
+            deleted: 'Utility Bill — Deleted',
             pending: 'Utility Bill — Approval Required',
         };
         const colors = {
@@ -152,6 +154,7 @@ export async function sendUtilityBillPaymentEmail({
             paid: '#16a34a',
             partially_paid: '#d97706',
             zoho_payable: '#0f766e',
+            deleted: '#dc2626',
             pending: '#0d9488',
         };
         const bodies = {
@@ -170,6 +173,8 @@ export async function sendUtilityBillPaymentEmail({
             zoho_payable: isFallbackToReportee
                 ? `A utility bill has been created in Zoho Books. ${employeeDisplayName(to)} is listed as Payable to on one or more lines.`
                 : 'A utility bill has been created in Zoho Books. You are listed as Payable to on one or more lines.',
+            deleted:
+                'A submitted utility bill was deleted. It is no longer in this group and does not need Accounts review.',
             pending: 'A utility bill requires your approval.',
         };
 

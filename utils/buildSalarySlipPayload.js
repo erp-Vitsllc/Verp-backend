@@ -879,8 +879,10 @@ export async function buildSalarySlipPayload({
     const ticketFromCycles = ticketAmount;
     const leaveRemaining = money(leaveTicketState?.leaveRemaining);
     const ticketRemaining = money(leaveTicketState?.ticketRemaining);
-    const leavePayMax = money(leaveRemaining + leaveFromCycles);
-    const ticketPayMax = money(ticketRemaining + ticketFromCycles);
+    const leaveDue = money(leaveTicketState?.leaveDue || leaveTicketState?.entitlements?.totalLeaveSalary);
+    const ticketDue = money(leaveTicketState?.ticketDue || leaveTicketState?.entitlements?.totalTicketAmount);
+    const leavePayMax = money(leaveRemaining + leaveFromCycles) || leaveDue;
+    const ticketPayMax = money(ticketRemaining + ticketFromCycles) || ticketDue;
     upsertEarning(
         earnings,
         'Leave Salary',
@@ -1320,6 +1322,7 @@ export async function buildSalarySlipPayload({
                 amount: leaveSalaryAmount,
                 remaining: leaveRemaining,
                 max: leavePayMax,
+                due: leaveDue,
             },
             airTicket: {
                 ...benefitFromCycles(
@@ -1331,6 +1334,7 @@ export async function buildSalarySlipPayload({
                 amount: ticketAmount,
                 remaining: ticketRemaining,
                 max: ticketPayMax,
+                due: ticketDue,
             },
             leaveMultipliers: {
                 authorized: authTimes,
@@ -1415,10 +1419,10 @@ function mergeAmountRows(stored, live, { overrides = {}, caps = {} } = {}) {
         if (overrideKey && overrides[overrideKey]) {
             amount = money(storedRow.amount);
         }
-        if (overrideKey === 'leaveSalary' && caps.leave != null) {
+        if (overrideKey === 'leaveSalary' && money(caps.leave) > 0) {
             amount = Math.max(0, Math.min(amount, money(caps.leave)));
         }
-        if (overrideKey === 'ticket' && caps.ticket != null) {
+        if (overrideKey === 'ticket' && money(caps.ticket) > 0) {
             amount = Math.max(0, Math.min(amount, money(caps.ticket)));
         }
         return {
@@ -1513,12 +1517,14 @@ function preferLiveComputed(merged, live) {
             amount: leaveAmount,
             remaining: money(live.summary?.leaveSalary?.remaining),
             max: money(live.summary?.leaveSalary?.max),
+            due: money(live.summary?.leaveSalary?.due),
         },
         airTicket: {
             ...(live.summary?.airTicket || {}),
             amount: ticketAmount,
             remaining: money(live.summary?.airTicket?.remaining),
             max: money(live.summary?.airTicket?.max),
+            due: money(live.summary?.airTicket?.due),
         },
     };
     return next;

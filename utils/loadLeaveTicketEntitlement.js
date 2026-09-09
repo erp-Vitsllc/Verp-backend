@@ -259,6 +259,8 @@ export async function loadLeaveTicketEntitlement({ employee, profile, salaryDoc,
         cycles: [],
         leaveRemaining: 0,
         ticketRemaining: 0,
+        leaveDue: 0,
+        ticketDue: 0,
         cycleDays: policyLeaveWorkingDays(policy),
     };
     const cacheKey = String(employee?.employeeId || profile?.employeeId || '').trim().toLowerCase();
@@ -355,6 +357,8 @@ export async function loadLeaveTicketEntitlement({ employee, profile, salaryDoc,
         cycles: paymentCycles,
         leaveRemaining: remaining.leaveRemaining,
         ticketRemaining: remaining.ticketRemaining,
+        leaveDue: remaining.leaveDue,
+        ticketDue: remaining.ticketDue,
         cycleDays,
     };
     if (cacheKey) leaveTicketStateCache.set(cacheKey, { at: Date.now(), value });

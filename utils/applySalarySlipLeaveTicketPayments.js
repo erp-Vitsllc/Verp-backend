@@ -101,11 +101,15 @@ export async function applySalarySlipLeaveTicketPayments({
             return slipMonth !== ym && ref !== `salary-slip:${ym}`;
         }),
     );
+    const leaveAmount =
+        remaining.leaveDue > 0 ? Math.min(amounts.leave, remaining.leaveRemaining) : amounts.leave;
+    const ticketAmount =
+        remaining.ticketDue > 0 ? Math.min(amounts.ticket, remaining.ticketRemaining) : amounts.ticket;
     const nextCycles = syncSalarySlipPaymentCycles({
         cycles: state.cycles,
         entitlements: state.entitlements?.entitlements,
-        leaveAmount: Math.min(amounts.leave, remaining.leaveRemaining),
-        ticketAmount: Math.min(amounts.ticket, remaining.ticketRemaining),
+        leaveAmount,
+        ticketAmount,
         monthKey: ym,
         paymentDate: monthEndDateKey(ym),
         remarks: `Paid on salary slip ${monthLabel(ym)}`,

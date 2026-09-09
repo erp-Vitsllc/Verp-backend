@@ -135,6 +135,7 @@ function decorateBill(bill) {
     o.reviewPath = billDetailsPath(o) || reviewPath(o.batchId, o.utilityType, o.billMonth, o);
     o.detailsPath = o.reviewPath;
     o.zohoBillNumber = String(o.zohoBillNumber || '').trim();
+    o.inZoho = utilityBillHasZohoLink(o);
     return o;
 }
 
@@ -231,23 +232,43 @@ function billFirstPendingRole(bill = {}) {
     return '';
 }
 
-function creatorWaitingOnFirstApprover(bill = {}) {
-    const first = billFirstPendingRole(bill);
-    const status = String(bill.status || '');
-    if (first === 'hr') return status === 'Pending HR';
-    if (first === 'accounts') return status === 'Pending Accounts';
-    return false;
+function actorOwnsBill(actor, bill) {
+    return isSameEmployee(actor, bill?.requestedBy);
+}
+
+/** Creator or admin may change a bill until it exists in Zoho Books. */
+function actorCanMutateUtilityBill(actor, bill, { isAdmin = false } = {}) {
+    if (!bill) return false;
+    if (utilityBillHasZohoLink(bill)) return false;
+    if (String(bill.status || '') === 'Paid') return false;
+    if (isAdmin === true) return true;
+    if (!actor) return false;
+    return actorOwnsBill(actor, bill);
 }
 
 function actorCanCreatorResend(actor, bill, canApproveReject = false, { isAdmin = false } = {}) {
     if (canApproveReject) return false;
-    if (!actor || !bill) return false;
-    const isCreator = isSameEmployee(actor, bill.requestedBy);
-    if (String(bill.status || '') === 'Rejected') {
-        return isCreator || isAdmin === true;
-    }
-    if (!isCreator) return false;
-    return creatorWaitingOnFirstApprover(bill);
+    if (!actorCanMutateUtilityBill(actor, bill, { isAdmin })) return false;
+    const status = String(bill.status || '');
+    if (status === 'Rejected') return true;
+    return status === 'Pending Accounts' || status === 'Pending HR' || status === 'Approved';
+}
+
+function withBillActorFlags(bill, actor, accountsGate, hrGate, { isAdmin = false } = {}) {
+    const decorated = decorateBill(bill);
+    const canApproveReject =
+        (bill.status === 'Pending Accounts' && accountsGate?.allowed) ||
+        (bill.status === 'Pending HR' && hrGate?.allowed);
+    const canPay = bill.status === 'Approved' && Boolean(accountsGate?.allowed);
+    const canMutate = actorCanMutateUtilityBill(actor, bill, { isAdmin });
+    return {
+        ...decorated,
+        canApproveReject: Boolean(canApproveReject),
+        canPay: Boolean(canPay),
+        canCreatorResend: actorCanCreatorResend(actor, bill, Boolean(canApproveReject), { isAdmin }),
+        canEditBill: canMutate || Boolean(canApproveReject),
+        canDeleteBill: canMutate,
+    };
 }
 
 function clearUtilityBillZohoFields(bill) {
@@ -556,6 +577,61 @@ async function syncBatchDashboard({
 }
 
 /**
+ * After an individual bill in a group is edited or deleted, keep the pending
+ * inbox totals in sync without creating a new task (and without emailing).
+ */
+async function refreshUtilityBillBatchInbox(batchId, { comment = '' } = {}) {
+    const id = String(batchId || '').trim();
+    if (!id) return { remainingPending: 0 };
+
+    const remaining = await UtilityBillPayment.find({
+        batchId: id,
+        status: { $in: ['Pending Accounts', 'Pending HR'] },
+    })
+        .sort({ createdAt: 1 })
+        .lean();
+
+    if (!remaining.length) {
+        await DashboardAction.updateMany(
+            { requestType: REQUEST_TYPE, requestId: id, status: 'Pending' },
+            {
+                status: 'Approved',
+                actionedDate: new Date(),
+                comment: comment || 'No remaining pending bills in this group',
+            },
+        );
+        return { remainingPending: 0 };
+    }
+
+    const first = remaining[0];
+    const total = remaining.reduce((sum, bill) => sum + (Number(bill.amount) || 0), 0);
+    const utilityType = first?.utilityType || 'Utility';
+    const billMonth = first?.billMonth || '';
+    const path = reviewPath(id, utilityType, billMonth, first);
+    await DashboardAction.updateMany(
+        { requestType: REQUEST_TYPE, requestId: id, status: 'Pending' },
+        {
+            $set: {
+                extra1: `${utilityType} ${billMonth || ''} — ${remaining.length} bill(s) · ${total.toLocaleString()} AED`.trim(),
+                extra2: statusLabel(first?.status, first?.pendingWithName),
+                extra3: JSON.stringify({
+                    batchId: id,
+                    entryId: String(first?.entryId || ''),
+                    billId: String(first?._id || ''),
+                    utilityType,
+                    billMonth,
+                    billCount: remaining.length,
+                    stage: String(first?.status || ''),
+                    detailsPath: path,
+                    reviewPath: path,
+                }),
+            },
+        },
+    );
+    return { remainingPending: remaining.length };
+}
+
+/**
  * POST /api/UtilityBill/check-duplicates
  * Body: { items: [{ provider, billNumber, billId? }] }
  */
@@ -628,19 +704,10 @@ export async function listUtilityBillPayments(req, res) {
         const actor = await resolveRequesterEmployee(req.user);
         const accountsGate = await isActorAccountsOrAdmin(actor, req.user);
         const hrGate = await isActorHrOrAdmin(actor, req.user);
+        const isAdminUser = isUtilityAdminSuperUser(req);
 
-        const withPermissions = (bill) => {
-            const decorated = decorateBill(bill);
-            const canApproveReject =
-                (bill.status === 'Pending Accounts' && accountsGate.allowed) ||
-                (bill.status === 'Pending HR' && hrGate.allowed);
-            // Pay only after approve → not paid; Accounts flowchart user (or admin)
-            const canPay = bill.status === 'Approved' && accountsGate.allowed;
-            const canCreatorResend = actorCanCreatorResend(actor, bill, canApproveReject, {
-                isAdmin: isUtilityAdminSuperUser(req),
-            });
-            return { ...decorated, canApproveReject, canPay, canCreatorResend };
-        };
+        const withPermissions = (bill) =>
+            withBillActorFlags(bill, actor, accountsGate, hrGate, { isAdmin: isAdminUser });
 
         const syncBillsVendorPaymentFromZoho = async (bills, { entryId: syncEntryId = null } = {}) => {
             const linked = (bills || []).filter(
@@ -900,7 +967,7 @@ export async function getUtilityBillBatch(req, res) {
                     persistModel: UtilityBillPayment,
                     fetchLive: true,
                 })
-            ).map(decorateBill),
+            ).map((b) => withBillActorFlags(b, actor, accountsGate, hrGate, { isAdmin })),
             reviewPath: reviewPath(resolvedBatchId, focus.utilityType, focus.billMonth, focus),
         });
     } catch (err) {
@@ -1713,34 +1780,51 @@ export async function updateUtilityBillBatch(req, res) {
         const canEditAccounts = stageStatus === 'Pending Accounts' && accountsGate.allowed;
         const canEditHr = stageStatus === 'Pending HR' && hrGate.allowed;
         const canEditApproved = stageStatus === 'Approved' && accountsGate.allowed;
-        const permissionFocus =
-            liveBills.find((b) => creatorWaitingOnFirstApprover(b)) || liveBills[0];
+        const targetPool = requestedIds.length
+            ? liveBills.filter((bill) => requestedIds.includes(String(bill._id)))
+            : liveBills;
+        const permissionFocus = targetPool[0] || liveBills[0];
+        const canMutateTargets =
+            targetPool.length > 0 &&
+            targetPool.every((bill) => actorCanMutateUtilityBill(actor, bill, { isAdmin }));
         const canCreatorResend = actorCanCreatorResend(
             actor,
             permissionFocus,
             canEditAccounts || canEditHr,
             { isAdmin },
         );
-        if (!canEditAccounts && !canEditHr && !canEditApproved && !canCreatorResend) {
+        if (
+            !canEditAccounts &&
+            !canEditHr &&
+            !canEditApproved &&
+            !canCreatorResend &&
+            !canMutateTargets
+        ) {
             return res.status(403).json({
                 message:
-                    permissionFocus && isSameEmployee(actor, permissionFocus.requestedBy)
-                        ? 'Edit and Resend is no longer available after the next person has acted.'
-                        : 'Only the pending Accounts or HR approver can edit, or the creator while waiting on the first approver.',
+                    permissionFocus && actorOwnsBill(actor, permissionFocus)
+                        ? 'This bill cannot be edited after it is added in Zoho Books.'
+                        : 'Only the person who submitted this bill (before Zoho) or the pending Accounts / HR approver can edit it.',
             });
         }
 
         const creatorOnly =
-            canCreatorResend && !canEditAccounts && !canEditHr && !canEditApproved;
-        let bills = creatorOnly
-            ? liveBills.filter((b) => creatorWaitingOnFirstApprover(b))
-            : liveBills;
+            (canCreatorResend || canMutateTargets) &&
+            !canEditAccounts &&
+            !canEditHr &&
+            !canEditApproved;
+        let bills = creatorOnly ? targetPool : liveBills;
         if (requestedIds.length) {
             bills = bills.filter((bill) => requestedIds.includes(String(bill._id)));
         }
         if (!bills.length) {
             return res.status(404).json({
                 message: 'No editable bills found for this batch (Paid bills cannot be edited).',
+            });
+        }
+        if (creatorOnly && bills.some((bill) => utilityBillHasZohoLink(bill))) {
+            return res.status(400).json({
+                message: 'This bill is already in Zoho Books and cannot be edited.',
             });
         }
 
@@ -1757,11 +1841,11 @@ export async function updateUtilityBillBatch(req, res) {
         }
 
         applyRowEdits(bills, rows);
-        const creatorResend = Boolean(canCreatorResend && !canEditAccounts && !canEditHr && !canEditApproved);
+        const creatorResend = Boolean(creatorOnly);
         for (const bill of bills) {
             clearUtilityBillZohoFields(bill);
             if (creatorResend) {
-                bill.comment = 'Edited and resent by creator — still awaiting first approver';
+                bill.comment = 'Edited by creator — awaiting current approver (no email sent)';
                 bill.actionedBy = actor?._id || null;
                 bill.actionedAt = new Date();
             }
@@ -1769,38 +1853,10 @@ export async function updateUtilityBillBatch(req, res) {
         }
 
         if (creatorResend) {
-            const first = bills[0];
-            const pendingRole = String(first?.pendingWithRole || billFirstPendingRole(first) || '');
-            const hod = pendingRole === 'hr'
-                ? await getDepartmentHOD('hr')
-                : await getDepartmentHOD('accounts');
-            if (hod?._id) {
-                const leanBills = bills.map((b) => b.toObject());
-                const path = reviewPath(batchId, first.utilityType, first.billMonth, first);
-                await syncBatchDashboard({
-                    batchId,
-                    bills: leanBills,
-                    assignedTo: hod._id,
-                    status: 'Pending',
-                    actionedBy: actor?._id || req.user?._id,
-                    comment: 'Creator edited and resent the bill',
-                    requestedByName: first.requestedByName,
-                    extra2: statusLabel(first.status, first.pendingWithName),
-                });
-                await sendUtilityBillPaymentEmail({
-                    recipient: hod,
-                    bill: {
-                        ...leanBills[0],
-                        amount: leanBills.reduce((s, b) => s + Number(b.amount || 0), 0),
-                    },
-                    kind: pendingRole === 'hr' ? 'pending_hr' : 'pending_accounts',
-                    batchMeta: {
-                        batchId: String(batchId),
-                        billCount: leanBills.length,
-                        reviewPath: path,
-                    },
-                });
-            }
+            const inboxBatchId = String(bills[0]?.batchId || batchId || '');
+            await refreshUtilityBillBatchInbox(inboxBatchId, {
+                comment: 'Creator edited a bill in this group',
+            });
         }
 
         const refreshed = await UtilityBillPayment.find({ batchId }).lean();
@@ -1810,7 +1866,7 @@ export async function updateUtilityBillBatch(req, res) {
             bills: refreshed.map((b) => decorateBill(b)),
             resent: creatorResend,
             message: creatorResend
-                ? 'Edited and resent to the next approver.'
+                ? 'Bill updated. Accounts is not emailed for edits.'
                 : 'Bill details saved. Retry Zoho sync or Pay to store the updated bill.',
         });
     } catch (err) {
@@ -2815,20 +2871,10 @@ export async function getUtilityBillPayment(req, res) {
         const actor = await resolveRequesterEmployee(req.user);
         const accountsGate = await isActorAccountsOrAdmin(actor, req.user);
         const hrGate = await isActorHrOrAdmin(actor, req.user);
-        const canApproveReject =
-            (numbered.status === 'Pending Accounts' && accountsGate.allowed) ||
-            (numbered.status === 'Pending HR' && hrGate.allowed);
-        const canPay = numbered.status === 'Approved' && accountsGate.allowed;
-        const canCreatorResend = actorCanCreatorResend(actor, numbered, canApproveReject, {
-            isAdmin: isUtilityAdminSuperUser(req),
-        });
         return res.status(200).json({
-            bill: {
-                ...decorateBill(numbered),
-                canApproveReject,
-                canPay,
-                canCreatorResend,
-            },
+            bill: withBillActorFlags(numbered, actor, accountsGate, hrGate, {
+                isAdmin: isUtilityAdminSuperUser(req),
+            }),
         });
     } catch (err) {
         return res.status(500).json({ message: err.message || 'Failed to load bill' });
@@ -2920,19 +2966,101 @@ export async function syncUtilityBillBatchToZoho(req, res) {
     }
 }
 
-/** DELETE /api/UtilityBill/:id — admin / super user only */
+/** DELETE /api/UtilityBill/:id — creator (before Zoho) or admin */
 export async function deleteUtilityBillPayment(req, res) {
     try {
-        if (!isUtilityAdminSuperUser(req)) {
-            return res.status(403).json({ message: 'Only admin can delete utility bills.' });
+        const actor = await resolveRequesterEmployee(req.user);
+        const isAdmin = isUtilityAdminSuperUser(req);
+        const bill = await UtilityBillPayment.findById(req.params.id);
+        if (!bill) {
+            return res.status(404).json({ message: 'Bill not found.' });
         }
-        const result = await cascadeDeleteUtilityBill(req.params.id, { req });
+
+        const inZoho = utilityBillHasZohoLink(bill);
+        if (inZoho && !isAdmin) {
+            return res.status(400).json({
+                message: 'This bill is already in Zoho Books and cannot be deleted.',
+            });
+        }
+        if (!isAdmin && !actorCanMutateUtilityBill(actor, bill, { isAdmin })) {
+            return res.status(403).json({
+                message:
+                    'Only the person who submitted this bill can delete it before it is added in Zoho.',
+            });
+        }
+
+        const snapshot = typeof bill.toObject === 'function' ? bill.toObject() : { ...bill };
+        const status = String(bill.status || '');
+        const wasSentForApproval = ['Pending Accounts', 'Pending HR', 'Approved', 'Rejected'].includes(
+            status,
+        );
+        const batchId = bill.batchId ? String(bill.batchId) : '';
+        const deletedByName =
+            empDisplayName(actor) || requesterDisplayName(actor, req.user) || 'A user';
+
+        const result = await cascadeDeleteUtilityBill(req.params.id, {
+            req,
+            skipArchive: !isAdmin,
+        });
         if (!result.ok) {
             return res.status(result.message === 'Bill not found.' ? 404 : 400).json({
                 message: result.message || 'Failed to delete bill',
             });
         }
-        return res.json(result);
+
+        if (batchId) {
+            try {
+                await refreshUtilityBillBatchInbox(batchId, {
+                    comment: `${deletedByName} deleted a bill from this group`,
+                });
+            } catch (inboxErr) {
+                console.warn(
+                    '[deleteUtilityBillPayment] Inbox refresh failed:',
+                    inboxErr?.message || inboxErr,
+                );
+            }
+        }
+
+        if (wasSentForApproval) {
+            try {
+                const accounts = await getDepartmentHOD('accounts');
+                if (accounts?._id) {
+                    const remainingPending = batchId
+                        ? await UtilityBillPayment.countDocuments({
+                              batchId,
+                              status: { $in: ['Pending Accounts', 'Pending HR'] },
+                          })
+                        : 0;
+                    await sendUtilityBillPaymentEmail({
+                        recipient: accounts,
+                        bill: snapshot,
+                        kind: 'deleted',
+                        batchMeta: {
+                            batchId,
+                            billCount: 1,
+                            reviewPath: billDetailsPath({
+                                entryId: snapshot.entryId,
+                            }),
+                            comment:
+                                `${deletedByName} deleted this bill` +
+                                (remainingPending > 0
+                                    ? `. ${remainingPending} bill(s) remain in the group.`
+                                    : '. No pending bills remain in this group.'),
+                        },
+                    });
+                }
+            } catch (mailErr) {
+                console.warn(
+                    '[deleteUtilityBillPayment] Delete email failed:',
+                    mailErr?.message || mailErr,
+                );
+            }
+        }
+
+        return res.json({
+            ...result,
+            emailedAccounts: wasSentForApproval,
+        });
     } catch (err) {
         console.error('[deleteUtilityBillPayment]', err);
         return res.status(500).json({ message: err?.message || 'Failed to delete bill' });
