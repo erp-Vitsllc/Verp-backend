@@ -31,7 +31,7 @@ import {
     getScheduledEmailTimeZone,
     getZonedParts,
 } from '../../utils/scheduleDailyAtMidnight.js';
-import { isJwtSystemSuperUser } from '../../utils/systemSuperUser.js';
+import { lastOpenSalaryProcessMonth } from '../../utils/salaryEnrollmentStartMonth.js';
 import { viewerIsSalaryFlowchartHr } from '../../utils/viewerIsSalaryFlowchartHr.js';
 import {
     buildDmfViewerContext,
@@ -120,6 +120,10 @@ function normalizeEnrollmentRows(rows) {
                 salaryDate: prev.salaryDate ?? raw.salaryDate,
                 processDate: prev.processDate ?? raw.processDate,
             });
+            continue;
+        }
+        if (fromMonth && prev.fromMonth && fromMonth < prev.fromMonth) {
+            byKey.set(key, { ...prev, fromMonth });
         }
     }
     return byKey;
@@ -1194,17 +1198,18 @@ function resolveProcessDay(settings, enrollments) {
 }
 
 /**
- * Latest month that may appear on the salary list.
- * Each calendar month's row is created on the 1st of that month.
+ * Latest salary period that may appear on the list.
+ * August salary is processed in September, so the current calendar month is never listed yet.
  */
 function lastOpenSalaryMonth(currentYm) {
-    return currentYm;
+    return addMonthsYm(currentYm, -1) || lastOpenSalaryProcessMonth();
 }
 
 /**
  * GET /api/Employee/salary-register
- * One row per month from policy start (or first enrollment) through the current calendar month.
- * A month row appears on the 1st of that month.
+ * One row per salary period from the earliest enrolled process-start month
+ * through last month. A period opens on the 1st of the following month
+ * (August salary on 1 September).
  */
 export const getSalaryRegister = async (req, res) => {
     try {
@@ -1249,22 +1254,18 @@ export const getSalaryRegister = async (req, res) => {
         ]);
         const enrollments = [...enrollmentByKey.values()];
 
-        const enrollmentOverview = await buildEnrollmentOverview(enrollments, detailYm || currentYm);
-
         const processDay = resolveProcessDay(payrollDoc, enrollments);
         const lastOpenYm = lastOpenSalaryMonth(currentYm);
+        const enrollmentOverview = await buildEnrollmentOverview(enrollments, detailYm || lastOpenYm || currentYm);
+        const policyStartYm = toYearMonth(payrollDoc?.salaryProcessStartMonth);
         const firstEnrollmentYm = enrollments.reduce((min, row) => {
             const ym = toYearMonth(row.fromMonth);
             if (!ym) return min;
             return !min || ym < min ? ym : min;
         }, null);
-        const policyStartYm = toYearMonth(payrollDoc?.salaryProcessStartMonth);
 
-        // Month rows follow the Main policy calendar, not the first enrollment month.
-        let startYm = policyStartYm || firstEnrollmentYm || null;
-        if (startYm && lastOpenYm && startYm > lastOpenYm && !policyStartYm) {
-            startYm = lastOpenYm;
-        }
+        // Enrolled process-start months only. That period opens next calendar month.
+        const startYm = firstEnrollmentYm || null;
 
         const waitingForOpenMonth = Boolean(startYm && lastOpenYm && startYm > lastOpenYm);
         const waitingForProcessingDate = waitingForOpenMonth;
@@ -1295,7 +1296,13 @@ export const getSalaryRegister = async (req, res) => {
             });
         }
 
-        // Policy start is still in the future: no preview row until that month opens.
+        if (detailYm && lastOpenYm && detailYm > lastOpenYm) {
+            return res.status(404).json({
+                message: 'This salary month is not open yet.',
+            });
+        }
+
+        // Enrolled process-start is still in the current month: it opens on the 1st of next month.
         if (startYm > lastOpenYm) {
             if (detailYm && detailYm !== startYm) {
                 return res.status(404).json({
@@ -1319,7 +1326,9 @@ export const getSalaryRegister = async (req, res) => {
             });
         }
 
-        const monthKeys = listMonthsInclusive(startYm, endYm);
+        const monthKeys = listMonthsInclusive(startYm, endYm).filter(
+            (ym) => ym && lastOpenYm && ym <= lastOpenYm && ym < currentYm,
+        );
         if (!monthKeys.length) {
             return res.status(200).json({
                 ...emptyRegisterPayload(),
@@ -1546,6 +1555,7 @@ export const getSalaryRegister = async (req, res) => {
                 const key = employeeCodeKey(row.employeeId);
                 if (!key || seen.has(key)) continue;
                 if (row.fromMonth && row.fromMonth > ym) continue;
+                if (!ym || ym > lastOpenYm || ym >= currentYm) continue;
                 const emp = empByCode.get(key);
                 if (!emp || !employeeWorkedInMonth(emp, ym)) continue;
                 const code = String(emp.employeeId || '').trim();

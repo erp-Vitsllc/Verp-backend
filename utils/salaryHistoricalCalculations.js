@@ -11,6 +11,7 @@ export const LEAVE_MULTIPLIERS = {
     authorized: 1,
     unauthorized: 2,
     annual: 1,
+    holiday: 1,
 };
 
 export const INACTIVE_LEAVE = new Set(['cancelled', 'rejected', 'pending', 'draft']);
@@ -101,6 +102,7 @@ export function policyLeaveMultipliers(policy) {
         unauthorized:
             resolveLeaveMultiplierValue(policy?.unauthorizedLeaveDeductionDays) ?? LEAVE_MULTIPLIERS.unauthorized,
         annual: resolveLeaveMultiplierValue(policy?.annualLeaveDeductionDays) ?? LEAVE_MULTIPLIERS.annual,
+        holiday: LEAVE_MULTIPLIERS.holiday,
     };
 }
 
@@ -116,7 +118,8 @@ export function leaveMultiplier(leaveType, explicit, policyMultipliers) {
     const type = String(leaveType || '').toLowerCase();
     const fromPolicy = resolveLeaveMultiplierValue(policyMultipliers?.[type]);
     if (fromPolicy != null) return fromPolicy;
-    return LEAVE_MULTIPLIERS[type] || 1;
+    if (Object.prototype.hasOwnProperty.call(LEAVE_MULTIPLIERS, type)) return LEAVE_MULTIPLIERS[type];
+    return 1;
 }
 
 export function inclusiveCalendarDays(from, to) {
@@ -152,6 +155,31 @@ export function validateVerpStart(joiningDate, verpStartDate) {
     if (!isDateKey(verpStartDate)) return 'VERP salary processing start date is required.';
     if (joiningDate && verpStartDate <= joiningDate) return MESSAGES.verpAfterJoining;
     return '';
+}
+
+/** First calendar day of the VERP salary processing month (yyyy-MM-01). */
+export function salaryProcessingStartDay(verpStartDate) {
+    const raw = String(verpStartDate || '').trim();
+    if (isDateKey(raw)) return `${raw.slice(0, 7)}-01`;
+    if (/^\d{4}-\d{2}$/.test(raw)) return `${raw}-01`;
+    return '';
+}
+
+/** System leave/holidays start only once today has reached that month's 1st. */
+export function isSalaryProcessingMonthReached(todayKey, verpStartDate) {
+    const start = salaryProcessingStartDay(verpStartDate);
+    return isDateKey(todayKey) && isDateKey(start) && todayKey >= start;
+}
+
+export function liveLeaveRecordsInProcessingWindow(rows, verpStartDate, todayKey) {
+    if (!isSalaryProcessingMonthReached(todayKey, verpStartDate)) return [];
+    const start = salaryProcessingStartDay(verpStartDate);
+    return (Array.isArray(rows) ? rows : []).filter((row) => {
+        const from = String(row?.fromDate || row?.startDate || '').trim();
+        if (!isDateKey(from)) return false;
+        if (from < start) return false;
+        return !isDateKey(todayKey) || from <= todayKey;
+    });
 }
 
 export function rangesOverlap(aFrom, aTo, bFrom, bTo) {
@@ -209,8 +237,12 @@ export function isActiveLeave(row) {
 
 export function leaveDeductionDays(row, policyMultipliers) {
     if (!isActiveLeave(row)) return 0;
+    const type = String(row?.leaveType || '').toLowerCase();
     const eligible = Math.max(0, Number(row?.eligibleWorkingDays ?? row?.actualDays) || 0);
-    const multiplier = leaveMultiplier(row?.leaveType, row?.multiplier ?? row?.rule, policyMultipliers);
+    if (type === 'holiday') {
+        return eligible > 0 ? eligible : 1;
+    }
+    const multiplier = leaveMultiplier(type, row?.multiplier ?? row?.rule, policyMultipliers);
     const stored = Number(row?.deductionDays ?? row?.deduction);
     if (Number.isFinite(stored) && stored > 0) return stored;
     return eligible * multiplier;
@@ -251,7 +283,8 @@ export function findOverlappingLeave(records) {
 }
 
 export function isDatedLeaveType(type) {
-    return String(type || '').toLowerCase() === 'annual';
+    const key = String(type || '').toLowerCase();
+    return key === 'annual' || key === 'holiday';
 }
 
 export function isOptionalDateLeaveType(type) {
@@ -350,11 +383,12 @@ export function summarizeLeaveDeductions(leaveRecords, annualLeaveRecords = [], 
         multiplier: leaveMultiplier('annual', row?.multiplier ?? row?.rule, policyMultipliers),
     }))];
 
-    const totals = { sick: 0, authorized: 0, unauthorized: 0, annual: 0, total: 0 };
+    const totals = { sick: 0, authorized: 0, unauthorized: 0, annual: 0, holiday: 0, total: 0 };
     rows.forEach((row) => {
         const type = String(row?.leaveType || 'sick').toLowerCase();
         const days = leaveDeductionDays(row, policyMultipliers);
-        if (type === 'sick') totals.sick += days;
+        if (type === 'holiday') totals.holiday += days;
+        else if (type === 'sick') totals.sick += days;
         else if (type === 'authorized') totals.authorized += days;
         else if (type === 'unauthorized') totals.unauthorized += days;
         else if (type === 'annual') totals.annual += days;
@@ -363,8 +397,23 @@ export function summarizeLeaveDeductions(leaveRecords, annualLeaveRecords = [], 
     return totals;
 }
 
+export function cycleIncludesLeavePayment(cycle) {
+    if (!cycle) return false;
+    if (cycle.includeLeave === true) return true;
+    if (cycle.includeLeave === false) return false;
+    return Number(cycle.leaveSalaryAmount ?? cycle.leaveSalary) > 0;
+}
+
+export function cycleIncludesTicketPayment(cycle) {
+    if (!cycle) return false;
+    if (cycle.includeTicket === true) return true;
+    if (cycle.includeTicket === false) return false;
+    return Number(cycle.ticketAmount) > 0;
+}
+
 export function isConsumingCycle(cycle, cycleDays) {
-    if (cycle?.reduceHistoricalWorkingDays === false) return false;
+    if (cycle?.reduceHistoricalWorkingDays !== true) return false;
+    if (!cycleIncludesLeavePayment(cycle) && !cycleIncludesTicketPayment(cycle)) return false;
     const payment = String(cycle?.paymentStatus || cycle?.status || '').toLowerCase();
     const verification = String(cycle?.verificationStatus || '').toLowerCase();
     if (payment === 'cancelled' || payment === 'rejected' || verification === 'rejected') return false;
@@ -460,6 +509,7 @@ export const LIVE_LEAVE_STATUS_MAP = {
     sick_leave: 'sick',
     on_leave: 'annual',
     compoff_leave: 'annual',
+    holiday: 'holiday',
 };
 
 export const OWNED_LEAVE_REQUEST_STATUSES = new Set(['approved', 'pending']);
@@ -508,6 +558,7 @@ export function summarizeAttendanceEligibility(rows = []) {
                 calendarDays: 1,
                 source: 'system',
                 status: owned.status,
+                remarks: String(row?.reason || '').trim(),
             });
             continue;
         }
@@ -551,6 +602,7 @@ export function calculateHistoricalEligibility({
         authorizedDeduction: leave.authorized,
         unauthorizedDeduction: leave.unauthorized,
         annualDeduction: leave.annual,
+        holidayDays: leave.holiday,
         totalLeaveDeduction: leave.total,
         netQualifyingDays,
         paidVerifiedCycles: consumers.cycles.length,
@@ -564,6 +616,355 @@ export function calculateHistoricalEligibility({
         cycleDays: entitlementDays,
         progressFill,
         towardCycle,
+    };
+}
+
+export function roundMoney(value) {
+    const n = Number(value);
+    if (!Number.isFinite(n)) return 0;
+    return Math.round((n + Number.EPSILON) * 100) / 100;
+}
+
+export function toSalaryDateKey(value) {
+    if (!value) return '';
+    if (isDateKey(value)) return String(value).trim();
+    const raw = String(value).trim();
+    const isoDay = raw.match(/^(\d{4}-\d{2}-\d{2})/);
+    if (isoDay) return isoDay[1];
+    const d = value instanceof Date ? value : new Date(raw);
+    if (Number.isNaN(d.getTime())) return '';
+    const y = d.getUTCFullYear();
+    const m = String(d.getUTCMonth() + 1).padStart(2, '0');
+    const day = String(d.getUTCDate()).padStart(2, '0');
+    return `${y}-${m}-${day}`;
+}
+
+export function addCalendarMonths(key, months) {
+    if (!isDateKey(key)) return '';
+    const year = Number(key.slice(0, 4));
+    const month = Number(key.slice(5, 7));
+    const day = Number(key.slice(8, 10));
+    const totalMonths = month - 1 + Number(months || 0);
+    const nextYear = year + Math.floor(totalMonths / 12);
+    const monthIndex = ((totalMonths % 12) + 12) % 12;
+    const lastDay = new Date(Date.UTC(nextYear, monthIndex + 1, 0)).getUTCDate();
+    const nextDay = Math.min(day, lastDay);
+    return `${nextYear}-${String(monthIndex + 1).padStart(2, '0')}-${String(nextDay).padStart(2, '0')}`;
+}
+
+export function monthStartKey(monthKey) {
+    return /^\d{4}-\d{2}$/.test(monthKey) ? `${monthKey}-01` : '';
+}
+
+export function monthEndKey(monthKey) {
+    if (!/^\d{4}-\d{2}$/.test(monthKey)) return '';
+    const year = Number(monthKey.slice(0, 4));
+    const month = Number(monthKey.slice(5, 7));
+    const lastDay = new Date(Date.UTC(year, month, 0)).getUTCDate();
+    return `${monthKey}-${String(lastDay).padStart(2, '0')}`;
+}
+
+export function daysInCalendarMonth(monthKey) {
+    if (!/^\d{4}-\d{2}$/.test(monthKey)) return 0;
+    const year = Number(monthKey.slice(0, 4));
+    const month = Number(monthKey.slice(5, 7));
+    return new Date(Date.UTC(year, month, 0)).getUTCDate();
+}
+
+export function minDateKey(a, b) {
+    if (!isDateKey(a)) return isDateKey(b) ? b : '';
+    if (!isDateKey(b)) return a;
+    return a <= b ? a : b;
+}
+
+export function maxDateKey(a, b) {
+    if (!isDateKey(a)) return isDateKey(b) ? b : '';
+    if (!isDateKey(b)) return a;
+    return a >= b ? a : b;
+}
+
+export function twelveMonthPeriodEnd(start) {
+    if (!isDateKey(start)) return '';
+    return addDays(addCalendarMonths(start, 12), -1);
+}
+
+export function listMonthKeysInclusive(from, to) {
+    if (!isDateKey(from) || !isDateKey(to) || to < from) return [];
+    const keys = [];
+    let cursor = from.slice(0, 7);
+    const end = to.slice(0, 7);
+    while (cursor <= end) {
+        keys.push(cursor);
+        const year = Number(cursor.slice(0, 4));
+        const month = Number(cursor.slice(5, 7));
+        cursor = month === 12 ? `${year + 1}-01` : `${year}-${String(month + 1).padStart(2, '0')}`;
+        if (keys.length > 240) break;
+    }
+    return keys;
+}
+
+export function normalizeSalaryHistory(rows = []) {
+    const list = (Array.isArray(rows) ? rows : [])
+        .map((row) => ({
+            effectiveFrom: toSalaryDateKey(row?.effectiveFrom ?? row?.fromDate),
+            effectiveTo: toSalaryDateKey(row?.effectiveTo ?? row?.toDate),
+            basicSalary: Math.max(0, Number(row?.basicSalary ?? row?.basic) || 0),
+        }))
+        .filter((row) => isDateKey(row.effectiveFrom))
+        .sort((a, b) => a.effectiveFrom.localeCompare(b.effectiveFrom));
+
+    return list.map((row, index) => {
+        const nextFrom = list[index + 1]?.effectiveFrom;
+        let effectiveTo = row.effectiveTo;
+        if (!effectiveTo && nextFrom) effectiveTo = addDays(nextFrom, -1);
+        return { ...row, effectiveTo: effectiveTo || '' };
+    });
+}
+
+export function salarySegmentsInRange(history, from, to) {
+    if (!isDateKey(from) || !isDateKey(to) || to < from) return [];
+    const segments = [];
+    for (const row of Array.isArray(history) ? history : []) {
+        if (!isDateKey(row?.effectiveFrom)) continue;
+        if (row.effectiveFrom > to) continue;
+        if (row.effectiveTo && row.effectiveTo < from) continue;
+        const start = maxDateKey(row.effectiveFrom, from);
+        const end = minDateKey(row.effectiveTo || to, to);
+        if (!isDateKey(start) || !isDateKey(end) || end < start) continue;
+        segments.push({
+            from: start,
+            to: end,
+            basicSalary: Math.max(0, Number(row.basicSalary) || 0),
+        });
+    }
+    return segments;
+}
+
+export function calculateLeaveSalaryForPeriod(salaryHistory, periodStart, periodEnd) {
+    const history = normalizeSalaryHistory(salaryHistory);
+    if (!isDateKey(periodStart) || !isDateKey(periodEnd) || periodEnd < periodStart) {
+        return { leaveSalary: 0, monthlyBreakdown: [] };
+    }
+    const monthlyBreakdown = [];
+    let total = 0;
+    for (const monthKey of listMonthKeysInclusive(periodStart, periodEnd)) {
+        const monthDays = daysInCalendarMonth(monthKey);
+        const calendarStart = monthStartKey(monthKey);
+        const calendarEnd = monthEndKey(monthKey);
+        const from = maxDateKey(calendarStart, periodStart);
+        const to = minDateKey(calendarEnd, periodEnd);
+        if (!from || !to || to < from || monthDays <= 0) continue;
+        const segments = salarySegmentsInRange(history, from, to).map((segment) => {
+            const days = inclusiveCalendarDays(segment.from, segment.to);
+            const accrual = (segment.basicSalary / 12) * (days / monthDays);
+            return {
+                from: segment.from,
+                to: segment.to,
+                basicSalary: segment.basicSalary,
+                days,
+                accrual,
+                calculation: `(${segment.basicSalary} / 12) × (${days} / ${monthDays})`,
+            };
+        });
+        const monthAccrual = segments.reduce((sum, segment) => sum + segment.accrual, 0);
+        total += monthAccrual;
+        const coversFullMonth = from === calendarStart && to === calendarEnd;
+        const singleFullSalary =
+            coversFullMonth &&
+            segments.length === 1 &&
+            segments[0].from === calendarStart &&
+            segments[0].to === calendarEnd;
+        monthlyBreakdown.push({
+            month: monthKey,
+            basicSalary: segments.length === 1 ? segments[0].basicSalary : null,
+            applicableDays: singleFullSalary ? 'Full Month' : segments.map((segment) => `${segment.days} days`).join(', '),
+            calculation: singleFullSalary ? `${segments[0].basicSalary} / 12` : segments.map((segment) => segment.calculation).join(' + '),
+            leaveSalaryAccrual: monthAccrual,
+            segments: singleFullSalary ? [] : segments,
+        });
+    }
+    return { leaveSalary: total, monthlyBreakdown };
+}
+
+export function policyTicketRate(policy, fallback) {
+    const candidates = [
+        policy?.airTicketAmount,
+        policy?.ticketAmount,
+        policy?.ticketRate,
+        policy?.airTicketRate,
+        fallback,
+    ];
+    for (const value of candidates) {
+        const n = Number(value);
+        if (Number.isFinite(n) && n > 0) return n;
+    }
+    return 0;
+}
+
+export function resolveTicketRateForDate(policyHistory, dateKey, fallback) {
+    const rows = (Array.isArray(policyHistory) ? policyHistory : [])
+        .map((row) => ({
+            from: toSalaryDateKey(row?.effectiveFrom ?? row?.fromDate),
+            to: toSalaryDateKey(row?.effectiveTo ?? row?.toDate),
+            rate: policyTicketRate(row, row?.airTicketAmount ?? row?.ticketRate ?? row?.ticketAmount),
+        }))
+        .filter((row) => isDateKey(row.from))
+        .sort((a, b) => a.from.localeCompare(b.from));
+    if (!rows.length) return policyTicketRate({ airTicketAmount: fallback }, fallback);
+    const key = isDateKey(dateKey) ? dateKey : rows[rows.length - 1].from;
+    const match = [...rows].reverse().find((row) => row.from <= key && (!row.to || row.to >= key));
+    return match?.rate || policyTicketRate({ airTicketAmount: fallback }, fallback);
+}
+
+export function resolveEntitlementCalculationStart({
+    joiningDate,
+    annualLeaveRecords = [],
+    paymentCycles = [],
+    cycleDays,
+} = {}) {
+    const ends = [];
+    for (const row of annualLeaveRecords || []) {
+        if (!isActiveLeave(row)) continue;
+        const type = String(row?.leaveType || 'annual').toLowerCase();
+        if (row?.leaveType && type !== 'annual') continue;
+        if (!isConsumingAnnualLeave(row)) continue;
+        const end = toSalaryDateKey(row?.endDate || row?.toDate || row?.returnToWorkDate);
+        if (isDateKey(end)) ends.push(end);
+    }
+    for (const row of paymentCycles || []) {
+        if (!isConsumingCycle(row, cycleDays)) continue;
+        const end = toSalaryDateKey(
+            row?.eligibilityEndDate || row?.leaveSalaryPaymentDate || row?.ticketPaymentDate || row?.paymentDate,
+        );
+        if (isDateKey(end)) ends.push(end);
+    }
+    const start = toSalaryDateKey(joiningDate);
+    if (!ends.length) return start;
+    ends.sort();
+    const next = addDays(ends[ends.length - 1], 1);
+    return next || start;
+}
+
+function annualLeaveTakenRows(annualLeaveHistory, calculationStartDate) {
+    return (Array.isArray(annualLeaveHistory) ? annualLeaveHistory : [])
+        .filter((row) => isActiveLeave(row))
+        .filter((row) => {
+            const type = String(row?.leaveType || 'annual').toLowerCase();
+            return !row?.leaveType || type === 'annual';
+        })
+        .map((row) => ({
+            startDate: toSalaryDateKey(row?.startDate || row?.fromDate),
+            endDate: toSalaryDateKey(row?.endDate || row?.toDate),
+            days: Math.max(0, Number(row?.eligibleWorkingDays ?? row?.actualDays ?? row?.calendarDays) || 0),
+        }))
+        .filter((row) => row.startDate || row.endDate)
+        .filter((row) => {
+            if (!isDateKey(calculationStartDate)) return true;
+            const start = row.startDate || row.endDate;
+            return start >= calculationStartDate;
+        })
+        .sort((a, b) => String(a.startDate).localeCompare(String(b.startDate)));
+}
+
+export function calculateAnnualLeaveEntitlement({
+    calculationStartDate,
+    calculationEndDate,
+    eligibleWorkingDays,
+    consumedEntitlements = 0,
+    reducingCycles = [],
+    requiredDaysPerEntitlement,
+    salaryHistory = [],
+    annualLeaveHistory = [],
+    salaryPolicyHistory = [],
+    ticketRate,
+    leaveWorkingDays,
+} = {}) {
+    const required = resolveEntitlementDays(requiredDaysPerEntitlement ?? leaveWorkingDays);
+    const days = Number(eligibleWorkingDays) || 0;
+    const safeDays = days > 0 ? days : 0;
+    const cycles = Array.isArray(reducingCycles) ? reducingCycles.filter(Boolean) : [];
+    const completedEntitlements = cycles.length
+        ? cycles.length
+        : Math.max(0, Math.floor(Number(consumedEntitlements) || 0));
+    const remainingDays = required > 0 ? Math.max(0, safeDays - completedEntitlements * required) : safeDays;
+    const availableEntitlements = required > 0 ? Math.floor(safeDays / required) : 0;
+    const totalEntitlementDays = required > 0 ? Math.max(required, availableEntitlements * required) : 0;
+    const leftoverTowardNext = required > 0 ? Math.max(0, safeDays - availableEntitlements * required) : safeDays;
+    const rowCount = Math.max(completedEntitlements, availableEntitlements);
+    const start = toSalaryDateKey(calculationStartDate);
+    const end = toSalaryDateKey(calculationEndDate);
+    const fallbackRate = policyTicketRate({ airTicketAmount: ticketRate }, ticketRate);
+    const takenLeaves = annualLeaveTakenRows(annualLeaveHistory, start);
+    const entitlements = [];
+
+    for (let index = 0; index < rowCount; index += 1) {
+        const salaryPeriodStart = start ? addCalendarMonths(start, index * 12) : '';
+        let salaryPeriodEnd = salaryPeriodStart ? twelveMonthPeriodEnd(salaryPeriodStart) : '';
+        if (end && salaryPeriodEnd && salaryPeriodEnd > end) salaryPeriodEnd = end;
+        const salary = calculateLeaveSalaryForPeriod(salaryHistory, salaryPeriodStart, salaryPeriodEnd);
+        const rate = resolveTicketRateForDate(
+            salaryPolicyHistory,
+            salaryPeriodEnd || salaryPeriodStart,
+            fallbackRate,
+        );
+        const cycle = cycles[index];
+        const paid = index < completedEntitlements;
+        const withLeave = !cycle || cycleIncludesLeavePayment(cycle);
+        const withTicket = !cycle || cycleIncludesTicketPayment(cycle);
+        const leaveTaken = takenLeaves[index] || { startDate: '', endDate: '', days: 0 };
+        entitlements.push({
+            entitlementNo: index + 1,
+            eligibilityStartDate: salaryPeriodStart,
+            eligibilityEndDate: salaryPeriodEnd,
+            eligibleDays: required,
+            salaryPeriodStart,
+            salaryPeriodEnd,
+            leaveSalary: withLeave ? roundMoney(salary.leaveSalary) : 0,
+            ticketRate: rate,
+            ticketAmount: withTicket ? roundMoney(rate) : 0,
+            leaveTaken,
+            monthlyBreakdown: salary.monthlyBreakdown,
+            status: paid ? 'Eligible' : 'Calculated',
+        });
+    }
+
+    const nextStart = start ? addCalendarMonths(start, availableEntitlements * 12) : start;
+    const nextEntitlement = {
+        accumulatedDays: leftoverTowardNext,
+        requiredDays: required,
+        remainingDays: Math.max(0, required - leftoverTowardNext),
+        startDate: nextStart || '',
+        endDate: end || '',
+        eligibleDays: leftoverTowardNext,
+        status: 'In Progress',
+    };
+
+    const leaveSalaryCount = cycles.length
+        ? cycles.filter(cycleIncludesLeavePayment).length
+        : completedEntitlements;
+    const ticketCount = cycles.length
+        ? cycles.filter(cycleIncludesTicketPayment).length
+        : completedEntitlements;
+    const totalLeaveSalary = roundMoney(entitlements.reduce((sum, row) => sum + Number(row.leaveSalary || 0), 0));
+    const totalTicketAmount = roundMoney(entitlements.reduce((sum, row) => sum + Number(row.ticketAmount || 0), 0));
+    const uniqueRates = [...new Set(entitlements.map((row) => Number(row.ticketRate) || 0))];
+
+    return {
+        eligibleWorkingDays: remainingDays,
+        requiredDaysPerEntitlement: required,
+        completedEntitlements,
+        availableEntitlements,
+        totalEntitlementDays,
+        remainingDays,
+        leaveSalaryCount,
+        totalLeaveSalary,
+        ticketCount,
+        totalTicketAmount,
+        ticketRate: uniqueRates.length === 1 ? uniqueRates[0] : fallbackRate,
+        entitlements,
+        nextEntitlement,
+        calculationStartDate: start,
+        calculationEndDate: end,
     };
 }
 

@@ -26,9 +26,31 @@ export function laterSalaryMonth(a, b) {
     return a >= b ? a : b;
 }
 
+export function earlierSalaryMonth(a, b) {
+    if (!a) return b || '';
+    if (!b) return a;
+    return a <= b ? a : b;
+}
+
 export function currentSalaryMonthKey(now = new Date()) {
     const dubai = getZonedParts(now, getScheduledEmailTimeZone());
     return `${dubai.year}-${pad2(dubai.month)}`;
+}
+
+/** Salary for month M is processed on the 1st of M+1 (August salary in September). */
+export function lastOpenSalaryProcessMonth(now = new Date()) {
+    return addSalaryMonths(currentSalaryMonthKey(now), -1);
+}
+
+/**
+ * Salary-register rows: earliest enrolled period through last month
+ * (never the current calendar month).
+ */
+export function salaryRegisterMonthRange({ earliestPeriodYm, now = new Date() } = {}) {
+    const startYm = salaryYearMonth(earliestPeriodYm);
+    const lastOpenYm = lastOpenSalaryProcessMonth(now);
+    if (!startYm || !lastOpenYm || startYm > lastOpenYm) return [];
+    return listSalaryMonthsInclusive(startYm, lastOpenYm);
 }
 
 /** First slip / payroll month is the 1st of the month after enrollment. */
@@ -87,18 +109,20 @@ export function salarySlipMonthRange({
     now = new Date(),
 } = {}) {
     if (!enrolled) return [];
-    const currentYm = currentSalaryMonthKey(now);
+    const lastOpenYm = lastOpenSalaryProcessMonth(now);
     const employeeStartYm = salaryYearMonth(fromMonth) || salaryYearMonth(verpStartYm);
     const fromYm = laterSalaryMonth(employeeStartYm, salaryYearMonth(policyStartYm)) || employeeStartYm;
-    if (!fromYm || fromYm > currentYm) return [];
-    return listSalaryMonthsInclusive(fromYm, currentYm);
+    if (!fromYm || !lastOpenYm || fromYm > lastOpenYm) return [];
+    return listSalaryMonthsInclusive(fromYm, lastOpenYm);
 }
 
-export function salarySlipMonthAllowed(monthKey, { enrolled, fromMonth = '' } = {}) {
+export function salarySlipMonthAllowed(monthKey, { enrolled, fromMonth = '', now = new Date() } = {}) {
     if (!enrolled) return false;
     const ym = salaryYearMonth(monthKey);
     const start = salaryYearMonth(fromMonth);
+    const lastOpenYm = lastOpenSalaryProcessMonth(now);
     if (!ym) return false;
     if (start && ym < start) return false;
+    if (!lastOpenYm || ym > lastOpenYm) return false;
     return true;
 }

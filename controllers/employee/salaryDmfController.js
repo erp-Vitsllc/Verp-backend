@@ -182,13 +182,12 @@ export async function startMonthSalaryDmf(req, res) {
         const monthKey = monthKeyOf(req.params?.monthKey);
         if (!monthKey) return res.status(400).json({ message: 'Invalid salary month.' });
 
-        // TEST: skip pending 100% so Process salary can start without clearing all items
-        // if (!(await monthPayrollIsClear(monthKey))) {
-        //     return res.status(400).json({
-        //         message:
-        //             'Validate payroll to 100% before sending for Accounts → HR → Management approval.',
-        //     });
-        // }
+        if (!(await monthPayrollIsClear(monthKey))) {
+            return res.status(400).json({
+                message:
+                    'Complete all payroll tasks (100% readiness) before processing salary.',
+            });
+        }
 
         let doc = await SalaryMonthDmf.findOne({ monthKey });
         if (!doc) {

@@ -23,6 +23,8 @@ import EmployeeTraining from '../models/EmployeeTraining.js';
 import EmployeeEmergencyContact from '../models/EmployeeEmergencyContact.js';
 import EmployeeSalary from '../models/EmployeeSalary.js';
 import SalaryHistoricalProfile from '../models/SalaryHistoricalProfile.js';
+import SalaryEnrollment from '../models/SalaryEnrollment.js';
+import SalarySlipMonth from '../models/SalarySlipMonth.js';
 import EmployeeContact from '../models/EmployeeContact.js';
 import EmployeePersonal from '../models/EmployeePersonal.js';
 import EmployeeBank from '../models/EmployeeBank.js';
@@ -858,16 +860,64 @@ export async function restoreArchivedRecord(archive) {
                 snapshot.paymentCycles,
                 enrollmentCycleKey,
             );
-            if (snapshot.leaveHistoryComplete != null) {
-                profile.leaveHistoryComplete = Boolean(snapshot.leaveHistoryComplete);
+            const details =
+                snapshot.profile && typeof snapshot.profile === 'object' ? snapshot.profile : snapshot;
+            const detailFields = [
+                'contractJoiningDate',
+                'originalContractJoiningDate',
+                'verpStartDate',
+                'companyMolCode',
+                'employeeMolId',
+                'salarySlip',
+                'leaveHistoryComplete',
+                'annualLeaveComplete',
+                'benefitsComplete',
+                'status',
+                'workflowStatus',
+                'verifiedBy',
+                'verifiedByName',
+                'verifiedByDepartment',
+                'verifiedAt',
+                'lockedBy',
+                'lockedByName',
+                'lockedAt',
+                'createdProfileAt',
+                'submittedTo',
+                'submittedBy',
+                'submittedByName',
+                'submittedByEmail',
+                'submittedAt',
+                'lastRejectReason',
+            ];
+            for (const key of detailFields) {
+                if (details[key] !== undefined) profile[key] = details[key];
             }
-            if (snapshot.annualLeaveComplete != null) {
-                profile.annualLeaveComplete = Boolean(snapshot.annualLeaveComplete);
-            }
-            if (snapshot.benefitsComplete != null) {
-                profile.benefitsComplete = Boolean(snapshot.benefitsComplete);
-            }
+            profile.enrollmentCleared = false;
+            profile.enrollmentResetAt = null;
             await profile.save();
+
+            if (snapshot.enrollment && typeof snapshot.enrollment === 'object') {
+                const enrollmentData = stripMongoDoc(snapshot.enrollment);
+                const existingEnrollment = await SalaryEnrollment.findOne({ employeeId });
+                if (!existingEnrollment) {
+                    await SalaryEnrollment.create({ ...enrollmentData, employeeId });
+                } else {
+                    if (enrollmentData.fromMonth) existingEnrollment.fromMonth = enrollmentData.fromMonth;
+                    if (enrollmentData.salaryDate != null) existingEnrollment.salaryDate = enrollmentData.salaryDate;
+                    if (enrollmentData.processDate != null) existingEnrollment.processDate = enrollmentData.processDate;
+                    if (enrollmentData.policy) existingEnrollment.policy = enrollmentData.policy;
+                    await existingEnrollment.save();
+                }
+            }
+
+            for (const row of Array.isArray(snapshot.salarySlipMonths) ? snapshot.salarySlipMonths : []) {
+                const monthKey = String(row?.monthKey || '').trim();
+                if (!monthKey) continue;
+                const exists = await SalarySlipMonth.findOne({ employeeId, monthKey }).lean();
+                if (exists) continue;
+                const slipData = stripMongoDoc(row);
+                await SalarySlipMonth.create({ ...slipData, employeeId, monthKey });
+            }
             return profile;
         }
 

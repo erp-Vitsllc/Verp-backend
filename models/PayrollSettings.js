@@ -61,6 +61,7 @@ const payrollSettingsSchema = new mongoose.Schema(
         workingDaysRequiredToEligible: { type: Number, default: null },
         leaveSalaryWorkingDays: { type: Number, default: 300 },
         workingDaysRequiredForAirTicket: { type: Number, default: null },
+        airTicketAmount: { type: Number, default: null },
         authorizedLeaveDeductionDays: { type: Number, default: null },
         unauthorizedLeaveDeductionDays: { type: Number, default: null },
         allowedSickLeaveDaysPerYear: { type: Number, default: null },

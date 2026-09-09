@@ -203,7 +203,7 @@ export async function getArchiveById(id) {
         await purgeExpiredAdminDeletionArchives();
         return null;
     }
-    return enrichArchiveRetentionFields(row);
+    return enrichArchiveRetentionFields(row, { includeSnapshot: true });
 }
 
 export async function restoreArchiveById(id, req) {

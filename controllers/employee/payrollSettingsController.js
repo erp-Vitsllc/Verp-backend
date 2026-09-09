@@ -233,6 +233,7 @@ export function serializePayrollSettings(doc) {
         workingDaysRequiredToEligible: doc?.workingDaysRequiredToEligible ?? null,
         leaveSalaryWorkingDays: doc?.leaveSalaryWorkingDays ?? null,
         workingDaysRequiredForAirTicket: doc?.workingDaysRequiredForAirTicket ?? null,
+        airTicketAmount: doc?.airTicketAmount ?? null,
         authorizedLeaveDeductionDays: doc?.authorizedLeaveDeductionDays ?? null,
         unauthorizedLeaveDeductionDays: doc?.unauthorizedLeaveDeductionDays ?? null,
         allowedSickLeaveDaysPerYear: doc?.allowedSickLeaveDaysPerYear ?? null,
@@ -270,6 +271,10 @@ export function buildPayrollPolicyPayload(body, existing) {
             body?.workingDaysRequiredForAirTicket !== undefined
                 ? toDays(body.workingDaysRequiredForAirTicket)
                 : existing?.workingDaysRequiredForAirTicket ?? null,
+        airTicketAmount:
+            body?.airTicketAmount !== undefined
+                ? toDays(body.airTicketAmount)
+                : existing?.airTicketAmount ?? null,
         authorizedLeaveDeductionDays:
             body?.authorizedLeaveDeductionDays !== undefined
                 ? toDays(body.authorizedLeaveDeductionDays)

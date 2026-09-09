@@ -107,9 +107,9 @@ export function leavePolicyEntitlements(policy) {
         Number(policy?.workingDaysRequiredToEligible) > 0
             ? Number(policy.workingDaysRequiredToEligible)
             : 300;
-    const airTicketRequiredDays =
-        Number(policy?.workingDaysRequiredForAirTicket) > 0
-            ? Number(policy.workingDaysRequiredForAirTicket)
+    const leaveWorkingDays =
+        Number(policy?.leaveSalaryWorkingDays) > 0
+            ? Number(policy.leaveSalaryWorkingDays)
             : requiredPresentDays;
     return {
         annualAllowedDays: DEFAULT_ANNUAL_LEAVE_DAYS,
@@ -117,7 +117,7 @@ export function leavePolicyEntitlements(policy) {
         sickAllowedDays: sickEnabled ? (sickAllowedRaw ?? 0) : null,
         sandwichLeave: Boolean(rules.sandwichLeave),
         requiredPresentDays,
-        airTicketRequiredDays,
+        airTicketRequiredDays: leaveWorkingDays,
         multipliers: policyLeaveMultipliers(policy),
     };
 }

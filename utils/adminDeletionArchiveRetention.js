@@ -38,7 +38,7 @@ export function isArchiveExpired(archive) {
 }
 
 const systemPurgedBy = {
-    name: 'System (60-day retention)',
+    name: 'System (retention elapsed)',
     employeeId: '',
 };
 
@@ -132,7 +132,34 @@ function formatCompanyProfileStatusAtDeletion(snapshot) {
     return status || activation || '';
 }
 
-export function enrichArchiveRetentionFields(archive) {
+function snapshotValueForView(value, depth = 0) {
+    if (depth > 12 || value == null) return value;
+    if (typeof value === 'string') {
+        if (value.startsWith('data:') || value.length > 8000) return '';
+        return value;
+    }
+    if (Array.isArray(value)) return value.map((item) => snapshotValueForView(item, depth + 1));
+    if (typeof value === 'object') {
+        if (value instanceof Date) return value.toISOString();
+        const out = {};
+        for (const [key, nested] of Object.entries(value)) {
+            const lower = String(key || '').toLowerCase();
+            if (lower === 'password' || lower === 'buffer' || lower === 'data') continue;
+            out[key] = snapshotValueForView(nested, depth + 1);
+        }
+        return out;
+    }
+    return value;
+}
+
+/** Snapshot for the Deleted Records detail view (strips file payloads). */
+export function snapshotForRecoveryView(snapshot) {
+    if (!snapshot || typeof snapshot !== 'object') return null;
+    if (snapshot.purged === true) return { purged: true };
+    return snapshotValueForView(snapshot);
+}
+
+export function enrichArchiveRetentionFields(archive, { includeSnapshot = false } = {}) {
     if (!archive) return archive;
     const expiresAt = resolveArchiveExpiresAt(archive);
     const daysRemaining = getArchiveDaysRemaining(expiresAt);
@@ -153,7 +180,7 @@ export function enrichArchiveRetentionFields(archive) {
             : fromDates > 0
               ? fromDates
               : ADMIN_DELETION_ARCHIVE_RETENTION_DAYS;
-    return {
+    const base = {
         ...rest,
         attachmentCount,
         expiresAt,
@@ -164,4 +191,6 @@ export function enrichArchiveRetentionFields(archive) {
         statusLabel: ARCHIVE_STATUS_LABELS[status] || status,
         companyProfileStatus: formatCompanyProfileStatusAtDeletion(snapshot),
     };
+    if (!includeSnapshot) return base;
+    return { ...base, snapshot: snapshotForRecoveryView(snapshot) };
 }
