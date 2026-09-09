@@ -234,6 +234,12 @@ export async function saveSalarySlipMonth(req, res) {
             { upsert: true, new: true, setDefaultsOnInsert: true },
         );
 
+        const { applySalarySlipLeaveTicketPaymentsForEmployee, salaryMonthProcessedForEmployee } =
+            await import('../../utils/applySalarySlipLeaveTicketPayments.js');
+        if (await salaryMonthProcessedForEmployee(code, monthKey)) {
+            await applySalarySlipLeaveTicketPaymentsForEmployee(code, monthKey, { slip: next });
+        }
+
         return res.json({
             message: 'Salary slip updated.',
             slip: savedSlip,

@@ -2116,6 +2116,21 @@ export const createSalaryMonthPayment = async (req, res) => {
             createdBy,
         });
 
+        const { applySalarySlipLeaveTicketPaymentsForEmployee } = await import(
+            '../../utils/applySalarySlipLeaveTicketPayments.js'
+        );
+        for (const id of employeeIds) {
+            try {
+                await applySalarySlipLeaveTicketPaymentsForEmployee(id, monthKey);
+            } catch (error) {
+                console.error(
+                    '[createSalaryMonthPayment] leave ticket',
+                    id,
+                    error?.message || error,
+                );
+            }
+        }
+
         return res.status(201).json({
             message: 'Payment saved.',
             payment: serializeMonthPayment(doc),

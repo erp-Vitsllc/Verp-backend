@@ -688,6 +688,26 @@ export function twelveMonthPeriodEnd(start) {
     return addDays(addCalendarMonths(start, 12), -1);
 }
 
+export function firstDayOfNextMonth(dateKey) {
+    if (!isDateKey(dateKey)) return '';
+    const year = Number(dateKey.slice(0, 4));
+    const month = Number(dateKey.slice(5, 7));
+    if (month === 12) return `${year + 1}-01-01`;
+    return `${year}-${String(month + 1).padStart(2, '0')}-01`;
+}
+
+/** After each 12-month block, show the first day of the following month. */
+export function entitlementDisplayDate(startDate, index) {
+    if (!isDateKey(startDate)) return '';
+    const count = Math.max(0, Math.floor(Number(index) || 0));
+    let cursor = startDate;
+    for (let i = 0; i <= count; i += 1) {
+        cursor = firstDayOfNextMonth(addCalendarMonths(cursor, 12));
+        if (!cursor) return '';
+    }
+    return cursor;
+}
+
 export function listMonthKeysInclusive(from, to) {
     if (!isDateKey(from) || !isDateKey(to) || to < from) return [];
     const keys = [];
@@ -883,14 +903,15 @@ export function calculateAnnualLeaveEntitlement({
     const days = Number(eligibleWorkingDays) || 0;
     const safeDays = days > 0 ? days : 0;
     const cycles = Array.isArray(reducingCycles) ? reducingCycles.filter(Boolean) : [];
-    const completedEntitlements = cycles.length
+    const availableEntitlements = required > 0 ? Math.floor(safeDays / required) : 0;
+    const paidFromCycles = cycles.length
         ? cycles.length
         : Math.max(0, Math.floor(Number(consumedEntitlements) || 0));
-    const remainingDays = required > 0 ? Math.max(0, safeDays - completedEntitlements * required) : safeDays;
-    const availableEntitlements = required > 0 ? Math.floor(safeDays / required) : 0;
+    const completedEntitlements = Math.min(paidFromCycles, availableEntitlements);
+    const remainingDays = required > 0 ? Math.max(0, safeDays - availableEntitlements * required) : safeDays;
     const totalEntitlementDays = required > 0 ? Math.max(required, availableEntitlements * required) : 0;
-    const leftoverTowardNext = required > 0 ? Math.max(0, safeDays - availableEntitlements * required) : safeDays;
-    const rowCount = Math.max(completedEntitlements, availableEntitlements);
+    const leftoverTowardNext = remainingDays;
+    const rowCount = availableEntitlements;
     const start = toSalaryDateKey(calculationStartDate);
     const end = toSalaryDateKey(calculationEndDate);
     const fallbackRate = policyTicketRate({ airTicketAmount: ticketRate }, ticketRate);
@@ -919,6 +940,7 @@ export function calculateAnnualLeaveEntitlement({
             eligibleDays: required,
             salaryPeriodStart,
             salaryPeriodEnd,
+            entitlementDate: start ? entitlementDisplayDate(start, index) : '',
             leaveSalary: withLeave ? roundMoney(salary.leaveSalary) : 0,
             ticketRate: rate,
             ticketAmount: withTicket ? roundMoney(rate) : 0,
@@ -935,6 +957,7 @@ export function calculateAnnualLeaveEntitlement({
         remainingDays: Math.max(0, required - leftoverTowardNext),
         startDate: nextStart || '',
         endDate: end || '',
+        entitlementDate: start ? entitlementDisplayDate(start, availableEntitlements) : '',
         eligibleDays: leftoverTowardNext,
         status: 'In Progress',
     };

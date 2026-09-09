@@ -21,7 +21,11 @@ import {
 } from './workingTimeHelpers.js';
 import { getVegaLogoDataUrl } from './buildSalarySlipPdfHtml.js';
 import { resolveEmployeePayrollPolicy } from './employeeLeavePolicy.js';
+import { loadLeaveTicketEntitlement } from './loadLeaveTicketEntitlement.js';
 import { resolveSalarySlipApprovers } from './resolveSalarySlipApprovers.js';
+import {
+    isSalarySlipCycle,
+} from './salarySlipLeaveTicket.js';
 
 const MONTH_FULL = [
     'January', 'February', 'March', 'April', 'May', 'June',
@@ -512,6 +516,17 @@ function cycleInMonth(dateValue, ym) {
     return monthKeyOf(dateValue) === ym || toYearMonth(dateValue) === ym;
 }
 
+function cycleBelongsToSlipMonth(cycle, ym) {
+    if (isSalarySlipCycle(cycle)) {
+        const inThisMonth = isSalarySlipCycle(cycle, ym);
+        return { leave: inThisMonth, ticket: inThisMonth };
+    }
+    return {
+        leave: cycleInMonth(cycle?.leaveSalaryPaymentDate || cycle?.paymentDate, ym),
+        ticket: cycleInMonth(cycle?.ticketPaymentDate || cycle?.paymentDate, ym),
+    };
+}
+
 function addMonthsYm(ym, count) {
     const match = String(ym || '').match(/^(\d{4})-(\d{2})$/);
     if (!match) return '';
@@ -690,7 +705,9 @@ export async function buildSalarySlipPayload({
                     .select('-offerLetter.data -salaryHistory.attachment.data -salaryHistory.offerLetter.data')
                     .lean(),
             SalaryHistoricalProfile.findOne({ employeeId: idPattern })
-                .select('salarySlip companyMolCode paymentCycles annualLeaveRecords leaveRecords')
+                .select(
+                    'salarySlip companyMolCode paymentCycles annualLeaveRecords leaveRecords verpStartDate contractJoiningDate hiddenSystemLeave',
+                )
                 .lean(),
             resolveEmployeePayrollPolicy(emp),
             loadWorkingTimeDoc(),
@@ -744,6 +761,16 @@ export async function buildSalarySlipPayload({
                 .select('kind amount duration monthStart billMonth status installments loanMongoId fineMongoId utilityBillId utilityType')
                 .lean(),
         ]);
+
+    const leaveTicketState = await loadLeaveTicketEntitlement({
+        employee: emp,
+        profile,
+        salaryDoc,
+        policy,
+    }).catch((error) => {
+        console.error('[buildSalarySlipPayload] leave ticket', error?.message || error);
+        return null;
+    });
 
     const entry = resolvedSalaryEntry(salaryDoc, ym);
     const monthly = monthlySalaryOf(entry);
@@ -836,17 +863,24 @@ export async function buildSalarySlipPayload({
     for (const cycle of profile?.paymentCycles || []) {
         const status = String(cycle.paymentStatus || cycle.status || '').toLowerCase();
         if (status === 'draft' || status === 'cancelled' || status === 'rejected') continue;
-        if (cycleInMonth(cycle.leaveSalaryPaymentDate || cycle.paymentDate, ym)) {
+        const inMonth = cycleBelongsToSlipMonth(cycle, ym);
+        if (inMonth.leave) {
             const cycleLeave = money(cycle.leaveSalaryAmount || cycle.leaveSalary);
             leaveSalaryAmount = money(leaveSalaryAmount + cycleLeave);
             if (daily > 0 && cycleLeave > 0) {
                 leaveSalaryDays += Math.round(cycleLeave / daily);
             }
         }
-        if (cycleInMonth(cycle.ticketPaymentDate || cycle.paymentDate, ym)) {
+        if (inMonth.ticket) {
             ticketAmount = money(ticketAmount + money(cycle.ticketAmount));
         }
     }
+    const leaveFromCycles = leaveSalaryAmount;
+    const ticketFromCycles = ticketAmount;
+    const leaveRemaining = money(leaveTicketState?.leaveRemaining);
+    const ticketRemaining = money(leaveTicketState?.ticketRemaining);
+    const leavePayMax = money(leaveRemaining + leaveFromCycles);
+    const ticketPayMax = money(ticketRemaining + ticketFromCycles);
     upsertEarning(
         earnings,
         'Leave Salary',
@@ -938,8 +972,8 @@ export async function buildSalarySlipPayload({
             basis: 'Yearly',
             amount: yearlyEndOfServiceBenefit(entry?.basic, emp.dateOfJoining, slipYear),
         },
-        { component: 'Leave Salary', basis: 'Yearly', amount: yearlyLeaveSalaryAmount },
-        { component: 'Travel Allowance', basis: 'Yearly', amount: yearlyTravelAmount },
+        { component: 'Leave Salary', basis: 'Yearly', amount: leaveSalaryAmount },
+        { component: 'Travel Allowance', basis: 'Yearly', amount: ticketAmount },
     ];
     const yearlyGrossEarnings = money(yearlyEarnings.reduce((sum, row) => sum + money(row.amount), 0));
 
@@ -1276,18 +1310,28 @@ export async function buildSalarySlipPayload({
             overtimeHoursCount: money(otHours),
             overtimeDaysCount: otDays,
             rewardCount,
-            leaveSalary: benefitFromCycles(
-                profile?.paymentCycles,
-                ['leaveSalaryAmount', 'leaveSalary'],
-                ym,
-                ['leaveSalaryPaymentDate', 'paymentDate'],
-            ),
-            airTicket: benefitFromCycles(
-                profile?.paymentCycles,
-                ['ticketAmount'],
-                ym,
-                ['ticketPaymentDate', 'paymentDate'],
-            ),
+            leaveSalary: {
+                ...benefitFromCycles(
+                    profile?.paymentCycles,
+                    ['leaveSalaryAmount', 'leaveSalary'],
+                    ym,
+                    ['leaveSalaryPaymentDate', 'paymentDate'],
+                ),
+                amount: leaveSalaryAmount,
+                remaining: leaveRemaining,
+                max: leavePayMax,
+            },
+            airTicket: {
+                ...benefitFromCycles(
+                    profile?.paymentCycles,
+                    ['ticketAmount'],
+                    ym,
+                    ['ticketPaymentDate', 'paymentDate'],
+                ),
+                amount: ticketAmount,
+                remaining: ticketRemaining,
+                max: ticketPayMax,
+            },
             leaveMultipliers: {
                 authorized: authTimes,
                 unauthorized: unauthTimes,
@@ -1350,7 +1394,13 @@ function rowNameKey(row) {
     return raw;
 }
 
-function mergeAmountRows(stored, live) {
+function benefitOverrideKey(nameKey) {
+    if (nameKey === 'leave salary') return 'leaveSalary';
+    if (nameKey === 'ticket' || nameKey === 'travel allowance') return 'ticket';
+    return '';
+}
+
+function mergeAmountRows(stored, live, { overrides = {}, caps = {} } = {}) {
     const liveRows = Array.isArray(live) ? live : [];
     const storedRows = Array.isArray(stored) ? stored : [];
     const storedByKey = new Map(storedRows.map((row) => [rowNameKey(row), row]));
@@ -1360,11 +1410,22 @@ function mergeAmountRows(stored, live) {
         used.add(key);
         const storedRow = storedByKey.get(key);
         if (!storedRow) return liveRow;
+        const overrideKey = benefitOverrideKey(key);
+        let amount = money(liveRow.amount);
+        if (overrideKey && overrides[overrideKey]) {
+            amount = money(storedRow.amount);
+        }
+        if (overrideKey === 'leaveSalary' && caps.leave != null) {
+            amount = Math.max(0, Math.min(amount, money(caps.leave)));
+        }
+        if (overrideKey === 'ticket' && caps.ticket != null) {
+            amount = Math.max(0, Math.min(amount, money(caps.ticket)));
+        }
         return {
             ...storedRow,
             ...liveRow,
             basis: liveRow.basis || storedRow.basis,
-            amount: money(liveRow.amount),
+            amount,
         };
     });
     for (const row of storedRows) {
@@ -1397,6 +1458,10 @@ function preferLiveComputed(merged, live) {
     if (!merged) return live;
     if (!live) return merged;
     const overrides = merged.thisMonthOverrides || {};
+    const benefitCaps = {
+        leave: live?.summary?.leaveSalary?.max,
+        ticket: live?.summary?.airTicket?.max,
+    };
     const loanSchedule = mergeStoredThisMonth(
         live.loanSchedule,
         merged.loanSchedule,
@@ -1412,10 +1477,15 @@ function preferLiveComputed(merged, live) {
         merged.utilities,
         () => Boolean(overrides.Utility),
     );
-    return recalcSalarySlip(pushDetailsIntoDeductions({
+    const earnings = mergeAmountRows(merged.earnings, live.earnings, { overrides, caps: benefitCaps });
+    const yearlyEarnings = mergeAmountRows(merged.yearlyEarnings, live.yearlyEarnings, {
+        overrides,
+        caps: benefitCaps,
+    });
+    const next = recalcSalarySlip(pushDetailsIntoDeductions({
         ...merged,
-        earnings: mergeAmountRows(merged.earnings, live.earnings),
-        yearlyEarnings: mergeAmountRows(merged.yearlyEarnings, live.yearlyEarnings),
+        earnings,
+        yearlyEarnings,
         deductions: mergeAmountRows(merged.deductions, live.deductions),
         attendance: { ...(merged.attendance || {}), ...(live.attendance || {}) },
         loanSchedule,
@@ -1427,6 +1497,31 @@ function preferLiveComputed(merged, live) {
         summary: live.summary || merged.summary,
         thisMonthOverrides: overrides,
     }));
+    const leaveAmount = money(
+        (yearlyEarnings.find((row) => rowNameKey(row) === 'leave salary') ||
+            earnings.find((row) => rowNameKey(row) === 'leave salary'))?.amount,
+    );
+    const ticketAmount = money(
+        (yearlyEarnings.find((row) => rowNameKey(row) === 'travel allowance') ||
+            yearlyEarnings.find((row) => rowNameKey(row) === 'ticket') ||
+            earnings.find((row) => rowNameKey(row) === 'ticket'))?.amount,
+    );
+    next.summary = {
+        ...(next.summary || {}),
+        leaveSalary: {
+            ...(live.summary?.leaveSalary || {}),
+            amount: leaveAmount,
+            remaining: money(live.summary?.leaveSalary?.remaining),
+            max: money(live.summary?.leaveSalary?.max),
+        },
+        airTicket: {
+            ...(live.summary?.airTicket || {}),
+            amount: ticketAmount,
+            remaining: money(live.summary?.airTicket?.remaining),
+            max: money(live.summary?.airTicket?.max),
+        },
+    };
+    return next;
 }
 
 function deductionKey(name) {

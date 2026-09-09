@@ -460,8 +460,10 @@ describe('salary historical calculations', () => {
         assert.equal(entitlement.completedEntitlements, 1);
         assert.equal(entitlement.leaveSalaryCount, 1);
         assert.equal(entitlement.ticketCount, 0);
-        assert.equal(entitlement.remainingDays, 303);
-        assert.equal(entitlement.eligibleWorkingDays, 303);
+        assert.equal(entitlement.remainingDays, 3);
+        assert.equal(entitlement.eligibleWorkingDays, 3);
+        assert.equal(entitlement.availableEntitlements, 2);
+        assert.equal(entitlement.entitlements.length, 2);
     });
 
     it('does not consume entitlement when reduceHistoricalWorkingDays is false', () => {
@@ -809,13 +811,14 @@ describe('salary historical calculations', () => {
 });
 
 describe('annual leave salary and ticket entitlements', () => {
-    it('does not auto-complete 300-day blocks without a reducing payment cycle', () => {
+    it('opens a leave salary row and reduces policy days when counted days reach the salary-policy leave count', () => {
         const cases = [
-            { days: 299, remaining: 299 },
-            { days: 300, remaining: 300 },
-            { days: 600, remaining: 600 },
-            { days: 603, remaining: 603 },
-            { days: 1000, remaining: 1000 },
+            { days: 299, remaining: 299, rows: 0 },
+            { days: 300, remaining: 0, rows: 1 },
+            { days: 578, remaining: 278, rows: 1 },
+            { days: 600, remaining: 0, rows: 2 },
+            { days: 603, remaining: 3, rows: 2 },
+            { days: 1000, remaining: 100, rows: 3 },
         ];
         for (const row of cases) {
             const result = calculateAnnualLeaveEntitlement({
@@ -827,19 +830,12 @@ describe('annual leave salary and ticket entitlements', () => {
             assert.equal(result.ticketCount, 0);
             assert.equal(result.remainingDays, row.remaining, `${row.days} days remaining`);
             assert.equal(result.eligibleWorkingDays, row.remaining);
-            assert.equal(result.entitlements.length, Math.floor(row.days / 300));
-            assert.equal(
-                result.nextEntitlement.accumulatedDays,
-                row.days - Math.floor(row.days / 300) * 300,
-            );
-            assert.equal(
-                result.availableEntitlements,
-                Math.floor(row.days / 300),
-                `${row.days} days available`,
-            );
+            assert.equal(result.entitlements.length, row.rows, `${row.days} leave salary rows`);
+            assert.equal(result.nextEntitlement.accumulatedDays, row.remaining);
+            assert.equal(result.availableEntitlements, row.rows, `${row.days} days available`);
             assert.equal(
                 result.totalEntitlementDays,
-                Math.max(300, Math.floor(row.days / 300) * 300),
+                Math.max(300, row.rows * 300),
                 `${row.days} days total entitlement`,
             );
         }
@@ -865,14 +861,71 @@ describe('annual leave salary and ticket entitlements', () => {
         assert.equal(result.entitlements[0].status, 'Calculated');
         assert.equal(result.entitlements[1].status, 'Calculated');
         assert.equal(result.nextEntitlement.accumulatedDays, 3);
+        assert.equal(result.entitlements[0].leaveSalary, 5000);
+        assert.equal(result.entitlements[1].leaveSalary, 5000);
+        assert.equal(result.totalLeaveSalary, 10000);
+        assert.equal(result.entitlements[0].entitlementDate, '2025-06-01');
+        assert.equal(result.entitlements[1].entitlementDate, '2026-07-01');
     });
 
-    it('deducts 300 days only for each reducing payment cycle', () => {
+    it('shows the month after each 12-month block as the entitlement date', () => {
+        const result = calculateAnnualLeaveEntitlement({
+            calculationStartDate: '2024-01-15',
+            eligibleWorkingDays: 900,
+            requiredDaysPerEntitlement: 300,
+        });
+        assert.equal(result.entitlements[0].entitlementDate, '2025-02-01');
+        assert.equal(result.entitlements[1].entitlementDate, '2026-03-01');
+        assert.equal(result.entitlements[2].entitlementDate, '2027-04-01');
+        assert.equal(result.nextEntitlement.entitlementDate, '2028-05-01');
+    });
+
+    it('puts leave salary and ticket on the reserved row when counted days reach policy leave days', () => {
+        const result = calculateAnnualLeaveEntitlement({
+            calculationStartDate: '2025-01-01',
+            eligibleWorkingDays: 300,
+            requiredDaysPerEntitlement: 300,
+            ticketRate: 1500,
+            salaryHistory: [{ effectiveFrom: '2025-01-01', basicSalary: 1200 }],
+        });
+        assert.equal(result.availableEntitlements, 1);
+        assert.equal(result.entitlements.length, 1);
+        assert.equal(result.remainingDays, 0);
+        assert.equal(result.entitlements[0].leaveSalary, 1200);
+        assert.equal(result.entitlements[0].ticketAmount, 1500);
+        assert.equal(result.totalLeaveSalary, 1200);
+        assert.equal(result.totalTicketAmount, 1500);
+        assert.equal(result.completedEntitlements, 0);
+    });
+
+    it('recalculates reserved rows when leave deductions reduce counted days', () => {
+        const before = calculateAnnualLeaveEntitlement({
+            eligibleWorkingDays: 578,
+            requiredDaysPerEntitlement: 300,
+        });
+        const afterHolidays = calculateAnnualLeaveEntitlement({
+            eligibleWorkingDays: 576,
+            requiredDaysPerEntitlement: 300,
+        });
+        const belowThreshold = calculateAnnualLeaveEntitlement({
+            eligibleWorkingDays: 299,
+            requiredDaysPerEntitlement: 300,
+        });
+        assert.equal(before.entitlements.length, 1);
+        assert.equal(before.remainingDays, 278);
+        assert.equal(afterHolidays.entitlements.length, 1);
+        assert.equal(afterHolidays.remainingDays, 276);
+        assert.equal(belowThreshold.entitlements.length, 0);
+        assert.equal(belowThreshold.remainingDays, 299);
+    });
+
+    it('keeps remaining days as leftover after each salary-policy leave block', () => {
         const cases = [
-            { days: 603, consumed: 0, count: 0, remaining: 603 },
-            { days: 603, consumed: 1, count: 1, remaining: 303 },
+            { days: 603, consumed: 0, count: 0, remaining: 3 },
+            { days: 603, consumed: 1, count: 1, remaining: 3 },
             { days: 603, consumed: 2, count: 2, remaining: 3 },
             { days: 300, consumed: 1, count: 1, remaining: 0 },
+            { days: 578, consumed: 2, count: 1, remaining: 278 },
             { days: 1000, consumed: 3, count: 3, remaining: 100 },
         ];
         for (const row of cases) {
@@ -886,13 +939,10 @@ describe('annual leave salary and ticket entitlements', () => {
             assert.equal(result.ticketCount, row.count);
             assert.equal(result.remainingDays, row.remaining, `${row.days} / ${row.consumed} remaining`);
             assert.equal(result.eligibleWorkingDays, row.remaining);
-            assert.equal(result.entitlements.length, Math.max(row.count, Math.floor(row.days / 300)));
+            assert.equal(result.entitlements.length, Math.floor(row.days / 300));
             assert.equal(result.availableEntitlements, Math.floor(row.days / 300));
             assert.equal(result.totalEntitlementDays, Math.max(300, Math.floor(row.days / 300) * 300));
-            assert.equal(
-                result.nextEntitlement.accumulatedDays,
-                row.days - Math.floor(row.days / 300) * 300,
-            );
+            assert.equal(result.nextEntitlement.accumulatedDays, row.remaining);
         }
     });
 
