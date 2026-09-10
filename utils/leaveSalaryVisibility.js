@@ -60,6 +60,24 @@ export function daysUntilProcessingStart(todayKey, processingStart) {
     return daysUntilDateKey(todayKey, firstOfProcessingMonth(processingStart));
 }
 
+/** Live attendance is taken from the 1st of the salary processing month. */
+export function isAttendanceDateOpen(dateKey, processingStart) {
+    const start = firstOfProcessingMonth(processingStart);
+    if (!isDateKey(dateKey) || !isDateKey(start)) return false;
+    return dateKey >= start;
+}
+
+/** Map of enrolled employee mongo id → first live attendance date (yyyy-MM-01). */
+export async function loadAttendanceOpenStartByMongoId(employees) {
+    const visibility = await loadEnrolledLeaveVisibilityByMongoId(employees);
+    const starts = new Map();
+    for (const [mongoId, start] of visibility.entries()) {
+        const openFrom = firstOfProcessingMonth(start);
+        if (openFrom) starts.set(mongoId, openFrom);
+    }
+    return starts;
+}
+
 export function formatProcessingMonthLabel(monthKey) {
     const key = processingMonthFromStart(monthKey);
     if (!YEAR_MONTH.test(key)) return '';

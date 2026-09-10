@@ -10,6 +10,7 @@ import {
 } from '../../utils/finePayableAmount.js';
 import { createOpenZohoVendorCredit } from '../zoho/postZohoVendorCredit.js';
 import { mapZohoErrorStatus } from '../zoho/zohoVendorPaymentUtils.js';
+import { sendPaymentNotificationEmail } from '../../utils/sendCombinedPaymentEmail.js';
 
 async function findFine(id) {
     const raw = String(id || '').trim();
@@ -105,9 +106,16 @@ export const postFineVendorCredit = async (req, res) => {
                       data: String(body.attachment.data || '').trim(),
                       name: String(body.attachment.name || '').trim(),
                       mimeType: String(body.attachment.mimeType || '').trim(),
+                      publicId: String(body.attachment.publicId || '').trim(),
+                      url: String(body.attachment.url || '').trim(),
                   }
                 : null;
-        const hasAttachment = Boolean(incomingAttachment?.data || incomingAttachment?.name);
+        const hasAttachment = Boolean(
+            incomingAttachment?.data ||
+                incomingAttachment?.publicId ||
+                incomingAttachment?.url ||
+                incomingAttachment?.name,
+        );
 
         const payment = new Payment({
             paymentId: `PAY-${String(paymentCount + 1).padStart(6, '0')}`,
@@ -164,6 +172,10 @@ export const postFineVendorCredit = async (req, res) => {
             fine.fineStatus = 'Paid';
         }
         await fine.save();
+
+        sendPaymentNotificationEmail(payment, 'Completed').catch((err) =>
+            console.error('[FineVendorCredit] Failed to send settlement email:', err),
+        );
 
         const attachWarning =
             result.attachment?.ok === false

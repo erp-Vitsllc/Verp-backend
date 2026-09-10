@@ -3,6 +3,11 @@ import Loan from "../../models/Loan.js";
 import Reward from "../../models/Reward.js";
 import Fine from "../../models/Fine.js";
 import { resolveEmployeeFinePayableAmount } from "../../utils/finePayableAmount.js";
+import {
+    fineIsVisibleToEmployee,
+    loanIsVisibleToEmployee,
+    rewardIsVisibleToEmployee,
+} from "../../utils/employeeFinancialVisibility.js";
 
 function roundMoney(value) {
     return Math.round((Number(value) || 0) * 100) / 100;
@@ -23,34 +28,12 @@ const MONTH_NAMES = [
     "December",
 ];
 
-/** Dashboard lists: Approved or Paid (and equivalent settled statuses) only. */
-function isApprovedOrPaidStatus(raw) {
-    const s = String(raw || "").trim().toLowerCase();
-    if (!s) return false;
-    if (s === "draft" || s === "pending") return false;
-    if (s.includes("reject") || s.includes("cancel")) return false;
-    if (s.includes("pending hr") || s.includes("pending accounts") || s.includes("pending authorization")) {
-        return false;
-    }
-    return (
-        s === "approved" ||
-        s.startsWith("approved") ||
-        s === "paid" ||
-        s.includes("(paid)") ||
-        s === "active" ||
-        s === "completed" ||
-        s === "recovered" ||
-        s === "pending payment to employee"
-    );
-}
-
 function displayLoanStatus(item) {
     const raw = String(item?.approvalStatus || item?.status || "").trim();
     if (!raw) return "—";
     const amount = Number(item.amount) || 0;
     const paid = Number(item.paidAmount) || 0;
     if (raw === "Paid" || (amount > 0 && paid >= amount - 0.01)) return "Recovered";
-    if (raw === "Pending Payment to Employee") return "Pending payment";
     return raw;
 }
 
@@ -120,8 +103,8 @@ function mapLoanItem(item) {
 function displayRewardStatus(item) {
     const raw = String(item?.rewardStatus || item?.approvalStatus || "").trim();
     if (!raw || raw === "Draft") return "";
+    if (raw.toLowerCase().includes("pending")) return "";
     if (
-        raw === "Pending Accounts" ||
         raw === "Approved (Not Paid)" ||
         raw === "Approved (Paid)" ||
         raw === "Paid" ||
@@ -251,17 +234,17 @@ export const getMyHrDashboardCards = async (req, res) => {
         return res.status(200).json({
             employeeId,
             loans: (loans || [])
-                .filter((item) => item.type === "Loan" && isApprovedOrPaidStatus(item.approvalStatus || item.status))
+                .filter((item) => item.type === "Loan" && loanIsVisibleToEmployee(item))
                 .map(mapLoanItem),
             advances: (loans || [])
-                .filter((item) => item.type === "Advance" && isApprovedOrPaidStatus(item.approvalStatus || item.status))
+                .filter((item) => item.type === "Advance" && loanIsVisibleToEmployee(item))
                 .map(mapLoanItem),
             rewards: (rewards || [])
-                .filter((item) => isApprovedOrPaidStatus(item.rewardStatus || item.approvalStatus))
+                .filter((item) => rewardIsVisibleToEmployee(item))
                 .map(mapRewardItem)
                 .filter(Boolean),
             fines: (fines || [])
-                .filter((item) => isApprovedOrPaidStatus(item.fineStatus))
+                .filter((item) => fineIsVisibleToEmployee(item, employeeId))
                 .map((item) => mapFineItem(item, employeeId))
                 .filter(Boolean),
         });

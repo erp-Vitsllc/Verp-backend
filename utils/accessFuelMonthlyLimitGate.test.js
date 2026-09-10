@@ -28,6 +28,29 @@ describe('Access Fuel monthly limit window', () => {
         assert.equal(isAccessFuelMonthlyLimitWindowOpen('2026-10', dubaiDate('2026-10-01T08:00:00.000Z')), true);
     });
 
+    it('disables previous months', () => {
+        assert.equal(isAccessFuelMonthlyLimitWindowOpen('2026-08', dubaiDate('2026-09-08T08:00:00.000Z')), false);
+        assert.equal(isAccessFuelMonthlyLimitWindowOpen('2026-07', dubaiDate('2026-09-26T08:00:00.000Z')), false);
+        assert.equal(
+            accessFuelMonthlyLimitGate({
+                monthKey: '2026-08',
+                assignedCount: 13,
+                pendingLimitCount: 10,
+                now: dubaiDate('2026-09-08T08:00:00.000Z'),
+            }).canCreate,
+            false,
+        );
+        assert.match(
+            accessFuelMonthlyLimitGate({
+                monthKey: '2026-08',
+                assignedCount: 13,
+                pendingLimitCount: 10,
+                now: dubaiDate('2026-09-08T08:00:00.000Z'),
+            }).reason,
+            /current or future/i,
+        );
+    });
+
     it('enables while assigned vehicles still need a monthly limit', () => {
         const now = dubaiDate('2026-09-08T08:00:00.000Z');
         assert.equal(
@@ -86,12 +109,14 @@ describe('Access Fuel monthly limit window', () => {
 });
 
 describe('Access Fuel monthly close window', () => {
-    it('opens only on the 2nd of the next month', () => {
+    it('opens from the 2nd of the next month onward', () => {
         assert.equal(isAccessFuelMonthlyCloseWindowOpen('2026-09', dubaiDate('2026-09-08T08:00:00.000Z')), false);
         assert.equal(isAccessFuelMonthlyCloseWindowOpen('2026-09', dubaiDate('2026-10-01T08:00:00.000Z')), false);
         assert.equal(isAccessFuelMonthlyCloseWindowOpen('2026-09', dubaiDate('2026-10-02T08:00:00.000Z')), true);
-        assert.equal(isAccessFuelMonthlyCloseWindowOpen('2026-09', dubaiDate('2026-10-03T08:00:00.000Z')), false);
+        assert.equal(isAccessFuelMonthlyCloseWindowOpen('2026-09', dubaiDate('2026-10-03T08:00:00.000Z')), true);
+        assert.equal(isAccessFuelMonthlyCloseWindowOpen('2026-08', dubaiDate('2026-09-09T08:00:00.000Z')), true);
         assert.equal(isAccessFuelMonthlyCloseWindowOpen('2026-12', dubaiDate('2027-01-02T08:00:00.000Z')), true);
+        assert.equal(isAccessFuelMonthlyCloseWindowOpen('2026-12', dubaiDate('2027-02-10T08:00:00.000Z')), true);
     });
 
     it('needs open fuel-added vehicles on that day', () => {
@@ -111,6 +136,14 @@ describe('Access Fuel monthly close window', () => {
                 now: dubaiDate('2026-09-08T08:00:00.000Z'),
             }).canClose,
             false,
+        );
+        assert.equal(
+            accessFuelMonthlyCloseGate({
+                monthKey: '2026-08',
+                openAddedCount: 1,
+                now: dubaiDate('2026-09-09T08:00:00.000Z'),
+            }).canClose,
+            true,
         );
     });
 });

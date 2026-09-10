@@ -96,6 +96,24 @@ function serializeLateRules(value) {
     }));
 }
 
+function lateRuleHasValue(row) {
+    if (!row) return false;
+    return (
+        (row.minutes != null && row.minutes !== '') ||
+        (row.events != null && row.events !== '') ||
+        Boolean(row.deduct)
+    );
+}
+
+function sharedLateRulesFrom(primary, secondary, { serialize = false } = {}) {
+    const normalize = serialize
+        ? (value) => serializeLateRules(value).slice(0, 1)
+        : (value) => toLateRules(value, { single: true });
+    const first = normalize(primary);
+    if (lateRuleHasValue(first[0])) return first;
+    return normalize(secondary);
+}
+
 function toExtraLateRules(value) {
     const rows = Array.isArray(value) ? value : [];
     return rows.slice(0, 20).map((row) => {
@@ -225,6 +243,7 @@ export function serializePayrollSettings(doc) {
     rules.pendingSickLeaveApproval = Boolean(
         rules.pendingSickLeaveApproval || rules.allSickLeaveApproval,
     );
+    const sharedLate = sharedLateRulesFrom(doc?.lateInRules, doc?.lateOutRules, { serialize: true });
     return {
         salaryProcessingDate: toMonthDay(doc?.salaryProcessingDate) || '1',
         salaryProcessStartMonth: doc?.salaryProcessStartMonth || '',
@@ -237,8 +256,8 @@ export function serializePayrollSettings(doc) {
         authorizedLeaveDeductionDays: doc?.authorizedLeaveDeductionDays ?? null,
         unauthorizedLeaveDeductionDays: doc?.unauthorizedLeaveDeductionDays ?? null,
         allowedSickLeaveDaysPerYear: doc?.allowedSickLeaveDaysPerYear ?? null,
-        lateInRules: serializeLateRules(doc?.lateInRules).slice(0, 1),
-        lateOutRules: serializeLateRules(doc?.lateOutRules).slice(0, 1),
+        lateInRules: sharedLate,
+        lateOutRules: sharedLate,
         extraLateRules: serializeExtraLateRules(doc?.extraLateRules),
         salaryProcessReminders: serializeReminders(doc?.salaryProcessReminders),
         attachment: serializePolicyAttachment(doc?.attachment),
@@ -253,6 +272,11 @@ export function buildPayrollPolicyPayload(body, existing) {
             processingRules[key] = Boolean(incoming[key]);
         }
     });
+
+    const sharedLateRules =
+        body?.lateInRules !== undefined || body?.lateOutRules !== undefined
+            ? sharedLateRulesFrom(body?.lateInRules, body?.lateOutRules)
+            : sharedLateRulesFrom(existing?.lateInRules, existing?.lateOutRules);
 
     return {
         salaryProcessingDate: toMonthDay(body?.salaryProcessingDate) || '1',
@@ -287,14 +311,8 @@ export function buildPayrollPolicyPayload(body, existing) {
             body?.allowedSickLeaveDaysPerYear !== undefined
                 ? toDays(body.allowedSickLeaveDaysPerYear)
                 : existing?.allowedSickLeaveDaysPerYear ?? null,
-        lateInRules:
-            body?.lateInRules !== undefined
-                ? toLateRules(body.lateInRules, { single: true })
-                : toLateRules(existing?.lateInRules, { single: true }),
-        lateOutRules:
-            body?.lateOutRules !== undefined
-                ? toLateRules(body.lateOutRules, { single: true })
-                : toLateRules(existing?.lateOutRules, { single: true }),
+        lateInRules: sharedLateRules,
+        lateOutRules: sharedLateRules,
         extraLateRules:
             body?.extraLateRules !== undefined
                 ? toExtraLateRules(body.extraLateRules)
@@ -449,5 +467,56 @@ export async function saveGroupPayrollSettings(req, res) {
     } catch (error) {
         console.error('[saveGroupPayrollSettings]', error);
         return res.status(500).json({ message: error.message || 'Failed to save group salary policy.' });
+    }
+}
+
+export async function copyMainPayrollSettingsToGroup(req, res) {
+    try {
+        const locationKey = normalizeStaffTypeKey(req.params?.locationKey);
+        const groupKey = groupPayrollSettingsKey(locationKey);
+        if (!groupKey) {
+            return res.status(400).json({ message: 'Work location is required.' });
+        }
+
+        const main = await PayrollSettings.findOne({ key: 'default' }).lean();
+        if (!isMainSalaryPolicyConfigured(main)) {
+            const err = new Error(MAIN_POLICY_REQUIRED_MESSAGE);
+            err.statusCode = 400;
+            err.code = 'MAIN_POLICY_REQUIRED';
+            throw err;
+        }
+
+        const serialized = serializePayrollSettings(main);
+        const payload = {
+            key: groupKey,
+            ...buildPayrollPolicyPayload(serialized, null),
+            attachment: serializePolicyAttachment(main.attachment) || {
+                name: '',
+                mimeType: '',
+                publicId: '',
+                url: '',
+            },
+            updatedBy: req.user?.id || null,
+        };
+
+        const doc = await PayrollSettings.findOneAndUpdate(
+            { key: groupKey },
+            { $set: payload },
+            { upsert: true, new: true, setDefaultsOnInsert: true },
+        );
+
+        return res.status(200).json({
+            message: 'Work location salary policy updated from main.',
+            source: 'group',
+            locationKey,
+            ...serializePayrollSettings(doc),
+        });
+    } catch (error) {
+        console.error('[copyMainPayrollSettingsToGroup]', error);
+        const status = error.statusCode || 500;
+        return res.status(status).json({
+            message: error.message || 'Failed to update group salary policy from main.',
+            code: error.code,
+        });
     }
 }

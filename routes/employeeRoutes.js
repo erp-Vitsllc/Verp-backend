@@ -165,7 +165,7 @@ router.get("/request-loan", (req, res) => {
 import { getDashboardStats } from "../controllers/stats/getDashboardStats.js";
 import { getPayrollDashboard } from "../controllers/employee/getPayrollDashboard.js";
 import { getSalaryRegister, deleteSalaryRegisterMonth, restoreSalaryRegisterMonths, sendPayrollBlockerReminders, createSalaryMonthPayment } from "../controllers/employee/getSalaryRegister.js";
-import { getPayrollSettings, savePayrollSettings, getGroupPayrollSettings, saveGroupPayrollSettings } from "../controllers/employee/payrollSettingsController.js";
+import { getPayrollSettings, savePayrollSettings, getGroupPayrollSettings, saveGroupPayrollSettings, copyMainPayrollSettingsToGroup } from "../controllers/employee/payrollSettingsController.js";
 import {
     getSalaryEnrollOptions,
     createSalaryEnrollment,
@@ -555,6 +555,16 @@ router.put(
         ['hrm_employees_view_salary', 'view'],
     ]),
     saveGroupPayrollSettings,
+);
+router.post(
+    "/payroll-settings/group/:locationKey/from-main",
+    checkAnyModulePermission([
+        ['hrm_salary', 'edit'],
+        ['hrm_salary', 'view'],
+        ['hrm_employees_view_salary', 'edit'],
+        ['hrm_employees_view_salary', 'view'],
+    ]),
+    copyMainPayrollSettingsToGroup,
 );
 
 // Dashboard Stats - requires view permission (General HR view)

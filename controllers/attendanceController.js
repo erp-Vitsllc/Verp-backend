@@ -46,7 +46,9 @@ import {
 } from '../utils/leaveSalaryVisibility.js';
 import {
     checkEmployeeLeaveAllowance,
+    leavePolicyEntitlements,
     loadEmployeeLeaveBalances,
+    resolveEmployeePayrollPolicy,
     resolveSickOverflowStatuses,
 } from '../utils/employeeLeavePolicy.js';
 import {
@@ -57,6 +59,7 @@ import {
     mergeHistoricalCalendarRecords,
     overlayHistoricalLeave,
 } from '../utils/historicalLeaveAttendanceOverlay.js';
+import { loadEmployeeSalaryWorkingDays } from '../utils/loadLeaveTicketEntitlement.js';
 
 const LEAVE_REQUEST_STATUS_KEYS = new Set([
     'unauthorized_leave',
@@ -223,6 +226,8 @@ function salaryLockPayload(gate) {
 async function loadSalaryAttendanceGate(employee, { monthKey, dateKey } = {}) {
     const enrollRequired = {
         enrolled: false,
+        liveOpen: false,
+        requestedOpen: false,
         attendanceLocked: true,
         lockMessage: SALARY_ENROLL_REQUIRED,
         processingStartMonth: '',
@@ -252,12 +257,13 @@ async function loadSalaryAttendanceGate(employee, { monthKey, dateKey } = {}) {
         processingMonthFromStart(monthKey) || processingMonthFromStart(dateKey) || todayMonth;
     const liveOpen = isSalaryMonthOpen(todayMonth, processingStartMonth);
     const requestedOpen = isSalaryMonthOpen(requestedMonth, processingStartMonth);
-    const notOpenYet = !liveOpen || !requestedOpen;
     const daysRemaining = liveOpen ? 0 : daysUntilProcessingStart(todayKey, processingStartDate);
     return {
         enrolled: true,
-        attendanceLocked: notOpenYet,
-        lockMessage: notOpenYet ? salaryOpensFromMessage(processingStartDate, todayKey) : '',
+        liveOpen,
+        requestedOpen,
+        attendanceLocked: !liveOpen,
+        lockMessage: !liveOpen ? salaryOpensFromMessage(processingStartDate, todayKey) : '',
         processingStartMonth,
         processingStartDate,
         daysRemaining,
@@ -266,8 +272,8 @@ async function loadSalaryAttendanceGate(employee, { monthKey, dateKey } = {}) {
 
 async function rejectIfNotSalaryEnrolled(res, employee, opts = {}) {
     const gate = await loadSalaryAttendanceGate(employee, opts);
-    if (!gate.attendanceLocked) return false;
-    res.status(403).json(salaryLockPayload(gate));
+    if (gate.enrolled && gate.liveOpen && gate.requestedOpen) return false;
+    res.status(403).json(salaryLockPayload({ ...gate, attendanceLocked: true }));
     return true;
 }
 
@@ -953,7 +959,13 @@ export async function getMyAttendanceMonth(req, res) {
 
         const requestedMonth = `${year}-${String(monthNum).padStart(2, '0')}`;
         const gate = await loadSalaryAttendanceGate(employee, { monthKey: requestedMonth });
-        if (gate.attendanceLocked && !gate.enrolled) {
+        const employeePayload = {
+            id: employeeMongoId,
+            employeeId: employee.employeeId,
+            name: [employee.firstName, employee.lastName].filter(Boolean).join(' ').trim(),
+            staffType,
+        };
+        if (gate.attendanceLocked) {
             return res.status(200).json({
                 ...salaryLockPayload(gate),
                 month: requestedMonth,
@@ -961,12 +973,26 @@ export async function getMyAttendanceMonth(req, res) {
                 to,
                 today: todayKey,
                 isSelf,
-                employee: {
-                    id: employeeMongoId,
-                    employeeId: employee.employeeId,
-                    name: [employee.firstName, employee.lastName].filter(Boolean).join(' ').trim(),
-                    staffType,
-                },
+                employee: employeePayload,
+                offWeekdays: [],
+                workingTime: { site: {}, office: {}, extra: {} },
+                records: [],
+                todayRecord: null,
+            });
+        }
+        if (!gate.requestedOpen) {
+            return res.status(200).json({
+                message: 'Attendance fetched successfully',
+                salaryEnrolled: true,
+                attendanceLocked: false,
+                processingStartMonth: gate.processingStartMonth || '',
+                processingStartDate: gate.processingStartDate || '',
+                month: requestedMonth,
+                from,
+                to,
+                today: todayKey,
+                isSelf,
+                employee: employeePayload,
                 offWeekdays: [],
                 workingTime: { site: {}, office: {}, extra: {} },
                 records: [],
@@ -975,12 +1001,10 @@ export async function getMyAttendanceMonth(req, res) {
         }
 
         const [records, workingTime, historicalProfile] = await Promise.all([
-            gate.attendanceLocked
-                ? Promise.resolve([])
-                : Attendance.find({
-                      employeeMongoId,
-                      date: { $gte: from, $lte: to },
-                  }).lean(),
+            Attendance.find({
+                employeeMongoId,
+                date: { $gte: from, $lte: to },
+            }).lean(),
             loadWorkingTimeDoc(),
             loadHistoricalLeaveProfile(employee.employeeId),
         ]);
@@ -1006,12 +1030,7 @@ export async function getMyAttendanceMonth(req, res) {
             to,
             today: todayKey,
             isSelf,
-            employee: {
-                id: employeeMongoId,
-                employeeId: employee.employeeId,
-                name: [employee.firstName, employee.lastName].filter(Boolean).join(' ').trim(),
-                staffType,
-            },
+            employee: employeePayload,
             offWeekdays,
             workingTime: {
                 site: workingTime.site,
@@ -1105,6 +1124,27 @@ function countScheduleDays(from, to, holidaySet, offWeekdays) {
     return { workingDays, holidayCount, weeklyOffCount };
 }
 
+function serializeLeavePolicy(entitlements) {
+    if (!entitlements) return null;
+    return {
+        annualAllowedDays: entitlements.annualAllowedDays,
+        sickEnabled: entitlements.sickEnabled,
+        sickAllowedDays: entitlements.sickAllowedDays,
+        sandwichLeave: entitlements.sandwichLeave,
+        authorizedDeductionDays: entitlements.multipliers?.authorized,
+        unauthorizedDeductionDays: entitlements.multipliers?.unauthorized,
+    };
+}
+
+async function leavePolicyForEmployee(employee) {
+    try {
+        const policy = await resolveEmployeePayrollPolicy(employee);
+        return serializeLeavePolicy(leavePolicyEntitlements(policy));
+    } catch {
+        return null;
+    }
+}
+
 /**
  * GET /api/Attendance/me/year-summary
  * Logged-in employee's attendance counts for a year, or a month when month=yyyy-MM.
@@ -1150,7 +1190,11 @@ export async function getMyAttendanceYearSummary(req, res) {
                 ? yearEndMonth
                 : todayMonth;
         const gate = await loadSalaryAttendanceGate(self, { monthKey: summaryMonth });
-        if (gate.attendanceLocked && !gate.enrolled) {
+        const [enrollWorking, leavePolicy] = await Promise.all([
+            loadEmployeeSalaryWorkingDays(self),
+            leavePolicyForEmployee(self),
+        ]);
+        if (gate.attendanceLocked) {
             const counts = emptyYearCounts();
             counts.authorized_leave_paid = 0;
             counts.authorized_leave_unpaid = 0;
@@ -1169,11 +1213,45 @@ export async function getMyAttendanceYearSummary(req, res) {
                 absentAuth: 0,
                 absentSick: 0,
                 absentUnauthorized: 0,
-                workingDays: 0,
+                workingDays: enrollWorking.workingDays,
                 holidayCount: 0,
                 weeklyOffCount: 0,
                 lastAnnualLeaveDate: '',
                 entries: [],
+                leaveBalances: {},
+                leavePolicy,
+            });
+        }
+        if (!gate.requestedOpen) {
+            const counts = emptyYearCounts();
+            counts.authorized_leave_paid = 0;
+            counts.authorized_leave_unpaid = 0;
+            counts.not_marked = 0;
+            counts.absent = 0;
+            return res.status(200).json({
+                message: 'Year summary fetched successfully',
+                salaryEnrolled: true,
+                attendanceLocked: false,
+                processingStartMonth: gate.processingStartMonth || '',
+                processingStartDate: gate.processingStartDate || '',
+                year,
+                month: monthNum ? `${year}-${String(monthNum).padStart(2, '0')}` : '',
+                from,
+                to,
+                counts,
+                leaveTotal: 0,
+                presentDays: 0,
+                absentDays: 0,
+                absentAuth: 0,
+                absentSick: 0,
+                absentUnauthorized: 0,
+                workingDays: enrollWorking.workingDays,
+                holidayCount: 0,
+                weeklyOffCount: 0,
+                lastAnnualLeaveDate: '',
+                entries: [],
+                leaveBalances: {},
+                leavePolicy,
             });
         }
 
@@ -1182,50 +1260,48 @@ export async function getMyAttendanceYearSummary(req, res) {
         counts.authorized_leave_unpaid = 0;
         counts.not_marked = 0;
         counts.absent = 0;
-        const attendanceQueryEnabled = !gate.attendanceLocked;
+        const attendanceFrom =
+            gate.processingStartDate && from < gate.processingStartDate
+                ? gate.processingStartDate
+                : from;
 
         const [grouped, holidayRows, employee, workingTime, lastAnnualLeave, detailRows, historicalProfile] =
             await Promise.all([
-            attendanceQueryEnabled
-                ? Attendance.aggregate([
-                      {
-                          $match: {
-                              employeeMongoId: String(self._id),
-                              date: { $gte: from, $lte: to },
-                          },
-                      },
-                      {
-                          $group: {
-                              _id: { statusKey: '$statusKey', leavePayType: '$leavePayType' },
-                              count: { $sum: 1 },
-                          },
-                      },
-                  ])
-                : Promise.resolve([]),
-            Holiday.find({ date: { $gte: from, $lte: to } }).select('date appliesTo').lean(),
+            Attendance.aggregate([
+                {
+                    $match: {
+                        employeeMongoId: String(self._id),
+                        date: { $gte: attendanceFrom, $lte: to },
+                    },
+                },
+                {
+                    $group: {
+                        _id: { statusKey: '$statusKey', leavePayType: '$leavePayType' },
+                        count: { $sum: 1 },
+                    },
+                },
+            ]),
+            Holiday.find({ date: { $gte: attendanceFrom, $lte: to } }).select('date appliesTo').lean(),
             EmployeeBasic.findById(self._id).select('staffType').lean(),
             loadWorkingTimeDoc(),
-            attendanceQueryEnabled
-                ? Attendance.findOne({
-                      employeeMongoId: String(self._id),
-                      statusKey: 'on_leave',
-                  })
-                      .sort({ date: -1 })
-                      .select('date')
-                      .lean()
-                : Promise.resolve(null),
-            attendanceQueryEnabled
-                ? Attendance.find({
-                      employeeMongoId: String(self._id),
-                      date: { $gte: from, $lte: to },
-                      statusKey: { $in: YEAR_SUMMARY_DETAIL_KEYS },
-                  })
-                      .select(
-                          'date statusKey statusLabel leavePayType leaveRequestStatus requestedStatusKey leaveRequestKind leaveRequestGroupId leaveRequestFromDate leaveRequestToDate reason leaveRequestReason',
-                      )
-                      .sort({ date: 1 })
-                      .lean()
-                : Promise.resolve([]),
+            Attendance.findOne({
+                employeeMongoId: String(self._id),
+                statusKey: 'on_leave',
+                date: { $gte: attendanceFrom, $lte: to },
+            })
+                .sort({ date: -1 })
+                .select('date')
+                .lean(),
+            Attendance.find({
+                employeeMongoId: String(self._id),
+                date: { $gte: attendanceFrom, $lte: to },
+                statusKey: { $in: YEAR_SUMMARY_DETAIL_KEYS },
+            })
+                .select(
+                    'date statusKey statusLabel leavePayType leaveRequestStatus requestedStatusKey leaveRequestKind leaveRequestGroupId leaveRequestFromDate leaveRequestToDate reason leaveRequestReason',
+                )
+                .sort({ date: 1 })
+                .lean(),
             loadHistoricalLeaveProfile(self.employeeId),
         ]);
 
@@ -1258,7 +1334,7 @@ export async function getMyAttendanceYearSummary(req, res) {
                 .map((row) => String(row.date || '').trim())
                 .filter(Boolean),
         );
-        const schedule = countScheduleDays(from, to, holidaySet, offWeekdays);
+        const schedule = countScheduleDays(attendanceFrom, to, holidaySet, offWeekdays);
 
         const presentDays =
             counts.on_office +
@@ -1302,7 +1378,7 @@ export async function getMyAttendanceYearSummary(req, res) {
             absentAuth,
             absentSick,
             absentUnauthorized,
-            workingDays: schedule.workingDays,
+            workingDays: enrollWorking.workingDays,
             holidayCount: schedule.holidayCount,
             weeklyOffCount: schedule.weeklyOffCount,
             lastAnnualLeaveDate: lastOverlayAnnualLeaveDate(
@@ -1314,14 +1390,7 @@ export async function getMyAttendanceYearSummary(req, res) {
                 ...overlay.entries,
             ],
             leaveBalances,
-            leavePolicy: {
-                annualAllowedDays: entitlements.annualAllowedDays,
-                sickEnabled: entitlements.sickEnabled,
-                sickAllowedDays: entitlements.sickAllowedDays,
-                sandwichLeave: entitlements.sandwichLeave,
-                authorizedDeductionDays: entitlements.multipliers.authorized,
-                unauthorizedDeductionDays: entitlements.multipliers.unauthorized,
-            },
+            leavePolicy: serializeLeavePolicy(entitlements) || leavePolicy,
         });
     } catch (error) {
         console.error('[getMyAttendanceYearSummary]', error);

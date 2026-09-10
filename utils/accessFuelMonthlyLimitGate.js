@@ -30,7 +30,8 @@ function isLastDaysOfMonth(year, month, day) {
 /**
  * Current month: open from day 1 (set this month's limits).
  * Next month: open only in the last 5 days of the current month.
- * Past months: open so a missed create can still be done.
+ * Past months: closed — Monthly Limit is only for current / future months.
+ * Later than next month: closed until that month becomes current/next.
  */
 export function isAccessFuelMonthlyLimitWindowOpen(monthKey, now = new Date()) {
     const selected = parseMonthKey(monthKey);
@@ -44,9 +45,8 @@ export function isAccessFuelMonthlyLimitWindowOpen(monthKey, now = new Date()) {
     if (monthKey === currentKey) return true;
     if (monthKey === nextKey) return isLastDaysOfMonth(currentYear, currentMonth, day);
 
-    const selectedIndex = selected.year * 12 + selected.month;
-    const currentIndex = currentYear * 12 + currentMonth;
-    return selectedIndex < currentIndex;
+    // Past or farther-future months stay closed.
+    return false;
 }
 
 export function limitedVehicleIdsFromLog(log, assignedVehicles = []) {
@@ -104,6 +104,16 @@ export function accessFuelMonthlyLimitGate({
         };
     }
     if (!isAccessFuelMonthlyLimitWindowOpen(monthKey, now)) {
+        const selected = parseMonthKey(monthKey);
+        const { year: currentYear, month: currentMonth } = getCalendarPartsInTz(now);
+        const selectedIndex = selected ? selected.year * 12 + selected.month : 0;
+        const currentIndex = currentYear * 12 + currentMonth;
+        if (selected && selectedIndex < currentIndex) {
+            return {
+                canCreate: false,
+                reason: 'Monthly Limit is only available for the current or future month.',
+            };
+        }
         return {
             canCreate: false,
             reason: 'Next month limits are available only in the last 5 days of this month.',
@@ -112,13 +122,20 @@ export function accessFuelMonthlyLimitGate({
     return { canCreate: true, reason: '' };
 }
 
-/** Close selected month only on the 2nd calendar day of the following month. */
+/**
+ * Close selected month from the 2nd of the following month onward.
+ * Example: August closes from 2 Sep onward (not only on 2 Sep).
+ */
 export function isAccessFuelMonthlyCloseWindowOpen(monthKey, now = new Date()) {
     const selected = parseMonthKey(monthKey);
     if (!selected) return false;
     const next = shiftMonth(selected.year, selected.month, 1);
     const { year, month, day } = getCalendarPartsInTz(now);
-    return year === next.year && month === next.month && day === 2;
+    const todayIndex = year * 12 + month;
+    const nextIndex = next.year * 12 + next.month;
+    if (todayIndex > nextIndex) return true;
+    if (todayIndex === nextIndex && day >= 2) return true;
+    return false;
 }
 
 export function accessFuelMonthlyCloseGate({
@@ -129,7 +146,7 @@ export function accessFuelMonthlyCloseGate({
     if (!isAccessFuelMonthlyCloseWindowOpen(monthKey, now)) {
         return {
             canClose: false,
-            reason: 'Available only on the 2nd of the next month.',
+            reason: 'Available from the 2nd of the next month onward.',
         };
     }
     if (Math.max(0, Number(openAddedCount) || 0) <= 0) {

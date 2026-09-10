@@ -46,11 +46,16 @@ export async function runLeanListQuery({
     toApiShape,
     /** Mongo field used when query.billIds / query.ids is present (e.g. zohoBillId). */
     idField = '',
+    /** Extra Mongo filter merged into the list query (e.g. exclude void bills). */
+    extraFilter = null,
 }) {
     const { page, pageSize, search, sortBy, sortDir, paginate } = parseListQuery(query);
 
     const filter = { organizationId };
     if (activeOnly) filter.isActive = true;
+    if (extraFilter && typeof extraFilter === 'object') {
+        Object.assign(filter, extraFilter);
+    }
 
     const rawIds = String(query.billIds || query.ids || '').trim();
     if (idField && rawIds) {

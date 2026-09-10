@@ -113,8 +113,10 @@ export function leavePolicyEntitlements(policy) {
             : requiredPresentDays;
     return {
         annualAllowedDays: DEFAULT_ANNUAL_LEAVE_DAYS,
+        annualPeriod: 'year',
         sickEnabled,
         sickAllowedDays: sickEnabled ? (sickAllowedRaw ?? 0) : null,
+        sickPeriod: sickEnabled ? 'year' : null,
         sandwichLeave: Boolean(rules.sandwichLeave),
         requiredPresentDays,
         airTicketRequiredDays: leaveWorkingDays,
@@ -244,7 +246,7 @@ export function sandwichDatesForLeave({ leaveByDate, offSet, from, to }) {
     return extras;
 }
 
-function typeBalance({ taken, sandwichDays, pending, allowed, enabled, multiplier }) {
+function typeBalance({ taken, sandwichDays, pending, allowed, enabled, multiplier, period }) {
     const cap = enabled && allowed != null ? Number(allowed) : null;
     const remaining = cap == null ? null : Math.max(0, cap - taken);
     return {
@@ -254,6 +256,7 @@ function typeBalance({ taken, sandwichDays, pending, allowed, enabled, multiplie
         allowed: cap,
         remaining,
         multiplier,
+        period: period || null,
         deductionDays: Number((taken * (Number(multiplier) || 1)).toFixed(2)),
     };
 }
@@ -348,6 +351,12 @@ export function buildLeaveBalances({
             allowed,
             enabled,
             multiplier: multipliers[multiplierKey] ?? 1,
+            period:
+                statusKey === 'on_leave'
+                    ? entitlements?.annualPeriod || 'year'
+                    : statusKey === 'sick_leave' && entitlements?.sickEnabled
+                      ? entitlements?.sickPeriod || 'year'
+                      : null,
         });
     }
 

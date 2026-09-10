@@ -6,6 +6,10 @@ import {
 } from '../services/zohoService.js';
 import { withZohoOrganization } from './zohoOrgContext.js';
 import { resolveZohoOrganizationIdForRewardEmployee } from './syncRewardPaymentToZoho.js';
+import {
+    attachmentLooksPresent,
+    resolveZohoAttachmentUpload,
+} from './resolveZohoAttachmentUpload.js';
 
 const DEFAULT_LOCATION_NAME = 'Head Office';
 const DEFAULT_TAX_TREATMENT = 'vat_not_registered';
@@ -37,36 +41,24 @@ function toDateKey(value) {
     return '';
 }
 
-function bufferFromBase64(data) {
-    const raw = String(data || '').trim();
-    if (!raw) return null;
-    let base64 = raw;
-    let mimeType = '';
-    const dataMatch = raw.match(/^data:([^;,]+)?(?:;[^,]*)?;base64,(.+)$/is);
-    if (dataMatch) {
-        if (dataMatch[1]) mimeType = String(dataMatch[1]).trim();
-        base64 = dataMatch[2];
-    } else if (raw.includes(',')) {
-        base64 = raw.split(',').pop();
-    }
-    try {
-        const buffer = Buffer.from(String(base64 || '').replace(/\s/g, ''), 'base64');
-        if (!buffer.length) return null;
-        return { buffer, mimeType };
-    } catch {
-        return null;
-    }
-}
-
 function resolveAttachmentCandidates(payment, attachments = []) {
     const list = [];
+    const seen = new Set();
     const push = (att) => {
-        if (!att || typeof att !== 'object') return;
-        if (!att.data && !att.url) return;
+        if (!attachmentLooksPresent(att)) return;
+        const key =
+            String(att.publicId || '').trim() ||
+            String(att.url || '').trim() ||
+            String(att.name || att.filename || '').trim() ||
+            (att.data ? `data:${String(att.data).slice(0, 40)}` : '') ||
+            (att.base64 ? `b64:${String(att.base64).slice(0, 40)}` : '');
+        if (!key || seen.has(key)) return;
+        seen.add(key);
         list.push(att);
     };
     (Array.isArray(attachments) ? attachments : []).forEach(push);
     push(payment?.attachment);
+    if (Array.isArray(payment?.attachments)) payment.attachments.forEach(push);
     return list;
 }
 
@@ -258,20 +250,22 @@ export async function syncExpenseRefundPaymentToZoho({
             const uploaded = [];
             const failed = [];
             for (const att of candidates) {
-                const parsed = bufferFromBase64(att.data);
-                if (!parsed?.buffer) continue;
-                const filename =
-                    clean(att.name || att.filename, 'expense-refund-attachment.pdf').slice(0, 200) ||
-                    'expense-refund-attachment.pdf';
+                const file = await resolveZohoAttachmentUpload(att, 'expense-refund-attachment.pdf');
+                if (!file?.buffer?.length) {
+                    failed.push(
+                        `${clean(att.name || att.filename, 'attachment')}: could not read file bytes`,
+                    );
+                    continue;
+                }
                 try {
                     await uploadBankTransactionAttachment(transactionId, {
-                        buffer: parsed.buffer,
-                        filename,
-                        mimeType: clean(att.mimeType || parsed.mimeType, 'application/pdf'),
+                        buffer: file.buffer,
+                        filename: file.filename,
+                        mimeType: file.mimeType || 'application/pdf',
                     });
-                    uploaded.push(filename);
+                    uploaded.push(file.filename);
                 } catch (attachErr) {
-                    failed.push(`${filename}: ${attachErr?.message || 'upload failed'}`);
+                    failed.push(`${file.filename}: ${attachErr?.message || 'upload failed'}`);
                     console.warn('[ExpenseRefundZoho] Attachment soft-fail:', attachErr?.message);
                 }
             }

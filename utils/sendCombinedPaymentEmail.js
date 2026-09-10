@@ -6,6 +6,7 @@ import Loan from '../models/Loan.js';
 import Payment from '../models/Payment.js';
 import { resolveEmployeeEmail } from './resolveEmployeeEmail.js';
 import { resolveEmployeeFinePayableAmount } from './finePayableAmount.js';
+import { resolveZohoAttachmentUpload } from './resolveZohoAttachmentUpload.js';
 
 const COMPANY_PARTY_IDS = new Set(['VEGA-HR-0000', 'VEGA_INTERNAL']);
 
@@ -17,11 +18,49 @@ const isUsableEmail = (value) => {
     return true;
 };
 
-/** Company email, else primary reportee business email — never personal. */
+/**
+ * Fund settle emails (Expense Refund / Vendor Credit / Pay by employee):
+ * prefer personal email, then company/work so mail still delivers.
+ */
 const resolvePaymentRecipientEmail = (employee) => {
+    const personal = String(employee?.personalEmail || '').trim();
+    if (isUsableEmail(personal)) return personal;
     const { email } = resolveEmployeeEmail(employee);
     return isUsableEmail(email) ? email : null;
 };
+
+const isLoanLikeType = (value) =>
+    ['Loan', 'LoanRepayment', 'Advance', 'AdvanceRepayment'].includes(String(value || '').trim());
+
+async function buildSupportingEmailAttachments(payment) {
+    const out = [];
+    const candidates = [];
+    if (payment?.attachment && typeof payment.attachment === 'object') {
+        candidates.push(payment.attachment);
+    }
+    if (Array.isArray(payment?.attachments)) {
+        payment.attachments.forEach((att) => {
+            if (att && typeof att === 'object') candidates.push(att);
+        });
+    }
+    for (const att of candidates) {
+        try {
+            const file = await resolveZohoAttachmentUpload(att, 'payment-attachment.pdf');
+            if (!file?.buffer?.length) continue;
+            out.push({
+                filename: file.filename || att.name || 'payment-attachment.pdf',
+                content: file.buffer,
+                contentType: file.mimeType || att.mimeType || 'application/octet-stream',
+            });
+        } catch (err) {
+            console.warn(
+                '[PaymentNotification] Could not attach supporting file:',
+                err?.message || err,
+            );
+        }
+    }
+    return out;
+}
 
 /**
  * Calculates the share for a specific employee in a fine (base + service charge once).
@@ -359,12 +398,12 @@ export const sendPaymentNotificationEmail = async (payment, status, comment = ''
                         $or: [{ relatedEntityId: currentItem._id }, { referenceId: currentItem.fineId }]
                     }).lean();
                 }
-            } else if (payment.relatedEntityType === 'Loan') {
+            } else if (isLoanLikeType(payment.relatedEntityType)) {
                 currentItem = await Loan.findById(payment.relatedEntityId) || await Loan.findOne({ loanId: payment.referenceId });
                 currentShare = currentItem?.amount || 0;
                 if (currentItem) {
                     itemPayments = await Payment.find({
-                        relatedEntityType: 'Loan',
+                        relatedEntityType: { $in: ['Loan', 'LoanRepayment', 'Advance', 'AdvanceRepayment'] },
                         paidBy: employee._id,
                         status: { $in: SUCCESS_STATUSES },
                         $or: [{ relatedEntityId: currentItem._id }, { referenceId: currentItem.loanId }]
@@ -416,7 +455,7 @@ export const sendPaymentNotificationEmail = async (payment, status, comment = ''
                     <p>Dear <strong>${employee.firstName} ${employee.lastName}</strong>,</p>
                     <p style="line-height: 1.6; color: #475569;">
                         ${isApproved 
-                            ? `Your payment of <strong>AED ${parseFloat(payment.amount).toLocaleString()}</strong> has been successfully processed. Please find your invoice attached to this email.`
+                            ? `Your payment of <strong>AED ${parseFloat(payment.amount).toLocaleString()}</strong> has been successfully processed. Please find your invoice${payment?.attachment || (Array.isArray(payment?.attachments) && payment.attachments.length) ? ' and supporting attachment' : ''} attached to this email.`
                             : `Your payment request for <strong>AED ${parseFloat(payment.amount).toLocaleString()}</strong> has been rejected by the Accounts Department.`
                         }
                     </p>
@@ -447,20 +486,31 @@ export const sendPaymentNotificationEmail = async (payment, status, comment = ''
             </div>
         `;
 
+        const mailAttachments = [];
+        if (pdfBuffer) {
+            mailAttachments.push({
+                filename: `Invoice_${payment.paymentId}.pdf`,
+                content: pdfBuffer,
+                contentType: 'application/pdf',
+            });
+        }
+        if (isApproved) {
+            const supporting = await buildSupportingEmailAttachments(payment);
+            mailAttachments.push(...supporting);
+        }
+
         const mailOptions = {
             fromName: "VeRP Accounts",
             to: toEmail,
             subject: subject,
             html: html,
-            attachments: pdfBuffer ? [{
-                filename: `Invoice_${payment.paymentId}.pdf`,
-                content: pdfBuffer,
-                contentType: 'application/pdf'
-            }] : []
+            attachments: mailAttachments,
         };
 
         await transporter.sendMail(mailOptions);
-        console.log(`[PaymentNotification] Email with PDF sent to ${toEmail}`);
+        console.log(
+            `[PaymentNotification] Email sent to personal/business ${toEmail} (attachments: ${mailAttachments.length})`,
+        );
 
     } catch (error) {
         console.error('[PaymentNotification] Error:', error);

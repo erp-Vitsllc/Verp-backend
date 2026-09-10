@@ -1,8 +1,14 @@
 import Attendance from '../models/Attendance.js';
 import Holiday from '../models/Holiday.js';
 import WorkingTime from '../models/WorkingTime.js';
+import SalaryEnrollment from '../models/SalaryEnrollment.js';
+import SalaryHistoricalProfile from '../models/SalaryHistoricalProfile.js';
 import { applySickAllowanceToLeaveRecords, leavePolicyEntitlements } from './employeeLeavePolicy.js';
 import { getScheduledEmailTimeZone, getCalendarPartsInTz } from './scheduleDailyAtMidnight.js';
+import {
+    processingStartFromEnrollment,
+    resolveSalaryProcessingStartDate,
+} from './leaveSalaryVisibility.js';
 import {
     calculateAnnualLeaveEntitlement,
     calculateHistoricalEligibility,
@@ -24,6 +30,19 @@ import {
 import {
     remainingLeaveTicketBalances,
 } from './salarySlipLeaveTicket.js';
+import {
+    cycleEligibilitySnapshot,
+    cycleLeaveDeductions,
+    historicalWindowForCycle,
+    lastAnnualLeaveEndFromAttendance,
+    lastTakenAnnualLeaveDays,
+    lastTakenAnnualLeaveEnd,
+    laterDateKey,
+    leaveCycleStart,
+    liveWindowForCycle,
+    policyWorkingDayRequirement,
+    enrollLeaveUsedByStatus,
+} from './currentLeaveCycle.js';
 import {
     getOffWeekdayKeys,
     getWeekForStaffType,
@@ -200,6 +219,66 @@ async function calcWorkingDays({ from, to, staffType }) {
     return { workingDays, weeklyOffs, holidays: holidayHits, calendarDays };
 }
 
+/**
+ * Same working-day total as salary enroll Eligibility Summary:
+ * historical working days (joining → day before VERP start) plus live days after processing start.
+ */
+export async function loadEmployeeSalaryWorkingDays(employee, profileHint = null) {
+    const empty = { historicalWorkingDays: 0, liveWorkingDays: 0, workingDays: 0 };
+    const employeeId = String(employee?.employeeId || '').trim();
+    if (!employeeId && !profileHint) return empty;
+
+    const [profile, enrollment] = await Promise.all([
+        profileHint
+            ? Promise.resolve(profileHint)
+            : employeeId
+              ? SalaryHistoricalProfile.findOne({ employeeId })
+                    .select('contractJoiningDate verpStartDate')
+                    .lean()
+                    .maxTimeMS(12000)
+              : null,
+        employeeId
+            ? SalaryEnrollment.findOne({ employeeId })
+                  .select('fromMonth salaryDate processDate')
+                  .lean()
+                  .maxTimeMS(12000)
+            : null,
+    ]);
+
+    const joiningDate = toDateKey(
+        profile?.contractJoiningDate || employee.contractJoiningDate || employee.dateOfJoining,
+    );
+    const verpStartDate =
+        toDateKey(profile?.verpStartDate) ||
+        resolveSalaryProcessingStartDate({
+            verpStartDate: profile?.verpStartDate,
+            enrollment,
+        }) ||
+        processingStartFromEnrollment(enrollment);
+    const period = historicalPeriod(joiningDate, verpStartDate);
+    const staffType = employee.staffType;
+    const historical =
+        joiningDate && period.end
+            ? await calcWorkingDays({ from: joiningDate, to: period.end, staffType })
+            : { workingDays: 0 };
+    const todayKey = dubaiDateKey();
+    const live =
+        isSalaryProcessingMonthReached(todayKey, verpStartDate)
+            ? await calcWorkingDays({
+                  from: salaryProcessingStartDay(verpStartDate) || verpStartDate,
+                  to: todayKey,
+                  staffType,
+              })
+            : { workingDays: 0 };
+    const historicalWorkingDays = Number(historical.workingDays) || 0;
+    const liveWorkingDays = Number(live.workingDays) || 0;
+    return {
+        historicalWorkingDays,
+        liveWorkingDays,
+        workingDays: historicalWorkingDays + liveWorkingDays,
+    };
+}
+
 async function loadLiveAttendanceEligibility({ employee, from, to, staffType }) {
     if (!isDateKey(from) || !employee) {
         return { workingDays: 0, leaveRecords: [], from: '', to: '' };
@@ -363,4 +442,146 @@ export async function loadLeaveTicketEntitlement({ employee, profile, salaryDoc,
     };
     if (cacheKey) leaveTicketStateCache.set(cacheKey, { at: Date.now(), value });
     return value;
+}
+
+async function loadAttendanceLeaveInRange({ employee, from, to }) {
+    if (!isDateKey(from) || !isDateKey(to) || to < from || !employee) return [];
+    const clauses = [];
+    if (employee._id) clauses.push({ employeeMongoId: String(employee._id) });
+    if (employee.employeeId) clauses.push({ employeeId: employee.employeeId });
+    if (!clauses.length) return [];
+    const leaveStatusKeys = Object.keys(LIVE_LEAVE_STATUS_MAP);
+    const rows = await Attendance.find({
+        date: { $gte: from, $lte: to },
+        $and: [
+            { $or: clauses },
+            {
+                $or: [
+                    { statusKey: { $in: leaveStatusKeys } },
+                    { leaveRequestStatus: { $in: ['approved', 'pending'] } },
+                ],
+            },
+        ],
+    })
+        .select('date statusKey leaveRequestStatus requestedStatusKey reason')
+        .lean();
+    return summarizeAttendanceEligibility(rows).leaveRecords || [];
+}
+
+function countLiveMarksSince(records = [], fromKey) {
+    const out = {
+        work_from_home: 0,
+        late_arrived: 0,
+        early_go: 0,
+        mispunch: 0,
+    };
+    for (const row of records) {
+        const date = String(row?.date || '').trim();
+        if (fromKey && date < fromKey) continue;
+        const key = String(row?.statusKey || '').trim();
+        if (out[key] != null) out[key] += 1;
+    }
+    return out;
+}
+
+/**
+ * Working days and remaining days in the open annual-leave cycle.
+ * The cycle starts the day after the last taken annual leave (enroll or attendance).
+ */
+export async function loadCurrentLeaveCycleEligibility({
+    employee,
+    profile,
+    policy,
+    attendanceRecords = [],
+} = {}) {
+    const joiningDate = toDateKey(
+        profile?.contractJoiningDate || employee?.contractJoiningDate || employee?.dateOfJoining,
+    );
+    const verpStartDate = toDateKey(profile?.verpStartDate);
+    const todayKey = dubaiDateKey();
+    const entitlements = leavePolicyEntitlements(policy);
+    const requiredDays = policyWorkingDayRequirement(policy);
+    const annualHistory = annualLeaveHistoryForEntitlement(
+        historicalLeaveOnly(profile?.leaveRecords),
+        historicalLeaveOnly(profile?.annualLeaveRecords),
+    );
+    const liveOpen = isSalaryProcessingMonthReached(todayKey, verpStartDate);
+    const lastAnnualLeaveEnd = laterDateKey(
+        lastTakenAnnualLeaveEnd(annualHistory),
+        liveOpen ? lastAnnualLeaveEndFromAttendance(attendanceRecords) : '',
+    );
+    const cycleStart = leaveCycleStart({ joiningDate, lastAnnualLeaveEnd });
+    const processingStart = salaryProcessingStartDay(verpStartDate) || verpStartDate;
+    const histWin = historicalWindowForCycle({ joiningDate, verpStartDate, cycleStart });
+    const liveWin = liveWindowForCycle({
+        verpStartDate: processingStart,
+        cycleStart,
+        todayKey,
+        liveOpen,
+    });
+
+    const [historical, liveWorking, liveLeaveRecords, salaryWorking] = await Promise.all([
+        histWin.from
+            ? calcWorkingDays({ from: histWin.from, to: histWin.to, staffType: employee?.staffType })
+            : { workingDays: 0 },
+        liveWin.from
+            ? calcWorkingDays({ from: liveWin.from, to: liveWin.to, staffType: employee?.staffType })
+            : { workingDays: 0 },
+        liveOpen && processingStart
+            ? loadAttendanceLeaveInRange({ employee, from: processingStart, to: todayKey })
+            : [],
+        loadEmployeeSalaryWorkingDays(employee, profile),
+    ]);
+
+    const enrollLeaveRecords = consolidateCountOnlyLeaveRecords(
+        historicalLeaveOnly(profile?.leaveRecords),
+        policyLeaveMultipliers(policy),
+    );
+    const leaveRecords = [...enrollLeaveRecords, ...(liveLeaveRecords || [])];
+    const used = enrollLeaveUsedByStatus({
+        leaveRecords,
+        annualLeaveRecords: annualHistory,
+        allRecords: true,
+    });
+    const deductions = cycleLeaveDeductions({
+        leaveRecords,
+        annualLeaveRecords: annualHistory,
+        policy,
+        cycleStart,
+        cycleEnd: todayKey,
+        lastAnnualLeaveEnd,
+    });
+    const workingDays = (Number(historical.workingDays) || 0) + (Number(liveWorking.workingDays) || 0);
+    const accumulatedDays = Math.max(0, workingDays - (Number(deductions.total) || 0));
+    const liveMarks = countLiveMarksSince(attendanceRecords, liveOpen ? processingStart : '');
+    const officeDays = Number(salaryWorking?.workingDays) || 0;
+    const absentDays =
+        (Number(used.on_leave) || 0) +
+        (Number(used.sick_leave) || 0) +
+        (Number(used.authorized_leave) || 0) +
+        (Number(used.unauthorized_leave) || 0) +
+        (Number(used.compoff_leave) || 0);
+
+    return {
+        ...cycleEligibilitySnapshot({
+            accumulatedDays,
+            requiredDays,
+            airTicketRequiredDays: entitlements.airTicketRequiredDays || requiredDays,
+            lastAnnualLeaveEnd,
+            cycleStart,
+            lastAnnualLeaveDays: lastTakenAnnualLeaveDays(annualHistory, lastAnnualLeaveEnd),
+        }),
+        presentDays: officeDays,
+        historicalWorkingDays: Number(salaryWorking?.historicalWorkingDays) || 0,
+        liveWorkingDays: Number(salaryWorking?.liveWorkingDays) || 0,
+        used,
+        attendance: {
+            office: officeDays,
+            wfh: liveMarks.work_from_home,
+            absent: absentDays,
+            late: liveMarks.late_arrived,
+            early: liveMarks.early_go,
+            mispunch: liveMarks.mispunch,
+        },
+    };
 }

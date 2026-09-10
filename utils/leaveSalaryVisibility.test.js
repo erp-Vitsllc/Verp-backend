@@ -10,6 +10,7 @@ import {
     formatProcessingMonthLabel,
     firstOfProcessingMonth,
     daysUntilProcessingStart,
+    isAttendanceDateOpen,
     isSalaryMonthOpen,
     processingMonthFromStart,
     processingStartFromEnrollment,
@@ -77,6 +78,10 @@ describe('leave salary visibility', () => {
         assert.equal(isSalaryMonthOpen('2026-08', '2026-09'), false);
         assert.equal(isSalaryMonthOpen('2026-09', '2026-09'), true);
         assert.equal(isSalaryMonthOpen('2026-10', '2026-09'), true);
+        assert.equal(isAttendanceDateOpen('2026-09-30', '2026-10-01'), false);
+        assert.equal(isAttendanceDateOpen('2026-10-01', '2026-10-15'), true);
+        assert.equal(isAttendanceDateOpen('2026-10-01', '2026-10'), true);
+        assert.equal(isAttendanceDateOpen('2026-09-10', ''), false);
     });
 
     it('hides leave days before the salary processing start date', () => {

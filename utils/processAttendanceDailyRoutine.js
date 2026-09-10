@@ -19,6 +19,7 @@ import {
     isCompanyShellEmployee,
     REAL_EMPLOYEE_MONGO_FILTER,
 } from './attendanceEmployeeFilters.js';
+import { loadAttendanceOpenStartByMongoId } from './leaveSalaryVisibility.js';
 
 function formatDateKey({ year, month, day }) {
     return `${year}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
@@ -125,6 +126,7 @@ export async function processAttendanceDailyRoutine() {
                 .lean(),
             Attendance.find({ date: yesterdayKey }).lean(),
         ]);
+        const attendanceOpenFrom = await loadAttendanceOpenStartByMongoId(activeEmployees);
 
         const isHoliday = Boolean(holidayDoc);
         const byEmp = new Map(
@@ -143,6 +145,10 @@ export async function processAttendanceDailyRoutine() {
             }
 
             const rec = byEmp.get(employeeMongoId);
+            const processingStart = attendanceOpenFrom.get(employeeMongoId);
+            if (!processingStart || yesterdayKey < processingStart) {
+                continue;
+            }
             if (rec && PROTECTED_NO_PUNCH_KEYS.has(String(rec.statusKey || ''))) {
                 continue;
             }

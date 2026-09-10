@@ -31,6 +31,14 @@ import {
     loadHistoricalLeaveProfile,
     overlayHistoricalLeave,
 } from '../../utils/historicalLeaveAttendanceOverlay.js';
+import { loadCurrentLeaveCycleEligibility } from '../../utils/loadLeaveTicketEntitlement.js';
+import { laterDateKey } from '../../utils/currentLeaveCycle.js';
+import {
+    fineIsVisibleToEmployee,
+    loanIsVisibleToEmployee,
+    rewardIsVisibleToEmployee,
+    utilityBillIsVisibleToEmployee,
+} from '../../utils/employeeFinancialVisibility.js';
 
 const LEAVE_STATUS_KEYS = new Set([
     'on_leave',
@@ -173,16 +181,39 @@ function emptyAppliedCounts() {
     };
 }
 
+function emptyRequestBucket() {
+    return { total: 0, request: 0, approved: 0, rejected: 0, present: 0 };
+}
+
+function emptyRequestStats() {
+    return {
+        on_leave: emptyRequestBucket(),
+        sick_leave: emptyRequestBucket(),
+        compoff_leave: emptyRequestBucket(),
+        authorized_leave: emptyRequestBucket(),
+        unauthorized_leave: emptyRequestBucket(),
+        late_arrived: emptyRequestBucket(),
+        early_go: emptyRequestBucket(),
+        mispunch: emptyRequestBucket(),
+        work_from_home: emptyRequestBucket(),
+    };
+}
+
+function yellowSourceKey(row) {
+    const previous = String(row?.previousStatusKey || '').trim();
+    if (previous === 'early_go' || previous === 'mispunch' || previous === 'late_arrived') return previous;
+    const status = String(row?.statusKey || '').trim();
+    if (status === 'early_go' || status === 'mispunch' || status === 'late_arrived') return status;
+    return 'late_arrived';
+}
+
 function requestedCountKey(row) {
     const kind = String(row?.leaveRequestKind || '').trim();
     if (kind === 'future_annual') return 'on_leave';
     if (kind === 'future_late') return 'late_arrived';
     if (kind === 'future_early') return 'early_go';
-    if (kind === 'yellow') {
-        const requested = String(row?.requestedStatusKey || '').trim();
-        if (requested === 'early_go') return 'early_go';
-        if (requested === 'mispunch') return 'mispunch';
-        return 'late_arrived';
+    if (kind === 'yellow' || String(row?.requestedStatusKey || '').trim() === 'on_office') {
+        return yellowSourceKey(row);
     }
     const requested = String(row?.requestedStatusKey || '').trim();
     if (requested && Object.prototype.hasOwnProperty.call(emptyAppliedCounts(), requested)) {
@@ -191,6 +222,67 @@ function requestedCountKey(row) {
     const status = String(row?.statusKey || '').trim();
     if (status && Object.prototype.hasOwnProperty.call(emptyAppliedCounts(), status)) return status;
     return '';
+}
+
+function combineRequestBuckets(...buckets) {
+    const out = emptyRequestBucket();
+    for (const bucket of buckets) {
+        out.total += Number(bucket?.total) || 0;
+        out.request += Number(bucket?.request) || 0;
+        out.approved += Number(bucket?.approved) || 0;
+        out.rejected += Number(bucket?.rejected) || 0;
+        out.present += Number(bucket?.present) || 0;
+    }
+    return out;
+}
+
+function tallyRequestStats(records = []) {
+    const stats = emptyRequestStats();
+    const seen = new Set();
+    for (const row of records) {
+        const decision = String(row?.leaveRequestStatus || '').trim();
+        if (decision !== 'pending' && decision !== 'approved' && decision !== 'rejected') continue;
+        const bucket = requestedCountKey(row);
+        if (!bucket || !stats[bucket]) continue;
+        const groupId =
+            String(row?.leaveRequestGroupId || '').trim() || `${row?.date || ''}-${bucket}`;
+        const seenKey = `${groupId}|${decision}|${bucket}`;
+        if (seen.has(seenKey)) continue;
+        seen.add(seenKey);
+        const entry = stats[bucket];
+        entry.total += 1;
+        if (decision === 'pending') entry.request += 1;
+        if (decision === 'approved') entry.approved += 1;
+        if (decision === 'rejected') entry.rejected += 1;
+        if (
+            decision === 'approved' &&
+            (bucket === 'mispunch' || bucket === 'late_arrived' || bucket === 'early_go')
+        ) {
+            const now = String(row?.statusKey || '').trim();
+            if (now === 'on_office' || now === 'work_from_home') entry.present += 1;
+        }
+    }
+    stats.late_early = combineRequestBuckets(stats.late_arrived, stats.early_go);
+    return stats;
+}
+
+function mergeEnrollLeaveIntoRequestStats(stats, enrollUsed = {}) {
+    const keys = [
+        'on_leave',
+        'sick_leave',
+        'authorized_leave',
+        'unauthorized_leave',
+        'compoff_leave',
+    ];
+    const next = { ...(stats || emptyRequestStats()) };
+    for (const key of keys) {
+        const bucket = { ...(next[key] || emptyRequestBucket()) };
+        const enrollApproved = Math.max(0, Number(enrollUsed?.[key]) || 0);
+        if (bucket.approved < enrollApproved) bucket.approved = enrollApproved;
+        bucket.total = (Number(bucket.request) || 0) + bucket.approved + (Number(bucket.rejected) || 0);
+        next[key] = bucket;
+    }
+    return next;
 }
 
 async function findNextBirthday(dubai) {
@@ -570,11 +662,11 @@ export async function getEmployeeAttendanceProfile(req, res) {
         const employeeCode = String(employee.employeeId || '').trim();
         const staffType = normalizeStaffTypeKey(employee.staffType) || 'office';
 
-        const [records, loans, rewards, fines, assets, personal, policy, offSet, nextBirthday, salaryDoc, utilityBills, historicalProfile] =
+        const [records, loans, rewards, fines, assets, personal, policy, offSet, nextBirthday, salaryDoc, utilityBills, historicalProfile, requestRows] =
             await Promise.all([
             Attendance.find({ employeeMongoId, date: { $gte: from, $lte: to } })
                 .select(
-                    'date statusKey statusLabel reason attachmentName leavePayType leaveRequestReason leaveRequestStatus requestedStatusKey requestedStatusLabel leaveRequestKind leaveRequestGroupId leaveRequestFromDate leaveRequestToDate leaveRequestedAt leaveRequestTimeOut',
+                    'date statusKey statusLabel reason attachmentName leavePayType leaveRequestReason leaveRequestStatus requestedStatusKey requestedStatusLabel previousStatusKey leaveRequestKind leaveRequestGroupId leaveRequestFromDate leaveRequestToDate leaveRequestedAt leaveRequestTimeOut',
                 )
                 .sort({ date: -1 })
                 .lean(),
@@ -587,7 +679,7 @@ export async function getEmployeeAttendanceProfile(req, res) {
                 .limit(20)
                 .lean(),
             Reward.find({ employeeId: employeeCode, rewardStatus: { $ne: 'Draft' } })
-                .select('rewardId rewardType amount rewardStatus awardedDate createdAt')
+                .select('rewardId rewardType amount rewardStatus approvalStatus awardedDate createdAt')
                 .sort({ createdAt: -1 })
                 .limit(20)
                 .lean(),
@@ -626,6 +718,15 @@ export async function getEmployeeAttendanceProfile(req, res) {
                 .limit(30)
                 .lean(),
             loadHistoricalLeaveProfile(employeeCode),
+            Attendance.find({
+                employeeMongoId,
+                leaveRequestStatus: { $in: ['pending', 'approved', 'rejected'] },
+            })
+                .select(
+                    'date statusKey leaveRequestStatus requestedStatusKey previousStatusKey leaveRequestKind leaveRequestGroupId',
+                )
+                .lean()
+                .maxTimeMS(12000),
         ]);
 
         const counts = {
@@ -647,6 +748,7 @@ export async function getEmployeeAttendanceProfile(req, res) {
         const appliedCounts = emptyAppliedCounts();
         const appliedGroups = new Set();
         const pendingRequestMap = new Map();
+        const requestStats = tallyRequestStats(requestRows);
         let lastAnnualLeaveDate = '';
 
         for (const row of records || []) {
@@ -732,14 +834,24 @@ export async function getEmployeeAttendanceProfile(req, res) {
         Object.assign(counts, applyOverlayCounts(counts, overlay.extraCounts));
         lastAnnualLeaveDate = lastOverlayAnnualLeaveDate(overlay.entries, lastAnnualLeaveDate);
 
-        const presentDays =
+        const leaveCycle = await loadCurrentLeaveCycleEligibility({
+            employee,
+            profile: historicalProfile,
+            policy,
+            attendanceRecords: records,
+        });
+        lastAnnualLeaveDate = laterDateKey(lastAnnualLeaveDate, leaveCycle.lastAnnualLeaveEnd);
+
+        const yearPresentDays =
             counts.on_office +
             counts.work_from_home +
             counts.late_arrived +
             counts.early_go +
             counts.mispunch;
+        const enrollPresentDays = Number(leaveCycle.presentDays);
+        const presentDays = Number.isFinite(enrollPresentDays) ? enrollPresentDays : yearPresentDays;
 
-        const pieFrom = lastAnnualLeaveDate || from;
+        const pieFrom = leaveCycle.cycleStart || lastAnnualLeaveDate || from;
         const pieTo = todayKey > to ? to : todayKey;
         const periodDays = daysBetweenInclusive(pieFrom, pieTo);
 
@@ -765,6 +877,27 @@ export async function getEmployeeAttendanceProfile(req, res) {
             to,
         });
         const leaveBalances = applyOverlayCountsToBalances(rawLeaveBalances, overlay.extraCounts);
+        const enrollUsed = leaveCycle.used || {};
+        const enrollAttendance = leaveCycle.attendance || {};
+        for (const statusKey of [
+            'on_leave',
+            'sick_leave',
+            'authorized_leave',
+            'unauthorized_leave',
+            'compoff_leave',
+        ]) {
+            const row = leaveBalances[statusKey];
+            if (!row) continue;
+            const taken = Number(enrollUsed[statusKey]) || 0;
+            const allowed = row.allowed;
+            const multiplier = Number(row.multiplier) || 1;
+            leaveBalances[statusKey] = {
+                ...row,
+                taken,
+                remaining: allowed == null ? null : Math.max(0, Number(allowed) - taken),
+                deductionDays: Number((taken * multiplier).toFixed(2)),
+            };
+        }
         const overflowSet = new Set(overflowSickDates || []);
         for (const extra of sandwichRows) {
             if (counts[extra.statusKey] != null) counts[extra.statusKey] += 1;
@@ -797,11 +930,9 @@ export async function getEmployeeAttendanceProfile(req, res) {
                 ? `${event.reason} · Converted after sick leave allowance`
                 : 'Converted from sick leave after the yearly allowance was used';
         }
-        const requiredPresentDays = entitlements.requiredPresentDays;
-        const airTicketRequiredDays = entitlements.airTicketRequiredDays;
-        const annualEligible = presentDays >= requiredPresentDays;
-        const annualTaken = leaveBalances.on_leave?.taken || 0;
-        const annualRemaining = leaveBalances.on_leave?.remaining ?? 0;
+        const requiredPresentDays = leaveCycle.requiredPresentDays || entitlements.requiredPresentDays;
+        const airTicketRequiredDays = leaveCycle.airTicketRequiredDays || entitlements.airTicketRequiredDays;
+        const annualEligible = leaveCycle.airTicketEligible;
         const sickRemaining = leaveBalances.sick_leave?.remaining;
         const joinKey = toDateKey(employee.dateOfJoining || employee.joiningDate);
         const dobKey = toDateKey(personal?.dateOfBirth);
@@ -810,11 +941,14 @@ export async function getEmployeeAttendanceProfile(req, res) {
             String(employee.profileStatus || '').toLowerCase() !== 'inactive';
         const reportsTo = employeeName(employee.primaryReportee);
 
-        const loanItems = (loans || []).filter((l) => l.type === 'Loan');
-        const advanceItems = (loans || []).filter((l) => l.type === 'Advance');
+        const loanItems = (loans || []).filter((l) => l.type === 'Loan' && loanIsVisibleToEmployee(l));
+        const advanceItems = (loans || []).filter((l) => l.type === 'Advance' && loanIsVisibleToEmployee(l));
+        const approvedRewards = (rewards || []).filter((r) => rewardIsVisibleToEmployee(r));
+        const approvedFines = (fines || []).filter((f) => fineIsVisibleToEmployee(f, employeeCode));
+        const approvedUtilityBills = (utilityBills || []).filter((bill) => utilityBillIsVisibleToEmployee(bill));
         const salary = pickSalary(salaryDoc);
         const increment = pickLatestIncrement(salaryDoc?.salaryHistory);
-        const utility = mapUtilityExcess(utilityBills);
+        const utility = mapUtilityExcess(approvedUtilityBills);
         const pendingHrRequests = [...pendingRequestMap.values()]
             .sort((a, b) => String(b.requestedAtKey).localeCompare(String(a.requestedAtKey)))
             .map((row) => ({
@@ -866,24 +1000,50 @@ export async function getEmployeeAttendanceProfile(req, res) {
             nextBirthday,
             summary: {
                 presentDays,
-                absentDays: counts.authorized_leave + counts.sick_leave + counts.compoff_leave + counts.unauthorized_leave + counts.on_leave,
+                yearPresentDays,
+                historicalWorkingDays: Number(leaveCycle.historicalWorkingDays) || 0,
+                liveWorkingDays: Number(leaveCycle.liveWorkingDays) || 0,
+                absentDays:
+                    Number(enrollAttendance.absent) ||
+                    (Number(enrollUsed.on_leave) || 0) +
+                        (Number(enrollUsed.sick_leave) || 0) +
+                        (Number(enrollUsed.authorized_leave) || 0) +
+                        (Number(enrollUsed.unauthorized_leave) || 0) +
+                        (Number(enrollUsed.compoff_leave) || 0),
+                enrollAttendance: {
+                    office: Number(enrollAttendance.office) || presentDays,
+                    wfh: Number(enrollAttendance.wfh) || 0,
+                    absent:
+                        Number(enrollAttendance.absent) ||
+                        (Number(enrollUsed.on_leave) || 0) +
+                            (Number(enrollUsed.sick_leave) || 0) +
+                            (Number(enrollUsed.authorized_leave) || 0) +
+                            (Number(enrollUsed.unauthorized_leave) || 0) +
+                            (Number(enrollUsed.compoff_leave) || 0),
+                    late: Number(enrollAttendance.late) || 0,
+                    early: Number(enrollAttendance.early) || 0,
+                    mispunch: Number(enrollAttendance.mispunch) || 0,
+                },
                 counts,
                 appliedCounts,
+                requestStats: mergeEnrollLeaveIntoRequestStats(requestStats, enrollUsed),
                 lastAnnualLeaveDate,
             },
             annualLeave: {
                 eligible: annualEligible,
-                presentDays,
+                presentDays: leaveCycle.eligibleDays,
                 requiredPresentDays,
-                eligibleDays: entitlements.annualAllowedDays,
-                leaveSalaryDays: annualTaken,
-                remainingDays: annualRemaining,
+                eligibleDays: leaveCycle.eligibleDays,
+                leaveSalaryDays: leaveCycle.leaveSalaryDays,
+                remainingDays: leaveCycle.remainingDays,
                 sickDays: leaveBalances.sick_leave?.allowed,
                 sickRemaining,
                 sickEnabled: entitlements.sickEnabled,
-                airTicketEligible: presentDays >= airTicketRequiredDays,
+                airTicketEligible: leaveCycle.airTicketEligible,
                 airTicketRequiredDays,
-                lastAnnualLeaveDate,
+                lastAnnualLeaveDate: leaveCycle.lastAnnualLeaveEnd || lastAnnualLeaveDate,
+                cycleStart: leaveCycle.cycleStart,
+                period: 'year',
                 pieFrom,
                 pieTo,
                 pie: [
@@ -896,11 +1056,14 @@ export async function getEmployeeAttendanceProfile(req, res) {
             leaveBalances,
             leavePolicy: {
                 annualAllowedDays: entitlements.annualAllowedDays,
+                annualPeriod: entitlements.annualPeriod || 'year',
                 sickEnabled: entitlements.sickEnabled,
                 sickAllowedDays: entitlements.sickAllowedDays,
+                sickPeriod: entitlements.sickPeriod,
                 sandwichLeave: entitlements.sandwichLeave,
                 authorizedDeductionDays: entitlements.multipliers.authorized,
                 unauthorizedDeductionDays: entitlements.multipliers.unauthorized,
+                leaveSalaryWorkingDays: entitlements.airTicketRequiredDays,
             },
             events,
             financial: {
@@ -910,7 +1073,7 @@ export async function getEmployeeAttendanceProfile(req, res) {
                 increments: mapIncrementItems(salaryDoc?.salaryHistory),
                 loans: loanItems.map(mapLoanFinancialItem),
                 advances: advanceItems.map(mapLoanFinancialItem),
-                rewards: (rewards || []).map((r) => ({
+                rewards: approvedRewards.map((r) => ({
                     id: String(r._id),
                     code: r.rewardId || 'Reward',
                     type: r.rewardType || 'Reward',
@@ -918,11 +1081,11 @@ export async function getEmployeeAttendanceProfile(req, res) {
                     status: r.rewardStatus || '',
                     dateLabel: formatMonthYear(toDateKey(r.awardedDate || r.createdAt)),
                 })),
-                fines: (fines || [])
+                fines: approvedFines
                     .map((f) => mapFineFinancialItem(f, employeeCode))
                     .filter(Boolean),
                 utility,
-                utilityItems: mapUtilityItems(utilityBills),
+                utilityItems: mapUtilityItems(approvedUtilityBills),
                 assets: (assets || []).map((a) => ({
                     id: String(a._id),
                     code: a.plateNumber || a.assetId || a.name || 'Asset',

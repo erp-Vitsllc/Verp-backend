@@ -248,7 +248,9 @@ export async function loadHistoricalLeaveProfile(employeeId) {
     const code = String(employeeId || '').trim();
     if (!code) return null;
     return SalaryHistoricalProfile.findOne({ employeeId: code })
-        .select('leaveRecords annualLeaveRecords')
+        .select(
+            'employeeId leaveRecords annualLeaveRecords contractJoiningDate verpStartDate paymentCycles hiddenSystemLeave',
+        )
         .lean();
 }
 

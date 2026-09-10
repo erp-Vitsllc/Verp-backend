@@ -1,6 +1,22 @@
 import { fetchBillById } from '../../services/zohoService.js';
-import { upsertZohoBillFromApi } from '../../services/zohoPurchaseSyncService.js';
+import {
+    deleteCachedZohoBills,
+    upsertZohoBillFromApi,
+} from '../../services/zohoPurchaseSyncService.js';
 import { mapZohoErrorStatus } from './zohoVendorPaymentUtils.js';
+
+async function purgeMissingZohoBill(billId) {
+    const id = String(billId || '').trim();
+    if (!id) return;
+    try {
+        await deleteCachedZohoBills([id]);
+    } catch (syncError) {
+        console.warn(
+            '[ZohoBillById] Local cache delete after missing Zoho bill failed:',
+            syncError?.message || syncError,
+        );
+    }
+}
 
 export const getZohoBillById = async (req, res) => {
     try {
@@ -11,17 +27,7 @@ export const getZohoBillById = async (req, res) => {
 
         const bill = await fetchBillById(billId);
         if (!bill) {
-            try {
-                const { deleteUtilityBillsForRemovedZohoBills } = await import(
-                    '../../utils/deleteUtilityBillsForRemovedZohoBills.js'
-                );
-                await deleteUtilityBillsForRemovedZohoBills([billId]);
-            } catch (syncError) {
-                console.warn(
-                    '[ZohoBillById] Utility delete after missing Zoho bill failed:',
-                    syncError?.message || syncError,
-                );
-            }
+            await purgeMissingZohoBill(billId);
             return res.status(404).json({ success: false, message: 'Bill not found in Zoho Books.' });
         }
 
@@ -39,17 +45,7 @@ export const getZohoBillById = async (req, res) => {
         console.error('[ZohoBillById] Failed:', error?.message || error);
         const message = error?.message || 'Failed to fetch bill from Zoho Books';
         if (/not found|does not exist|deleted|invalid.*bill/i.test(message)) {
-            try {
-                const { deleteUtilityBillsForRemovedZohoBills } = await import(
-                    '../../utils/deleteUtilityBillsForRemovedZohoBills.js'
-                );
-                await deleteUtilityBillsForRemovedZohoBills([String(req.params?.billId || '').trim()]);
-            } catch (syncError) {
-                console.warn(
-                    '[ZohoBillById] Utility delete after Zoho bill error failed:',
-                    syncError?.message || syncError,
-                );
-            }
+            await purgeMissingZohoBill(req.params?.billId);
         }
         return res.status(mapZohoErrorStatus(message)).json({
             success: false,

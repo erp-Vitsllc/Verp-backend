@@ -21,6 +21,56 @@ import { getExplicitSyncPreference } from './zohoContactSyncService.js';
 const BULK_UPSERT_BATCH_SIZE = 500;
 const DEFAULT_CHUNK_LIMIT = 400;
 
+function cleanIds(ids = []) {
+    return [
+        ...new Set(
+            (Array.isArray(ids) ? ids : [ids])
+                .map((id) => String(id || '').trim())
+                .filter(Boolean),
+        ),
+    ];
+}
+
+/** Zoho void / deleted bills must not remain visible in ERP Accounts → Bills. */
+export function isRemovedZohoBillStatus(status) {
+    const value = String(status || '').trim().toLowerCase();
+    return value === 'void' || value === 'deleted';
+}
+
+/**
+ * Drop local Zoho bill cache rows (and linked utility bills) after Zoho remove/void.
+ */
+export async function deleteCachedZohoBills(zohoBillIds = [], organizationId = '') {
+    const ids = cleanIds(zohoBillIds);
+    if (!ids.length) return { deleted: 0, billIds: [] };
+
+    const orgId = String(organizationId || getZohoOrganizationId() || '').trim();
+    const filter = { zohoBillId: { $in: ids } };
+    if (orgId) filter.organizationId = orgId;
+
+    const result = await ZohoBill.deleteMany(filter);
+    const deleted = result.deletedCount || 0;
+    if (deleted > 0) {
+        console.log(
+            `[ZohoSync] bills: removed ${deleted} local cache row(s) after Zoho void/delete`,
+        );
+    }
+
+    try {
+        const { deleteUtilityBillsForRemovedZohoBills } = await import(
+            '../utils/deleteUtilityBillsForRemovedZohoBills.js'
+        );
+        await deleteUtilityBillsForRemovedZohoBills(ids);
+    } catch (err) {
+        console.warn(
+            '[ZohoPurchaseSync] Utility bill delete after Zoho bill cache remove failed:',
+            err?.message || err,
+        );
+    }
+
+    return { deleted, billIds: ids };
+}
+
 async function runBulkUpserts(Model, bulkOps) {
     if (!bulkOps.length) return;
 
@@ -155,9 +205,27 @@ export async function syncZohoBillsChunk(query = {}) {
     const organizationId = getZohoOrganizationId();
     const chunk = await fetchBillsChunk(query, { startPage, maxRows });
     const syncedAt = new Date();
+
+    const liveRows = [];
+    const removedFromChunk = [];
+    for (const row of chunk.rows || []) {
+        const status = String(row?.status || '').toLowerCase();
+        const id = String(row?.bill_id || row?.id || '').trim();
+        if (isRemovedZohoBillStatus(status)) {
+            if (id) removedFromChunk.push(id);
+            continue;
+        }
+        liveRows.push(row);
+    }
+
+    // Never re-upsert void/deleted into ERP cache — drop them immediately.
+    if (removedFromChunk.length) {
+        await deleteCachedZohoBills(removedFromChunk, organizationId);
+    }
+
     const stats = await upsertChunkRows({
         Model: ZohoBill,
-        rows: chunk.rows || [],
+        rows: liveRows,
         organizationId,
         syncedAt,
         mapToDoc: mapZohoBillToDoc,
@@ -170,7 +238,7 @@ export async function syncZohoBillsChunk(query = {}) {
 
     // Reflect Zoho paid bills onto vehicle service Amount Status.
     try {
-        const paidIds = (chunk.rows || [])
+        const paidIds = liveRows
             .map((row) => {
                 const doc = mapZohoBillToDoc(row, organizationId, syncedAt);
                 if (!doc?.zohoBillId) return '';
@@ -178,7 +246,7 @@ export async function syncZohoBillsChunk(query = {}) {
                 const balance = Number(doc.balance ?? row?.balance ?? NaN);
                 const paid =
                     status === 'paid' ||
-                    (Number.isFinite(balance) && Math.abs(balance) < 0.01 && status !== 'draft' && status !== 'void');
+                    (Number.isFinite(balance) && Math.abs(balance) < 0.01 && status !== 'draft');
                 return paid ? doc.zohoBillId : '';
             })
             .filter(Boolean);
@@ -196,23 +264,14 @@ export async function syncZohoBillsChunk(query = {}) {
     }
 
     const removedZohoBillIds = [
-        ...new Set([
-            ...(stats.removedIds || []),
-            ...((chunk.rows || [])
-                .map((row) => {
-                    const status = String(row?.status || '').toLowerCase();
-                    if (status !== 'void' && status !== 'deleted') return '';
-                    return String(row?.bill_id || row?.id || '').trim();
-                })
-                .filter(Boolean)),
-        ]),
+        ...new Set([...(stats.removedIds || []), ...removedFromChunk]),
     ];
-    if (removedZohoBillIds.length) {
+    if (stats.removedIds?.length) {
         try {
             const { deleteUtilityBillsForRemovedZohoBills } = await import(
                 '../utils/deleteUtilityBillsForRemovedZohoBills.js'
             );
-            await deleteUtilityBillsForRemovedZohoBills(removedZohoBillIds);
+            await deleteUtilityBillsForRemovedZohoBills(stats.removedIds);
         } catch (err) {
             console.warn(
                 '[ZohoPurchaseSync] Utility bill delete after Zoho bill remove failed:',
@@ -224,6 +283,8 @@ export async function syncZohoBillsChunk(query = {}) {
     return {
         organizationId,
         ...stats,
+        deactivated: (stats.deactivated || 0) + removedFromChunk.length,
+        removedIds: removedZohoBillIds,
         hasMore: Boolean(chunk.hasMore),
         nextZohoPage: chunk.nextPage,
         zohoPage: startPage,
@@ -286,6 +347,12 @@ export async function upsertZohoBillFromApi(bill, extras = {}) {
     const doc = mapZohoBillToDoc(bill, organizationId, syncedAt);
     if (!doc) return null;
 
+    // Void / deleted in Zoho → remove from ERP cache (do not keep showing in Accounts → Bills).
+    if (isRemovedZohoBillStatus(doc.status || bill?.status)) {
+        await deleteCachedZohoBills([doc.zohoBillId], organizationId);
+        return null;
+    }
+
     const utilityExtras = {};
     if (extras && typeof extras === 'object') {
         if (extras.utilityBillPaymentId != null) {
@@ -316,7 +383,7 @@ export async function upsertZohoBillFromApi(bill, extras = {}) {
 
     await ZohoBill.findOneAndUpdate(
         { organizationId, zohoBillId: doc.zohoBillId },
-        { $set: { ...doc, ...utilityExtras } },
+        { $set: { ...doc, ...utilityExtras, isActive: true } },
         { upsert: true, new: true },
     );
 
@@ -326,12 +393,7 @@ export async function upsertZohoBillFromApi(bill, extras = {}) {
         const balance = Number(doc.balance ?? bill?.balance ?? NaN);
         const paid =
             status === 'paid' || (Number.isFinite(balance) && Math.abs(balance) < 0.01 && status !== 'draft');
-        if ((status === 'void' || status === 'deleted') && doc.zohoBillId) {
-            const { deleteUtilityBillsForRemovedZohoBills } = await import(
-                '../utils/deleteUtilityBillsForRemovedZohoBills.js'
-            );
-            await deleteUtilityBillsForRemovedZohoBills([doc.zohoBillId]);
-        } else if (paid && doc.zohoBillId) {
+        if (paid && doc.zohoBillId) {
             const { markVehicleGarageServicesPaidFromZohoBillIds } = await import(
                 '../utils/markVehicleGarageServicesPaidFromZoho.js'
             );
@@ -436,6 +498,10 @@ export async function listZohoBillsFromDb({ activeOnly = true, query = {} } = {}
         defaultSort: { date: -1 },
         toApiShape: toZohoBillApiShape,
         idField: 'zohoBillId',
+        // Safety net: never list void/deleted even if an old cache row remains.
+        extraFilter: {
+            status: { $not: /^(void|deleted)$/i },
+        },
     });
 }
 

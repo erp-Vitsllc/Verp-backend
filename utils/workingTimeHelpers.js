@@ -7,6 +7,7 @@ import {
     normalizeStaffTypeKey,
     staffTypeMongoClause,
 } from './workLocationHelpers.js';
+import { loadAttendanceOpenStartByMongoId } from './leaveSalaryVisibility.js';
 
 export const WEEKDAY_KEYS = [
     'sunday',
@@ -403,6 +404,9 @@ export async function syncWeeklyOffAttendanceMarks({
     }
 
     const dateKeys = eachDateKey(fromKey, toKey);
+    const attendanceOpenFrom = await loadAttendanceOpenStartByMongoId(
+        groups.flatMap((group) => group.employees),
+    );
     let upserted = 0;
     let cleared = 0;
 
@@ -438,6 +442,8 @@ export async function syncWeeklyOffAttendanceMarks({
             for (const dateKey of offDates) {
                 for (const emp of group.employees) {
                     const employeeMongoId = String(emp._id);
+                    const openFrom = attendanceOpenFrom.get(employeeMongoId);
+                    if (!openFrom || dateKey < openFrom) continue;
                     const statusKey = existingMap.get(`${dateKey}::${employeeMongoId}`);
                     if (statusKey && statusKey !== 'weekly_off') continue;
 

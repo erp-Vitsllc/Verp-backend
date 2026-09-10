@@ -9,6 +9,7 @@ import {
     resolveAppliesToInput,
 } from '../utils/workingTimeHelpers.js';
 import { listActiveWorkLocations } from '../utils/workLocationHelpers.js';
+import { loadAttendanceOpenStartByMongoId } from '../utils/leaveSalaryVisibility.js';
 
 function isValidDateKey(value) {
     return typeof value === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(value);
@@ -54,10 +55,13 @@ async function markHolidayAttendance(date, name, staffTypes, markedBy) {
                 .filter((row) => PROTECT_FROM_HOLIDAY_OVERWRITE.has(String(row.statusKey || '')))
                 .map((row) => String(row.employeeMongoId)),
         );
+        const attendanceOpenFrom = await loadAttendanceOpenStartByMongoId(employees);
 
         const bulk = [];
         for (const emp of employees) {
             const employeeMongoId = String(emp._id);
+            const openFrom = attendanceOpenFrom.get(employeeMongoId);
+            if (!openFrom || date < openFrom) continue;
             if (skip.has(employeeMongoId)) continue;
             const employeeName = [emp.firstName, emp.lastName].filter(Boolean).join(' ').trim();
             bulk.push({

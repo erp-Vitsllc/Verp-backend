@@ -9,7 +9,9 @@ import {
 
 const HIDDEN_ASSET_STATUSES = new Set([
     'Draft',
+    'Pending',
     'Rejected',
+    'Submitted for Approval',
     'Unassigned',
     'Returned',
     'End of Life',
@@ -128,7 +130,7 @@ export const getMyAssetDashboardCards = async (req, res) => {
                 assignedToId: { $in: assigneeIds },
                 status: { $ne: 'Inactive' },
             })
-                .select('type status values assignedAt assignedToId createdAt updatedAt')
+                .select('type status values assignedAt assignedToId pendingStatusChange createdAt updatedAt')
                 .sort({ assignedAt: -1, updatedAt: -1 })
                 .lean(),
         ]);
@@ -143,7 +145,9 @@ export const getMyAssetDashboardCards = async (req, res) => {
         return res.status(200).json({
             tools,
             vehicles,
-            utilities: (utilities || []).map(mapUtilityItem),
+            utilities: (utilities || [])
+                .filter((entry) => !entry?.pendingStatusChange)
+                .map(mapUtilityItem),
         });
     } catch (error) {
         console.error('[getMyAssetDashboardCards]', error);
