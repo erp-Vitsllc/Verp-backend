@@ -195,14 +195,17 @@ export function cycleEligibilitySnapshot({
 } = {}) {
     const progress = cycleProgress({ accumulatedDays, requiredDays });
     const ticketNeed = Math.max(0, Number(airTicketRequiredDays) || progress.requiredDays);
+    const leaveEligible = progress.requiredDays <= 0 || progress.completedCycles > 0;
     return {
         lastAnnualLeaveEnd: lastAnnualLeaveEnd || '',
         cycleStart: cycleStart || '',
         requiredPresentDays: progress.requiredDays,
         eligibleDays: progress.eligibleDays,
+        completedCycles: progress.completedCycles,
+        leaveEligible,
         leaveSalaryDays: Math.max(0, Number(lastAnnualLeaveDays) || 0),
         remainingDays: progress.remainingDays,
-        airTicketEligible: ticketNeed > 0 && progress.eligibleDays >= ticketNeed,
+        airTicketEligible: ticketNeed > 0 && (progress.completedCycles > 0 || progress.eligibleDays >= ticketNeed),
         airTicketRequiredDays: ticketNeed,
         period: 'year',
     };

@@ -879,6 +879,7 @@ export async function getEmployeeAttendanceProfile(req, res) {
         const leaveBalances = applyOverlayCountsToBalances(rawLeaveBalances, overlay.extraCounts);
         const enrollUsed = leaveCycle.used || {};
         const enrollAttendance = leaveCycle.attendance || {};
+        const annualEligible = Boolean(leaveCycle.leaveEligible);
         for (const statusKey of [
             'on_leave',
             'sick_leave',
@@ -890,13 +891,15 @@ export async function getEmployeeAttendanceProfile(req, res) {
             if (!row) continue;
             const taken = Number(enrollUsed[statusKey]) || 0;
             const allowed =
-                row.allowed != null
-                    ? row.allowed
-                    : statusKey === 'sick_leave'
-                      ? entitlements.sickAllowedDays
-                      : statusKey === 'on_leave'
-                        ? entitlements.annualAllowedDays
-                        : null;
+                statusKey === 'on_leave' && !annualEligible
+                    ? 0
+                    : row.allowed != null
+                      ? row.allowed
+                      : statusKey === 'sick_leave'
+                        ? entitlements.sickAllowedDays
+                        : statusKey === 'on_leave'
+                          ? entitlements.annualAllowedDays
+                          : null;
             const multiplier = Number(row.multiplier) || 1;
             leaveBalances[statusKey] = {
                 ...row,
@@ -940,7 +943,6 @@ export async function getEmployeeAttendanceProfile(req, res) {
         }
         const requiredPresentDays = leaveCycle.requiredPresentDays || entitlements.requiredPresentDays;
         const airTicketRequiredDays = leaveCycle.airTicketRequiredDays || entitlements.airTicketRequiredDays;
-        const annualEligible = leaveCycle.airTicketEligible;
         const sickRemaining = leaveBalances.sick_leave?.remaining;
         const joinKey = toDateKey(employee.dateOfJoining || employee.joiningDate);
         const dobKey = toDateKey(personal?.dateOfBirth);
@@ -1039,6 +1041,8 @@ export async function getEmployeeAttendanceProfile(req, res) {
             },
             annualLeave: {
                 eligible: annualEligible,
+                leaveEligible: annualEligible,
+                completedCycles: Number(leaveCycle.completedCycles) || 0,
                 presentDays: leaveCycle.eligibleDays,
                 requiredPresentDays,
                 eligibleDays: leaveCycle.eligibleDays,

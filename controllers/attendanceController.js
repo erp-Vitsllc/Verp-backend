@@ -1187,13 +1187,15 @@ function applyEnrollUsedToLeaveBalances(leaveBalances, enrollUsed = {}, entitlem
         if (!row) continue;
         const taken = Number(enrollUsed[statusKey]) || 0;
         const allowed =
-            row.allowed != null
-                ? row.allowed
-                : statusKey === 'sick_leave'
-                  ? entitlements.sickAllowedDays
-                  : statusKey === 'on_leave'
-                    ? entitlements.annualAllowedDays
-                    : null;
+            statusKey === 'on_leave' && entitlements.leaveEligible === false
+                ? 0
+                : row.allowed != null
+                  ? row.allowed
+                  : statusKey === 'sick_leave'
+                    ? entitlements.sickAllowedDays
+                    : statusKey === 'on_leave'
+                      ? entitlements.annualAllowedDays
+                      : null;
         const multiplier = Number(row.multiplier) || 1;
         next[statusKey] = {
             ...row,
@@ -1440,7 +1442,7 @@ export async function getMyAttendanceYearSummary(req, res) {
         const leaveBalances = applyEnrollUsedToLeaveBalances(
             applyOverlayCountsToBalances(rawLeaveBalances, overlay.extraCounts),
             enrollUsed,
-            entitlements,
+            { ...entitlements, leaveEligible: Boolean(leaveCycle.leaveEligible) },
         );
 
         return res.status(200).json({
@@ -1475,6 +1477,14 @@ export async function getMyAttendanceYearSummary(req, res) {
             leavePolicy: serializeLeavePolicy(entitlements) || leavePolicy,
             enrollAttendance,
             requestStats: requestStatsFromEnroll(enrollUsed, enrollAttendance),
+            annualLeave: {
+                eligible: Boolean(leaveCycle.leaveEligible),
+                leaveEligible: Boolean(leaveCycle.leaveEligible),
+                completedCycles: Number(leaveCycle.completedCycles) || 0,
+                requiredPresentDays: Number(leaveCycle.requiredPresentDays) || 0,
+                eligibleDays: Number(leaveCycle.eligibleDays) || 0,
+                remainingDays: Number(leaveCycle.remainingDays) || 0,
+            },
         });
     } catch (error) {
         console.error('[getMyAttendanceYearSummary]', error);
