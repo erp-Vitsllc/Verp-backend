@@ -25,6 +25,19 @@ import { attachZohoBillNumbers } from '../../utils/attachZohoDocumentNumbers.js'
 
 const REQUEST_TYPE = 'Utility Bill Payment';
 
+function dubaiOpenUtilityBillMonth(refDate = new Date()) {
+    const parts = new Intl.DateTimeFormat('en-CA', {
+        timeZone: 'Asia/Dubai',
+        year: 'numeric',
+        month: '2-digit',
+    }).formatToParts(refDate);
+    const year = Number(parts.find((part) => part.type === 'year')?.value);
+    const month = Number(parts.find((part) => part.type === 'month')?.value);
+    if (!year || !month) return '';
+    const prev = new Date(Date.UTC(year, month - 2, 1));
+    return `${prev.getUTCFullYear()}-${String(prev.getUTCMonth() + 1).padStart(2, '0')}`;
+}
+
 function empDisplayName(emp) {
     if (!emp) return '';
     return `${emp.firstName || ''} ${emp.lastName || ''}`.trim() || emp.employeeId || 'User';
@@ -254,11 +267,16 @@ function actorCanCreatorResend(actor, bill, canApproveReject = false, { isAdmin 
     return status === 'Pending Accounts' || status === 'Pending HR' || status === 'Approved';
 }
 
+/** Approve / Reject only for the flowchart person this stage is waiting on — not Admin, not the requester. */
+function actorIsPendingStageApprover(status, accountsGate, hrGate) {
+    if (status === 'Pending Accounts') return Boolean(accountsGate?.isAccounts);
+    if (status === 'Pending HR') return Boolean(hrGate?.isHr);
+    return false;
+}
+
 function withBillActorFlags(bill, actor, accountsGate, hrGate, { isAdmin = false } = {}) {
     const decorated = decorateBill(bill);
-    const canApproveReject =
-        (bill.status === 'Pending Accounts' && accountsGate?.allowed) ||
-        (bill.status === 'Pending HR' && hrGate?.allowed);
+    const canApproveReject = actorIsPendingStageApprover(bill.status, accountsGate, hrGate);
     const canPay = bill.status === 'Approved' && Boolean(accountsGate?.allowed);
     const canMutate = actorCanMutateUtilityBill(actor, bill, { isAdmin });
     return {
@@ -925,7 +943,11 @@ export async function getUtilityBillBatch(req, res) {
         );
         const canPay =
             stageStatus === 'Approved' && accountsGate.allowed && !hasZohoDraft;
-        const canApproveReject = canEdit;
+        const canApproveReject = actorIsPendingStageApprover(
+            stageStatus,
+            accountsGate,
+            hrGate,
+        );
         const canCreatorResend = actorCanCreatorResend(actor, focus, canApproveReject, {
             isAdmin,
         });
@@ -987,6 +1009,15 @@ export async function createUtilityBillBatch(req, res) {
         const { utilityType, billMonth = '', notes = '', rows = [] } = req.body || {};
         if (!utilityType || !Array.isArray(rows) || !rows.length) {
             return res.status(400).json({ message: 'utilityType and rows are required' });
+        }
+        const monthKey = String(billMonth || '').trim();
+        if (/^\d{4}-\d{2}$/.test(monthKey)) {
+            const openMonth = dubaiOpenUtilityBillMonth();
+            if (openMonth && monthKey > openMonth) {
+                return res.status(400).json({
+                    message: "This month's bill can be added on the 1st of next month.",
+                });
+            }
         }
 
         const accounts = await getDepartmentHOD('accounts');
@@ -2043,7 +2074,7 @@ export async function respondUtilityBillBatch(req, res) {
 
         if (stageStatus === 'Pending Accounts') {
             const gate = accountsGateEarly;
-            if (!gate.allowed) {
+            if (!gate.isAccounts) {
                 return res.status(403).json({
                     message: `Only Accounts (${empDisplayName(gate.accounts) || 'flowchart Accounts'}) can respond at this stage.`,
                 });
@@ -2324,7 +2355,7 @@ export async function respondUtilityBillBatch(req, res) {
 
         // Pending HR
         const gate = hrGateEarly;
-        if (!gate.allowed) {
+        if (!gate.isHr) {
             const hrName = empDisplayName(gate.hr) || 'HR';
             return res.status(403).json({
                 message: `Only HR (${hrName}) can respond at this stage. Open this from the HR login / HR pending inbox.`,

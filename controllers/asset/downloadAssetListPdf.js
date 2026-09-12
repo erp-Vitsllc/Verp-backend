@@ -1,6 +1,6 @@
 import { getCompleteEmployee } from '../../services/employeeService.js';
 import { formatAssetListDate } from '../../utils/buildEmployeeAssetListPdfHtml.js';
-import { generateEmployeeAssetListFromTemplatePdf } from '../../utils/generateEmployeeAssetListFromTemplatePdf.js';
+import { generateEmployeeAssetListFromTemplatePdf, resolveAssetListPrintMeta } from '../../utils/generateEmployeeAssetListFromTemplatePdf.js';
 import { parseAssetListExportColumns } from '../../utils/assetListExportColumns.js';
 import {
     loadAssetsByIds,
@@ -31,6 +31,7 @@ export const downloadAssetListPdf = async (req, res) => {
                 .trim()
                 .toLowerCase() === 'true';
         const columns = parseAssetListExportColumns(req.query?.columns);
+        const printMeta = resolveAssetListPrintMeta(req.user);
         let pdfBuffer;
 
         if (groupByOwner) {
@@ -40,6 +41,7 @@ export const downloadAssetListPdf = async (req, res) => {
                 groupByOwner: true,
                 listTitle,
                 columns,
+                ...printMeta,
             });
         } else if (employeeId) {
             const employee = await getCompleteEmployee(employeeId);
@@ -48,6 +50,7 @@ export const downloadAssetListPdf = async (req, res) => {
                     employee,
                     assets,
                     columns,
+                    ...printMeta,
                 });
             } else {
                 pdfBuffer = await generateEmployeeAssetListFromTemplatePdf({
@@ -59,6 +62,7 @@ export const downloadAssetListPdf = async (req, res) => {
                         date: formatAssetListDate(new Date()),
                     },
                     columns,
+                    ...printMeta,
                 });
             }
         } else {
@@ -71,6 +75,7 @@ export const downloadAssetListPdf = async (req, res) => {
                     date: formatAssetListDate(new Date()),
                 },
                 columns,
+                ...printMeta,
             });
         }
 

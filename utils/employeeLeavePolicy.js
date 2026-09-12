@@ -115,8 +115,9 @@ export function leavePolicyEntitlements(policy) {
         annualAllowedDays: DEFAULT_ANNUAL_LEAVE_DAYS,
         annualPeriod: 'year',
         sickEnabled,
-        sickAllowedDays: sickEnabled ? (sickAllowedRaw ?? 0) : null,
-        sickPeriod: sickEnabled ? 'year' : null,
+        sickAllowedDays: sickAllowedRaw != null ? sickAllowedRaw : sickEnabled ? 0 : null,
+        allowedSickLeaveDaysPerYear: sickAllowedRaw,
+        sickPeriod: sickEnabled || sickAllowedRaw != null ? 'year' : null,
         sandwichLeave: Boolean(rules.sandwichLeave),
         requiredPresentDays,
         airTicketRequiredDays: leaveWorkingDays,
@@ -343,7 +344,9 @@ export function buildLeaveBalances({
                   ? entitlements?.sickAllowedDays
                   : null;
         const enabled =
-            statusKey === 'on_leave' || (statusKey === 'sick_leave' && Boolean(entitlements?.sickEnabled));
+            statusKey === 'on_leave' ||
+            (statusKey === 'sick_leave' &&
+                (Boolean(entitlements?.sickEnabled) || entitlements?.sickAllowedDays != null));
         types[statusKey] = typeBalance({
             taken: taken[statusKey] || 0,
             sandwichDays: sandwichByType[statusKey] || 0,

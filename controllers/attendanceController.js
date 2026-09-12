@@ -59,7 +59,7 @@ import {
     mergeHistoricalCalendarRecords,
     overlayHistoricalLeave,
 } from '../utils/historicalLeaveAttendanceOverlay.js';
-import { loadEmployeeSalaryWorkingDays } from '../utils/loadLeaveTicketEntitlement.js';
+import { loadCurrentLeaveCycleEligibility, loadEmployeeSalaryWorkingDays } from '../utils/loadLeaveTicketEntitlement.js';
 
 const LEAVE_REQUEST_STATUS_KEYS = new Set([
     'unauthorized_leave',
@@ -1130,10 +1130,80 @@ function serializeLeavePolicy(entitlements) {
         annualAllowedDays: entitlements.annualAllowedDays,
         sickEnabled: entitlements.sickEnabled,
         sickAllowedDays: entitlements.sickAllowedDays,
+        allowedSickLeaveDaysPerYear: entitlements.allowedSickLeaveDaysPerYear,
         sandwichLeave: entitlements.sandwichLeave,
         authorizedDeductionDays: entitlements.multipliers?.authorized,
         unauthorizedDeductionDays: entitlements.multipliers?.unauthorized,
     };
+}
+
+function requestStatsFromEnroll(enrollUsed = {}, enrollAttendance = {}) {
+    const keys = [
+        'on_leave',
+        'sick_leave',
+        'authorized_leave',
+        'unauthorized_leave',
+        'compoff_leave',
+        'late_arrived',
+        'early_go',
+        'late_early',
+        'mispunch',
+    ];
+    const stats = {};
+    for (const key of keys) {
+        const approved = Math.max(0, Number(enrollUsed?.[key]) || 0);
+        stats[key] = {
+            total: approved,
+            request: 0,
+            approved,
+            rejected: 0,
+            present: 0,
+        };
+    }
+    const late = Math.max(0, Number(enrollAttendance?.late) || 0);
+    const early = Math.max(0, Number(enrollAttendance?.early) || 0);
+    const mispunch = Math.max(0, Number(enrollAttendance?.mispunch) || 0);
+    stats.late_arrived.total = late;
+    stats.late_arrived.approved = late;
+    stats.early_go.total = early;
+    stats.early_go.approved = early;
+    stats.late_early.total = late + early;
+    stats.late_early.approved = late + early;
+    stats.mispunch.total = mispunch;
+    stats.mispunch.approved = mispunch;
+    return stats;
+}
+
+function applyEnrollUsedToLeaveBalances(leaveBalances, enrollUsed = {}, entitlements = {}) {
+    const next = { ...(leaveBalances || {}) };
+    for (const statusKey of [
+        'on_leave',
+        'sick_leave',
+        'authorized_leave',
+        'unauthorized_leave',
+        'compoff_leave',
+    ]) {
+        const row = next[statusKey];
+        if (!row) continue;
+        const taken = Number(enrollUsed[statusKey]) || 0;
+        const allowed =
+            row.allowed != null
+                ? row.allowed
+                : statusKey === 'sick_leave'
+                  ? entitlements.sickAllowedDays
+                  : statusKey === 'on_leave'
+                    ? entitlements.annualAllowedDays
+                    : null;
+        const multiplier = Number(row.multiplier) || 1;
+        next[statusKey] = {
+            ...row,
+            taken,
+            allowed,
+            remaining: allowed == null ? null : Math.max(0, Number(allowed) - taken),
+            deductionDays: Number((taken * multiplier).toFixed(2)),
+        };
+    }
+    return next;
 }
 
 async function leavePolicyForEmployee(employee) {
@@ -1355,11 +1425,23 @@ export async function getMyAttendanceYearSummary(req, res) {
             counts.authorized_leave +
             counts.unauthorized_leave;
 
-        const { types: rawLeaveBalances, entitlements } = await loadEmployeeLeaveBalances(
+        const { types: rawLeaveBalances, entitlements, policy } = await loadEmployeeLeaveBalances(
             { _id: self._id, employeeId: self.employeeId, staffType },
             { year },
         );
-        const leaveBalances = applyOverlayCountsToBalances(rawLeaveBalances, overlay.extraCounts);
+        const leaveCycle = await loadCurrentLeaveCycleEligibility({
+            employee: { _id: self._id, employeeId: self.employeeId, staffType },
+            profile: historicalProfile,
+            policy,
+            attendanceRecords: detailRows,
+        });
+        const enrollUsed = leaveCycle.used || {};
+        const enrollAttendance = leaveCycle.attendance || {};
+        const leaveBalances = applyEnrollUsedToLeaveBalances(
+            applyOverlayCountsToBalances(rawLeaveBalances, overlay.extraCounts),
+            enrollUsed,
+            entitlements,
+        );
 
         return res.status(200).json({
             message: 'Year summary fetched successfully',
@@ -1391,6 +1473,8 @@ export async function getMyAttendanceYearSummary(req, res) {
             ],
             leaveBalances,
             leavePolicy: serializeLeavePolicy(entitlements) || leavePolicy,
+            enrollAttendance,
+            requestStats: requestStatsFromEnroll(enrollUsed, enrollAttendance),
         });
     } catch (error) {
         console.error('[getMyAttendanceYearSummary]', error);

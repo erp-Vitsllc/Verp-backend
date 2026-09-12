@@ -12,13 +12,13 @@ import {
 } from './employeeLeavePolicy.js';
 
 describe('employee leave policy', () => {
-    it('uses allowed sick leave per year only when the HR rule is enabled', () => {
+    it('exposes salary-policy allowed sick leave days even when the HR toggle is off', () => {
         const off = leavePolicyEntitlements({
             processingRules: { allowedSickLeavePerYear: false },
             allowedSickLeaveDaysPerYear: 12,
         });
         assert.equal(off.sickEnabled, false);
-        assert.equal(off.sickAllowedDays, null);
+        assert.equal(off.sickAllowedDays, 12);
 
         const on = leavePolicyEntitlements({
             processingRules: { allowedSickLeavePerYear: true },

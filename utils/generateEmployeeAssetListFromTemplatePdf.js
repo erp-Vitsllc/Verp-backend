@@ -15,6 +15,9 @@ const PAGE_WIDTH = 595.92;
 const PAGE_HEIGHT = 934.56;
 const BLACK = rgb(0, 0, 0);
 const LINE = rgb(0, 0, 0);
+const NEW_RED = rgb(0.86, 0.08, 0.08);
+const NEW_BADGE = '(new)';
+const PRINT_TZ = 'Asia/Dubai';
 
 /** Measured from asset-list-template.pdf — Serial No | Assigned to | Asset Name | Accessories | Asset ID | QTY | Value */
 const LAYOUT = {
@@ -31,6 +34,25 @@ const LAYOUT = {
 };
 
 const SERIAL_WEIGHT = 0.45;
+
+export function resolveAssetListPrintMeta(user, now = new Date()) {
+    const printedBy =
+        String(user?.name || '').trim() ||
+        String(user?.username || '').trim() ||
+        String(user?.email || '').trim() ||
+        String(user?.employeeId || '').trim() ||
+        '—';
+    const printedOn = now.toLocaleString('en-GB', {
+        timeZone: PRINT_TZ,
+        day: '2-digit',
+        month: '2-digit',
+        year: 'numeric',
+        hour: '2-digit',
+        minute: '2-digit',
+        hour12: false,
+    });
+    return { printedBy, printedOn };
+}
 
 function employeeDisplayName(employee) {
     if (!employee) return '—';
@@ -101,6 +123,81 @@ function wrapTextToLines(font, text, size, maxWidth) {
 function countWrappedLines(font, text, size, colStart, colEnd) {
     const maxWidth = colEnd - colStart - CELL_PAD_X * 2;
     return wrapTextToLines(font, text, size, maxWidth).length;
+}
+
+function assetNameLayout(font, row, colStart, colEnd) {
+    const size = 8;
+    const maxWidth = colEnd - colStart - CELL_PAD_X * 2;
+    const lines = wrapTextToLines(font, row?.name || '—', size, maxWidth);
+    if (!row?.isLatestAssigned) {
+        return { lines, size, maxWidth, badgeFitsLast: false, extraLine: false, lineCount: lines.length };
+    }
+    const last = lines[lines.length - 1] || '';
+    const gap = font.widthOfTextAtSize(' ', size);
+    const badgeWidth = font.widthOfTextAtSize(NEW_BADGE, size);
+    const badgeFitsLast = font.widthOfTextAtSize(last, size) + gap + badgeWidth <= maxWidth;
+    const extraLine = !badgeFitsLast;
+    return {
+        lines,
+        size,
+        maxWidth,
+        badgeFitsLast,
+        extraLine,
+        lineCount: lines.length + (extraLine ? 1 : 0),
+    };
+}
+
+function drawAssetNameInCell(page, font, row, colStart, colEnd, rowTop, rowHeight) {
+    const { lines, size, badgeFitsLast, extraLine, lineCount } = assetNameLayout(font, row, colStart, colEnd);
+    const lh = lineHeightForSize(size);
+    const blockHeight = lineCount * lh;
+    let y = rowTop - (rowHeight - blockHeight) / 2 - size;
+    const x0 = colStart + CELL_PAD_X;
+
+    lines.forEach((line, idx) => {
+        page.drawText(line, { x: x0, y, size, font, color: BLACK });
+        if (row?.isLatestAssigned && idx === lines.length - 1 && badgeFitsLast) {
+            const gap = font.widthOfTextAtSize(' ', size);
+            page.drawText(NEW_BADGE, {
+                x: x0 + font.widthOfTextAtSize(line, size) + gap,
+                y,
+                size,
+                font,
+                color: NEW_RED,
+            });
+        }
+        y -= lh;
+    });
+
+    if (row?.isLatestAssigned && extraLine) {
+        page.drawText(NEW_BADGE, { x: x0, y, size, font, color: NEW_RED });
+    }
+}
+
+function drawPrintMeta(page, font, { printedOn, printedBy } = {}) {
+    const toPdfText = (value) => String(value ?? '').replace(/[^\u0000-\u00ff]/g, '?').trim();
+    const onText = toPdfText(printedOn);
+    const byText = toPdfText(printedBy);
+    if (!onText && !byText) return;
+
+    const size = 9;
+    const right = LAYOUT.table.x + LAYOUT.table.width;
+    let y = PAGE_HEIGHT - 28;
+    const lines = [];
+    if (onText) lines.push(`Printed on: ${onText}`);
+    if (byText) lines.push(`Printed by: ${byText}`);
+
+    for (const line of lines) {
+        const textWidth = font.widthOfTextAtSize(line, size);
+        page.drawText(line, {
+            x: right - textWidth,
+            y,
+            size,
+            font,
+            color: BLACK,
+        });
+        y -= 12;
+    }
 }
 
 function cellHeightForLines(lineCount, size, minHeight) {
@@ -218,6 +315,10 @@ function rowHeightForAsset(row, font, columnDefs, colX) {
             heights.push(
                 cellHeightForLines(countAccessoryListLines(font, row.accessories, colStart, colEnd), 7, defaultRowHeight),
             );
+        } else if (col.key === 'assetName') {
+            heights.push(
+                cellHeightForLines(assetNameLayout(font, row, colStart, colEnd).lineCount, 8, defaultRowHeight),
+            );
         } else {
             const text = cellValueForColumn(row, col.key);
             heights.push(
@@ -310,7 +411,11 @@ function drawAssetRow(page, font, row, rowTop, rowHeight, columnDefs, colX) {
             drawAccessoryListInCell(page, font, row.accessories, colStart, colEnd, rowTop, rowHeight);
             return;
         }
-        const align = col.key === 'assignedTo' || col.key === 'assetName' || col.key === 'assetType' || col.key === 'category'
+        if (col.key === 'assetName') {
+            drawAssetNameInCell(page, font, row, colStart, colEnd, rowTop, rowHeight);
+            return;
+        }
+        const align = col.key === 'assignedTo' || col.key === 'assetType' || col.key === 'category'
             ? 'left'
             : 'center';
         drawWrappedTextInCell(page, font, cellValueForColumn(row, col.key), colStart, colEnd, rowTop, rowHeight, {
@@ -408,8 +513,45 @@ function getOwnerSortKey(asset) {
     return 'z:unassigned';
 }
 
-function buildAssetListPdfRows(assets, { fallbackAssignee = null } = {}) {
+function resolveAssignedInstant(asset) {
+    const raw = asset?.assignedDate || asset?.updatedAt || asset?.createdAt;
+    if (!raw) return null;
+    const d = raw instanceof Date ? raw : new Date(raw);
+    return Number.isNaN(d.getTime()) ? null : d;
+}
+
+function assignedAtMs(asset) {
+    const d = resolveAssignedInstant(asset);
+    return d ? d.getTime() : 0;
+}
+
+function assignedDayKey(value) {
+    if (!value) return '';
+    const d = value instanceof Date ? value : new Date(value);
+    if (Number.isNaN(d.getTime())) return '';
+    return d.toLocaleDateString('en-CA', { timeZone: PRINT_TZ });
+}
+
+function latestAssignedDayByOwner(assets, { singleOwnerLatest = false } = {}) {
+    const maxMsByOwner = new Map();
+    for (const asset of assets || []) {
+        const ms = assignedAtMs(asset);
+        if (!ms) continue;
+        const ownerKey = singleOwnerLatest ? 'single' : getOwnerSortKey(asset);
+        const prev = maxMsByOwner.get(ownerKey) || 0;
+        if (ms > prev) maxMsByOwner.set(ownerKey, ms);
+    }
+
+    const latestDayByOwner = new Map();
+    for (const [ownerKey, ms] of maxMsByOwner) {
+        latestDayByOwner.set(ownerKey, assignedDayKey(ms));
+    }
+    return latestDayByOwner;
+}
+
+function buildAssetListPdfRows(assets, { fallbackAssignee = null, singleOwnerLatest = false } = {}) {
     const fallbackName = fallbackAssignee ? employeeDisplayName(fallbackAssignee) : null;
+    const latestDayByOwner = latestAssignedDayByOwner(assets, { singleOwnerLatest });
 
     const orderedAssets = [...(assets || [])].sort((a, b) => {
         const keyCmp = getOwnerSortKey(a).localeCompare(getOwnerSortKey(b));
@@ -419,24 +561,30 @@ function buildAssetListPdfRows(assets, { fallbackAssignee = null } = {}) {
 
     return orderedAssets.map((asset, index) => {
         const baseRow = buildEmployeeAssetListRows([asset])[0];
+        const ownerKey = singleOwnerLatest ? 'single' : getOwnerSortKey(asset);
+        const latestDay = latestDayByOwner.get(ownerKey);
+        const thisDay = assignedDayKey(resolveAssignedInstant(asset));
         return {
             ...baseRow,
             assignedTo: resolveAssetAssigneeName(asset) || fallbackName || '—',
             assetType: resolveNestedName(asset?.typeId),
             category: resolveNestedName(asset?.categoryId),
+            isLatestAssigned: Boolean(latestDay && thisDay && thisDay === latestDay),
             index,
         };
     });
 }
 
-function renderAssetListPdf({ outputDoc, font, fontBold, bgImage, listRows, columnDefs }) {
+function renderAssetListPdf({ outputDoc, font, fontBold, bgImage, listRows, columnDefs, printedOn, printedBy }) {
     const colX = buildColX(columnDefs);
     const total = listRows.reduce((sum, row) => sum + (Number(row.totalValue) || 0), 0);
     const pages = paginateRows(listRows, font, columnDefs, colX);
+    const printMeta = { printedOn, printedBy };
 
     pages.forEach((pageRows, pageIndex) => {
         const page = outputDoc.addPage([PAGE_WIDTH, PAGE_HEIGHT]);
         drawPageBackground(page, bgImage);
+        drawPrintMeta(page, fontBold, printMeta);
         drawTableHeaderAt(page, fontBold, LAYOUT.table.headerTop, columnDefs, colX);
 
         if (pageRows.length === 0 && pageIndex === 0) {
@@ -494,6 +642,8 @@ export async function generateEmployeeAssetListFromTemplatePdf({
     groupByOwner = false,
     listTitle = 'Asset List',
     columns = null,
+    printedOn = '',
+    printedBy = '',
 }) {
     try {
         const outputDoc = await PDFDocument.create();
@@ -506,10 +656,22 @@ export async function generateEmployeeAssetListFromTemplatePdf({
                 ? { firstName: headerOverride.employeeName }
                 : employee;
 
-        const listRows = buildAssetListPdfRows(assets, { fallbackAssignee });
+        const listRows = buildAssetListPdfRows(assets, {
+            fallbackAssignee,
+            singleOwnerLatest: Boolean(employee) && !groupByOwner,
+        });
         const columnDefs = resolveAssetListExportColumns(columns);
 
-        renderAssetListPdf({ outputDoc, font, fontBold, bgImage, listRows, columnDefs });
+        renderAssetListPdf({
+            outputDoc,
+            font,
+            fontBold,
+            bgImage,
+            listRows,
+            columnDefs,
+            printedOn,
+            printedBy,
+        });
 
         const pdfBytes = await outputDoc.save();
         return Buffer.from(pdfBytes);

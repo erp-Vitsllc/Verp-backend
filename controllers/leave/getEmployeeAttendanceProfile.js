@@ -889,11 +889,19 @@ export async function getEmployeeAttendanceProfile(req, res) {
             const row = leaveBalances[statusKey];
             if (!row) continue;
             const taken = Number(enrollUsed[statusKey]) || 0;
-            const allowed = row.allowed;
+            const allowed =
+                row.allowed != null
+                    ? row.allowed
+                    : statusKey === 'sick_leave'
+                      ? entitlements.sickAllowedDays
+                      : statusKey === 'on_leave'
+                        ? entitlements.annualAllowedDays
+                        : null;
             const multiplier = Number(row.multiplier) || 1;
             leaveBalances[statusKey] = {
                 ...row,
                 taken,
+                allowed,
                 remaining: allowed == null ? null : Math.max(0, Number(allowed) - taken),
                 deductionDays: Number((taken * multiplier).toFixed(2)),
             };
@@ -1059,6 +1067,7 @@ export async function getEmployeeAttendanceProfile(req, res) {
                 annualPeriod: entitlements.annualPeriod || 'year',
                 sickEnabled: entitlements.sickEnabled,
                 sickAllowedDays: entitlements.sickAllowedDays,
+                allowedSickLeaveDaysPerYear: entitlements.allowedSickLeaveDaysPerYear,
                 sickPeriod: entitlements.sickPeriod,
                 sandwichLeave: entitlements.sandwichLeave,
                 authorizedDeductionDays: entitlements.multipliers.authorized,

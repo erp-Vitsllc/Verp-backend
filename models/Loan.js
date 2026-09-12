@@ -184,6 +184,14 @@ const loanSchema = new mongoose.Schema({
     zohoExpenseNumber: { type: String, default: '' },
     zohoSyncedAt: { type: Date, default: null },
     zohoSyncError: { type: String, default: '' },
+    /** Employee → company recovery path: `employee` (no Zoho) or empty (Expense Refund / Zoho). */
+    accountsRepaymentPath: { type: String, default: '' },
+    accountsRepaymentAt: { type: Date, default: null },
+    accountsRepaymentBy: {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: 'User',
+        default: null,
+    },
 }, { timestamps: true });
 
 const Loan = mongoose.model("Loan", loanSchema);

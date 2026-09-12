@@ -69,6 +69,8 @@ const payrollSettingsSchema = new mongoose.Schema(
         lateOutRules: { type: [lateDeductRuleSchema], default: () => [] },
         extraLateRules: { type: [lateDeductRuleSchema], default: () => [] },
         salaryProcessReminders: { type: [salaryProcessReminderSchema], default: () => [] },
+        minAllowedLeavePerGroupPercent: { type: Number, default: null },
+        maxAllowedLeavePerGroupPercent: { type: Number, default: null },
         hiddenSalaryMonths: { type: [String], default: () => [] },
         attachment: {
             name: { type: String, default: '' },

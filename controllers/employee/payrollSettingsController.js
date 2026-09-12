@@ -1,6 +1,7 @@
 import PayrollSettings from '../../models/PayrollSettings.js';
 import { ensureAttachmentPersistedToS3 } from '../../utils/s3Upload.js';
 import { normalizeStaffTypeKey } from '../../utils/workLocationHelpers.js';
+import { readGroupLeavePercent } from '../../utils/groupLeaveSlots.js';
 
 const DEFAULT_RULES = {
     allAttendanceMarked: false,
@@ -260,6 +261,8 @@ export function serializePayrollSettings(doc) {
         lateOutRules: sharedLate,
         extraLateRules: serializeExtraLateRules(doc?.extraLateRules),
         salaryProcessReminders: serializeReminders(doc?.salaryProcessReminders),
+        minAllowedLeavePerGroupPercent: readGroupLeavePercent(doc?.minAllowedLeavePerGroupPercent),
+        maxAllowedLeavePerGroupPercent: readGroupLeavePercent(doc?.maxAllowedLeavePerGroupPercent),
         attachment: serializePolicyAttachment(doc?.attachment),
     };
 }
@@ -321,6 +324,14 @@ export function buildPayrollPolicyPayload(body, existing) {
             body?.salaryProcessReminders !== undefined
                 ? toReminders(body.salaryProcessReminders)
                 : toReminders(existing?.salaryProcessReminders),
+        minAllowedLeavePerGroupPercent:
+            body?.minAllowedLeavePerGroupPercent !== undefined
+                ? readGroupLeavePercent(body.minAllowedLeavePerGroupPercent)
+                : readGroupLeavePercent(existing?.minAllowedLeavePerGroupPercent),
+        maxAllowedLeavePerGroupPercent:
+            body?.maxAllowedLeavePerGroupPercent !== undefined
+                ? readGroupLeavePercent(body.maxAllowedLeavePerGroupPercent)
+                : readGroupLeavePercent(existing?.maxAllowedLeavePerGroupPercent),
     };
 }
 

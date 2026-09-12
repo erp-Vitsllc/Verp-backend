@@ -59,7 +59,7 @@ export function buildFleetHandoverDisplayLabels({
     previousAssignee = null,
     adminOfficer = null,
     isInspection = false,
-    isReinspection = false,
+    isReinspection: _isReinspection = false,
     isReturn = false,
 }) {
     if (isReturn) {
@@ -73,40 +73,30 @@ export function buildFleetHandoverDisplayLabels({
             handoverToDisplay: adminLabel,
         };
     }
+    const adminLabel =
+        formatHandoverPersonDisplayLabel(adminOfficer) ||
+        workflowMeta?.stages?.assigner?.actorName ||
+        formatHandoverPersonDisplayLabel(assigner) ||
+        '—';
+    // From = who holds the vehicle now: assigned employee, else Admin Officer.
+    const handoverByDisplay = previousAssignee
+        ? formatHandoverPersonDisplayLabel(previousAssignee) || '—'
+        : adminLabel;
+
     if (isInspection) {
-        // Custodian = assigned owner if vehicle is assigned, else Admin Officer.
         const custodian = previousAssignee || adminOfficer || assignee;
-        const custodianLabel = formatHandoverPersonDisplayLabel(custodian) || '—';
-        if (isReinspection) {
-            // Reinspection: By and To are both the custodian.
-            return {
-                handoverByDisplay: custodianLabel,
-                handoverToDisplay: custodianLabel,
-            };
-        }
-        // First inspection: By stays empty; To = custodian.
         return {
-            handoverByDisplay: '—',
-            handoverToDisplay: custodianLabel,
+            handoverByDisplay,
+            handoverToDisplay: formatHandoverPersonDisplayLabel(custodian) || '—',
         };
     }
 
-    // Assign / reassign: By = Admin Officer if unassigned (from pool), else current assigned owner;
-    // To = targeted user.
-    const fromPool = Boolean(workflowMeta?.wasAssignedFromPool);
-    let handoverByDisplay;
-    if (fromPool || !previousAssignee) {
-        handoverByDisplay =
-            formatHandoverPersonDisplayLabel(adminOfficer) ||
-            workflowMeta?.stages?.assigner?.actorName ||
-            formatHandoverPersonDisplayLabel(assigner) ||
-            '—';
-    } else {
-        handoverByDisplay = formatHandoverPersonDisplayLabel(previousAssignee) || '—';
-    }
-
-    const handoverToDisplay = formatHandoverPersonDisplayLabel(assignee) || '—';
-    return { handoverByDisplay, handoverToDisplay };
+    // Assign / reassign: To = future assignee. Return already handled above.
+    const fromPool = Boolean(workflowMeta?.wasAssignedFromPool) || !previousAssignee;
+    return {
+        handoverByDisplay: fromPool ? adminLabel : handoverByDisplay,
+        handoverToDisplay: formatHandoverPersonDisplayLabel(assignee) || '—',
+    };
 }
 
 const HANDOVER_HISTORY_IMMUTABLE_DETAIL_KEYS = [

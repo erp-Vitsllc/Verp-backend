@@ -4,6 +4,8 @@ import {
 } from './assetListExportColumns.js';
 import { buildAssetListPdfRows } from './generateEmployeeAssetListFromTemplatePdf.js';
 
+const NEW_BADGE = '(new)';
+
 function xmlEscape(value) {
     return String(value ?? '')
         .replace(/&/g, '&amp;')
@@ -12,13 +14,22 @@ function xmlEscape(value) {
         .replace(/"/g, '&quot;');
 }
 
-function cellXml(value, type = 'String') {
+function cellXml(value, type = 'String', styleId = '') {
+    const styleAttr = styleId ? ` ss:StyleID="${styleId}"` : '';
     if (type === 'Number') {
         const n = Number(value);
         const safe = Number.isFinite(n) ? n : 0;
-        return `<Cell><Data ss:Type="Number">${safe}</Data></Cell>`;
+        return `<Cell${styleAttr}><Data ss:Type="Number">${safe}</Data></Cell>`;
     }
-    return `<Cell><Data ss:Type="String">${xmlEscape(value)}</Data></Cell>`;
+    return `<Cell${styleAttr}><Data ss:Type="String">${xmlEscape(value)}</Data></Cell>`;
+}
+
+function assetNameCellXml(row) {
+    const name = xmlEscape(row.name || '—');
+    if (!row.isLatestAssigned) {
+        return cellXml(row.name || '—');
+    }
+    return `<Cell><Data ss:Type="String" xmlns="http://www.w3.org/TR/REC-html40">${name} <Font html:Color="#DC1414">${NEW_BADGE}</Font></Data></Cell>`;
 }
 
 function rowValue(row, key) {
@@ -30,7 +41,7 @@ function rowValue(row, key) {
         case 'category':
             return row.category || '—';
         case 'assetName':
-            return row.name || '—';
+            return row.isLatestAssigned ? `${row.name || '—'} ${NEW_BADGE}` : (row.name || '—');
         case 'accessories':
             return formatAccessoriesCell(row.accessories);
         case 'assetId':
@@ -53,20 +64,35 @@ export function generateAssetListExcel({
     columns = null,
     listTitle = 'Asset List',
     employee = null,
+    printedOn = '',
+    printedBy = '',
+    groupByOwner = false,
 }) {
     const columnDefs = resolveAssetListExportColumns(columns);
     const listRows = buildAssetListPdfRows(assets, {
         fallbackAssignee: employee,
+        singleOwnerLatest: Boolean(employee) && !groupByOwner,
     });
 
+    const colCount = 1 + columnDefs.length;
+    const mergeAcross = Math.max(0, colCount - 1);
+    const printMetaRow = (text) =>
+        `<Row><Cell ss:MergeAcross="${mergeAcross}" ss:StyleID="PrintMeta"><Data ss:Type="String">${xmlEscape(text)}</Data></Cell></Row>`;
+    const printRows = [];
+    if (printedOn) printRows.push(printMetaRow(`Printed on: ${printedOn}`));
+    if (printedBy) printRows.push(printMetaRow(`Printed by: ${printedBy}`));
+    if (printRows.length) printRows.push('<Row></Row>');
+
     const headers = ['Serial No', ...columnDefs.map((c) => c.label)];
-    const headerRow = `<Row>${headers.map((h) => cellXml(h)).join('')}</Row>`;
+    const headerRow = `<Row>${headers.map((h) => cellXml(h, 'String', 'Header')).join('')}</Row>`;
 
     const bodyRows = listRows
         .map((row, index) => {
             const cells = [cellXml(index + 1, 'Number')];
             for (const col of columnDefs) {
-                if (col.key === 'qty' || col.key === 'value') {
+                if (col.key === 'assetName') {
+                    cells.push(assetNameCellXml(row));
+                } else if (col.key === 'qty' || col.key === 'value') {
                     cells.push(cellXml(rowValue(row, col.key), 'Number'));
                 } else {
                     cells.push(cellXml(rowValue(row, col.key)));
@@ -105,9 +131,14 @@ export function generateAssetListExcel({
    <Font ss:Bold="1"/>
    <Interior ss:Color="#F3F4F6" ss:Pattern="Solid"/>
   </Style>
+  <Style ss:ID="PrintMeta">
+   <Font ss:Bold="1" ss:Size="10"/>
+   <Alignment ss:Horizontal="Right"/>
+  </Style>
  </Styles>
  <Worksheet ss:Name="${sheetName}">
-  <Table>
+  <Table ss:ExpandedColumnCount="${colCount}">
+   ${printRows.join('\n   ')}
    ${headerRow}
    ${bodyRows}
    ${totalRow}

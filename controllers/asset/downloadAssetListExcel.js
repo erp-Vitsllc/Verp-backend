@@ -1,6 +1,7 @@
 import { getCompleteEmployee } from '../../services/employeeService.js';
 import { generateAssetListExcel } from '../../utils/generateAssetListExcel.js';
 import { parseAssetListExportColumns } from '../../utils/assetListExportColumns.js';
+import { resolveAssetListPrintMeta } from '../../utils/generateEmployeeAssetListFromTemplatePdf.js';
 import {
     loadAssetsByIds,
     parseAssetIdsFromQuery,
@@ -35,6 +36,7 @@ export const downloadAssetListExcel = async (req, res) => {
             columns,
             listTitle,
             employee,
+            ...resolveAssetListPrintMeta(req.user),
         });
 
         if (!excelBuffer || excelBuffer.length < 50) {

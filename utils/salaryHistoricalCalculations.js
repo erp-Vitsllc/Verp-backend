@@ -35,7 +35,8 @@ export const MESSAGES = {
     alreadyAwaitingHr: 'This salary profile is already sent for HR approval.',
     notAwaitingHr: 'This salary profile is not waiting for HR approval.',
     rejectReasonRequired: 'A rejection description is required.',
-    createdProfileHrOnly: 'Only flowchart HR can update a created salary profile.',
+    createdProfileHrOnly: 'Only the flowchart Admin Officer can update an enrolled salary profile.',
+    paidLeaveSalaryLocked: 'Paid leave salary cannot be edited or deleted.',
 };
 
 const ISO = /^\d{4}-\d{2}-\d{2}$/;
@@ -409,6 +410,70 @@ export function cycleIncludesTicketPayment(cycle) {
     if (cycle.includeTicket === true) return true;
     if (cycle.includeTicket === false) return false;
     return Number(cycle.ticketAmount) > 0;
+}
+
+export function isSalarySlipPaymentCycle(cycle) {
+    return (
+        String(cycle?.source || '').toLowerCase() === 'salaryslip' ||
+        String(cycle?.paymentReference || '').startsWith('salary-slip:') ||
+        Boolean(String(cycle?.salarySlipMonthKey || '').trim())
+    );
+}
+
+export function isPaidLeaveSalaryCycle(cycle) {
+    if (!cycleIncludesLeavePayment(cycle)) return false;
+    const status = String(cycle?.paymentStatus || cycle?.status || '').toLowerCase();
+    if (status === 'cancelled' || status === 'rejected' || status === 'draft') return false;
+    return status === 'paid' || isSalarySlipPaymentCycle(cycle);
+}
+
+function paidLeaveSalaryIdentity(cycle) {
+    const slip = String(cycle?.salarySlipMonthKey || '').trim();
+    if (slip) return `slip:${slip}`;
+    const ref = String(cycle?.paymentReference || '').trim();
+    if (ref) return `ref:${ref}`;
+    const id = String(cycle?._id || cycle?.id || '').trim();
+    if (id) return `id:${id}`;
+    const date = String(cycle?.leaveSalaryPaymentDate || cycle?.paymentDate || '').trim();
+    const amount = Number(cycle?.leaveSalaryAmount ?? cycle?.leaveSalary) || 0;
+    const entitlementNo = Number(cycle?.entitlementNo) || 0;
+    return `fp:${entitlementNo}:${date}:${amount}`;
+}
+
+function paidLeaveSalarySnapshot(cycle) {
+    return [
+        Number(cycle?.leaveSalaryAmount ?? cycle?.leaveSalary) || 0,
+        cycleIncludesLeavePayment(cycle) ? 1 : 0,
+        String(cycle?.paymentStatus || cycle?.status || '').toLowerCase(),
+        String(cycle?.leaveSalaryPaymentDate || cycle?.paymentDate || '').trim(),
+        Number(cycle?.entitlementNo) || 0,
+        cycle?.reduceHistoricalWorkingDays === true ? 1 : 0,
+        String(cycle?.entitlementDate || '').trim(),
+    ].join('|');
+}
+
+export function paidLeaveSalaryMutationError(existingCycles = [], nextCycles = []) {
+    const existingPaid = (Array.isArray(existingCycles) ? existingCycles : []).filter(isPaidLeaveSalaryCycle);
+    const next = Array.isArray(nextCycles) ? nextCycles : [];
+    const used = new Set();
+    for (const paid of existingPaid) {
+        const key = paidLeaveSalaryIdentity(paid);
+        let matchIndex = next.findIndex((row, index) => !used.has(index) && paidLeaveSalaryIdentity(row) === key);
+        if (matchIndex < 0) {
+            matchIndex = next.findIndex(
+                (row, index) =>
+                    !used.has(index) &&
+                    isPaidLeaveSalaryCycle(row) &&
+                    paidLeaveSalarySnapshot(row) === paidLeaveSalarySnapshot(paid),
+            );
+        }
+        if (matchIndex < 0) return MESSAGES.paidLeaveSalaryLocked;
+        used.add(matchIndex);
+        if (paidLeaveSalarySnapshot(next[matchIndex]) !== paidLeaveSalarySnapshot(paid)) {
+            return MESSAGES.paidLeaveSalaryLocked;
+        }
+    }
+    return '';
 }
 
 export function isConsumingCycle(cycle, cycleDays) {

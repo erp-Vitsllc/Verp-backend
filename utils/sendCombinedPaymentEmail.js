@@ -338,6 +338,14 @@ export const sendPaymentNotificationEmail = async (payment, status, comment = ''
         const toEmail = resolvePaymentRecipientEmail(employee);
         if (!toEmail) return;
 
+        const isLoanRepayNotice = ['LoanRepayment', 'AdvanceRepayment'].includes(
+            String(payment.relatedEntityType || '').trim(),
+        );
+        const repayKind =
+            String(payment.relatedEntityType || '').trim() === 'AdvanceRepayment'
+                ? 'advance'
+                : 'loan';
+
         // FETCH OUTSTANDING DEBTS
         const otherDebts = [];
         let totalRemainingAll = 0;
@@ -362,11 +370,13 @@ export const sendPaymentNotificationEmail = async (payment, status, comment = ''
         // 2. All Loans/Advances
         const loans = await Loan.find({
             employeeId: employee.employeeId,
-            status: { $nin: ['Paid', 'Cancelled', 'Rejected'] }
+            status: { $nin: isLoanRepayNotice ? ['Cancelled', 'Rejected'] : ['Paid', 'Cancelled', 'Rejected'] }
         });
 
         for (const l of loans) {
-            const remaining = Math.max(0, (l.amount || 0) - (l.paidAmount || 0));
+            const remaining = isLoanRepayNotice
+                ? Math.max(0, (l.amount || 0) - (Number(l.repaidAmount) || 0))
+                : Math.max(0, (l.amount || 0) - (l.paidAmount || 0));
             if (remaining > 0.01) {
                 totalRemainingAll += remaining;
                 if (payment.relatedEntityId?.toString() !== l._id.toString() && payment.referenceId !== l.loanId) {
@@ -377,7 +387,9 @@ export const sendPaymentNotificationEmail = async (payment, status, comment = ''
 
         const statusColor = isApproved ? '#10b981' : '#ef4444';
         const statusText = isApproved ? 'Success' : 'Rejected';
-        const subject = `Payment ${statusText}: ${payment.paymentId}`;
+        const subject = isLoanRepayNotice && isApproved
+            ? `Your ${repayKind} payment is completed: ${payment.paymentId}`
+            : `Payment ${statusText}: ${payment.paymentId}`;
 
         let currentShare = 0;
         let paidEarlier = 0;
@@ -402,8 +414,11 @@ export const sendPaymentNotificationEmail = async (payment, status, comment = ''
                 currentItem = await Loan.findById(payment.relatedEntityId) || await Loan.findOne({ loanId: payment.referenceId });
                 currentShare = currentItem?.amount || 0;
                 if (currentItem) {
+                    const repaymentTypes = isLoanRepayNotice
+                        ? ['LoanRepayment', 'AdvanceRepayment']
+                        : ['Loan', 'Advance'];
                     itemPayments = await Payment.find({
-                        relatedEntityType: { $in: ['Loan', 'LoanRepayment', 'Advance', 'AdvanceRepayment'] },
+                        relatedEntityType: { $in: repaymentTypes },
                         paidBy: employee._id,
                         status: { $in: SUCCESS_STATUSES },
                         $or: [{ relatedEntityId: currentItem._id }, { referenceId: currentItem.loanId }]
@@ -454,8 +469,10 @@ export const sendPaymentNotificationEmail = async (payment, status, comment = ''
                 <div style="padding: 40px; color: #1e293b;">
                     <p>Dear <strong>${employee.firstName} ${employee.lastName}</strong>,</p>
                     <p style="line-height: 1.6; color: #475569;">
-                        ${isApproved 
-                            ? `Your payment of <strong>AED ${parseFloat(payment.amount).toLocaleString()}</strong> has been successfully processed. Please find your invoice${payment?.attachment || (Array.isArray(payment?.attachments) && payment.attachments.length) ? ' and supporting attachment' : ''} attached to this email.`
+                        ${isApproved
+                            ? isLoanRepayNotice
+                                ? `Your payment of ${repayKind} has been completed. Please find your invoice${payment?.attachment || (Array.isArray(payment?.attachments) && payment.attachments.length) ? ' and supporting attachment' : ''} attached to this email.`
+                                : `Your payment of <strong>AED ${parseFloat(payment.amount).toLocaleString()}</strong> has been successfully processed. Please find your invoice${payment?.attachment || (Array.isArray(payment?.attachments) && payment.attachments.length) ? ' and supporting attachment' : ''} attached to this email.`
                             : `Your payment request for <strong>AED ${parseFloat(payment.amount).toLocaleString()}</strong> has been rejected by the Accounts Department.`
                         }
                     </p>

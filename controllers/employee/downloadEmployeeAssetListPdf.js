@@ -1,7 +1,7 @@
 import mongoose from 'mongoose';
 import AssetItem from '../../models/AssetItem.js';
 import { getCompleteEmployee } from '../../services/employeeService.js';
-import { generateEmployeeAssetListFromTemplatePdf } from '../../utils/generateEmployeeAssetListFromTemplatePdf.js';
+import { generateEmployeeAssetListFromTemplatePdf, resolveAssetListPrintMeta } from '../../utils/generateEmployeeAssetListFromTemplatePdf.js';
 
 const HELD_STATUSES = ['Assigned', 'Pending', 'On Leave', 'Out of Service', 'Returned', 'Service'];
 
@@ -87,7 +87,11 @@ export const downloadEmployeeAssetListPdf = async (req, res) => {
             assets = await loadEmployeeHeldAssets(employeeObjectId);
         }
 
-        const pdfBuffer = await generateEmployeeAssetListFromTemplatePdf({ employee, assets });
+        const pdfBuffer = await generateEmployeeAssetListFromTemplatePdf({
+            employee,
+            assets,
+            ...resolveAssetListPrintMeta(req.user),
+        });
 
         if (!pdfBuffer || pdfBuffer.length < 500) {
             return res.status(500).json({ message: 'Failed to generate asset list PDF' });

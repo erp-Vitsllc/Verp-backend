@@ -1,6 +1,7 @@
 import mongoose from 'mongoose';
 import { syncDashboardAction } from './syncDashboard.js';
 import { sendAttendanceLeaveRequestEmail } from './sendAttendanceLeaveEmails.js';
+import { resolveFlowchartHrEmployee } from './resolveFlowchartHrEmployee.js';
 
 export const LEAVE_DASHBOARD_REQUEST_TYPE = 'Employee Leave Request';
 
@@ -104,5 +105,77 @@ export async function notifyPrimaryReporteeOfLeaveRequest({
         }),
         buttonLabel: 'Open Leave Approval',
         emailTitle: `${label} Request`,
+    });
+}
+
+export async function notifyFlowchartHrOfIneligibleAnnualLeave({
+    employee,
+    from,
+    to,
+    attendanceId,
+    groupId = '',
+    requestedLabel = 'Annual Leave',
+    requestedStatusKey = 'on_leave',
+    leaveRequestKind = 'future_annual',
+    reason = '',
+    eligibleDays = 0,
+    requiredDays = 0,
+    extraNote = '',
+} = {}) {
+    const resolved = await resolveFlowchartHrEmployee();
+    const hr = resolved?.employee;
+    if (!hr?._id) {
+        console.warn('[LeaveNotify] No designated Flowchart HR for ineligible annual leave.');
+        return;
+    }
+
+    const start = String(from || '').trim();
+    const end = String(to || start).trim();
+    const rangeLabel = start && end && start !== end ? `${start} → ${end}` : start || end;
+    const empName = personName(employee);
+    const label = String(requestedLabel || 'Annual Leave').trim() || 'Annual Leave';
+    const requestId = leaveDashboardRequestObjectId(groupId, attendanceId);
+    const eligibilityNote =
+        String(extraNote || '').trim() ||
+        `Not eligible for leave (${eligibleDays}/${requiredDays} days).`;
+
+    await syncDashboardAction({
+        requestId,
+        requestType: LEAVE_DASHBOARD_REQUEST_TYPE,
+        assignedTo: hr._id,
+        status: 'Pending',
+        subjectEmployee: employee,
+        requestedByName: empName,
+        extra1: start,
+        extra2: `${label} request for ${rangeLabel} · ${eligibilityNote}`,
+        extra3: JSON.stringify({
+            attendanceId: String(attendanceId || ''),
+            employeeMongoId: String(employee?._id || ''),
+            from: start,
+            to: end,
+            requestedStatusKey,
+            leaveRequestKind,
+            leaveRequestGroupId: String(groupId || ''),
+            leaveDashboard: true,
+            annualLeaveNotEligible: true,
+        }),
+    });
+
+    await sendAttendanceLeaveRequestEmail({
+        manager: hr,
+        employee,
+        date: start,
+        dateLabel: rangeLabel,
+        requestedLabel: label,
+        currentLabel: 'Pending HR review',
+        reason: [reason, eligibilityNote].filter(Boolean).join(' '),
+        kind: leaveRequestKind,
+        reviewPath: leaveDashboardReviewPath({
+            from: start,
+            to: end,
+            attendanceId,
+        }),
+        buttonLabel: 'Open Leave Approval',
+        emailTitle: `${label} — not eligible`,
     });
 }

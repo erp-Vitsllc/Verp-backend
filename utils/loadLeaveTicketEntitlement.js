@@ -574,6 +574,7 @@ export async function loadCurrentLeaveCycleEligibility({
         presentDays: officeDays,
         historicalWorkingDays: Number(salaryWorking?.historicalWorkingDays) || 0,
         liveWorkingDays: Number(salaryWorking?.liveWorkingDays) || 0,
+        accumulatedDays,
         used,
         attendance: {
             office: officeDays,

@@ -82,11 +82,17 @@ export const addPayment = async (req, res) => {
             settleEmployeeId = '',
         } = req.body;
 
-        const isEmployeeFinePay = Boolean(employeePaySettlement);
+        const isEmployeePaySettlement = Boolean(employeePaySettlement);
+        const employeePayEntityType = String(relatedEntityType || '').trim();
+        const isEmployeeFinePay =
+            isEmployeePaySettlement && employeePayEntityType === 'Fine';
+        const isEmployeeLoanRepayPay =
+            isEmployeePaySettlement &&
+            ['LoanRepayment', 'AdvanceRepayment'].includes(employeePayEntityType);
         
         // CHECK IF CREATOR IS ACCOUNTS PERSON
         const isAccountsUser = await isUserInFlowchart(req.user, 'accounts');
-        const isFinanceUser = isEmployeeFinePay
+        const isFinanceUser = isEmployeePaySettlement
             ? await isUserInFlowchart(req.user, 'finance').catch(() => false)
             : false;
         const isAccountsLike =
@@ -102,11 +108,11 @@ export const addPayment = async (req, res) => {
         if (!isAccountsUser) {
             finalStatus = 'Processing';
         }
-        if (isEmployeeFinePay) {
+        if (isEmployeePaySettlement) {
             if (!isAccountsLike) {
                 return res.status(403).json({
                     success: false,
-                    message: 'Only Accounts can record employee fine payment.',
+                    message: 'Only Accounts can record employee payment.',
                 });
             }
             finalStatus = 'Completed';
@@ -159,11 +165,11 @@ export const addPayment = async (req, res) => {
             });
         }
 
-        if (isEmployeeFinePay) {
-            if (String(relatedEntityType || '').trim() !== 'Fine') {
+        if (isEmployeePaySettlement) {
+            if (!isEmployeeFinePay && !isEmployeeLoanRepayPay) {
                 return res.status(400).json({
                     success: false,
-                    message: 'Employee pay is only for fines.',
+                    message: 'Employee pay is only for fines, loans, or advances.',
                 });
             }
             if (!['Salary', 'Cash'].includes(normalizedSource)) {
@@ -281,6 +287,57 @@ export const addPayment = async (req, res) => {
             }
         }
 
+        let employeeLoanSettle = null;
+        if (isEmployeeLoanRepayPay) {
+            employeeLoanSettle = relatedEntityId ? await Loan.findById(relatedEntityId) : null;
+            if (!employeeLoanSettle && referenceId) {
+                employeeLoanSettle = await Loan.findOne({ loanId: referenceId });
+            }
+            if (!employeeLoanSettle) {
+                return res.status(404).json({
+                    success: false,
+                    message: 'Loan or advance not found',
+                });
+            }
+            const expectedType =
+                String(employeeLoanSettle.type || 'Loan').trim() === 'Advance'
+                    ? 'AdvanceRepayment'
+                    : 'LoanRepayment';
+            if (employeePayEntityType !== expectedType) {
+                return res.status(400).json({
+                    success: false,
+                    message: 'Payment type does not match this record.',
+                });
+            }
+            const amountTotal = Number(employeeLoanSettle.amount) || 0;
+            const repaidSoFar = Number(employeeLoanSettle.repaidAmount) || 0;
+            const expected = Math.round(Math.max(0, amountTotal - repaidSoFar) * 100) / 100;
+            const entered = Math.round((parseFloat(amount) || 0) * 100) / 100;
+            const kindLabel =
+                String(employeeLoanSettle.type || 'Loan').trim() === 'Advance' ? 'advance' : 'loan';
+            if (expected <= 0.01) {
+                return res.status(400).json({
+                    success: false,
+                    message: `This ${kindLabel} is already fully repaid.`,
+                });
+            }
+            if (Math.abs(entered - expected) > 0.009) {
+                return res.status(400).json({
+                    success: false,
+                    message: `Amount Pay must equal the outstanding ${kindLabel} amount (AED ${expected.toFixed(2)}).`,
+                });
+            }
+            const settleId = String(
+                settleEmployeeId || employeeLoanSettle.employeeId || '',
+            ).trim();
+            if (settleId && settleId !== employee.employeeId) {
+                const settlePerson = await EmployeeBasic.findOne({ employeeId: settleId });
+                if (settlePerson) {
+                    employee = settlePerson;
+                }
+            }
+        }
+
         // Generate paymentId before creating payment
         const paymentCount = await Payment.countDocuments();
         const paymentId = `PAY-${String(paymentCount + 1).padStart(6, '0')}`;
@@ -295,11 +352,16 @@ export const addPayment = async (req, res) => {
             status: finalStatus,
             paymentDate: paymentDate ? new Date(paymentDate) : new Date(),
             description: description || '',
-            referenceId: employeeFineSettle?.fineId || referenceId || null,
+            referenceId: employeeFineSettle?.fineId || employeeLoanSettle?.loanId || referenceId || null,
             relatedEntityType: relatedEntityType || null,
-            relatedEntityId: employeeFineSettle?._id || relatedEntityId || null,
-            settleEmployeeId: isEmployeeFinePay
-                ? String(settleEmployeeId || employee.employeeId || '').trim()
+            relatedEntityId: employeeFineSettle?._id || employeeLoanSettle?._id || relatedEntityId || null,
+            settleEmployeeId: isEmployeePaySettlement
+                ? String(
+                      settleEmployeeId ||
+                          employeeLoanSettle?.employeeId ||
+                          employee.employeeId ||
+                          '',
+                  ).trim()
                 : '',
             createdBy: req.user._id,
             remarks: remarks || '',
@@ -566,8 +628,20 @@ export const addPayment = async (req, res) => {
                         0,
                     );
                     loan.repaidAmount = totalRepaid;
+                    if (
+                        isEmployeeLoanRepayPay &&
+                        (Number(loan.amount) || 0) - totalRepaid <= 0.01 &&
+                        !String(loan.accountsRepaymentPath || '').trim()
+                    ) {
+                        loan.accountsRepaymentPath = 'employee';
+                        loan.accountsRepaymentAt = new Date();
+                        loan.accountsRepaymentBy = req.user._id;
+                    }
                     await loan.save();
 
+                    if (isEmployeeLoanRepayPay) {
+                        // Employee pay: mark repaid in ERP only — no Zoho Expense Refund.
+                    } else {
                     const paidThroughId = String(
                         paidThroughAccountId || payment.paidThroughAccountId || '',
                     ).trim();
@@ -695,6 +769,7 @@ export const addPayment = async (req, res) => {
                         return failLoanRepaymentZoho(
                             zohoErr?.message || 'Zoho Expense Refund failed',
                         );
+                    }
                     }
                 } else {
                     console.error('[AddPayment] Loan not found for repayment:', {
@@ -1206,6 +1281,10 @@ export const addPayment = async (req, res) => {
         let message = 'Payment created successfully';
         if (isEmployeeFinePay) {
             message = 'Payment recorded. Invoice emailed to the fined employee.';
+        } else if (isEmployeeLoanRepayPay) {
+            const kind =
+                employeePayEntityType === 'AdvanceRepayment' ? 'advance' : 'loan';
+            message = `Payment recorded. Invoice emailed for this ${kind} payment.`;
         }
         if (zohoSync) {
             if (zohoSync.ok && zohoSync.expenseId) {

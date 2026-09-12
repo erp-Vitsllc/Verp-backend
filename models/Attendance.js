@@ -181,6 +181,10 @@ const attendanceSchema = new mongoose.Schema(
             ref: 'EmployeeBasic',
             default: null,
         },
+        annualLeaveNotEligible: {
+            type: Boolean,
+            default: false,
+        },
         markedBy: {
             type: mongoose.Schema.Types.ObjectId,
             ref: 'User',

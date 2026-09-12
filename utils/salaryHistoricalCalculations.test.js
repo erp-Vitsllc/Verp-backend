@@ -37,6 +37,8 @@ import {
     resolveEntitlementCalculationStart,
     roundMoney,
     addCalendarMonths,
+    paidLeaveSalaryMutationError,
+    isPaidLeaveSalaryCycle,
 } from './salaryHistoricalCalculations.js';
 
 describe('salary historical calculations', () => {
@@ -1074,5 +1076,36 @@ describe('annual leave salary and ticket entitlements', () => {
         );
         assert.equal(policyTicketRate({ airTicketAmount: 1500 }), 1500);
         assert.equal(policyTicketRate({ workingDaysRequiredForAirTicket: 365 }), 0);
+    });
+
+    it('blocks edit and delete of paid leave salary cycles', () => {
+        const paid = {
+            id: 'c1',
+            includeLeave: true,
+            leaveSalaryAmount: 2500,
+            paymentStatus: 'paid',
+            leaveSalaryPaymentDate: '2026-09-01',
+        };
+        assert.equal(isPaidLeaveSalaryCycle(paid), true);
+        assert.equal(isPaidLeaveSalaryCycle({ ...paid, paymentStatus: 'draft' }), false);
+        assert.equal(
+            paidLeaveSalaryMutationError([paid], []),
+            MESSAGES.paidLeaveSalaryLocked,
+        );
+        assert.equal(
+            paidLeaveSalaryMutationError([paid], [{ ...paid, leaveSalaryAmount: 1 }]),
+            MESSAGES.paidLeaveSalaryLocked,
+        );
+        assert.equal(
+            paidLeaveSalaryMutationError([paid], [{ ...paid, ticketAmount: 500 }]),
+            '',
+        );
+        assert.equal(
+            paidLeaveSalaryMutationError(
+                [paid],
+                [paid, { includeLeave: true, leaveSalaryAmount: 100, paymentStatus: 'draft' }],
+            ),
+            '',
+        );
     });
 });
