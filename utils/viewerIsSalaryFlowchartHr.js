@@ -17,15 +17,21 @@ function matchesFlowchartEmployee(req, employee) {
     return Boolean(myEid && theirEid && myEid === theirEid);
 }
 
+/** The Flowchart HR assignee only — not portal admin, not salary-edit permission. */
+export async function viewerIsFlowchartHrAssignee(req) {
+    if (!req?.user) return false;
+    const hrResolved = await resolveFlowchartHrEmployee();
+    if (hrResolved.error || !hrResolved.employee?._id) return false;
+    return matchesFlowchartEmployee(req, hrResolved.employee);
+}
+
 /** Flowchart HR (or admin) who may act on salary enrollment. */
 export async function viewerIsSalaryFlowchartHr(req) {
     if (!req?.user) return false;
     if (await isReqUserAdmin(req.user)) return true;
     const userId = req.user.id || req.user._id;
     if (userId && (await isUserAdministrator(userId))) return true;
-    const hrResolved = await resolveFlowchartHrEmployee();
-    if (hrResolved.error || !hrResolved.employee?._id) return false;
-    return matchesFlowchartEmployee(req, hrResolved.employee);
+    return viewerIsFlowchartHrAssignee(req);
 }
 
 /** Settings → Flowchart Admin Officer only — not portal super-admin, not HR. */

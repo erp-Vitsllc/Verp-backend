@@ -16,6 +16,7 @@ import EmployeeExperience from "../models/EmployeeExperience.js";
 import EmployeeEmergencyContact from "../models/EmployeeEmergencyContact.js";
 import EmployeeTraining from "../models/EmployeeTraining.js";
 import User from "../models/User.js";
+import { normalizeLoginThrough } from "../utils/loginThrough.js";
 import { getSignedFileUrl, normalizeS3Key, isPresignedUrlStillFresh } from "../utils/s3Upload.js";
 import { getS3BucketName, looksLikeObjectStorageUrl } from "../config/storageConfig.js";
 import { syncProbationStatusFromEmploymentVisa } from "../utils/employeeStatusHelper.js";
@@ -227,6 +228,7 @@ export const getCompleteEmployee = async (id) => {
 
         // Update enablePortalAccess based on linked user existence, status, and existence of company email
         employeeBasic.enablePortalAccess = !!(linkedUser && linkedUser.enablePortalAccess);
+        employeeBasic.loginThrough = normalizeLoginThrough(employeeBasic);
 
         // Actually, just handle it properly in the destruction
         // Re-assigning results to be clearer
@@ -921,7 +923,7 @@ export const saveEmployeeData = async (employeeId, updatePayload) => {
             'employeeId', 'firstName', 'lastName', 'role', 'department', 'designation', 'company',
             'status', 'probationPeriod', 'reportingAuthority', 'primaryReportee', 'secondaryReportee', 'overtime',
             'profileApprovalStatus', 'profileStatus', 'email', 'companyEmail', 'password',
-            'enablePortalAccess', 'dateOfJoining', 'contractJoiningDate', 'staffType',
+            'enablePortalAccess', 'loginThrough', 'dateOfJoining', 'contractJoiningDate', 'staffType',
             'profilePicture', 'documents', 'oldDocuments', 'trainingDetails'
         ];
 

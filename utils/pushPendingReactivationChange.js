@@ -5,6 +5,7 @@ import { isRequestUserDesignatedFlowchartHr } from "./isDesignatedFlowchartHr.js
 import { EMPLOYEE_ACTIVATION_SECTION_KEYS } from "./profileFileChangeHrNotify.js";
 import { shouldQueueProfileChange, triggerProfileReactivationIfNeeded } from "./triggerProfileReactivation.js";
 import { resolvePortalActorId } from "./resolvePortalActorId.js";
+import { isAccessControlOnlyPendingEntry } from "./loginThrough.js";
 
 const norm = (s) => String(s || "").toLowerCase().trim();
 
@@ -208,6 +209,17 @@ export async function pushPendingReactivationChangeReplaceByDedupeKey(employeeId
     }
 
     await doc.save();
+}
+
+/** Drop queued loginThrough / portal-access rows without loading the rest of EmployeeBasic. */
+export async function dropAccessControlOnlyPendingChanges(employeeId) {
+    if (!employeeId) return;
+    const row = await EmployeeBasic.findOne({ employeeId }).select("pendingReactivationChanges").lean();
+    const list = Array.isArray(row?.pendingReactivationChanges) ? row.pendingReactivationChanges : [];
+    if (!list.length) return;
+    const next = list.filter((entry) => !isAccessControlOnlyPendingEntry(entry));
+    if (next.length === list.length) return;
+    await EmployeeBasic.updateOne({ employeeId }, { $set: { pendingReactivationChanges: next } });
 }
 
 export async function queueOrTriggerProfileChange({ employeeId, actor, reason, employeeBasic, changeEntry }) {

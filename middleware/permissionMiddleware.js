@@ -256,6 +256,7 @@ const BASIC_DETAILS_PATCH_GROUPS = [
             "profileStatus",
             "profilePicture",
             "enablePortalAccess",
+            "loginThrough",
         ],
         modules: ["hrm_employees_view_basic"],
     },

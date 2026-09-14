@@ -20,6 +20,12 @@ import {
 } from "../../utils/employeeProfileNotificationMessages.js";
 import { isReqUserAdmin } from "../../utils/sendAdminDeletionNotificationEmails.js";
 import { resolveFrontendHostLabel } from "../../utils/resolveFrontendBaseUrl.js";
+import User from "../../models/User.js";
+import {
+    accessControlSetFromPendingEntry,
+    isAccessControlOnlyPendingEntry,
+    normalizeLoginThrough,
+} from "../../utils/loginThrough.js";
 
 /** Subdocument id fallback must match frontend (String(entry._id || index)). */
 const pendingEntryId = (entry, idx) => String(entry?._id ?? idx);
@@ -31,7 +37,7 @@ async function loadEmployeeForActivationSubmit(id) {
             : { employeeId: id };
     return EmployeeBasic.findOne(query)
         .select(
-            "firstName lastName employeeId profileStatus profileWorkflow pendingReactivationChanges profileApprovalStatus profileSubmittedTo",
+            "firstName lastName employeeId profileStatus profileWorkflow pendingReactivationChanges profileApprovalStatus profileSubmittedTo enablePortalAccess loginThrough",
         )
         .lean();
 }
@@ -63,6 +69,68 @@ export const sendApprovalEmail = async (req, res) => {
         const attachmentText = attachment && String(attachment).trim() ? String(attachment).trim() : null;
         const attachmentNameText = attachmentName && String(attachmentName).trim() ? String(attachmentName).trim() : "";
 
+        const pendingForAccess = Array.isArray(employeeBasic.pendingReactivationChanges)
+            ? [...employeeBasic.pendingReactivationChanges]
+            : [];
+        let selectedForAccess = pendingForAccess;
+        if (selectionProvided) {
+            if (includedChangeEntryIds === null) {
+                return res.status(400).json({
+                    message: "includedChangeEntryIds array is required when selectionProvided is true.",
+                });
+            }
+            const allSet = new Set(pendingForAccess.map((entry, idx) => pendingEntryId(entry, idx)));
+            for (const wid of includedChangeEntryIds) {
+                if (!allSet.has(wid)) {
+                    return res.status(400).json({
+                        message: `Change entry id is not in the pending queue: ${wid}`,
+                    });
+                }
+            }
+            if (pendingForAccess.length > 0 && includedChangeEntryIds.length === 0) {
+                return res.status(400).json({
+                    message: "Select at least one requested change to submit.",
+                });
+            }
+            const keep = new Set(includedChangeEntryIds.map(String));
+            selectedForAccess = pendingForAccess.filter((entry, idx) => keep.has(pendingEntryId(entry, idx)));
+        }
+        const earlyAccessOnly = selectedForAccess.filter((entry) => isAccessControlOnlyPendingEntry(entry));
+        const earlyRemaining = selectedForAccess.filter((entry) => !isAccessControlOnlyPendingEntry(entry));
+        if (earlyAccessOnly.length > 0 && earlyRemaining.length === 0) {
+            const liveSet = {};
+            for (const change of earlyAccessOnly) {
+                Object.assign(liveSet, accessControlSetFromPendingEntry(change));
+            }
+            if (Object.keys(liveSet).length > 0) {
+                await EmployeeBasic.updateOne({ _id: employeeBasic._id }, { $set: liveSet });
+                if (typeof liveSet.enablePortalAccess === "boolean") {
+                    await User.findOneAndUpdate(
+                        { employeeId: employeeBasic.employeeId },
+                        { $set: { enablePortalAccess: liveSet.enablePortalAccess } },
+                    );
+                }
+            }
+            const pullIds = earlyAccessOnly.map((entry) => entry?._id).filter(Boolean);
+            if (pullIds.length > 0) {
+                await EmployeeBasic.updateOne(
+                    { _id: employeeBasic._id },
+                    { $pull: { pendingReactivationChanges: { _id: { $in: pullIds } } } },
+                );
+            }
+            return res.status(200).json({
+                message: "Access settings applied.",
+                appliedLive: true,
+                employee: {
+                    loginThrough: liveSet.loginThrough || normalizeLoginThrough(employeeBasic),
+                    enablePortalAccess:
+                        liveSet.enablePortalAccess !== undefined
+                            ? liveSet.enablePortalAccess
+                            : employeeBasic.enablePortalAccess,
+                },
+            });
+        }
+
         const hrResolved = await resolveFlowchartHrEmployee();
         if (hrResolved.error) {
             return res.status(400).json({
@@ -91,7 +159,11 @@ export const sendApprovalEmail = async (req, res) => {
             },
         });
 
-        const eb = await EmployeeBasic.findById(employeeBasic._id);
+        const eb = await EmployeeBasic.findById(employeeBasic._id)
+            .select(
+                "firstName lastName employeeId profileStatus profileWorkflow pendingReactivationChanges profileApprovalStatus enablePortalAccess loginThrough",
+            )
+            .lean();
         if (!eb) {
             return res.status(404).json({ message: "Employee not found" });
         }
@@ -132,6 +204,45 @@ export const sendApprovalEmail = async (req, res) => {
             const keep = new Set(includedChangeEntryIds.map(String));
             submittingThisRequest = pending.filter((entry, idx) => keep.has(pendingEntryId(entry, idx)));
             // Keep full queue — unchecked rows stay until a later submission (matches Company).
+        }
+
+        const accessOnlyChanges = submittingThisRequest.filter((entry) => isAccessControlOnlyPendingEntry(entry));
+        const remainingForHr = submittingThisRequest.filter((entry) => !isAccessControlOnlyPendingEntry(entry));
+        if (accessOnlyChanges.length > 0) {
+            const liveSet = {};
+            for (const change of accessOnlyChanges) {
+                Object.assign(liveSet, accessControlSetFromPendingEntry(change));
+            }
+            if (Object.keys(liveSet).length > 0) {
+                await EmployeeBasic.updateOne({ _id: eb._id }, { $set: liveSet });
+                if (typeof liveSet.enablePortalAccess === "boolean") {
+                    await User.findOneAndUpdate(
+                        { employeeId: employeeBasic.employeeId },
+                        { $set: { enablePortalAccess: liveSet.enablePortalAccess } },
+                    );
+                }
+            }
+            const pullIds = accessOnlyChanges.map((entry) => entry?._id).filter(Boolean);
+            if (pullIds.length > 0) {
+                await EmployeeBasic.updateOne(
+                    { _id: eb._id },
+                    { $pull: { pendingReactivationChanges: { _id: { $in: pullIds } } } },
+                );
+            }
+            if (remainingForHr.length === 0) {
+                return res.status(200).json({
+                    message: "Access settings applied.",
+                    appliedLive: true,
+                    employee: {
+                        loginThrough: liveSet.loginThrough || normalizeLoginThrough(eb),
+                        enablePortalAccess:
+                            liveSet.enablePortalAccess !== undefined
+                                ? liveSet.enablePortalAccess
+                                : eb.enablePortalAccess,
+                    },
+                });
+            }
+            submittingThisRequest = remainingForHr;
         }
 
         const employeeName = `${employeeBasic.firstName || ""} ${employeeBasic.lastName || ""}`.trim() || "Employee";
@@ -188,12 +299,7 @@ export const sendApprovalEmail = async (req, res) => {
             siteHost,
         });
 
-        eb.profileApprovalStatus = "submitted";
-        eb.profileSubmittedTo = hrEmployee._id;
-        eb.profileActivationSubmittedBy = submitterEmployeeId;
-        eb.profileActivationHold = undefined;
-        if (!Array.isArray(eb.profileWorkflow)) eb.profileWorkflow = [];
-        eb.profileWorkflow.push({
+        const workflowEntry = {
             role: "HR",
             assignedTo: hrEmployee._id,
             status: "submitted",
@@ -203,12 +309,18 @@ export const sendApprovalEmail = async (req, res) => {
             description: workflowDescription,
             attachment: attachmentText || "",
             attachmentName: attachmentNameText,
-        });
-        eb.markModified("profileWorkflow");
-        await eb.save();
+        };
         await EmployeeBasic.updateOne(
             { _id: eb._id },
-            { $unset: { profileActivationHold: "", profileActivationDraftEditor: "" } },
+            {
+                $set: {
+                    profileApprovalStatus: "submitted",
+                    profileSubmittedTo: hrEmployee._id,
+                    profileActivationSubmittedBy: submitterEmployeeId,
+                },
+                $unset: { profileActivationHold: "", profileActivationDraftEditor: "" },
+                $push: { profileWorkflow: workflowEntry },
+            },
         );
 
         const subjectForDashboard = await EmployeeBasic.findById(employeeBasic._id)

@@ -86,6 +86,7 @@ const convertPermissionsFormat = (permissions) => {
         // Check if already in new format (isView)
         if (oldPerm && oldPerm.hasOwnProperty('isView')) {
             converted[moduleId] = {
+                isApp: oldPerm.isApp ?? false,
                 isView: oldPerm.isView ?? false,
                 isCreate: oldPerm.isCreate ?? false,
                 isEdit: oldPerm.isEdit ?? false,
@@ -98,6 +99,7 @@ const convertPermissionsFormat = (permissions) => {
         // Check if in old new format (isActive)
         else if (oldPerm && oldPerm.hasOwnProperty('isActive')) {
             converted[moduleId] = {
+                isApp: oldPerm.isApp ?? false,
                 isView: oldPerm.isActive ?? false,
                 isCreate: oldPerm.isCreate ?? false,
                 isEdit: oldPerm.isEdit ?? false,
@@ -110,6 +112,7 @@ const convertPermissionsFormat = (permissions) => {
         // Convert from very old format (full, create, view, edit, delete)
         else if (oldPerm) {
             converted[moduleId] = {
+                isApp: oldPerm.isApp || oldPerm.app || false,
                 isView: oldPerm.full || oldPerm.view || false,
                 isCreate: oldPerm.full || oldPerm.create || false,
                 isEdit: oldPerm.full || oldPerm.edit || false,
@@ -124,6 +127,7 @@ const convertPermissionsFormat = (permissions) => {
     // Ensure dashboard is always active
     if (!converted.dashboard) {
         converted.dashboard = {
+            isApp: false,
             isView: true,
             isCreate: false,
             isEdit: false,
@@ -175,6 +179,10 @@ export const hasPermission = async (userId, moduleId, permissionType) => {
 
     // First check if module has View permission (isView or isActive must be true)
     const hasView = modulePermission.isView === true || modulePermission.isActive === true;
+    if (permissionType === 'isApp' || permissionType === 'app') {
+        return modulePermission.isApp === true;
+    }
+
     if (!hasView) {
         return false;
     }
@@ -262,6 +270,7 @@ export const getAllPermissions = () => {
     // Set all permissions to true for each module/session
     allModuleIds.forEach(moduleId => {
         permissions[moduleId] = {
+            isApp: true,
             isView: true,
             isCreate: true,
             isEdit: true,
@@ -274,6 +283,7 @@ export const getAllPermissions = () => {
 
     // Dashboard is always active (but not necessarily create/edit/delete)
     permissions.dashboard = {
+        isApp: true,
         isView: true,
         isCreate: false,
         isEdit: false,

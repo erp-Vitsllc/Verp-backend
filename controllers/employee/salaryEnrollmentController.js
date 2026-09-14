@@ -1,3 +1,4 @@
+import Company from '../../models/Company.js';
 import EmployeeBasic from '../../models/EmployeeBasic.js';
 import PayrollSettings from '../../models/PayrollSettings.js';
 import SalaryEnrollment from '../../models/SalaryEnrollment.js';
@@ -17,6 +18,51 @@ import {
 } from './payrollSettingsController.js';
 
 const YEAR_MONTH = /^\d{4}-\d{2}$/;
+
+function companyRefId(value) {
+    if (value == null || value === '') return '';
+    if (typeof value === 'object') {
+        if (value._id) return String(value._id).trim();
+        if (typeof value.toHexString === 'function') return value.toHexString();
+    }
+    return String(value).trim();
+}
+
+function companyLabelMaps(companies) {
+    const companyById = new Map();
+    const companyCodeToId = new Map();
+    const publicCompanyIdByMongo = new Map();
+    for (const company of companies || []) {
+        const mongoId = String(company._id);
+        companyById.set(mongoId, String(company.nickName || company.name || '').trim());
+        publicCompanyIdByMongo.set(mongoId, String(company.companyId || company._id));
+        const companyCode = String(company.companyId || '').trim().toUpperCase();
+        if (companyCode) companyCodeToId.set(companyCode, mongoId);
+    }
+    return { companyById, companyCodeToId, publicCompanyIdByMongo };
+}
+
+function resolveEmployeeCompany(emp, maps) {
+    const objectId = companyRefId(emp?.company);
+    let companyKey = objectId && maps.companyById.has(objectId) ? objectId : '';
+    if (!companyKey) {
+        const asCode = String(
+            typeof emp?.company === 'string' ? emp.company : emp?.company?.companyId || '',
+        )
+            .trim()
+            .toUpperCase();
+        if (asCode && maps.companyCodeToId.has(asCode)) {
+            companyKey = maps.companyCodeToId.get(asCode);
+        }
+    }
+    if (!companyKey) {
+        return { companyId: 'unassigned', companyName: '' };
+    }
+    return {
+        companyId: maps.publicCompanyIdByMongo.get(companyKey) || companyKey,
+        companyName: maps.companyById.get(companyKey) || '',
+    };
+}
 
 function toMonthDay(value) {
     if (value === '' || value == null) return '';
@@ -51,13 +97,13 @@ async function policyCopyForEmployee(employee, salaryDay) {
 
 export async function getSalaryEnrollOptions(req, res) {
     try {
-        const [employeeRows, enrollmentDocs, profileDocs, mainPolicy] = await Promise.all([
+        const [employeeRows, enrollmentDocs, profileDocs, mainPolicy, companies] = await Promise.all([
             EmployeeBasic.find({
                 employeeId: { $nin: ['', 'VEGA-HR-0000'] },
                 status: { $ne: 'Left User' },
                 ...REAL_EMPLOYEE_MONGO_FILTER,
             })
-                .select('employeeId firstName lastName staffType')
+                .select('employeeId firstName lastName staffType company')
                 .sort({ firstName: 1, lastName: 1 })
                 .lean()
                 .maxTimeMS(12000),
@@ -67,7 +113,12 @@ export async function getSalaryEnrollOptions(req, res) {
                 .lean()
                 .maxTimeMS(8000),
             PayrollSettings.findOne({ key: 'default' }).select('_id').lean().maxTimeMS(8000),
+            Company.find({ status: 'Active' })
+                .select('name nickName companyId')
+                .lean()
+                .maxTimeMS(8000),
         ]);
+        const companyMaps = companyLabelMaps(companies);
 
         const enrollmentByKey = new Map();
         const molByKey = new Map();
@@ -108,12 +159,15 @@ export async function getSalaryEnrollOptions(req, res) {
                 const enrollment = enrollmentByKey.get(key);
                 const enrolled = Boolean(enrollment);
                 const companyMolCode = enrolled ? molByKey.get(key) || '' : '';
+                const company = resolveEmployeeCompany(emp, companyMaps);
                 return {
                     employeeId,
                     firstName: emp.firstName || '',
                     lastName: emp.lastName || '',
                     name: `${emp.firstName || ''} ${emp.lastName || ''}`.trim() || employeeId,
                     staffType: normalizeStaffTypeKey(emp.staffType),
+                    companyId: company.companyId,
+                    companyName: company.companyName,
                     enrolled,
                     fromMonth: String(enrollment?.fromMonth || '').trim(),
                     salaryDate: toMonthDay(enrollment?.salaryDate),

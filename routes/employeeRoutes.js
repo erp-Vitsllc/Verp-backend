@@ -83,6 +83,7 @@ import { retryLoanZohoExpense } from "../controllers/employee/retryLoanZohoExpen
 import { getPendingLoanDashboardInbox } from "../controllers/employee/getPendingLoanDashboardInbox.js";
 import { getMyHrDashboardCards } from "../controllers/employee/getMyHrDashboardCards.js";
 import { getMyAssetDashboardCards } from "../controllers/employee/getMyAssetDashboardCards.js";
+import { getMyTaskCards } from "../controllers/employee/getMyTaskCards.js";
 import {
     createEmployeeHubRequest,
     getEmployeeHubRequest,
@@ -142,6 +143,7 @@ router.get("/me", async (req, res) => {
 // Logged-in employee's own loan / advance / reward / fine totals (home dashboard)
 router.get("/dashboard/my-hr-cards", getMyHrDashboardCards);
 router.get("/dashboard/my-requests", getMyDashboardRequests);
+router.get("/dashboard/my-task-cards", getMyTaskCards);
 router.get("/dashboard/my-asset-cards", getMyAssetDashboardCards);
 router.get("/dashboard/my-loan-profile", getMyLoanProfile);
 router.post("/dashboard/self-loan-request", createSelfLoanDraft);

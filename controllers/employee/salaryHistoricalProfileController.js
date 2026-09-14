@@ -53,7 +53,11 @@ import {
 import { serializePayrollSettings, requireMainSalaryPolicy } from './payrollSettingsController.js';
 import { applySickAllowanceToLeaveRecords, leavePolicyEntitlements, resolveEmployeePayrollPolicy } from '../../utils/employeeLeavePolicy.js';
 import { resolveFlowchartHrEmployee } from '../../utils/resolveFlowchartHrEmployee.js';
-import { viewerIsSalaryFlowchartHr as viewerIsSalaryHr, viewerIsFlowchartAdminOfficer } from '../../utils/viewerIsSalaryFlowchartHr.js';
+import {
+    viewerIsSalaryFlowchartHr as viewerIsSalaryHr,
+    viewerIsFlowchartHrAssignee,
+    viewerIsFlowchartAdminOfficer,
+} from '../../utils/viewerIsSalaryFlowchartHr.js';
 import {
     closeSalaryEnrollmentInbox,
     emailCreatorSalaryApproved,
@@ -938,6 +942,7 @@ export async function buildPayload(req, employeeId, overlay = {}) {
     });
 
     const isHrApprover = await viewerIsSalaryHr(req);
+    const isHrAssignee = await viewerIsFlowchartHrAssignee(req);
     const isAdminOfficer = await viewerIsFlowchartAdminOfficer(req);
     const enrolledProfile = Boolean(enrollment) || workflowIsLocked(workflowStatus);
     const employeeOut = serializeEmployee(employee, workLocationLabel);
@@ -1000,7 +1005,10 @@ export async function buildPayload(req, employeeId, overlay = {}) {
             canEdit: canEditProfile({ workflowStatus, canEdit }),
             canChangeJoiningDate:
                 (canEdit && canEditProfile({ workflowStatus, canEdit })) ||
-                (isAdminOfficer && enrolledProfile),
+                (isHrAssignee && enrolledProfile && workflowStatus !== 'pending_hr'),
+            canEditEnrolled: Boolean(
+                isHrAssignee && enrolledProfile && workflowStatus !== 'pending_hr',
+            ),
             canVerify: canEdit && ['draft', 'correction', 'reopened'].includes(workflowStatus),
             canCreate: canEdit && readiness.canCreate && workflowStatus === 'verified',
             canApprove: isHrApprover && workflowStatus === 'pending_hr',
@@ -1011,9 +1019,10 @@ export async function buildPayload(req, employeeId, overlay = {}) {
             canViewAudit: true,
             canViewPayrollCodes: canViewSalarySetup,
             isSalaryHr: isHrApprover,
+            isHrAssignee,
             isAdminOfficer,
             canResetEnrollment: Boolean(
-                isAdminOfficer &&
+                (canEdit || isHrApprover) &&
                     profile &&
                     !enrollmentCleared &&
                     hasResettableEnrollmentDetails(profile, enrollment),
@@ -1052,15 +1061,14 @@ async function upsertFromBody(req, employeeId, extra = {}) {
     const existing = await SalaryHistoricalProfile.findOne({ employeeId }).lean();
     const workflowStatus = mapWorkflow(existing);
     const canEdit = await userCanEdit(req);
-    const isSalaryHr = await viewerIsSalaryHr(req);
-    const isAdminOfficer = await viewerIsFlowchartAdminOfficer(req);
+    const canEditEnrolled = await viewerIsFlowchartHrAssignee(req);
     const isLockedProfile = workflowIsLocked(workflowStatus);
     const body = req.body || {};
     const salarySlipOnly =
         hasBodyField(body, 'salarySlip') &&
         Object.keys(body).every((key) => key === 'salarySlip');
 
-    if (isLockedProfile && !isAdminOfficer) {
+    if (isLockedProfile && !canEditEnrolled) {
         const err = new Error(MESSAGES.createdProfileHrOnly);
         err.statusCode = 403;
         throw err;
@@ -1083,7 +1091,7 @@ async function upsertFromBody(req, employeeId, extra = {}) {
     }
     if (
         workflowIsLocked(workflowStatus) &&
-        !isAdminOfficer &&
+        !canEditEnrolled &&
         extra.workflowStatus !== 'reopened' &&
         extra.status !== 'created' &&
         extra.workflowStatus !== 'locked'
@@ -1108,7 +1116,8 @@ async function upsertFromBody(req, employeeId, extra = {}) {
     );
     const nextJoining = toDateKey(body.contractJoiningDate) || originalJoining;
     if (nextJoining !== originalJoining && nextJoining !== toDateKey(existing?.contractJoiningDate)) {
-        if (!canEdit && !isAdminOfficer) {
+        const canChangeJoining = isLockedProfile ? canEditEnrolled : canEdit;
+        if (!canChangeJoining) {
             const err = new Error(MESSAGES.joiningDateHrOnly);
             err.statusCode = 403;
             throw err;
@@ -1246,7 +1255,7 @@ async function upsertFromBody(req, employeeId, extra = {}) {
     };
     delete payload.audit;
     if (!existing) payload.createdBy = who.id || null;
-    if (isLockedProfile && (salarySlipOnly || (isAdminOfficer && !extra.workflowStatus))) {
+    if (isLockedProfile && (salarySlipOnly || (canEditEnrolled && !extra.workflowStatus))) {
         payload.workflowStatus = existing.workflowStatus || 'locked';
         payload.status = existing.status || 'created';
     } else if (!extra.workflowStatus) {
@@ -1503,8 +1512,8 @@ export async function resetSalaryHistoricalEnrollment(req, res) {
     try {
         const employeeId = String(req.params?.employeeId || '').trim();
         if (!employeeId) return res.status(400).json({ message: 'Employee is required.' });
-        if (!(await viewerIsFlowchartAdminOfficer(req))) {
-            return res.status(403).json({ message: 'Only the flowchart Admin Officer can reset enrolment.' });
+        if (!(await userCanEdit(req)) && !(await viewerIsSalaryHr(req))) {
+            return res.status(403).json({ message: 'Only HR can reset enrolment.' });
         }
         await verifyLoggedInUserPassword(req, req.body?.password);
 

@@ -17,6 +17,33 @@ export const protect = async (req, res, next) => {
         // Verify token
         const decoded = jwt.verify(token, process.env.JWT_SECRET);
 
+        if (decoded.actor === 'employee') {
+            const employee = await EmployeeBasic.findById(decoded.id).select(
+                '_id firstName lastName employeeId email companyEmail profilePicture status',
+            );
+
+            const name = employee
+                ? [employee.firstName, employee.lastName].filter(Boolean).join(' ').trim()
+                : decoded.employeeId || 'Employee';
+            req.user = {
+                ...decoded,
+                id: employee ? employee._id.toString() : String(decoded.id),
+                _id: employee?._id || decoded.id,
+                name,
+                username: employee?.employeeId || decoded.employeeId || 'employee',
+                email: employee?.email || '',
+                isSystemSuperUser: false,
+                isAdmin: false,
+                isAdministrator: false,
+                companyEmail: employee?.companyEmail || '',
+                employeeId: employee?.employeeId || decoded.employeeId || '',
+                employeeObjectId: employee?._id || null,
+                role: null,
+                groupName: null,
+            };
+            return next();
+        }
+
         // Check if user still exists and is active
         const user = await User.findById(decoded.id).select('_id name username status enablePortalAccess email isAdmin companyEmail employeeId groupName');
 

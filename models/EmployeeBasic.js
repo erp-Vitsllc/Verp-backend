@@ -136,6 +136,10 @@ const employeeBasicSchema = new mongoose.Schema(
         companyEmail: { type: String, default: '', trim: true, lowercase: true },
         password: { type: String }, // hashed (only if enablePortalAccess is true)
         enablePortalAccess: { type: Boolean, default: false },
+        loginThrough: {
+            portalApp: { type: Boolean },
+            web: { type: Boolean },
+        },
 
         // EMPLOYMENT INFO
         dateOfJoining: { type: Date, required: true },

@@ -35,7 +35,7 @@ export const MESSAGES = {
     alreadyAwaitingHr: 'This salary profile is already sent for HR approval.',
     notAwaitingHr: 'This salary profile is not waiting for HR approval.',
     rejectReasonRequired: 'A rejection description is required.',
-    createdProfileHrOnly: 'Only the flowchart Admin Officer can update an enrolled salary profile.',
+    createdProfileHrOnly: 'Only HR can update an enrolled salary profile.',
     paidLeaveSalaryLocked: 'Paid leave salary cannot be edited or deleted.',
 };
 

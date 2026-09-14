@@ -2,6 +2,7 @@ import User from "../../models/User.js";
 import Group from "../../models/Group.js";
 import EmployeeBasic from "../../models/EmployeeBasic.js";
 import { escapeRegex } from "../../utils/regexHelper.js";
+import { normalizeLoginThrough } from "../../utils/loginThrough.js";
 // Get all users with optional filters and pagination
 export const getUsers = async (req, res) => {
     try {
@@ -51,14 +52,16 @@ export const getUsers = async (req, res) => {
             .map(u => u.employeeId);
 
         const employees = await EmployeeBasic.find({ employeeId: { $in: employeeIds } })
-            .select('employeeId designation _id')
+            .select('employeeId designation _id loginThrough enablePortalAccess')
             .lean();
 
         const designationMap = {};
         const employeeIdMap = {};
+        const loginThroughMap = {};
         employees.forEach(emp => {
             designationMap[emp.employeeId] = emp.designation;
             employeeIdMap[emp.employeeId] = emp._id;
+            loginThroughMap[emp.employeeId] = normalizeLoginThrough(emp);
         });
 
         // Format users for response
@@ -87,7 +90,10 @@ export const getUsers = async (req, res) => {
                 isAdministrator: isAdministrator,
                 isSystemAdmin: isSystemAdmin,
                 designation: designation || null,
-                employeeObjectId: employeeObjectId || null
+                employeeObjectId: employeeObjectId || null,
+                loginThrough: isSystemAdmin
+                    ? { portalApp: true, web: true }
+                    : (loginThroughMap[user.employeeId] || { portalApp: true, web: true }),
             };
         }));
 

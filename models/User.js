@@ -42,6 +42,19 @@ const userSchema = new mongoose.Schema(
         isAdmin: { type: Boolean, default: false }, // Admin users get all permissions automatically
         lastLogin: { type: Date, default: null },
         lastLoginIp: { type: String, default: '' },
+        /** Current VeRP mobile app device. status fixed = only that phone may log in. */
+        mobileDevice: {
+            deviceId: { type: String, default: '', trim: true },
+            deviceName: { type: String, default: '', trim: true },
+            location: { type: String, default: '', trim: true },
+            ipAddress: { type: String, default: '', trim: true },
+            lastSeenAt: { type: Date, default: null },
+            status: {
+                type: String,
+                enum: ['not_fixed', 'fixed'],
+                default: 'not_fixed',
+            },
+        },
         passwordExpiryDate: { type: Date, default: null }, // Password expires in 180 days
         passwordHistory: [{ type: String }], // Array of hashed previous passwords
 

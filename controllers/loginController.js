@@ -4,6 +4,7 @@ import User from "../models/User.js";
 import EmployeeBasic from "../models/EmployeeBasic.js";
 import { getUserPermissions } from "../services/permissionService.js";
 import { getClientIp, recordActivityAsync } from "../utils/activityLog.js";
+import { normalizeLoginThrough } from "../utils/loginThrough.js";
 
 
 export const login = async (req, res) => {
@@ -122,6 +123,22 @@ export const login = async (req, res) => {
                     });
                 }
                 return res.status(403).json({ message: `Your account is ${user.status}. Please contact administrator.` });
+            }
+
+            if (user.employeeId) {
+                const linkedEmployee = await EmployeeBasic.findOne({ employeeId: user.employeeId })
+                    .select('loginThrough enablePortalAccess')
+                    .lean();
+                const through = normalizeLoginThrough(linkedEmployee);
+                const isAppLogin = req.body?.source === 'portalApp' || req.body?.channel === 'app';
+                if (isAppLogin && !through.portalApp) {
+                    return res.status(403).json({
+                        message: "You don't have permission to login ERP application",
+                    });
+                }
+                if (!isAppLogin && !through.web) {
+                    return res.status(403).json({ message: 'Web login is not enabled for this employee.' });
+                }
             }
 
             // Check if account is temporarily locked (1 hour block)

@@ -5,7 +5,12 @@ import EmployeeSalary from "../../models/EmployeeSalary.js";
 import { uploadDocumentToS3 } from "../../utils/s3Upload.js";
 import { isReqUserAdmin } from "../../utils/sendAdminDeletionNotificationEmails.js";
 import { triggerProfileReactivationIfNeeded } from "../../utils/triggerProfileReactivation.js";
-import { skipLiveProfileWritesPendingHrAsync, queueOrTriggerProfileChange } from "../../utils/pushPendingReactivationChange.js";
+import {
+    skipLiveProfileWritesPendingHrAsync,
+    queueOrTriggerProfileChange,
+    dropAccessControlOnlyPendingChanges,
+} from "../../utils/pushPendingReactivationChange.js";
+import User from "../../models/User.js";
 import { markProfileActivationHoldResolvedForSection } from "../../utils/markProfileActivationHoldResolved.js";
 import { PURGE_TYPES, purgeEmployeeOldDocuments } from "../../utils/purgeEmployeeOldDocuments.js";
 import {
@@ -27,6 +32,7 @@ import { salaryMonthKeyFromDate } from "../../utils/salaryHistoryDateUtils.js";
 import { validateEmployeeBankPayload } from "../../utils/employeeBankValidation.js";
 import { validateEmployeeAddressPayload } from "../../utils/employeeAddressValidation.js";
 import { denyCoreEmployeeProfileDelete } from "../../utils/employeeCardDeleteAccess.js";
+import { loginThroughFromBody, normalizeLoginThrough } from "../../utils/loginThrough.js";
 
 const isEmptyProfileValue = (value) =>
     value === null ||
@@ -128,7 +134,8 @@ export const updateBasicDetails = async (req, res) => {
             "documents",
             "oldDocuments",
             "trainingDetails",
-            "enablePortalAccess"
+            "enablePortalAccess",
+            "loginThrough",
         ];
 
         // 2. Build updatePayload
@@ -139,6 +146,29 @@ export const updateBasicDetails = async (req, res) => {
                 updatePayload[field] = req.body[field];
             }
         });
+        if (updatePayload.loginThrough !== undefined) {
+            updatePayload.loginThrough = loginThroughFromBody(req.body, existingBasic);
+        }
+
+        const accessUpdate = {};
+        if (updatePayload.loginThrough !== undefined) {
+            accessUpdate.loginThrough = updatePayload.loginThrough;
+            delete updatePayload.loginThrough;
+        }
+        if (updatePayload.enablePortalAccess !== undefined) {
+            accessUpdate.enablePortalAccess = updatePayload.enablePortalAccess;
+            delete updatePayload.enablePortalAccess;
+        }
+        if (Object.keys(accessUpdate).length > 0) {
+            await EmployeeBasic.updateOne({ employeeId }, { $set: accessUpdate });
+            if (accessUpdate.enablePortalAccess !== undefined) {
+                await User.findOneAndUpdate(
+                    { employeeId },
+                    { $set: { enablePortalAccess: accessUpdate.enablePortalAccess } },
+                );
+            }
+            await dropAccessControlOnlyPendingChanges(employeeId);
+        }
         if (skipArchiveOnRequest) {
             delete updatePayload.skipArchive;
         }
@@ -542,6 +572,21 @@ export const updateBasicDetails = async (req, res) => {
 
         // 5. If nothing to update
         if (Object.keys(updatePayload).length === 0) {
+            if (Object.keys(accessUpdate).length > 0) {
+                return res.status(200).json({
+                    message: "Access settings updated",
+                    queuedForHrApproval: false,
+                    employee: {
+                        loginThrough:
+                            accessUpdate.loginThrough ||
+                            normalizeLoginThrough(existingBasic),
+                        enablePortalAccess:
+                            accessUpdate.enablePortalAccess !== undefined
+                                ? accessUpdate.enablePortalAccess
+                                : existingBasic?.enablePortalAccess,
+                    },
+                });
+            }
             return res.status(400).json({ message: "Nothing to update" });
         }
 

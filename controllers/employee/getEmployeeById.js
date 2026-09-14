@@ -235,14 +235,6 @@ export const getEmployeeById = async (req, res) => {
 
         normalizeEmployeeProfileStatusForApi(employee);
 
-        // Calculate approximate response size for logging
-        const responseSize = JSON.stringify(employee).length;
-        console.log(`[getEmployeeById] Response size: ${(responseSize / 1024).toFixed(2)} KB`);
-
-        // Set response headers for better handling
-        res.setHeader('Content-Type', 'application/json');
-        res.setHeader('Content-Length', responseSize);
-
         return res.status(200).json({
             message: "Employee fetched successfully",
             employee,
