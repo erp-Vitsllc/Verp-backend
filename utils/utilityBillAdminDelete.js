@@ -124,6 +124,19 @@ export async function cascadeDeleteUtilityBill(billId, { req, skipArchive = fals
     const id = String(billId || '').trim();
     if (!id) return { ok: false, message: 'Bill id is required.' };
 
+    // Zoho Accounts → Bills Refresh used to call this with skipArchive and no HTTP req.
+    // That wiped ERP utility bills. Only a real ERP user request may delete them.
+    if (skipArchive && !req) {
+        console.warn(
+            `[UtilityBill] blocked auto-delete of ${id} (Zoho refresh / no user request).`,
+        );
+        return {
+            ok: false,
+            blocked: true,
+            message: 'Automatic delete of ERP utility bills is disabled.',
+        };
+    }
+
     const bill = await UtilityBillPayment.findById(id);
     if (!bill) return { ok: false, message: 'Bill not found.' };
 

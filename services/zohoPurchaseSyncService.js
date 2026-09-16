@@ -38,7 +38,8 @@ export function isRemovedZohoBillStatus(status) {
 }
 
 /**
- * Drop local Zoho bill cache rows (and linked utility bills) after Zoho remove/void.
+ * Drop local Zoho bill cache rows after Zoho remove/void.
+ * Never deletes ERP Utility Bills (utilitybillpayments). Refresh is cache-only.
  */
 export async function deleteCachedZohoBills(zohoBillIds = [], organizationId = '') {
     const ids = cleanIds(zohoBillIds);
@@ -189,6 +190,8 @@ export async function syncZohoExpensesChunk(query = {}) {
 }
 
 export async function syncZohoBillsChunk(query = {}) {
+    // Refresh updates Accounts → Bills (zohobills cache) only.
+    // It must never create, update, or delete ERP Utility Bills.
     const { startPage, maxRows, syncToken } = parseChunkOptions(query);
     const organizationId = getZohoOrganizationId();
     const chunk = await fetchBillsChunk(query, { startPage, maxRows });
@@ -254,6 +257,7 @@ export async function syncZohoBillsChunk(query = {}) {
     const removedZohoBillIds = [
         ...new Set([...(stats.removedIds || []), ...removedFromChunk]),
     ];
+    // removedZohoBillIds is cache metadata only. Do not touch UtilityBillPayment.
 
     return {
         organizationId,

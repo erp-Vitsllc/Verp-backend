@@ -9,6 +9,7 @@ import {
     cascadeDeleteUtilityBill,
     isUtilityAdminSuperUser,
 } from '../../utils/utilityBillAdminDelete.js';
+import { isJwtSystemSuperUser } from '../../utils/systemSuperUser.js';
 import {
     syncApprovedUtilityBillsToZoho,
     utilityBillDateFromMonth,
@@ -274,7 +275,7 @@ function actorIsPendingStageApprover(status, accountsGate, hrGate) {
     return false;
 }
 
-function withBillActorFlags(bill, actor, accountsGate, hrGate, { isAdmin = false } = {}) {
+function withBillActorFlags(bill, actor, accountsGate, hrGate, { isAdmin = false, isSuperUser = false } = {}) {
     const decorated = decorateBill(bill);
     const canApproveReject = actorIsPendingStageApprover(bill.status, accountsGate, hrGate);
     const canPay = bill.status === 'Approved' && Boolean(accountsGate?.allowed);
@@ -285,7 +286,7 @@ function withBillActorFlags(bill, actor, accountsGate, hrGate, { isAdmin = false
         canPay: Boolean(canPay),
         canCreatorResend: actorCanCreatorResend(actor, bill, Boolean(canApproveReject), { isAdmin }),
         canEditBill: canMutate || Boolean(canApproveReject),
-        canDeleteBill: canMutate,
+        canDeleteBill: Boolean(isSuperUser),
     };
 }
 
@@ -740,9 +741,13 @@ export async function listUtilityBillPayments(req, res) {
         const accountsGate = await isActorAccountsOrAdmin(actor, req.user);
         const hrGate = await isActorHrOrAdmin(actor, req.user);
         const isAdminUser = isUtilityAdminSuperUser(req);
+        const isSuperUser = isJwtSystemSuperUser(req.user);
 
         const withPermissions = (bill) =>
-            withBillActorFlags(bill, actor, accountsGate, hrGate, { isAdmin: isAdminUser });
+            withBillActorFlags(bill, actor, accountsGate, hrGate, {
+                isAdmin: isAdminUser,
+                isSuperUser,
+            });
 
         const syncBillsVendorPaymentFromZoho = async (bills, { entryId: syncEntryId = null } = {}) => {
             const linked = (bills || []).filter(
@@ -1006,7 +1011,12 @@ export async function getUtilityBillBatch(req, res) {
                     persistModel: UtilityBillPayment,
                     fetchLive: true,
                 })
-            ).map((b) => withBillActorFlags(b, actor, accountsGate, hrGate, { isAdmin })),
+            ).map((b) =>
+                withBillActorFlags(b, actor, accountsGate, hrGate, {
+                    isAdmin,
+                    isSuperUser: isJwtSystemSuperUser(req.user),
+                }),
+            ),
             reviewPath: reviewPath(resolvedBatchId, focus.utilityType, focus.billMonth, focus),
         });
     } catch (err) {
@@ -2922,6 +2932,7 @@ export async function getUtilityBillPayment(req, res) {
         return res.status(200).json({
             bill: withBillActorFlags(numbered, actor, accountsGate, hrGate, {
                 isAdmin: isUtilityAdminSuperUser(req),
+                isSuperUser: isJwtSystemSuperUser(req.user),
             }),
         });
     } catch (err) {
@@ -3014,27 +3025,18 @@ export async function syncUtilityBillBatchToZoho(req, res) {
     }
 }
 
-/** DELETE /api/UtilityBill/:id — creator (before Zoho) or admin */
+/** DELETE /api/UtilityBill/:id — Super User (admin) only. Never from Zoho Refresh. */
 export async function deleteUtilityBillPayment(req, res) {
     try {
+        if (!isJwtSystemSuperUser(req.user)) {
+            return res.status(403).json({
+                message: 'Only a Super User (admin) can delete utility bills.',
+            });
+        }
         const actor = await resolveRequesterEmployee(req.user);
-        const isAdmin = isUtilityAdminSuperUser(req);
         const bill = await UtilityBillPayment.findById(req.params.id);
         if (!bill) {
             return res.status(404).json({ message: 'Bill not found.' });
-        }
-
-        const inZoho = utilityBillHasZohoLink(bill);
-        if (inZoho && !isAdmin) {
-            return res.status(400).json({
-                message: 'This bill is already in Zoho Books and cannot be deleted.',
-            });
-        }
-        if (!isAdmin && !actorCanMutateUtilityBill(actor, bill, { isAdmin })) {
-            return res.status(403).json({
-                message:
-                    'Only the person who submitted this bill can delete it before it is added in Zoho.',
-            });
         }
 
         const snapshot = typeof bill.toObject === 'function' ? bill.toObject() : { ...bill };
@@ -3048,7 +3050,7 @@ export async function deleteUtilityBillPayment(req, res) {
 
         const result = await cascadeDeleteUtilityBill(req.params.id, {
             req,
-            skipArchive: !isAdmin,
+            skipArchive: false,
         });
         if (!result.ok) {
             return res.status(result.message === 'Bill not found.' ? 404 : 400).json({

@@ -9,16 +9,15 @@ function cleanIds(ids) {
 }
 
 /**
- * ERP utility bills are sensitive finance records.
- * Never auto-delete them when a Zoho bill is void, missing from a refresh, or dropped from cache.
- * Manual delete in ERP (creator before Zoho / admin) is the only allowed remove path.
+ * Accounts → Bills Refresh used to delete matching ERP utility bills.
+ * That path is permanently disabled. Refresh may only update the Zoho cache.
  */
 export async function deleteUtilityBillsForRemovedZohoBills(zohoBillIds = []) {
     const ids = cleanIds(zohoBillIds);
     if (ids.length) {
         console.warn(
-            `[ZohoSync] skipped auto-delete of ${ids.length} ERP utility bill(s) ` +
-                `(Zoho bill gone/void). Bills stay in MongoDB.`,
+            `[ZohoSync] Refresh will not delete ERP utility bills ` +
+                `(${ids.length} Zoho id(s) ignored).`,
         );
     }
     return { deleted: 0, billIds: [], skipped: ids };
