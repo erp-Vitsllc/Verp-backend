@@ -62,8 +62,11 @@ export function serializeMobileDevice(user) {
     const status = stored.status === STATUS_FIXED ? STATUS_FIXED : STATUS_NOT_FIXED;
     const deviceName = String(stored.deviceName || '').trim();
     const location = String(stored.location || '').trim();
-    const ipAddress = normalizeIp(stored.ipAddress) || normalizeIp(user?.lastLoginIp);
     const deviceId = String(stored.deviceId || '').trim();
+    const hasDevice = Boolean(deviceId || deviceName);
+    const ipAddress = hasDevice
+        ? (normalizeIp(stored.ipAddress) || normalizeIp(user?.lastLoginIp))
+        : '';
     return {
         deviceName: deviceName || '',
         location: location || '',
@@ -71,7 +74,7 @@ export function serializeMobileDevice(user) {
         lastSeenAt: stored.lastSeenAt || null,
         status,
         statusLabel: status === STATUS_FIXED ? 'Fixed' : 'Not Fixed',
-        hasDevice: Boolean(deviceId || deviceName || ipAddress),
+        hasDevice,
         canFix: Boolean(deviceId),
     };
 }

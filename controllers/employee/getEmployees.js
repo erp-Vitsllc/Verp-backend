@@ -285,6 +285,7 @@ export const getEmployees = async (req, res) => {
 
                         // Fields from contactInfo
                         contactNumber: "$contactInfo.contactNumber",
+                        whatsappNumber: "$contactInfo.whatsappNumber",
                         addressLine1: "$contactInfo.addressLine1",
                         addressLine2: "$contactInfo.addressLine2",
                         country: "$contactInfo.country",

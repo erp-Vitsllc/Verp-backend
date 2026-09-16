@@ -52,6 +52,7 @@ export const addEmployee = async (req, res) => {
 
             // Contact Info
             contactNumber,
+            whatsappNumber,
             addressLine1,
             addressLine2,
             country,
@@ -248,6 +249,7 @@ export const addEmployee = async (req, res) => {
             contactNumber ? EmployeeContact.create({
                 employeeId: cleanedEmployeeId,
                 contactNumber,
+                whatsappNumber: whatsappNumber || '',
                 addressLine1: addressLine1 || '',
                 addressLine2: addressLine2 || '',
                 country: country || '',

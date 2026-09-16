@@ -137,6 +137,13 @@ export async function mobileLogin(req, res) {
     }
 
     const incomingDevice = readMobileDeviceFromRequest(req);
+    console.log('[mobileLogin] device', {
+      username: user.username,
+      deviceId: incomingDevice.deviceId || null,
+      deviceName: incomingDevice.deviceName || null,
+      location: incomingDevice.location || null,
+      ipAddress: incomingDevice.ipAddress || null,
+    });
     const deviceDenied = mobileDeviceLoginDenied(user, incomingDevice, { isSystemAdmin: isAdminLogin });
     if (deviceDenied) {
       return res.status(403).json({ message: deviceDenied });

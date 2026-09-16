@@ -376,6 +376,7 @@ export const getCompleteEmployee = async (id) => {
             // Contact information
             ...(contact && {
                 contactNumber: contact.contactNumber,
+                whatsappNumber: contact.whatsappNumber || '',
                 addressLine1: contact.addressLine1,
                 addressLine2: contact.addressLine2,
                 country: contact.country,
@@ -928,7 +929,7 @@ export const saveEmployeeData = async (employeeId, updatePayload) => {
         ];
 
         const contactFields = [
-            'contactNumber', 'addressLine1', 'addressLine2', 'country', 'state',
+            'contactNumber', 'whatsappNumber', 'addressLine1', 'addressLine2', 'country', 'state',
             'city', 'postalCode', 'currentAddressLine1', 'currentAddressLine2',
             'currentCity', 'currentState', 'currentCountry', 'currentPostalCode'
         ];

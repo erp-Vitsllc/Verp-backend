@@ -264,6 +264,7 @@ const BASIC_DETAILS_PATCH_GROUPS = [
         fields: [
             "email",
             "contactNumber",
+            "whatsappNumber",
             "dateOfBirth",
             "maritalStatus",
             "numberOfDependents",

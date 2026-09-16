@@ -131,6 +131,10 @@ export function validateEmployeeProfileBasicDetailsPayload(body = {}) {
 
     push(validateProfileEmail(body.email));
     push(validateInternationalPhone(body.contactNumber));
+    if (String(body.whatsappNumber || "").replace(/\s/g, "")) {
+        const waErr = validateInternationalPhone(body.whatsappNumber);
+        if (waErr) errors.push(String(waErr).replace(/Contact number/i, "WhatsApp number"));
+    }
     push(validateProfileDateOfBirth(body.dateOfBirth));
     push(validateProfileMaritalStatus(body.maritalStatus));
     push(validateProfileNumberOfDependents(body.maritalStatus, body.numberOfDependents));
@@ -147,6 +151,7 @@ export function normalizeEmployeeProfileBasicDetailsPayload(body = {}) {
         lastName: normalizeProfileNamePart(body.lastName),
         email: stripDangerousText(body.email).toLowerCase(),
         contactNumber: stripDangerousText(body.contactNumber).replace(/\s/g, ""),
+        whatsappNumber: stripDangerousText(body.whatsappNumber || "").replace(/\s/g, ""),
         dateOfBirth: body.dateOfBirth || null,
         maritalStatus: marital,
         numberOfDependents:

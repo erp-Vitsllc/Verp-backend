@@ -33,6 +33,7 @@ import leaveRoute from "./routes/leaveRoutes.js";
 import holidayRoute from "./routes/holidayRoutes.js";
 import workingTimeRoute from "./routes/workingTimeRoutes.js";
 import workLocationRoute from "./routes/workLocationRoutes.js";
+import whatsappRoute from "./routes/whatsappRoutes.js";
 import { startLocatorWebSocket } from "./services/locatorWebSocketService.js";
 import { syncLocatorToErpDatabase } from "./services/locatorSnapshotService.js";
 import { commonLimiter } from "./middleware/rateLimitMiddleware.js";
@@ -179,7 +180,8 @@ app.use((req, res, next) => {
     const isZohoSyncRoute = /^\/api\/zoho\/(expenses|bills|vendorpayments|vendors|customers|sync)/i.test(
         path.split('?')[0],
     );
-    const timeoutMs = isZohoSyncRoute ? 300000 : 60000;
+    const isWhatsAppBroadcastRoute = /^\/api\/whatsapp\/test-employees/i.test(path.split('?')[0]);
+    const timeoutMs = isZohoSyncRoute || isWhatsAppBroadcastRoute ? 300000 : 60000;
 
     req.setTimeout(timeoutMs, () => {
         if (!res.headersSent) {
@@ -234,6 +236,7 @@ app.use("/api/Leave", leaveRoute);
 app.use("/api/Holiday", holidayRoute);
 app.use("/api/WorkingTime", workingTimeRoute);
 app.use("/api/WorkLocation", workLocationRoute);
+app.use("/api/whatsapp", whatsappRoute);
 
 app.use((err, req, res, next) => {
     console.error("Express error:", err?.stack || err?.message || err);

@@ -14,6 +14,8 @@ const employeeContactSchema = new mongoose.Schema(
 
         // CONTACT INFO
         contactNumber: { type: String, required: true },
+        /** Optional WhatsApp Cloud API number. Used only for WP send, not contact number. */
+        whatsappNumber: { type: String, default: '', trim: true },
 
         // PERMANENT ADDRESS
         addressLine1: { type: String },

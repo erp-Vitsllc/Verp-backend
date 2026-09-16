@@ -47,6 +47,7 @@ const PROFILE_BASIC_PATCH_KEYS = new Set([
     "lastName",
     "email",
     "contactNumber",
+    "whatsappNumber",
     "dateOfBirth",
     "maritalStatus",
     "numberOfDependents",
@@ -89,6 +90,7 @@ export const updateBasicDetails = async (req, res) => {
             "firstName",
             "lastName",
             "contactNumber",
+            "whatsappNumber",
             "email",
             "country",
             "nationality",
@@ -191,7 +193,7 @@ export const updateBasicDetails = async (req, res) => {
                 EmployeePersonal.findOne({ employeeId })
                     .select("dateOfBirth maritalStatus numberOfDependents fathersName nationality")
                     .lean(),
-                EmployeeContact.findOne({ employeeId }).select("contactNumber").lean(),
+                EmployeeContact.findOne({ employeeId }).select("contactNumber whatsappNumber").lean(),
             ]);
 
             const mergedForValidation = {
@@ -202,6 +204,10 @@ export const updateBasicDetails = async (req, res) => {
                     updatePayload.contactNumber ??
                     existingContact?.contactNumber ??
                     existingBasic?.contactNumber,
+                whatsappNumber:
+                    updatePayload.whatsappNumber ??
+                    existingContact?.whatsappNumber ??
+                    '',
                 dateOfBirth: updatePayload.dateOfBirth ?? existingPersonal?.dateOfBirth,
                 maritalStatus: updatePayload.maritalStatus ?? existingPersonal?.maritalStatus,
                 numberOfDependents:
