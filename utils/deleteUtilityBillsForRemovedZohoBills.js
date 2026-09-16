@@ -1,6 +1,3 @@
-import UtilityBillPayment from '../models/UtilityBillPayment.js';
-import { cascadeDeleteUtilityBill } from './utilityBillAdminDelete.js';
-
 function cleanIds(ids) {
     return [
         ...new Set(
@@ -12,33 +9,17 @@ function cleanIds(ids) {
 }
 
 /**
- * When a Zoho Books bill is gone (deleted / void), remove the matching ERP utility bill.
+ * ERP utility bills are sensitive finance records.
+ * Never auto-delete them when a Zoho bill is void, missing from a refresh, or dropped from cache.
+ * Manual delete in ERP (creator before Zoho / admin) is the only allowed remove path.
  */
 export async function deleteUtilityBillsForRemovedZohoBills(zohoBillIds = []) {
     const ids = cleanIds(zohoBillIds);
-    if (!ids.length) return { deleted: 0, billIds: [] };
-
-    const bills = await UtilityBillPayment.find({
-        $or: [
-            { zohoBillId: { $in: ids } },
-            { zohoBillIds: { $in: ids } },
-            { 'zohoLineItems.zohoBillId': { $in: ids } },
-        ],
-    })
-        .select('_id')
-        .lean();
-
-    const deletedIds = [];
-    for (const bill of bills) {
-        const result = await cascadeDeleteUtilityBill(bill._id, { skipArchive: true });
-        if (result?.ok) deletedIds.push(String(bill._id));
-    }
-
-    if (deletedIds.length) {
-        console.log(
-            `[ZohoSync] utility bills: removed ${deletedIds.length} ERP bill(s) after Zoho bill delete`,
+    if (ids.length) {
+        console.warn(
+            `[ZohoSync] skipped auto-delete of ${ids.length} ERP utility bill(s) ` +
+                `(Zoho bill gone/void). Bills stay in MongoDB.`,
         );
     }
-
-    return { deleted: deletedIds.length, billIds: deletedIds };
+    return { deleted: 0, billIds: [], skipped: ids };
 }

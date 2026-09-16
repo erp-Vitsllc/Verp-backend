@@ -13,6 +13,7 @@ import {
     clearUtilityContractExpiryNotifications,
     daysUntilContractEnd,
 } from '../../utils/processUtilityContractExpiryReminders.js';
+import { employeeIdQueryVariants } from '../../utils/upsertUtilityBalancePartyExpense.js';
 
 function escapeRegex(s) {
     return String(s || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -224,7 +225,11 @@ export async function listUtilityEntries(req, res) {
         const status = String(req.query?.status || '').trim();
 
         if (type) filter.type = nameRegex(type);
-        if (assignedToId) filter.assignedToId = assignedToId;
+        if (assignedToId) {
+            const variants = await employeeIdQueryVariants(assignedToId);
+            const ids = variants.length ? variants : [assignedToId];
+            filter.assignedToId = ids.length > 1 ? { $in: ids } : ids[0];
+        }
         if (assignedToType) filter.assignedToType = assignedToType;
         if (status === 'Active' || status === 'Inactive') filter.status = status;
 

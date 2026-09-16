@@ -683,18 +683,35 @@ export async function listUtilityBillPayments(req, res) {
             overview,
         } = req.query;
 
-        // Dashboard / pending cards: one lean list, no Zoho live sync or attachment payloads.
+        // Dashboard / pending cards / profile: one lean list, no Zoho live sync or attachment payloads.
         if (String(overview || '') === '1' && !batchId) {
             const overviewFilter = {};
-            if (entryId) overviewFilter.entryId = String(entryId);
-            else if (utilityType) overviewFilter.utilityType = String(utilityType).trim();
+            if (entryId) {
+                overviewFilter.entryId = String(entryId);
+            } else if (entryIds) {
+                const ids = String(entryIds)
+                    .split(',')
+                    .map((s) => s.trim())
+                    .filter(Boolean);
+                if (ids.length) overviewFilter.entryId = { $in: ids };
+            } else if (utilityType) {
+                overviewFilter.utilityType = String(utilityType).trim();
+            } else if (payByEmployeeId || employeeId) {
+                const partyEmployeeId = String(payByEmployeeId || employeeId || '').trim();
+                const variants = await employeeIdQueryVariants(partyEmployeeId);
+                const ids = variants.length ? variants : [partyEmployeeId];
+                overviewFilter.$or = [
+                    { payByEmployeeId: { $in: ids } },
+                    { 'zohoLineItems.payByEmployeeId': { $in: ids } },
+                ];
+            }
             const occupancyMonth = String(billMonth || '').trim();
             if (/^\d{4}-\d{2}$/.test(occupancyMonth)) {
                 overviewFilter.billMonth = occupancyMonth;
             }
             const overviewBills = await UtilityBillPayment.find(overviewFilter)
                 .select(
-                    '_id entryId batchId utilityType provider accountNo billMonth amount monthlyRental differenceAmount status paymentDay payByCompanyName payByEmployeeName companyPayAmount employeePayAmount zohoBillId zohoBillIds zohoBillStatus zohoLineItems.zohoBillId createdAt',
+                    '_id entryId batchId utilityType provider accountNo billMonth amount monthlyRental differenceAmount status paymentDay payByCompanyName payByEmployeeName payByEmployeeId companyPayAmount employeePayAmount zohoBillId zohoBillIds zohoBillNumber zohoBillStatus zohoLineItems.zohoBillId zohoLineItems.payByEmployeeId zohoLineItems.amount createdAt',
                 )
                 .lean();
             return res.status(200).json({ bills: overviewBills });

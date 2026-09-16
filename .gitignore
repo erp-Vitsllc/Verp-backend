@@ -54,3 +54,6 @@ parse_snyk.js
 # Zoho OAuth tokens 
 data/zoho-tokens.json
 data/zoho-tokens-*.json
+
+# GPS locator session tokens (written at runtime on the server)
+data/locator-tokens.json

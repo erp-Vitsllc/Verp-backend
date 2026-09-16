@@ -56,18 +56,6 @@ export async function deleteCachedZohoBills(zohoBillIds = [], organizationId = '
         );
     }
 
-    try {
-        const { deleteUtilityBillsForRemovedZohoBills } = await import(
-            '../utils/deleteUtilityBillsForRemovedZohoBills.js'
-        );
-        await deleteUtilityBillsForRemovedZohoBills(ids);
-    } catch (err) {
-        console.warn(
-            '[ZohoPurchaseSync] Utility bill delete after Zoho bill cache remove failed:',
-            err?.message || err,
-        );
-    }
-
     return { deleted, billIds: ids };
 }
 
@@ -266,19 +254,6 @@ export async function syncZohoBillsChunk(query = {}) {
     const removedZohoBillIds = [
         ...new Set([...(stats.removedIds || []), ...removedFromChunk]),
     ];
-    if (stats.removedIds?.length) {
-        try {
-            const { deleteUtilityBillsForRemovedZohoBills } = await import(
-                '../utils/deleteUtilityBillsForRemovedZohoBills.js'
-            );
-            await deleteUtilityBillsForRemovedZohoBills(stats.removedIds);
-        } catch (err) {
-            console.warn(
-                '[ZohoPurchaseSync] Utility bill delete after Zoho bill remove failed:',
-                err?.message || err,
-            );
-        }
-    }
 
     return {
         organizationId,
