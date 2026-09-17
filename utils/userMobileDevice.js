@@ -63,7 +63,7 @@ export function serializeMobileDevice(user) {
     const deviceName = String(stored.deviceName || '').trim();
     const location = String(stored.location || '').trim();
     const deviceId = String(stored.deviceId || '').trim();
-    const hasDevice = Boolean(deviceId || deviceName);
+    const hasDevice = Boolean(deviceId || deviceName || location || stored.ipAddress);
     const ipAddress = hasDevice
         ? (normalizeIp(stored.ipAddress) || normalizeIp(user?.lastLoginIp))
         : '';
