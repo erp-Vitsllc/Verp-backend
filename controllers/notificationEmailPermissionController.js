@@ -50,35 +50,56 @@ export async function getNotificationEmailPermissionMap(req, res) {
     }
 }
 
+function parseChannelFlag(value) {
+    if (typeof value === 'boolean') return value;
+    if (value === 'true' || value === 1 || value === '1') return true;
+    if (value === 'false' || value === 0 || value === '0') return false;
+    return undefined;
+}
+
 export async function updateNotificationEmailPermission(req, res) {
     try {
-        const eventKey = String(req.body?.eventKey || req.params?.eventKey || '').trim();
-        if (!eventKey || !ALLOWED_KEYS.has(eventKey)) {
+        const rawKeys = Array.isArray(req.body?.eventKeys)
+            ? req.body.eventKeys
+            : [req.body?.eventKey || req.params?.eventKey];
+        const eventKeys = [...new Set(
+            rawKeys.map((key) => String(key || '').trim()).filter((key) => ALLOWED_KEYS.has(key)),
+        )];
+        if (!eventKeys.length) {
             return res.status(400).json({ message: 'Unknown event key.' });
         }
         const patch = {};
-        if (typeof req.body?.notification === 'boolean') patch.notification = req.body.notification;
-        if (typeof req.body?.email === 'boolean') patch.email = req.body.email;
-        if (typeof req.body?.whatsapp === 'boolean') patch.whatsapp = req.body.whatsapp;
+        const notification = parseChannelFlag(req.body?.notification);
+        const email = parseChannelFlag(req.body?.email);
+        const whatsapp = parseChannelFlag(req.body?.whatsapp);
+        if (typeof notification === 'boolean') patch.notification = notification;
+        if (typeof email === 'boolean') patch.email = email;
+        if (typeof whatsapp === 'boolean') patch.whatsapp = whatsapp;
         if (!Object.keys(patch).length) {
             return res.status(400).json({ message: 'No channel updates provided.' });
         }
         patch.updatedByName = String(req.user?.name || req.user?.username || '').trim();
         patch.updatedByUserId = String(req.user?.id || req.user?._id || '').trim();
 
-        const row = await NotificationEmailPermission.findOneAndUpdate(
-            { eventKey },
-            { $set: patch },
-            { upsert: true, new: true },
-        ).lean();
+        await NotificationEmailPermission.bulkWrite(
+            eventKeys.map((eventKey) => ({
+                updateOne: {
+                    filter: { eventKey },
+                    update: { $set: { ...patch, eventKey } },
+                    upsert: true,
+                },
+            })),
+            { ordered: false },
+        );
         clearNotificationEmailPermissionCache();
         return res.status(200).json({
             ok: true,
+            eventKeys,
             item: {
-                eventKey,
-                notification: row.notification !== false,
-                email: row.email !== false,
-                whatsapp: row.whatsapp !== false,
+                eventKey: eventKeys[0],
+                notification: patch.notification,
+                email: patch.email,
+                whatsapp: patch.whatsapp,
             },
         });
     } catch (error) {
