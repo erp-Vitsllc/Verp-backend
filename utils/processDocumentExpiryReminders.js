@@ -44,6 +44,12 @@ import {
     escapeExpiryEmailHtml,
     renderExpiryEmailLocationBlock,
 } from "./documentExpiryEmailLocation.js";
+import { sendErpEmail, buildEmailDedupeKey } from "./emailDispatch.js";
+import {
+    deliverEmployeePaidMessage,
+    isNotificationEnabledForType,
+    isEmailEnabledForEvent,
+} from "./notificationEmailPermission.js";
 
 const STAGE_1_MARKER = 30;
 const STAGE_2_MARKER = 20;
@@ -94,15 +100,23 @@ const createTransporter = () => {
     });
 };
 
-const sendExpiryReminderEmail = async ({ to, subject, html }) => {
+const sendExpiryReminderEmail = async ({ to, subject, html, eventKey = "", emailType = "", recordId = "" }) => {
     const transporter = createTransporter();
-    if (!transporter || !to?.length) return;
+    if (!transporter || !to?.length) return { sent: false };
+    const emailOk = await isEmailEnabledForEvent(eventKey, emailType);
+    if (!emailOk) return { sent: false, reason: "email_channel_off" };
     const emailUser = process.env.EMAIL_USER?.trim();
-    await transporter.sendMail({
+    return sendErpEmail({
+        transporter,
         from: `"VeRP Notifications" <${emailUser}>`,
-        to: to.join(","),
+        to,
         subject,
         html,
+        dedupeKey: buildEmailDedupeKey([emailType || eventKey || "expiry", recordId, subject]),
+        module: eventKey || "expiry",
+        emailType: emailType || "ExpiryReminder",
+        recordId,
+        metadata: { eventKey, subjectCategory: "reminder" },
     });
 };
 
@@ -131,6 +145,8 @@ const ensureDashboardAction = async ({
     requestType = "Document Expiry Reminder",
 }) => {
     if (!assignedTo || !requestId) return;
+    const notifyOk = await isNotificationEnabledForType(requestType);
+    if (!notifyOk) return;
     const exists = await DashboardAction.findOne({
         assignedTo,
         requestId,
@@ -551,6 +567,9 @@ const processCompanyReminders = async () => {
                 to: recipients.emails,
                 subject,
                 html,
+                eventKey: "hrm.company.document_expiry",
+                emailType: "CompanyDocumentExpiry",
+                recordId: `${company._id}:${doc.key}:${emailStage}`,
             });
 
             await markReminderSent({
@@ -717,7 +736,7 @@ const processEmployeeReminders = async () => {
         profileStatus: "active",
         status: { $ne: "Left User" } 
     })
-        .select("_id employeeId firstName lastName documents contractExpiryDate primaryReportee")
+        .select("_id employeeId firstName lastName documents contractExpiryDate primaryReportee companyEmail workEmail")
         .lean();
     const employeeIds = employees.map((e) => e.employeeId);
     const map = await buildEmployeeDocumentMap(employeeIds);
@@ -817,10 +836,15 @@ const processEmployeeReminders = async () => {
                 </div>
             `;
 
-            await sendExpiryReminderEmail({
-                to: recipients.emails,
+            const text = `Employee document expiry ${stageLabel}: ${subjectName} — ${doc.label} expires ${new Date(doc.expiryDate).toLocaleDateString("en-GB")}.`;
+            await deliverEmployeePaidMessage({
+                eventKey: "hrm.employees.document_expiry",
+                employee,
                 subject,
                 html,
+                text,
+                recordId: `${employee._id}:${docKey}:${emailStage}`,
+                emailType: "EmployeeDocumentExpiry",
             });
 
             await markReminderSent({
@@ -982,6 +1006,9 @@ const processVehicleReminders = async () => {
                 to: recipients.emails,
                 subject,
                 html,
+                eventKey: "hrm.vehicle.document_expiry",
+                emailType: "VehicleDocumentExpiry",
+                recordId: `${asset._id}:${doc.key}:${emailStage}`,
             });
 
             await markReminderSent({

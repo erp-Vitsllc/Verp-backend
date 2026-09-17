@@ -179,6 +179,22 @@ export async function sendTextMessage(to, message, extras = {}) {
             return fail('Message text is required.');
         }
 
+        if (extras.eventKey && extras.skipPaidChannelCheck !== true) {
+            const { getEventChannels, resolveEmployeePaidChannel } = await import(
+                '../utils/notificationEmailPermission.js'
+            );
+            const channels = await getEventChannels(extras.eventKey);
+            if (!channels.whatsapp) {
+                return fail('WhatsApp is turned off for this event.');
+            }
+            if (extras.employee) {
+                const picked = await resolveEmployeePaidChannel(extras.employee, extras.eventKey);
+                if (picked.channel !== 'whatsapp') {
+                    return fail('WhatsApp skipped: employee has a company email or channel is off.');
+                }
+            }
+        }
+
         const result = await postWhatsAppMessage({
             messaging_product: 'whatsapp',
             recipient_type: 'individual',

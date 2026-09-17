@@ -149,6 +149,15 @@ export async function sendErpEmail({
         if (!allowed) return { sent: false, reason: 'duplicate' };
     }
 
+    try {
+        const { isEmailEnabledForEvent } = await import('./notificationEmailPermission.js');
+        const eventKey = String(metadata?.eventKey || '').trim();
+        const emailOk = await isEmailEnabledForEvent(eventKey, emailType);
+        if (!emailOk) return { sent: false, reason: 'email_channel_off' };
+    } catch (err) {
+        console.warn('[emailDispatch] permission check skipped:', err?.message || err);
+    }
+
     const finalSubject = buildErpSubject({
         category: metadata?.subjectCategory,
         baseSubject: subject,
