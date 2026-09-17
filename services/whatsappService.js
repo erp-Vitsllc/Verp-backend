@@ -164,7 +164,7 @@ export async function checkWhatsAppAccount(to) {
     }
 }
 
-export async function sendTextMessage(to, message) {
+export async function sendTextMessage(to, message, extras = {}) {
     try {
         if (!isWhatsAppEnabled()) {
             return fail('WhatsApp is disabled. Set WHATSAPP_ENABLED=true after credentials are filled.');
@@ -179,19 +179,31 @@ export async function sendTextMessage(to, message) {
             return fail('Message text is required.');
         }
 
-        return postWhatsAppMessage({
+        const result = await postWhatsAppMessage({
             messaging_product: 'whatsapp',
             recipient_type: 'individual',
             to: phone,
             type: 'text',
             text: { body: text },
         });
+        const { logOutboundWhatsAppMessage } = await import('../utils/whatsappMessageLog.js');
+        await logOutboundWhatsAppMessage({
+            phone,
+            body: text,
+            messageType: 'text',
+            source: extras.source || 'manual',
+            result,
+            actor: extras.actor || null,
+            employeeId: extras.employeeId || '',
+            contactName: extras.contactName || '',
+        });
+        return result;
     } catch (error) {
         return fail(error);
     }
 }
 
-export async function sendTemplateMessage(to, templateName, languageCode, components = []) {
+export async function sendTemplateMessage(to, templateName, languageCode, components = [], extras = {}) {
     try {
         if (!isWhatsAppEnabled()) {
             return fail('WhatsApp is disabled. Set WHATSAPP_ENABLED=true after credentials are filled.');
@@ -207,7 +219,7 @@ export async function sendTemplateMessage(to, templateName, languageCode, compon
             return fail('Template name is required.');
         }
 
-        return postWhatsAppMessage({
+        const result = await postWhatsAppMessage({
             messaging_product: 'whatsapp',
             to: phone,
             type: 'template',
@@ -217,6 +229,21 @@ export async function sendTemplateMessage(to, templateName, languageCode, compon
                 components: Array.isArray(components) ? components : [],
             },
         });
+        const { logOutboundWhatsAppMessage, templateMessagePreview } = await import(
+            '../utils/whatsappMessageLog.js'
+        );
+        await logOutboundWhatsAppMessage({
+            phone,
+            body: templateMessagePreview(name, components),
+            messageType: 'template',
+            source: extras.source || 'template',
+            templateName: name,
+            result,
+            actor: extras.actor || null,
+            employeeId: extras.employeeId || '',
+            contactName: extras.contactName || '',
+        });
+        return result;
     } catch (error) {
         return fail(error);
     }

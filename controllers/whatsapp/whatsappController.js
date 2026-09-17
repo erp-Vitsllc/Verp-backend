@@ -1,6 +1,8 @@
 import { checkWhatsAppConfiguration, checkWhatsAppAccount, sendTextMessage, sendTemplateMessage } from '../../services/whatsappService.js';
 import { getWhatsAppConfig } from '../../config/whatsapp.js';
 import { isValidWhatsAppPhone, normalizeWhatsAppPhone } from '../../utils/normalizeWhatsAppPhone.js';
+import { isAutoWhatsAppSource } from '../../utils/whatsappMessageLog.js';
+import WhatsAppMessage from '../../models/WhatsAppMessage.js';
 import EmployeeBasic from '../../models/EmployeeBasic.js';
 import EmployeeContact from '../../models/EmployeeContact.js';
 import mongoose from 'mongoose';
@@ -80,7 +82,10 @@ export async function postWhatsAppTest(req, res) {
             });
         }
 
-        const result = await sendTextMessage(phone, message);
+        const result = await sendTextMessage(phone, message, {
+            source: 'manual',
+            actor: req.user,
+        });
         return res.status(result.success ? 200 : 400).json(result);
     } catch (error) {
         console.error('[WhatsApp] test send failed:', error?.message || error);
@@ -138,7 +143,12 @@ export async function postWhatsAppTestEmployees(req, res) {
         const skipped = contacts.length - queue.length;
 
         for (const item of queue) {
-            const result = await sendTextMessage(item.phone, message);
+            const result = await sendTextMessage(item.phone, message, {
+                source: 'broadcast',
+                actor: req.user,
+                employeeId: item.employeeId,
+                contactName: item.name,
+            });
             if (result.success) {
                 sent.push({
                     employeeId: item.employeeId,
@@ -274,6 +284,12 @@ export async function postWhatsAppToEmployee(req, res) {
             'vega_digital_it_solution',
             'en',
             templateComponents,
+            {
+                source: 'auto',
+                actor: req.user,
+                employeeId: employee.employeeId,
+                contactName: employeeName,
+            },
         );
         if (!result.success) {
             return res.status(400).json({
@@ -323,16 +339,227 @@ export function getWhatsAppWebhook(req, res) {
     }
 }
 
-export function postWhatsAppWebhook(req, res) {
+export async function postWhatsAppWebhook(req, res) {
     try {
         const body = req.body && typeof req.body === 'object' && !Array.isArray(req.body)
             ? req.body
             : {};
         const summary = summarizeWebhook(body);
         console.log('[WhatsApp] webhook event', summary);
+
+        const {
+            logInboundWhatsAppMessage,
+            applyWhatsAppDeliveryStatus,
+            inboundMessageBody,
+        } = await import('../../utils/whatsappMessageLog.js');
+
+        const entries = Array.isArray(body?.entry) ? body.entry : [];
+        for (const entry of entries) {
+            const changes = Array.isArray(entry?.changes) ? entry.changes : [];
+            for (const change of changes) {
+                const value = change?.value && typeof change.value === 'object' ? change.value : {};
+                const contacts = Array.isArray(value.contacts) ? value.contacts : [];
+                const nameByWaId = new Map(
+                    contacts.map((row) => [
+                        String(row?.wa_id || '').trim(),
+                        String(row?.profile?.name || '').trim(),
+                    ]),
+                );
+
+                for (const message of Array.isArray(value.messages) ? value.messages : []) {
+                    const from = String(message?.from || '').trim();
+                    const ts = Number(message?.timestamp);
+                    await logInboundWhatsAppMessage({
+                        phone: from,
+                        waMessageId: String(message?.id || '').trim(),
+                        body: inboundMessageBody(message),
+                        messageType: String(message?.type || 'text'),
+                        contactName: nameByWaId.get(from) || '',
+                        occurredAt: Number.isFinite(ts) ? new Date(ts * 1000) : new Date(),
+                    });
+                }
+
+                for (const statusRow of Array.isArray(value.statuses) ? value.statuses : []) {
+                    const ts = Number(statusRow?.timestamp);
+                    await applyWhatsAppDeliveryStatus({
+                        waMessageId: String(statusRow?.id || '').trim(),
+                        status: String(statusRow?.status || '').trim(),
+                        recipientPhone: String(statusRow?.recipient_id || '').trim(),
+                        occurredAt: Number.isFinite(ts) ? new Date(ts * 1000) : new Date(),
+                    });
+                }
+            }
+        }
+
         return res.status(200).json({ success: true });
     } catch (error) {
         console.error('[WhatsApp] webhook receive failed:', error?.message || error);
         return res.status(200).json({ success: true });
+    }
+}
+
+function publicMessage(doc) {
+    const row = doc && typeof doc.toObject === 'function' ? doc.toObject() : doc || {};
+    const source = String(row.source || 'manual');
+    return {
+        id: String(row._id || ''),
+        waMessageId: row.waMessageId || '',
+        conversationPhone: row.conversationPhone || '',
+        direction: row.direction || '',
+        source,
+        autoSend: isAutoWhatsAppSource(source),
+        status: row.status || '',
+        messageType: row.messageType || 'text',
+        body: row.body || '',
+        templateName: row.templateName || '',
+        fromPhone: row.fromPhone || '',
+        toPhone: row.toPhone || '',
+        contactName: row.contactName || '',
+        employeeId: row.employeeId || '',
+        sentByName: row.sentByName || '',
+        sentByUserId: row.sentByUserId || '',
+        error: row.error || '',
+        occurredAt: row.occurredAt || row.createdAt || null,
+    };
+}
+
+function sourceFilter(source) {
+    const value = String(source || '').trim().toLowerCase();
+    if (value === 'in' || value === 'received') return { direction: 'in' };
+    if (value === 'out' || value === 'sent') return { direction: 'out' };
+    if (value === 'auto') return { source: { $in: ['auto', 'broadcast', 'template'] } };
+    if (['manual', 'broadcast', 'template', 'webhook'].includes(value)) return { source: value };
+    return {};
+}
+
+export function getWhatsAppInboxAccess(req, res) {
+    return res.status(200).json({ allowed: true });
+}
+
+export async function listWhatsAppConversations(req, res) {
+    try {
+        const search = String(req.query?.search || '').trim();
+        const filter = sourceFilter(req.query?.filter);
+        const match = { ...filter };
+        if (search) {
+            const safe = search.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+            match.$or = [
+                { conversationPhone: { $regex: safe, $options: 'i' } },
+                { contactName: { $regex: safe, $options: 'i' } },
+                { employeeId: { $regex: safe, $options: 'i' } },
+                { body: { $regex: safe, $options: 'i' } },
+                { sentByName: { $regex: safe, $options: 'i' } },
+            ];
+        }
+
+        const rows = await WhatsAppMessage.aggregate([
+            { $match: match },
+            { $sort: { occurredAt: -1, createdAt: -1 } },
+            {
+                $group: {
+                    _id: '$conversationPhone',
+                    lastMessage: { $first: '$$ROOT' },
+                    inboundCount: {
+                        $sum: { $cond: [{ $eq: ['$direction', 'in'] }, 1, 0] },
+                    },
+                    outboundCount: {
+                        $sum: { $cond: [{ $eq: ['$direction', 'out'] }, 1, 0] },
+                    },
+                    autoCount: {
+                        $sum: {
+                            $cond: [
+                                { $in: ['$source', ['auto', 'broadcast', 'template']] },
+                                1,
+                                0,
+                            ],
+                        },
+                    },
+                },
+            },
+            { $sort: { 'lastMessage.occurredAt': -1 } },
+            { $limit: 200 },
+        ]);
+
+        const conversations = rows.map((row) => {
+            const last = publicMessage(row.lastMessage || {});
+            return {
+                phone: String(row._id || ''),
+                contactName: last.contactName || '',
+                employeeId: last.employeeId || '',
+                lastMessage: last,
+                inboundCount: row.inboundCount || 0,
+                outboundCount: row.outboundCount || 0,
+                autoCount: row.autoCount || 0,
+            };
+        });
+
+        return res.status(200).json({ conversations });
+    } catch (error) {
+        console.error('[WhatsApp] conversations failed:', error?.message || error);
+        return res.status(500).json({ message: error?.message || 'Failed to load WhatsApp conversations' });
+    }
+}
+
+export async function listWhatsAppThread(req, res) {
+    try {
+        const phone = normalizeWhatsAppPhone(req.query?.phone || req.params?.phone || '');
+        if (!isValidWhatsAppPhone(phone)) {
+            return res.status(400).json({ message: 'A valid WhatsApp number is required.' });
+        }
+        const filter = {
+            conversationPhone: phone,
+            ...sourceFilter(req.query?.filter),
+        };
+        const messages = await WhatsAppMessage.find(filter)
+            .sort({ occurredAt: 1, createdAt: 1 })
+            .limit(500)
+            .lean();
+        const last = messages[messages.length - 1] || null;
+        return res.status(200).json({
+            phone,
+            contactName: last?.contactName || '',
+            employeeId: last?.employeeId || '',
+            messages: messages.map(publicMessage),
+        });
+    } catch (error) {
+        console.error('[WhatsApp] thread failed:', error?.message || error);
+        return res.status(500).json({ message: error?.message || 'Failed to load WhatsApp messages' });
+    }
+}
+
+export async function postWhatsAppThreadReply(req, res) {
+    try {
+        const phone = normalizeWhatsAppPhone(req.body?.phone || req.query?.phone || req.params?.phone || '');
+        const message = String(req.body?.message || req.body?.text || '').trim();
+        if (!isValidWhatsAppPhone(phone)) {
+            return res.status(400).json({ success: false, error: 'A valid WhatsApp number is required.' });
+        }
+        if (!message) {
+            return res.status(400).json({ success: false, error: 'message is required' });
+        }
+
+        const last = await WhatsAppMessage.findOne({ conversationPhone: phone })
+            .sort({ occurredAt: -1 })
+            .select('contactName employeeId')
+            .lean();
+        const result = await sendTextMessage(phone, message, {
+            source: 'manual',
+            actor: req.user,
+            employeeId: last?.employeeId || '',
+            contactName: last?.contactName || '',
+        });
+        if (!result.success) {
+            return res.status(400).json({
+                success: false,
+                error: result.error || 'WhatsApp send failed',
+            });
+        }
+        return res.status(200).json({ success: true, messageId: result.messageId || '' });
+    } catch (error) {
+        console.error('[WhatsApp] thread reply failed:', error?.message || error);
+        return res.status(500).json({
+            success: false,
+            error: error?.message || 'Failed to send WhatsApp message',
+        });
     }
 }
