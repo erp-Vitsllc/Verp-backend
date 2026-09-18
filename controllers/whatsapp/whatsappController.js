@@ -282,20 +282,26 @@ export async function postWhatsAppCheckNumber(req, res) {
                 onWhatsApp: true,
             });
         }
+        if (account.onWhatsApp === false && !account.checkUnavailable) {
+            return res.status(400).json({
+                success: false,
+                onWhatsApp: false,
+                error: account.error || WHATSAPP_NOT_REGISTERED_ERROR,
+                field: 'whatsappNumber',
+            });
+        }
 
-        return res.status(400).json({
-            success: false,
-            onWhatsApp: false,
-            error: account.error || WHATSAPP_NOT_REGISTERED_ERROR,
-            field: 'whatsappNumber',
+        return res.status(200).json({
+            success: true,
+            onWhatsApp: null,
+            checkUnavailable: true,
         });
     } catch (error) {
         console.error('[WhatsApp] number check failed:', error?.message || error);
-        return res.status(400).json({
-            success: false,
-            onWhatsApp: false,
-            error: WHATSAPP_NOT_REGISTERED_ERROR,
-            field: 'whatsappNumber',
+        return res.status(200).json({
+            success: true,
+            onWhatsApp: null,
+            checkUnavailable: true,
         });
     }
 }

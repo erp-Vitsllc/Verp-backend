@@ -269,7 +269,6 @@ async function postWhatsAppMessage(body) {
 export const WHATSAPP_NOT_REGISTERED_ERROR = 'This number is not registered on WhatsApp';
 
 const ACCOUNT_CHECK_TTL_MS = 10 * 60 * 1000;
-const PROBE_WAIT_MS = 12000;
 const accountCheckCache = new Map();
 const pendingAccountProbes = new Map();
 
@@ -299,15 +298,6 @@ function setCachedAccountCheck(phone, value) {
     }
 }
 
-function isNotOnWhatsAppError(code, text) {
-    const message = String(text || '').toLowerCase();
-    return (
-        Number(code) === 131026
-        || message.includes('not a whatsapp user')
-        || (message.includes('undeliverable') && Number(code) !== 131030)
-    );
-}
-
 async function hasDeliveredWhatsAppConversation(phone) {
     try {
         const WhatsAppMessage = (await import('../models/WhatsAppMessage.js')).default;
@@ -327,57 +317,34 @@ async function hasDeliveredWhatsAppConversation(phone) {
     }
 }
 
-function interpretRecipientProbe(result) {
-    const code = Number(result?.metaError?.code);
-    const text = String(result?.error || '');
-
-    if (isNotOnWhatsAppError(code, text)) {
-        return accountCheckResult({
-            success: false,
-            onWhatsApp: false,
-            error: WHATSAPP_NOT_REGISTERED_ERROR,
-            metaError: result?.metaError || null,
+/** Silent lookup only. Never send a WhatsApp message. */
+async function lookupContactsStatus(phone) {
+    const config = getWhatsAppConfig();
+    if (!config.accessToken || !config.phoneNumberId || !config.apiVersion) return null;
+    try {
+        const url = `${config.apiUrl}/${config.apiVersion}/${config.phoneNumberId}/contacts`;
+        const response = await fetch(url, {
+            method: 'POST',
+            headers: {
+                Authorization: `Bearer ${config.accessToken}`,
+                'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({
+                blocking: 'wait',
+                contacts: [`+${phone}`],
+                force_check: true,
+            }),
+            signal: AbortSignal.timeout(12000),
         });
+        const payload = await response.json().catch(() => ({}));
+        if (!response.ok) return null;
+        const row = Array.isArray(payload?.contacts) ? payload.contacts[0] : null;
+        const status = String(row?.status || '').toLowerCase();
+        if (status === 'invalid') return false;
+        return null;
+    } catch {
+        return null;
     }
-
-    // 24-hour session window: recipient exists, nothing is delivered.
-    if (code === 131047) {
-        return accountCheckResult({ onWhatsApp: true, metaError: result?.metaError || null });
-    }
-
-    if (code === 131030 || text.toLowerCase().includes('not in allowed list')) {
-        return accountCheckResult({
-            success: false,
-            onWhatsApp: false,
-            error: WHATSAPP_NOT_REGISTERED_ERROR,
-            metaError: result?.metaError || null,
-        });
-    }
-
-    // HTTP 200 only means Meta accepted the send. Unregistered numbers often
-    // fail later with webhook 131026 — do not treat this as registered.
-    return null;
-}
-
-function interpretProbeDelivery(delivery) {
-    const status = String(delivery?.status || '').toLowerCase();
-    const code = Number(delivery?.errorCode);
-    const text = String(delivery?.errorMessage || '');
-
-    if (['delivered', 'read'].includes(status) && !isNotOnWhatsAppError(code, text)) {
-        return accountCheckResult({ onWhatsApp: true });
-    }
-    if (status === 'failed' && code === 131047) {
-        return accountCheckResult({ onWhatsApp: true });
-    }
-    if (isNotOnWhatsAppError(code, text) || status === 'failed') {
-        return accountCheckResult({
-            success: false,
-            onWhatsApp: false,
-            error: WHATSAPP_NOT_REGISTERED_ERROR,
-        });
-    }
-    return null;
 }
 
 export function resolveWhatsAppAccountProbe(waMessageId, delivery = {}) {
@@ -385,45 +352,16 @@ export function resolveWhatsAppAccountProbe(waMessageId, delivery = {}) {
     if (!id) return;
     const pending = pendingAccountProbes.get(id);
     if (!pending) return;
-    const status = String(delivery?.status || '').toLowerCase();
-    if (status === 'sent') return;
-    pending.resolve({
-        status,
-        errorCode: Number(delivery?.errorCode) || 0,
-        errorMessage: String(delivery?.errorMessage || ''),
-    });
-}
-
-function waitForAccountProbe(messageId, timeoutMs = PROBE_WAIT_MS) {
-    const id = String(messageId || '').trim();
-    if (!id) return Promise.resolve(null);
-
-    return new Promise((resolve) => {
-        const timer = setTimeout(() => {
-            pendingAccountProbes.delete(id);
-            resolve(null);
-        }, timeoutMs);
-        pendingAccountProbes.set(id, {
-            resolve: (value) => {
-                clearTimeout(timer);
-                pendingAccountProbes.delete(id);
-                resolve(value);
-            },
-        });
-    });
+    pending.resolve(delivery || {});
 }
 
 /**
- * Meta Cloud API has no contacts lookup.
- * 131026 = not a WhatsApp user. 131047 = registered, outside the 24h window.
- * HTTP 200 is not proof — wait for the delivery webhook before allowing save.
+ * Check whether a number is on WhatsApp without sending a message.
+ * Cloud API has no reliable contacts lookup; explicit invalid is the only
+ * negative we trust. Prior delivered/received chat is a positive.
  */
 export async function checkWhatsAppAccount(to) {
     try {
-        if (!isWhatsAppEnabled()) {
-            return accountCheckResult({ checkUnavailable: true });
-        }
-
         const phone = normalizeWhatsAppPhone(to);
         if (!isValidWhatsAppPhone(phone)) {
             return accountCheckResult({
@@ -442,76 +380,44 @@ export async function checkWhatsAppAccount(to) {
             return known;
         }
 
-        const probe = await postWhatsAppMessage({
-            messaging_product: 'whatsapp',
-            recipient_type: 'individual',
-            to: phone,
-            type: 'text',
-            text: { preview_url: false, body: '\u2060' },
-        });
-        const immediate = interpretRecipientProbe(probe);
-        if (immediate) {
-            console.log('[WhatsApp] account check', {
-                phoneSuffix: phone.slice(-4),
-                onWhatsApp: immediate.onWhatsApp,
-                code: immediate.metaError?.code ?? null,
+        if (!isWhatsAppEnabled()) {
+            return accountCheckResult({ checkUnavailable: true });
+        }
+
+        const contactsStatus = await lookupContactsStatus(phone);
+        if (contactsStatus === false) {
+            const missing = accountCheckResult({
+                success: false,
+                onWhatsApp: false,
+                error: WHATSAPP_NOT_REGISTERED_ERROR,
             });
-            setCachedAccountCheck(phone, immediate);
-            return immediate;
+            setCachedAccountCheck(phone, missing);
+            return missing;
         }
 
-        const messageId = probe.messageId || probe.data?.messages?.[0]?.id || '';
-        if (probe.success && messageId) {
-            const delivery = await waitForAccountProbe(messageId);
-            const fromWebhook = delivery ? interpretProbeDelivery(delivery) : null;
-            if (fromWebhook) {
-                console.log('[WhatsApp] account check', {
-                    phoneSuffix: phone.slice(-4),
-                    onWhatsApp: fromWebhook.onWhatsApp,
-                    status: delivery?.status || '',
-                    code: delivery?.errorCode || null,
-                });
-                setCachedAccountCheck(phone, fromWebhook);
-                return fromWebhook;
-            }
-        }
-
-        console.log('[WhatsApp] account check', {
-            phoneSuffix: phone.slice(-4),
-            onWhatsApp: false,
-            reason: probe.success ? 'no_delivery_confirmation' : (probe.error || 'probe_failed'),
-        });
-        return accountCheckResult({
-            success: false,
-            onWhatsApp: false,
-            error: WHATSAPP_NOT_REGISTERED_ERROR,
-            metaError: probe.metaError || null,
-        });
+        return accountCheckResult({ checkUnavailable: true });
     } catch (error) {
-        if (error?.code === 'WHATSAPP_DISABLED' || error?.code === 'WHATSAPP_NOT_CONFIGURED') {
-            return accountCheckResult({ checkUnavailable: true, error: error.message });
-        }
         return accountCheckResult({
-            success: false,
-            onWhatsApp: false,
-            error: WHATSAPP_NOT_REGISTERED_ERROR,
+            checkUnavailable: true,
+            error: error?.message || 'WhatsApp check unavailable',
         });
     }
 }
 
-/** Empty number is allowed. A filled number must be confirmed on WhatsApp before save. */
+/** Empty number is allowed. Only block when Meta/history says it is not on WhatsApp. */
 export async function assertRegisteredWhatsAppNumber(phone) {
     const raw = String(phone || '').trim();
     if (!raw) return { ok: true };
-    if (!isWhatsAppEnabled()) return { ok: true };
 
     const account = await checkWhatsAppAccount(raw);
-    if (account.onWhatsApp === true) return { ok: true };
-    return {
-        ok: false,
-        message: account.error || WHATSAPP_NOT_REGISTERED_ERROR,
-        field: 'whatsappNumber',
-    };
+    if (account.onWhatsApp === false && !account.checkUnavailable) {
+        return {
+            ok: false,
+            message: account.error || WHATSAPP_NOT_REGISTERED_ERROR,
+            field: 'whatsappNumber',
+        };
+    }
+    return { ok: true };
 }
 
 export async function sendTextMessage(to, message, extras = {}) {
