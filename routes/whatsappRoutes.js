@@ -1,12 +1,13 @@
 import express from 'express';
 import { protect } from '../middleware/authMiddleware.js';
-import { checkPermission, requireAdmin } from '../middleware/permissionMiddleware.js';
+import { checkAnyModulePermission, checkPermission, requireAdmin } from '../middleware/permissionMiddleware.js';
 import {
     getWhatsAppInboxAccess,
     getWhatsAppStatus,
     getWhatsAppWebhook,
     listWhatsAppConversations,
     listWhatsAppThread,
+    postWhatsAppCheckNumber,
     postWhatsAppTest,
     postWhatsAppTestEmployees,
     postWhatsAppThreadReply,
@@ -26,6 +27,20 @@ router.get('/thread', protect, requireAdmin, listWhatsAppThread);
 router.post('/thread', protect, requireAdmin, postWhatsAppThreadReply);
 router.post('/test', protect, requireAdmin, postWhatsAppTest);
 router.post('/test-employees', protect, requireAdmin, postWhatsAppTestEmployees);
+router.post(
+    '/check-number',
+    protect,
+    checkAnyModulePermission(
+        [
+            ['hrm_employees_list', 'view'],
+            ['hrm_employees_add', 'create'],
+            ['hrm_employees_view_basic', 'edit'],
+            ['hrm_employees_view_personal', 'edit'],
+        ],
+        'Access denied. Employee permission is required to check WhatsApp numbers.',
+    ),
+    postWhatsAppCheckNumber,
+);
 router.post('/employee/:id', protect, checkPermission('hrm_employees_list', 'view'), postWhatsAppToEmployee);
 
 export default router;

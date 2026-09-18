@@ -44,3 +44,21 @@ export function isValidWhatsAppPhone(input) {
     const normalized = normalizeWhatsAppPhone(input);
     return /^\d{8,15}$/.test(normalized);
 }
+
+/** All stored forms we may have used for the same WhatsApp number. */
+export function whatsAppPhoneKeys(input) {
+    const n = normalizeWhatsAppPhone(input);
+    if (!n) return [];
+    const keys = new Set([n, String(input || '').replace(/\D/g, '')].filter(Boolean));
+    if (n.startsWith('971') && n.length >= 12) {
+        keys.add(`0${n.slice(3)}`);
+        keys.add(n.slice(3));
+    }
+    if (n.length === 10 && n.startsWith('05')) {
+        keys.add(`971${n.slice(1)}`);
+    }
+    if (n.length === 9 && n.startsWith('5')) {
+        keys.add(`971${n}`);
+    }
+    return [...keys];
+}

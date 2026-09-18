@@ -13,6 +13,7 @@ import nodemailer from 'nodemailer';
 import { pickEffectiveEmail } from './resolveEmployeeEmail.js';
 import { normalizeS3Key } from './s3Upload.js';
 import { handoverRequiresHrApproval } from './vehicleAccessoriesListSync.js';
+import { canLoginThroughAnyChannel } from './loginThrough.js';
 
 export const HANDOVER_FLOW_STAGES = {
     TARGET: 'target',
@@ -641,9 +642,17 @@ export async function employeeHasActivePortalUser(emp) {
     const empId = emp?.employeeId;
     if (!empId) return false;
     const user = await User.findOne({ employeeId: String(empId), status: 'Active' })
-        .select('enablePortalAccess')
+        .select('_id')
         .lean();
-    return !!(user && user.enablePortalAccess === true);
+    if (!user) return false;
+    let source = emp;
+    if (!(emp.loginThrough && typeof emp.loginThrough === 'object')) {
+        const row = await EmployeeBasic.findOne({ employeeId: String(empId) })
+            .select('loginThrough')
+            .lean();
+        if (row) source = row;
+    }
+    return canLoginThroughAnyChannel(source);
 }
 
 export function assigneeHasCompanyEmail(emp) {
@@ -652,7 +661,6 @@ export function assigneeHasCompanyEmail(emp) {
 
 export async function assigneeCanSelfAcknowledgeFleetHandover(emp) {
     if (!emp || !assigneeHasCompanyEmail(emp)) return false;
-    if (emp.enablePortalAccess === true) return true;
     return employeeHasActivePortalUser(emp);
 }
 

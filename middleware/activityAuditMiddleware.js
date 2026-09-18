@@ -11,6 +11,7 @@ const SKIP_PREFIXES = [
     '/api/locator',
     '/api/ActivityLog',
     '/api/document-ai',
+    '/api/whatsapp/webhook',
 ];
 
 const MODULE_RULES = [

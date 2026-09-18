@@ -35,7 +35,10 @@ import {
     getScheduledEmailTimeZone,
     getZonedParts,
 } from '../../utils/scheduleDailyAtMidnight.js';
-import { lastOpenSalaryProcessMonth } from '../../utils/salaryEnrollmentStartMonth.js';
+import {
+    lastOpenSalaryProcessMonth,
+    salaryRegisterPayrollOpenMonth,
+} from '../../utils/salaryEnrollmentStartMonth.js';
 import { viewerIsSalaryFlowchartHr } from '../../utils/viewerIsSalaryFlowchartHr.js';
 import {
     buildDmfViewerContext,
@@ -1202,9 +1205,9 @@ function lastOpenSalaryMonth(currentYm) {
 
 /**
  * GET /api/Employee/salary-register
- * One row per salary period from the earliest enrolled process-start month
+ * One row per salary period from the nearest enrolled process-start month
  * through last month. A period opens on the 1st of the following month
- * (August salary on 1 September).
+ * (October enrollment → October salary on 1 November).
  */
 export const getSalaryRegister = async (req, res) => {
     try {
@@ -1259,12 +1262,14 @@ export const getSalaryRegister = async (req, res) => {
             return !min || ym < min ? ym : min;
         }, null);
 
-        // Enrolled process-start months only. That period opens next calendar month.
+        // Nearest enrolled process-start month. That salary period opens on the 1st of the next month
+        // (October enrollment → payroll row on 1 November).
         const startYm = firstEnrollmentYm || null;
+        const payrollOpenYm = startYm ? salaryRegisterPayrollOpenMonth(startYm) : null;
 
         const waitingForOpenMonth = Boolean(startYm && lastOpenYm && startYm > lastOpenYm);
         const waitingForProcessingDate = waitingForOpenMonth;
-        const nextOpenMonthKey = waitingForOpenMonth ? startYm : null;
+        const nextOpenMonthKey = waitingForOpenMonth ? payrollOpenYm : null;
 
         const registerMeta = {
             enrolledCount: Number(enrollmentOverview?.enrolled) || enrollments.length,
@@ -1273,6 +1278,8 @@ export const getSalaryRegister = async (req, res) => {
             waitingForProcessingDate,
             currentMonth: monthLabel(currentYm),
             currentMonthKey: currentYm,
+            firstSalaryMonth: waitingForOpenMonth && startYm ? monthLabel(startYm) : '',
+            firstSalaryMonthKey: waitingForOpenMonth && startYm ? startYm : '',
             nextOpenMonth: nextOpenMonthKey ? monthLabel(nextOpenMonthKey) : '',
             nextOpenMonthKey: nextOpenMonthKey || '',
             hiddenMonthCount: hiddenMonths.size,
@@ -1297,7 +1304,7 @@ export const getSalaryRegister = async (req, res) => {
             });
         }
 
-        // Enrolled process-start is still in the current month: it opens on the 1st of next month.
+        // Nearest enrolled process-start is still the current/future month: it opens on the 1st of next month.
         if (startYm > lastOpenYm) {
             if (detailYm && detailYm !== startYm) {
                 return res.status(404).json({

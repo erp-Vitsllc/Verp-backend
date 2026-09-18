@@ -51,6 +51,8 @@ const employeeBasicSchema = new mongoose.Schema(
         profileActivationSubmittedBy: { type: mongoose.Schema.Types.ObjectId, ref: "EmployeeBasic", default: null },
         /** Who last queued activation changes before submit — only they (and profile subject) see draft pending UI. */
         profileActivationDraftEditor: { type: mongoose.Schema.Types.ObjectId, ref: "EmployeeBasic", default: null },
+        /** Last HR rejection reason — shown to the submitter on Resubmit. Cleared on the next Send for Activation. */
+        profileActivationLastRejectReason: { type: String, default: "" },
 
         // NEW: Profile Workflow Array
         profileWorkflow: [{
@@ -307,6 +309,9 @@ employeeBasicSchema.index({ staffType: 1 });
 employeeBasicSchema.index({ createdAt: -1 }); // For sorting
 // Critical for Company.aggregate $lookup employee count — avoids COLLSCAN per company
 employeeBasicSchema.index({ company: 1, employeeId: 1 });
+employeeBasicSchema.index({ company: 1, status: 1, employeeId: 1 });
+employeeBasicSchema.index({ companyEmail: 1 });
+employeeBasicSchema.index({ status: 1, profileStatus: 1, createdAt: -1 });
 // Compound indexes for common query patterns
 employeeBasicSchema.index({ department: 1, status: 1 });
 employeeBasicSchema.index({ status: 1, profileStatus: 1 });

@@ -381,5 +381,6 @@ fineSchema.index({ fineType: 1 });
 fineSchema.index({ createdAt: -1 });
 fineSchema.index({ assetObjectId: 1 });
 fineSchema.index({ assetId: 1 });
+fineSchema.index({ "workflow.assignedTo": 1, "workflow.status": 1 });
 
 export default mongoose.model("Fine", fineSchema);

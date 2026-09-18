@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 import {
     assertLeaveBalance,
+    applySickAllowanceToLeaveRecords,
     buildLeaveBalances,
     buildOffDateSet,
     dateKeysInRange,
@@ -135,6 +136,109 @@ describe('employee leave policy', () => {
             }).authorizedDates.join(','),
             '2026-08-10,2026-08-11',
         );
+    });
+
+    it('caps sick leave at 12 days after last annual leave; extra days become authorized', () => {
+        const entitlements = leavePolicyEntitlements({
+            processingRules: { allowedSickLeavePerYear: true },
+            allowedSickLeaveDaysPerYear: 12,
+        });
+        const sickDates = dateKeysInRange('2026-02-01', '2026-02-13');
+        const { types, overflowSickDates } = buildLeaveBalances({
+            records: [
+                { date: '2026-01-20', statusKey: 'on_leave' },
+                { date: '2026-01-21', statusKey: 'on_leave' },
+                ...sickDates.map((date) => ({ date, statusKey: 'sick_leave' })),
+            ],
+            entitlements,
+            offSet: new Set(),
+            from: '2026-01-01',
+            to: '2026-12-31',
+            lastAnnualLeaveEnd: '2026-01-21',
+        });
+        assert.equal(sickDates.length, 13);
+        assert.deepEqual(overflowSickDates, ['2026-02-13']);
+        assert.equal(types.sick_leave.taken, 12);
+        assert.equal(types.sick_leave.remaining, 0);
+        assert.equal(types.sick_leave.period, 'from last annual leave to next');
+        assert.equal(types.authorized_leave.taken, 1);
+    });
+
+    it('resets the 12-day sick allowance after the next annual leave', () => {
+        const entitlements = leavePolicyEntitlements({
+            processingRules: { allowedSickLeavePerYear: true },
+            allowedSickLeaveDaysPerYear: 12,
+        });
+        const firstCycleSick = dateKeysInRange('2026-02-01', '2026-02-13');
+        const { types, overflowSickDates } = buildLeaveBalances({
+            records: [
+                { date: '2026-01-10', statusKey: 'on_leave' },
+                ...firstCycleSick.map((date) => ({ date, statusKey: 'sick_leave' })),
+                { date: '2026-06-01', statusKey: 'on_leave' },
+                { date: '2026-06-02', statusKey: 'on_leave' },
+                { date: '2026-06-10', statusKey: 'sick_leave' },
+                { date: '2026-06-11', statusKey: 'sick_leave' },
+            ],
+            entitlements,
+            offSet: new Set(),
+            from: '2026-01-01',
+            to: '2026-12-31',
+            lastAnnualLeaveEnd: '2026-06-02',
+            nextAnnualLeaveStart: '',
+        });
+        assert.deepEqual(overflowSickDates, ['2026-02-13']);
+        assert.equal(types.sick_leave.taken, 2);
+        assert.equal(types.sick_leave.remaining, 10);
+        assert.equal(types.authorized_leave.taken, 1);
+    });
+
+    it('does not carry sick days from before last annual leave into the new 12-day cap', () => {
+        const entitlements = leavePolicyEntitlements({
+            processingRules: { allowedSickLeavePerYear: true },
+            allowedSickLeaveDaysPerYear: 12,
+        });
+        const { types, overflowSickDates } = buildLeaveBalances({
+            records: [
+                ...dateKeysInRange('2026-01-05', '2026-01-16').map((date) => ({
+                    date,
+                    statusKey: 'sick_leave',
+                })),
+                { date: '2026-02-01', statusKey: 'on_leave' },
+                { date: '2026-03-02', statusKey: 'sick_leave' },
+                { date: '2026-03-03', statusKey: 'sick_leave' },
+            ],
+            entitlements,
+            offSet: new Set(),
+            from: '2026-01-01',
+            to: '2026-12-31',
+            lastAnnualLeaveEnd: '2026-02-01',
+        });
+        assert.deepEqual(overflowSickDates, []);
+        assert.equal(types.sick_leave.taken, 2);
+        assert.equal(types.sick_leave.remaining, 10);
+    });
+
+    it('splits a sick leave row so days after the 12-day cap become authorized', () => {
+        const entitlements = leavePolicyEntitlements({
+            processingRules: { allowedSickLeavePerYear: true },
+            allowedSickLeaveDaysPerYear: 12,
+        });
+        const rows = applySickAllowanceToLeaveRecords(
+            [
+                { leaveType: 'annual', fromDate: '2026-01-10', toDate: '2026-01-15' },
+                { leaveType: 'sick', fromDate: '2026-02-01', toDate: '2026-02-14' },
+            ],
+            entitlements,
+            { lastAnnualLeaveEnd: '2026-01-15' },
+        );
+        const sick = rows.filter((row) => row.leaveType === 'sick');
+        const authorized = rows.filter((row) => row.leaveType === 'authorized');
+        assert.equal(sick.length, 1);
+        assert.equal(sick[0].fromDate, '2026-02-01');
+        assert.equal(sick[0].toDate, '2026-02-12');
+        assert.equal(authorized.length, 1);
+        assert.equal(authorized[0].fromDate, '2026-02-13');
+        assert.equal(authorized[0].toDate, '2026-02-14');
     });
 
     it('does not block extra sick leave; overflow becomes authorized instead', () => {

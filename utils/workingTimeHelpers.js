@@ -196,6 +196,73 @@ export function dayScheduleToMinutes(day, which = 'start') {
     return hour * 60 + minute;
 }
 
+/** Extra punch hours convert to leave-eligibility days at 10 hours = 1 day. */
+export const OVERTIME_HOURS_PER_DAY = 10;
+
+export function overtimeHoursFromPunch({ timeIn, timeOut, date, week }) {
+    const actualIn = clockTimeToMinutes(timeIn);
+    const actualOut = clockTimeToMinutes(timeOut);
+    if (actualIn == null || actualOut == null) return { hours: 0, isOffDay: false };
+
+    let worked = actualOut - actualIn;
+    if (worked <= 0) worked += 24 * 60;
+
+    const scheduled = getScheduledPunchMinutes(week, date);
+    let scheduledMinutes = 0;
+    if (!scheduled.isOffDay) {
+        scheduledMinutes = (scheduled.endMinutes ?? 18 * 60) - (scheduled.startMinutes ?? 9 * 60);
+        if (scheduledMinutes <= 0) scheduledMinutes += 24 * 60;
+    }
+
+    const otMinutes = scheduled.isOffDay ? worked : Math.max(0, worked - scheduledMinutes);
+    if (otMinutes <= 0) return { hours: 0, isOffDay: Boolean(scheduled.isOffDay) };
+    return {
+        hours: Math.round((otMinutes / 60) * 100) / 100,
+        isOffDay: Boolean(scheduled.isOffDay),
+    };
+}
+
+export function overtimeHoursToDays(hours) {
+    const h = Math.max(0, Number(hours) || 0);
+    if (!h) return 0;
+    return Math.round((h / OVERTIME_HOURS_PER_DAY) * 100) / 100;
+}
+
+/** Sum overtime from attendance punches after VERP processing start. */
+export function summarizePunchOvertime(rows = [], week) {
+    const byDate = new Map();
+    (Array.isArray(rows) ? rows : []).forEach((row) => {
+        const date = String(row?.date || '').trim();
+        if (!date) return;
+        byDate.set(date, row);
+    });
+    const overtimeRecords = [];
+    let hours = 0;
+    for (const row of byDate.values()) {
+        const ot = overtimeHoursFromPunch({
+            timeIn: row.timeIn,
+            timeOut: row.timeOut,
+            date: row.date,
+            week,
+        });
+        if (ot.hours <= 0) continue;
+        hours += ot.hours;
+        overtimeRecords.push({
+            date: String(row.date).trim(),
+            hours: ot.hours,
+            days: overtimeHoursToDays(ot.hours),
+            isOffDay: Boolean(ot.isOffDay),
+        });
+    }
+    overtimeRecords.sort((a, b) => String(a.date).localeCompare(String(b.date)));
+    hours = Math.round(hours * 100) / 100;
+    return {
+        hours,
+        days: overtimeHoursToDays(hours),
+        overtimeRecords,
+    };
+}
+
 /** Scheduled punch-in / punch-out minutes for a staff week + date (yyyy-MM-dd). */
 export function getScheduledPunchMinutes(week, dateKey) {
     const dayKey = weekdayKeyFromDateKey(dateKey);

@@ -769,6 +769,8 @@ assetItemSchema.pre('save', async function (next) {
 });
 
 assetItemSchema.index({ assignedTo: 1, status: 1 });
+assetItemSchema.index({ assignedCompany: 1, assignedToType: 1, status: 1 });
+assetItemSchema.index({ typeId: 1, categoryId: 1, status: 1 });
 
 const AssetItem = mongoose.model('AssetItem', assetItemSchema);
 

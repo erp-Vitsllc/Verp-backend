@@ -186,9 +186,5 @@ export async function validateEmployeeWorkDetailsPayload(payload = {}, { employe
         return { ok: false, message: "Employee cannot be selected as their own reportee" };
     }
 
-    if (p.enablePortalAccess === undefined && employee && employee.enablePortalAccess === undefined) {
-        return { ok: false, message: "Portal Access is required" };
-    }
-
     return { ok: true };
 }

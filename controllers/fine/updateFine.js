@@ -8,7 +8,7 @@ import { sendFineApprovalEmail } from "../../utils/sendFineApprovalEmail.js";
 import { getDepartmentHOD } from "../../utils/getDepartmentHOD.js";
 import { getManagementHOD } from "../../utils/getManagementHOD.js";
 import { isVehicleFinePayload, validateVehicleFinePayload } from "../../utils/validateVehicleFinePayload.js";
-import { canUserActOnFineStageAsync } from "../../utils/fineStageAuth.js";
+import { canUserActOnFineStageAsync, fineStillNeedsApprovalInbox } from "../../utils/fineStageAuth.js";
 import {
     isApprovedFineStatus,
     isUserHrForApprovedFineEdit,
@@ -820,7 +820,7 @@ export const updateFine = async (req, res) => {
 
             // 2. If there's a new pending step (e.g., after resubmit or rejection back to creator), create it
             const nextPendingStep = updatedFine.workflow?.find(w => w.status === 'Pending');
-            if (nextPendingStep) {
+            if (nextPendingStep && fineStillNeedsApprovalInbox(updatedFine)) {
                 await syncDashboardAction({
                     requestId: updatedFine._id,
                     requestType: reqType,

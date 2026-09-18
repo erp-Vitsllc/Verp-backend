@@ -1,7 +1,8 @@
-import { checkWhatsAppConfiguration, checkWhatsAppAccount, sendTextMessage, sendTemplateMessage } from '../../services/whatsappService.js';
-import { getWhatsAppConfig } from '../../config/whatsapp.js';
-import { isValidWhatsAppPhone, normalizeWhatsAppPhone } from '../../utils/normalizeWhatsAppPhone.js';
+import { checkWhatsAppConfiguration, checkWhatsAppAccount, sendTextMessage, sendTemplateMessage, getWhatsAppWabaSubscribeResult, WHATSAPP_NOT_REGISTERED_ERROR, resolveWhatsAppAccountProbe } from '../../services/whatsappService.js';
+import { getWhatsAppConfig, isWhatsAppEnabled } from '../../config/whatsapp.js';
+import { isValidWhatsAppPhone, normalizeWhatsAppPhone, whatsAppPhoneKeys } from '../../utils/normalizeWhatsAppPhone.js';
 import { isAutoWhatsAppSource } from '../../utils/whatsappMessageLog.js';
+import { getWhatsAppWebhookHealth, rememberWhatsAppWebhook } from '../../utils/whatsappWebhookHealth.js';
 import WhatsAppMessage from '../../models/WhatsAppMessage.js';
 import EmployeeBasic from '../../models/EmployeeBasic.js';
 import EmployeeContact from '../../models/EmployeeContact.js';
@@ -40,15 +41,31 @@ function summarizeWebhook(body) {
     };
 }
 
-export function getWhatsAppStatus(req, res) {
+export async function getWhatsAppStatus(req, res) {
     try {
         const check = checkWhatsAppConfiguration();
+        const webhook = getWhatsAppWebhookHealth();
+        const subscription = getWhatsAppWabaSubscribeResult();
+        const inboundStored = await WhatsAppMessage.countDocuments({ direction: 'in' });
+        const lastInbound = await WhatsAppMessage.findOne({ direction: 'in' })
+            .sort({ occurredAt: -1 })
+            .select('occurredAt')
+            .lean();
         return res.status(200).json({
             enabled: check.enabled,
             configured: check.configured,
             phoneNumberIdConfigured: check.phoneNumberIdConfigured,
             wabaConfigured: check.wabaConfigured,
             apiVersion: check.apiVersion || '',
+            inboundStored,
+            lastInboundAt: lastInbound?.occurredAt || null,
+            lastWebhookAt: webhook.at,
+            lastWebhookInbound: webhook.inbound,
+            lastWebhookStatuses: webhook.statuses,
+            wabaSubscribed: Boolean(subscription.subscribed),
+            wabaSubscribeError: subscription.error || '',
+            webhookPath: '/api/whatsapp/webhook',
+            webhookUrlConfigured: Boolean(String(process.env.WHATSAPP_WEBHOOK_URL || '').trim()),
         });
     } catch (error) {
         console.error('[WhatsApp] status failed:', error?.message || error);
@@ -58,6 +75,15 @@ export function getWhatsAppStatus(req, res) {
             phoneNumberIdConfigured: false,
             wabaConfigured: false,
             apiVersion: '',
+            inboundStored: 0,
+            lastInboundAt: null,
+            lastWebhookAt: null,
+            lastWebhookInbound: 0,
+            lastWebhookStatuses: 0,
+            wabaSubscribed: false,
+            wabaSubscribeError: '',
+            webhookPath: '/api/whatsapp/webhook',
+            webhookUrlConfigured: false,
         });
     }
 }
@@ -221,6 +247,59 @@ function publicSendError(result) {
     return result?.error || 'WhatsApp send failed';
 }
 
+export async function postWhatsAppCheckNumber(req, res) {
+    try {
+        const phone = normalizeWhatsAppPhone(req.body?.phone || req.body?.whatsappNumber || '');
+        if (!phone) {
+            return res.status(200).json({
+                success: true,
+                onWhatsApp: null,
+                skipped: true,
+            });
+        }
+        if (!isValidWhatsAppPhone(phone)) {
+            return res.status(400).json({
+                success: false,
+                onWhatsApp: false,
+                error: 'Please enter a valid WhatsApp number',
+                field: 'whatsappNumber',
+            });
+        }
+
+        if (!isWhatsAppEnabled()) {
+            return res.status(200).json({
+                success: true,
+                onWhatsApp: null,
+                skipped: true,
+                checkUnavailable: true,
+            });
+        }
+
+        const account = await checkWhatsAppAccount(phone);
+        if (account.onWhatsApp === true) {
+            return res.status(200).json({
+                success: true,
+                onWhatsApp: true,
+            });
+        }
+
+        return res.status(400).json({
+            success: false,
+            onWhatsApp: false,
+            error: account.error || WHATSAPP_NOT_REGISTERED_ERROR,
+            field: 'whatsappNumber',
+        });
+    } catch (error) {
+        console.error('[WhatsApp] number check failed:', error?.message || error);
+        return res.status(400).json({
+            success: false,
+            onWhatsApp: false,
+            error: WHATSAPP_NOT_REGISTERED_ERROR,
+            field: 'whatsappNumber',
+        });
+    }
+}
+
 export async function postWhatsAppToEmployee(req, res) {
     try {
         const id = String(req.params?.id || '').trim();
@@ -341,10 +420,21 @@ export function getWhatsAppWebhook(req, res) {
 
 export async function postWhatsAppWebhook(req, res) {
     try {
-        const body = req.body && typeof req.body === 'object' && !Array.isArray(req.body)
-            ? req.body
-            : {};
+        let body = req.body;
+        if (typeof body === 'string') {
+            try {
+                body = JSON.parse(body);
+            } catch {
+                body = {};
+            }
+        }
+        if (!body || typeof body !== 'object' || Array.isArray(body)) {
+            body = {};
+        }
         const summary = summarizeWebhook(body);
+        const inbound = summary.changes.reduce((total, row) => total + (Number(row.messageCount) || 0), 0);
+        const statuses = summary.changes.reduce((total, row) => total + (Number(row.statusCount) || 0), 0);
+        rememberWhatsAppWebhook({ inbound, statuses, object: summary.object });
         console.log('[WhatsApp] webhook event', summary);
 
         const {
@@ -358,29 +448,44 @@ export async function postWhatsAppWebhook(req, res) {
             const changes = Array.isArray(entry?.changes) ? entry.changes : [];
             for (const change of changes) {
                 const value = change?.value && typeof change.value === 'object' ? change.value : {};
+                const businessPhone = String(value?.metadata?.display_phone_number || '').trim();
                 const contacts = Array.isArray(value.contacts) ? value.contacts : [];
                 const nameByWaId = new Map(
                     contacts.map((row) => [
-                        String(row?.wa_id || '').trim(),
+                        normalizeWhatsAppPhone(row?.wa_id || ''),
                         String(row?.profile?.name || '').trim(),
                     ]),
                 );
 
-                for (const message of Array.isArray(value.messages) ? value.messages : []) {
-                    const from = String(message?.from || '').trim();
+                const inboundRows = [
+                    ...(Array.isArray(value.messages) ? value.messages : []),
+                    ...(Array.isArray(value.message) ? [value.message] : []),
+                ];
+                for (const message of inboundRows) {
+                    const from = String(message?.from || message?.wa_id || contacts[0]?.wa_id || '').trim();
                     const ts = Number(message?.timestamp);
+                    const text = inboundMessageBody(message);
+                    if (!from && !text) continue;
                     await logInboundWhatsAppMessage({
                         phone: from,
                         waMessageId: String(message?.id || '').trim(),
-                        body: inboundMessageBody(message),
+                        body: text,
                         messageType: String(message?.type || 'text'),
-                        contactName: nameByWaId.get(from) || '',
+                        contactName: nameByWaId.get(normalizeWhatsAppPhone(from)) || contacts[0]?.profile?.name || '',
                         occurredAt: Number.isFinite(ts) ? new Date(ts * 1000) : new Date(),
+                        toPhone: businessPhone,
                     });
                 }
 
                 for (const statusRow of Array.isArray(value.statuses) ? value.statuses : []) {
                     const ts = Number(statusRow?.timestamp);
+                    const statusErrors = Array.isArray(statusRow?.errors) ? statusRow.errors : [];
+                    const firstError = statusErrors[0] && typeof statusErrors[0] === 'object' ? statusErrors[0] : {};
+                    resolveWhatsAppAccountProbe(String(statusRow?.id || '').trim(), {
+                        status: String(statusRow?.status || '').trim(),
+                        errorCode: firstError.code,
+                        errorMessage: firstError.title || firstError.message || firstError.error_data?.details || '',
+                    });
                     await applyWhatsAppDeliveryStatus({
                         waMessageId: String(statusRow?.id || '').trim(),
                         status: String(statusRow?.status || '').trim(),
@@ -401,6 +506,7 @@ export async function postWhatsAppWebhook(req, res) {
 function publicMessage(doc) {
     const row = doc && typeof doc.toObject === 'function' ? doc.toObject() : doc || {};
     const source = String(row.source || 'manual');
+    const body = String(row.body || '').trim() || (row.templateName ? `Template: ${row.templateName}` : '');
     return {
         id: String(row._id || ''),
         waMessageId: row.waMessageId || '',
@@ -410,10 +516,11 @@ function publicMessage(doc) {
         autoSend: isAutoWhatsAppSource(source),
         status: row.status || '',
         messageType: row.messageType || 'text',
-        body: row.body || '',
+        body,
         templateName: row.templateName || '',
         fromPhone: row.fromPhone || '',
         toPhone: row.toPhone || '',
+        accountPhone: row.direction === 'out' ? (row.fromPhone || '') : (row.toPhone || ''),
         contactName: row.contactName || '',
         employeeId: row.employeeId || '',
         sentByName: row.sentByName || '',
@@ -421,6 +528,20 @@ function publicMessage(doc) {
         error: row.error || '',
         occurredAt: row.occurredAt || row.createdAt || null,
     };
+}
+
+function conversationPhoneQuery(phone) {
+    const keys = whatsAppPhoneKeys(phone);
+    if (keys.length <= 1) return { conversationPhone: keys[0] || phone };
+    return { conversationPhone: { $in: keys } };
+}
+
+function isEmptyStatusStub(row) {
+    return (
+        String(row?.direction) === 'out' &&
+        String(row?.source) === 'webhook' &&
+        !String(row?.body || '').trim()
+    );
 }
 
 function sourceFilter(source) {
@@ -483,7 +604,7 @@ export async function listWhatsAppConversations(req, res) {
         const conversations = rows.map((row) => {
             const last = publicMessage(row.lastMessage || {});
             return {
-                phone: String(row._id || ''),
+                phone: normalizeWhatsAppPhone(row._id) || String(row._id || ''),
                 contactName: last.contactName || '',
                 employeeId: last.employeeId || '',
                 lastMessage: last,
@@ -493,7 +614,30 @@ export async function listWhatsAppConversations(req, res) {
             };
         });
 
-        return res.status(200).json({ conversations });
+        const merged = [];
+        const byTail = new Map();
+        for (const row of conversations) {
+            if (isEmptyStatusStub(row.lastMessage)) {
+                row.lastMessage = { ...row.lastMessage, body: row.lastMessage?.templateName || '' };
+            }
+            const tail = String(row.phone || '').slice(-9) || row.phone;
+            const existing = byTail.get(tail);
+            if (!existing) {
+                byTail.set(tail, row);
+                merged.push(row);
+                continue;
+            }
+            existing.inboundCount += row.inboundCount;
+            existing.outboundCount += row.outboundCount;
+            existing.autoCount += row.autoCount;
+            if (!existing.contactName && row.contactName) existing.contactName = row.contactName;
+            if (!existing.employeeId && row.employeeId) existing.employeeId = row.employeeId;
+            const existingAt = new Date(existing.lastMessage?.occurredAt || 0).getTime();
+            const nextAt = new Date(row.lastMessage?.occurredAt || 0).getTime();
+            if (nextAt > existingAt) existing.lastMessage = row.lastMessage;
+        }
+
+        return res.status(200).json({ conversations: merged });
     } catch (error) {
         console.error('[WhatsApp] conversations failed:', error?.message || error);
         return res.status(500).json({ message: error?.message || 'Failed to load WhatsApp conversations' });
@@ -507,13 +651,14 @@ export async function listWhatsAppThread(req, res) {
             return res.status(400).json({ message: 'A valid WhatsApp number is required.' });
         }
         const filter = {
-            conversationPhone: phone,
+            ...conversationPhoneQuery(phone),
             ...sourceFilter(req.query?.filter),
         };
-        const messages = await WhatsAppMessage.find(filter)
+        const messages = (await WhatsAppMessage.find(filter)
             .sort({ occurredAt: 1, createdAt: 1 })
             .limit(500)
-            .lean();
+            .lean())
+            .filter((row) => !isEmptyStatusStub(row));
         const last = messages[messages.length - 1] || null;
         return res.status(200).json({
             phone,
@@ -538,7 +683,7 @@ export async function postWhatsAppThreadReply(req, res) {
             return res.status(400).json({ success: false, error: 'message is required' });
         }
 
-        const last = await WhatsAppMessage.findOne({ conversationPhone: phone })
+        const last = await WhatsAppMessage.findOne(conversationPhoneQuery(phone))
             .sort({ occurredAt: -1 })
             .select('contactName employeeId')
             .lean();

@@ -7,6 +7,7 @@ import { sendFineApprovalEmail } from "../../utils/sendFineApprovalEmail.js";
 import { isVehicleFinePayload, validateVehicleFinePayload } from "../../utils/validateVehicleFinePayload.js";
 import { normalizeFineSourceSchedule } from "../../utils/normalizeFineSourceSchedule.js";
 import { parseFineCalendarDate } from "../../utils/fineCalendarDate.js";
+import { fineStillNeedsApprovalInbox } from "../../utils/fineStageAuth.js";
 
 async function persistFineAttachmentsList(attachments, folder) {
     if (!Array.isArray(attachments) || attachments.length === 0) return [];
@@ -488,7 +489,7 @@ export const addFine = async (req, res) => {
                 const firstFine = createdFines[0];
                 const reporteeStep = firstFine.workflow?.find(w => w.status === 'Pending');
 
-                if (reporteeStep) {
+                if (reporteeStep && fineStillNeedsApprovalInbox(firstFine)) {
                     try {
                         const { syncDashboardAction } = await import("../../utils/syncDashboard.js");
                         await syncDashboardAction({
@@ -698,7 +699,7 @@ export const addFine = async (req, res) => {
         if (savedFine.fineStatus !== 'Draft') {
             const { syncDashboardAction } = await import("../../utils/syncDashboard.js");
             const reporteeStep = savedFine.workflow?.find(w => w.status === 'Pending');
-            if (reporteeStep) {
+            if (reporteeStep && fineStillNeedsApprovalInbox(savedFine)) {
                 const targetEmpId = (savedFine.assignedEmployees && savedFine.assignedEmployees.length > 0)
                     ? savedFine.assignedEmployees[0].employeeId
                     : employeeId;

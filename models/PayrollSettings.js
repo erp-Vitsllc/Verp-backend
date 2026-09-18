@@ -71,6 +71,8 @@ const payrollSettingsSchema = new mongoose.Schema(
         salaryProcessReminders: { type: [salaryProcessReminderSchema], default: () => [] },
         minAllowedLeavePerGroupPercent: { type: Number, default: null },
         maxAllowedLeavePerGroupPercent: { type: Number, default: null },
+        attendanceExclusionEmployeeIds: { type: [String], default: () => [] },
+        leaveExclusionEmployeeIds: { type: [String], default: () => [] },
         hiddenSalaryMonths: { type: [String], default: () => [] },
         attachment: {
             name: { type: String, default: '' },

@@ -228,7 +228,7 @@ export async function refreshMobileToken(req, res) {
       return res.status(401).json({ message: 'Refresh token is not recognized.' });
     }
 
-    const user = await User.findById(decoded.id).select('_id status enablePortalAccess employeeId mobileDevice');
+    const user = await User.findById(decoded.id).select('_id status employeeId mobileDevice');
     if (!user || user.status !== 'Active') {
       await RefreshToken.deleteMany({ userId: decoded.id });
       return res.status(401).json({ message: 'User is no longer allowed to sign in.' });

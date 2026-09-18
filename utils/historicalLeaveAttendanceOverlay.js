@@ -13,6 +13,8 @@ export const ENROLLMENT_LEAVE_STATUS = {
     authorized: 'authorized_leave',
     unauthorized: 'unauthorized_leave',
     annual: 'on_leave',
+    compoff: 'compoff_leave',
+    compoff_leave: 'compoff_leave',
 };
 
 export const ENROLLMENT_LEAVE_LABEL = {
@@ -20,6 +22,7 @@ export const ENROLLMENT_LEAVE_LABEL = {
     authorized_leave: 'Authorized Leave',
     unauthorized_leave: 'Unauthorized Leave',
     on_leave: 'Annual leave',
+    compoff_leave: 'Comp off leave',
 };
 
 const LEAVE_STATUS_KEYS = new Set(Object.values(ENROLLMENT_LEAVE_STATUS));
@@ -30,6 +33,7 @@ function emptyLeaveCounts() {
         sick_leave: 0,
         authorized_leave: 0,
         unauthorized_leave: 0,
+        compoff_leave: 0,
     };
 }
 
@@ -153,6 +157,10 @@ export function overlayHistoricalLeave(profile, { from = '', to = '', includeCou
             });
             continue;
         }
+
+        // Comp off is counted only when a real date is set and falls in the
+        // requested year window. Undated enrollment rows are ignored.
+        if (type === 'compoff' || type === 'compoff_leave') continue;
 
         if (!includeCountOnly || (!isCountOnlyLeaveType(type) && type !== 'sick')) continue;
         const days = storedDays(row);

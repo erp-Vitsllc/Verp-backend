@@ -4,10 +4,9 @@ import { dispatchFineApprovedNotification } from "../../utils/dispatchFineApprov
 import { getManagementHOD } from "../../utils/getManagementHOD.js";
 import { sendHODAuthorizationEmail } from "../../utils/sendHODAuthorizationEmail.js";
 import { isValidStorageUrl } from "../../utils/validationHelper.js";
-import { canUserActOnFineStageAsync } from "../../utils/fineStageAuth.js";
+import { canUserActOnFineStageAsync, fineStillNeedsApprovalInbox } from "../../utils/fineStageAuth.js";
 import { runAfterResponse } from "../../utils/runAfterResponse.js";
 import {
-    openAccountsPaymentInbox,
     emailAccountsPaymentRequest,
     resolveFineManagementActor,
     resolveFineAccountsActor,
@@ -416,7 +415,7 @@ export const approveFine = async (req, res) => {
             });
 
             const nextPendingStep = fine.workflow?.find(w => w.status === 'Pending');
-            if (nextPendingStep) {
+            if (nextPendingStep && fineStillNeedsApprovalInbox(fine)) {
                 await syncDashboardAction({
                     requestId: fine._id,
                     requestType: reqType,
@@ -428,8 +427,6 @@ export const approveFine = async (req, res) => {
                     extra1: fine.fineType,
                     extra2: `Total: AED ${fines.reduce((sum, f) => sum + (f.fineAmount || 0), 0)}` // total for group
                 });
-            } else if (fine.fineStatus === 'Approved') {
-                await openAccountsPaymentInbox(fine, fines);
             }
         } catch (syncErr) {
             console.error("[ApproveFine] Dashboard Sync Error:", syncErr);

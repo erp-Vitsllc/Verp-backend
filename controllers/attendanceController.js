@@ -28,6 +28,7 @@ import {
     REAL_EMPLOYEE_MONGO_FILTER,
 } from '../utils/attendanceEmployeeFilters.js';
 import { listPendingHubInboxItems } from '../utils/employeeHubRequestInbox.js';
+import { resolveDashboardAssigneeContext } from '../utils/resolveDashboardAssigneeContext.js';
 import { isReqUserSystemSuperUser } from '../utils/systemSuperUser.js';
 import {
     isLeaveDashboardAttendanceRow,
@@ -852,7 +853,7 @@ export async function markAttendance(req, res) {
                     finalStatusLabel = authorizedLeaveLabel(leavePayType);
                     reason = reason
                         ? `${reason} · Sick allowance used`
-                        : 'Converted from sick leave after the yearly allowance was used';
+                        : 'Converted from sick leave after the allowance from last annual leave was used';
                 }
             }
 
@@ -1924,7 +1925,7 @@ export async function markTeamAttendance(req, res) {
 
 /**
  * GET /api/Attendance/dashboard/pending-inbox
- * Leave requests pending for the logged-in primary reportee (Attendance bell + sidebar).
+ * Attendance leave requests waiting on this employee (or ?targetUserId= for Team Performance).
  */
 export async function getAttendancePendingInbox(req, res) {
     try {
@@ -1939,7 +1940,16 @@ export async function getAttendancePendingInbox(req, res) {
             /* ignore */
         }
 
-        const self = await resolveLinkedEmployee(req);
+        const ctx = await resolveDashboardAssigneeContext(req);
+        if (!ctx.ok) {
+            return res.status(ctx.status || 401).json({
+                message: ctx.message || 'Unauthorized',
+                count: 0,
+                items: [],
+            });
+        }
+
+        const self = ctx.employee;
         if (!self) {
             return res.status(200).json({
                 message: 'Attendance pending inbox fetched successfully',
@@ -2202,7 +2212,7 @@ export async function requestAttendanceLeave(req, res) {
             resolvedStatusKey === 'authorized_leave' && requestedStatusKey === 'sick_leave'
                 ? reason
                     ? `${reason} · Sick allowance used`
-                    : 'Converted from sick leave after the yearly allowance was used'
+                    : 'Converted from sick leave after the allowance from last annual leave was used'
                 : reason;
         record.leaveRequestKind = 'leave';
         record.attachmentName = attachmentName || record.attachmentName || '';

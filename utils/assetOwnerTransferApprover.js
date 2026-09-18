@@ -12,6 +12,7 @@ import {
 } from './assetOperationalFlags.js';
 import { getDepartmentHOD } from './getDepartmentHOD.js';
 import { resolveAssetControllerEmployee } from './assetApprovalHelpers.js';
+import { canLoginThroughAnyChannel } from './loginThrough.js';
 
 export const NO_PORTAL_NO_REPORTEE_OWNER_APPROVAL_MESSAGE =
     'This assigned employee has no user account, and no primary reportee. Set a primary reportee (with a login) on their profile before sending Leave / End of Services — otherwise approval waits forever on someone who cannot log in.';
@@ -43,7 +44,7 @@ const findActiveUserForEmployee = async (emp) => {
         employeeId: { $regex: new RegExp(`^${escaped}$`, 'i') },
         status: 'Active',
     })
-        .select('enablePortalAccess employeeId')
+        .select('_id employeeId')
         .lean()
         .catch(() => null);
 };
@@ -51,18 +52,25 @@ const findActiveUserForEmployee = async (emp) => {
 /** Leave / AC-return: employee can approve only if they can log in AND have a company email. */
 export const assigneeCanSelfApproveOwnerTransfer = async (emp) => {
     if (!emp) return false;
-    if (emp.enablePortalAccess === false) return false;
     if (!assigneeHasCompanyEmailOnRecord(emp)) return false;
     const linkedUser = await findActiveUserForEmployee(emp);
     if (!linkedUser) return false;
-    return linkedUser.enablePortalAccess !== false;
+    let source = emp;
+    if (!(emp.loginThrough && typeof emp.loginThrough === 'object')) {
+        const empId = emp.employeeId ? String(emp.employeeId).trim() : '';
+        const row = empId
+            ? await EmployeeBasic.findOne({ employeeId: empId }).select('loginThrough').lean().catch(() => null)
+            : null;
+        if (row) source = row;
+    }
+    return canLoginThroughAnyChannel(source);
 };
 
 const loadOwnerActionApproverDoc = async (empRef) => {
     const id = empRef?._id || empRef;
     if (!id) return null;
     return EmployeeBasic.findById(id)
-        .select('_id employeeId firstName lastName companyEmail workEmail enablePortalAccess')
+        .select('_id employeeId firstName lastName companyEmail workEmail loginThrough')
         .lean()
         .catch(() => null);
 };
@@ -79,11 +87,11 @@ export const resolveOwnerTransferApprover = async (ownerEmp) => {
 
     const ownerDoc = await EmployeeBasic.findById(ownerId)
         .select(
-            '_id employeeId firstName lastName companyEmail workEmail enablePortalAccess primaryReportee',
+            '_id employeeId firstName lastName companyEmail workEmail loginThrough primaryReportee',
         )
         .populate(
             'primaryReportee',
-            '_id employeeId firstName lastName companyEmail workEmail enablePortalAccess',
+            '_id employeeId firstName lastName companyEmail workEmail loginThrough',
         )
         .lean()
         .catch(() => null);
@@ -481,7 +489,7 @@ export const buildPendingActionWaitingDisplay = (asset, designatedAssetControlle
             }
             if (showingAc) {
                 const noEmail = !assigneeHasCompanyEmailOnRecord(assignee);
-                const noPortal = assignee?.enablePortalAccess === false;
+                const noPortal = !canLoginThroughAnyChannel(assignee);
                 if ((noEmail || noPortal) && reporteeName) {
                     return pack(reporteeName, 'reportee', reporteeId);
                 }

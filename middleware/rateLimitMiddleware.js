@@ -16,7 +16,11 @@ export const commonLimiter = rateLimit({
     max: commonMax,
     standardHeaders: true,
     legacyHeaders: false,
-    skip: () => rateLimitDisabled,
+    skip: (req) => {
+        if (rateLimitDisabled) return true;
+        const path = String(req?.originalUrl || req?.url || '').split('?')[0];
+        return path === '/api/whatsapp/webhook' || path.startsWith('/api/whatsapp/webhook/');
+    },
     message: {
         message: "Too many requests from this IP, please try again after 15 minutes",
     },

@@ -36,7 +36,7 @@ export const MESSAGES = {
     notAwaitingHr: 'This salary profile is not waiting for HR approval.',
     rejectReasonRequired: 'A rejection description is required.',
     createdProfileHrOnly: 'Only HR can update an enrolled salary profile.',
-    paidLeaveSalaryLocked: 'Paid leave salary cannot be edited or deleted.',
+    paidLeaveSalaryLocked: 'Salary slip leave salary cannot be edited or deleted here.',
 };
 
 const ISO = /^\d{4}-\d{2}-\d{2}$/;
@@ -453,7 +453,9 @@ function paidLeaveSalarySnapshot(cycle) {
 }
 
 export function paidLeaveSalaryMutationError(existingCycles = [], nextCycles = []) {
-    const existingPaid = (Array.isArray(existingCycles) ? existingCycles : []).filter(isPaidLeaveSalaryCycle);
+    const existingPaid = (Array.isArray(existingCycles) ? existingCycles : []).filter(
+        (cycle) => isPaidLeaveSalaryCycle(cycle) && isSalarySlipPaymentCycle(cycle),
+    );
     const next = Array.isArray(nextCycles) ? nextCycles : [];
     const used = new Set();
     for (const paid of existingPaid) {
@@ -631,6 +633,15 @@ export function summarizeAttendanceEligibility(rows = []) {
         if (LIVE_WORKING_STATUS_KEYS.has(key)) workingDays += 1;
     }
     return { workingDays, leaveRecords };
+}
+
+/** Extra punch hours after VERP start convert to qualifying days at 10 hours = 1 day. */
+export const OVERTIME_HOURS_PER_DAY = 10;
+
+export function overtimeHoursToDays(hours) {
+    const h = Math.max(0, Number(hours) || 0);
+    if (!h) return 0;
+    return Math.round((h / OVERTIME_HOURS_PER_DAY) * 100) / 100;
 }
 
 export function calculateHistoricalEligibility({

@@ -32,5 +32,8 @@ const dashboardActionSchema = new mongoose.Schema({
 dashboardActionSchema.index({ assignedTo: 1, status: 1 });
 dashboardActionSchema.index({ assignedToEmpId: 1, status: 1 });
 dashboardActionSchema.index({ requestId: 1 });
+dashboardActionSchema.index({ status: 1, requestType: 1, assignedTo: 1, requestedDate: -1 });
+dashboardActionSchema.index({ status: 1, requestType: 1, assignedToEmpId: 1, requestedDate: -1 });
+dashboardActionSchema.index({ status: 1, requestType: 1, requestedDate: -1 });
 
 export default mongoose.model("DashboardAction", dashboardActionSchema);

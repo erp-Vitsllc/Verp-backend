@@ -57,6 +57,7 @@ export const submitApproval = async (req, res) => {
                     profileSubmittedTo: hrEmployee._id,
                     profileActivationSubmittedBy: submitterEmployeeId,
                 },
+                $unset: { profileActivationLastRejectReason: "" },
                 $push: {
                     profileWorkflow: {
                         role: "HR",

@@ -318,7 +318,7 @@ export const sendApprovalEmail = async (req, res) => {
                     profileSubmittedTo: hrEmployee._id,
                     profileActivationSubmittedBy: submitterEmployeeId,
                 },
-                $unset: { profileActivationHold: "", profileActivationDraftEditor: "" },
+                $unset: { profileActivationHold: "", profileActivationDraftEditor: "", profileActivationLastRejectReason: "" },
                 $push: { profileWorkflow: workflowEntry },
             },
         );

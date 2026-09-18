@@ -90,4 +90,45 @@ export function getWhatsAppMessagesUrl(config = getWhatsAppConfig()) {
     return `${config.apiUrl}/${config.apiVersion}/${config.phoneNumberId}/messages`;
 }
 
+let identityCache = { at: 0, value: null };
+
+/** Display number + verified name of the sending WhatsApp Business account. */
+export async function getWhatsAppBusinessIdentity() {
+    const now = Date.now();
+    if (identityCache.value && now - identityCache.at < 6 * 60 * 60 * 1000) {
+        return identityCache.value;
+    }
+
+    const config = getWhatsAppConfig();
+    const fallback = {
+        displayPhone: envString('WHATSAPP_DISPLAY_PHONE'),
+        verifiedName: envString('WHATSAPP_ACCOUNT_NAME') || 'WhatsApp Business',
+    };
+    if (!config.phoneNumberId || !config.accessToken || !config.apiVersion) {
+        identityCache = { at: now, value: fallback };
+        return fallback;
+    }
+
+    try {
+        const url = `${config.apiUrl}/${config.apiVersion}/${config.phoneNumberId}?fields=display_phone_number,verified_name`;
+        const response = await fetch(url, {
+            headers: { Authorization: `Bearer ${config.accessToken}` },
+            signal: AbortSignal.timeout(12000),
+        });
+        const payload = await response.json().catch(() => ({}));
+        const displayPhone = normalizeDigits(payload?.display_phone_number) || fallback.displayPhone;
+        const verifiedName = String(payload?.verified_name || fallback.verifiedName).trim();
+        const value = { displayPhone, verifiedName: verifiedName || 'WhatsApp Business' };
+        identityCache = { at: now, value };
+        return value;
+    } catch {
+        identityCache = { at: now, value: fallback };
+        return fallback;
+    }
+}
+
+function normalizeDigits(value) {
+    return String(value || '').replace(/\D/g, '');
+}
+
 export { SEND_REQUIRED };

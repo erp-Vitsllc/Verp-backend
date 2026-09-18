@@ -24,6 +24,7 @@ import {
     normalizeEmployeeProfileBasicDetailsPayload,
     validateEmployeeProfileBasicDetailsPayload,
 } from "../../utils/employeeProfileBasicDetailsValidation.js";
+import { assertRegisteredWhatsAppNumber } from "../../services/whatsappService.js";
 import {
     validateSalaryHistoryNotEmpty,
     oldestSalaryHistoryStillPresent,
@@ -231,6 +232,16 @@ export const updateBasicDetails = async (req, res) => {
             for (const key of PROFILE_BASIC_PATCH_KEYS) {
                 if (Object.prototype.hasOwnProperty.call(updatePayload, key)) {
                     updatePayload[key] = normalizedBasic[key];
+                }
+            }
+
+            if (Object.prototype.hasOwnProperty.call(updatePayload, "whatsappNumber")) {
+                const waCheck = await assertRegisteredWhatsAppNumber(updatePayload.whatsappNumber);
+                if (!waCheck.ok) {
+                    return res.status(400).json({
+                        message: waCheck.message,
+                        field: "whatsappNumber",
+                    });
                 }
             }
 

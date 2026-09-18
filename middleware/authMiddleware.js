@@ -2,6 +2,7 @@ import jwt from "jsonwebtoken";
 import User from "../models/User.js";
 import EmployeeBasic from "../models/EmployeeBasic.js";
 import { isUsernameSystemSuperUser } from "../utils/systemSuperUser.js";
+import { normalizeLoginThrough } from "../utils/loginThrough.js";
 
 /**
  * Authentication middleware - verifies JWT token and attaches user to request
@@ -45,7 +46,7 @@ export const protect = async (req, res, next) => {
         }
 
         // Check if user still exists and is active
-        const user = await User.findById(decoded.id).select('_id name username status enablePortalAccess email isAdmin companyEmail employeeId groupName');
+        const user = await User.findById(decoded.id).select('_id name username status email isAdmin companyEmail employeeId groupName');
 
         if (!user) {
             return res.status(401).json({ message: "User not found" });
@@ -55,14 +56,11 @@ export const protect = async (req, res, next) => {
             return res.status(401).json({ message: "User account is not active" });
         }
 
-        if (!user.enablePortalAccess) {
-            return res.status(401).json({ message: "Portal access is disabled for this user" });
-        }
-
         // Find linked employee record if available (exact match, then space/case-tolerant match)
         let employeeObjectId = null;
+        let linkedEmployee = null;
         if (user.employeeId) {
-            let emp = await EmployeeBasic.findOne({ employeeId: user.employeeId }).select('_id');
+            let emp = await EmployeeBasic.findOne({ employeeId: user.employeeId }).select('_id loginThrough');
             if (!emp) {
                 const norm = (s) => (s || '').toString().toLowerCase().replace(/\s+/g, '');
                 const userNorm = norm(user.employeeId);
@@ -80,10 +78,13 @@ export const protect = async (req, res, next) => {
                                 userNorm
                             ]
                         }
-                    }).select('_id');
+                    }).select('_id loginThrough');
                 }
             }
-            if (emp) employeeObjectId = emp._id;
+            if (emp) {
+                employeeObjectId = emp._id;
+                linkedEmployee = emp;
+            }
         }
 
         // Fallback: link by company / portal email when User.employeeId is missing
@@ -98,12 +99,28 @@ export const protect = async (req, res, next) => {
                         { workEmail: { $in: emails } },
                         { email: { $in: emails } },
                     ],
-                }).select('_id');
-                if (empByEmail) employeeObjectId = empByEmail._id;
+                }).select('_id loginThrough');
+                if (empByEmail) {
+                    employeeObjectId = empByEmail._id;
+                    linkedEmployee = empByEmail;
+                }
             }
         }
 
         const isSystemSuperUser = isUsernameSystemSuperUser(user.username);
+
+        if (!isSystemSuperUser && linkedEmployee) {
+            const through = normalizeLoginThrough(linkedEmployee);
+            const isAppLogin = decoded.typ === 'access';
+            if (isAppLogin && !through.portalApp) {
+                return res.status(403).json({
+                    message: "You don't have permission to login ERP application",
+                });
+            }
+            if (!isAppLogin && !through.web) {
+                return res.status(403).json({ message: 'Web login is not enabled for this employee.' });
+            }
+        }
 
         // Attach user info to request (decoded last would overwrite live fields — keep it first)
         req.user = {

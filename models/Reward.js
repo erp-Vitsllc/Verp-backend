@@ -188,6 +188,7 @@ rewardSchema.index({ employeeId: 1 });
 rewardSchema.index({ rewardStatus: 1 });
 rewardSchema.index({ rewardType: 1 });
 rewardSchema.index({ createdAt: -1 });
+rewardSchema.index({ "workflow.assignedTo": 1, "workflow.status": 1 });
 
 export default mongoose.model("Reward", rewardSchema);
 

@@ -47,6 +47,7 @@ import {
     formatEmployeeDisplayName,
 } from '../utils/vehicleHandoverApprovalFlow.js';
 import { allocateNextServiceReqNo } from '../utils/assetServiceReqNo.js';
+import { canLoginThroughAnyChannel } from '../utils/loginThrough.js';
 import {
     buildInitialHandoverEscalationMeta,
     markHandoverEscalationResolved,
@@ -696,15 +697,22 @@ const buildAssetActionApprovalHandoverAttachments = async (req, assets) => {
  */
 const assigneeCanSelfAcknowledgeAssignment = async (emp) => {
     if (!emp) return false;
-    if (emp.enablePortalAccess === false) return false;
     const empId = emp.employeeId ? String(emp.employeeId).trim() : '';
     if (!empId) return false;
     const linkedUser = await User.findOne({ employeeId: empId, status: 'Active' })
-        .select('enablePortalAccess')
+        .select('_id')
         .lean()
         .catch(() => null);
     if (!linkedUser) return false;
-    return linkedUser.enablePortalAccess !== false;
+    let source = emp;
+    if (!(emp.loginThrough && typeof emp.loginThrough === 'object')) {
+        const row = await EmployeeBasic.findOne({ employeeId: empId })
+            .select('loginThrough')
+            .lean()
+            .catch(() => null);
+        if (row) source = row;
+    }
+    return canLoginThroughAnyChannel(source);
 };
 
 /** After L&D is finalized: mark Lost and clear live assignment (history retains prior assignees). */
@@ -1473,30 +1481,21 @@ const getActorPermissionFlagsForAsset = async (reqUser, asset) => {
             (typeof asset.assignedTo === 'object' && (asset.assignedTo.employeeId || asset.assignedTo.companyEmail !== undefined || asset.assignedTo.primaryReportee))
                 ? asset.assignedTo
                 : await EmployeeBasic.findById(assigneeId)
-                    .select('companyEmail primaryReportee employeeId')
+                    .select('companyEmail primaryReportee employeeId loginThrough')
                     .lean()
                     .catch(() => null);
 
-        // If we didn't receive employeeId in the populated document, fetch it so we can check portal access safely.
+        // If we didn't receive employeeId in the populated document, fetch it so we can check login access safely.
         if (assigneeDoc && !assigneeDoc.employeeId) {
             assigneeDoc = await EmployeeBasic.findById(assigneeId)
-                .select('companyEmail primaryReportee employeeId')
+                .select('companyEmail primaryReportee employeeId loginThrough')
                 .lean()
                 .catch(() => assigneeDoc);
         }
 
         const primaryReporteeId = toIdString(assigneeDoc?.primaryReportee);
 
-        // Portal access check (ERP login-enabled user)
-        let hasPortalAccess = null;
-        const assigneeEmpId = assigneeDoc?.employeeId ? String(assigneeDoc.employeeId) : null;
-        if (assigneeEmpId) {
-            const linkedUser = await User.findOne({ employeeId: assigneeEmpId, status: 'Active' })
-                .select('enablePortalAccess')
-                .lean()
-                .catch(() => null);
-            hasPortalAccess = !!(linkedUser && linkedUser.enablePortalAccess);
-        }
+        const hasPortalAccess = await assigneeCanSelfAcknowledgeAssignment(assigneeDoc);
 
         isPrimaryReporteeDelegate = !!(
             primaryReporteeId &&
@@ -8480,7 +8479,7 @@ export const respondToAssignment = async (req, res) => {
         const item = await AssetItem.findById(id)
             .populate({
                 path: 'assignedTo',
-                select: 'employeeId firstName lastName companyEmail enablePortalAccess primaryReportee',
+                select: 'employeeId firstName lastName companyEmail enablePortalAccess loginThrough primaryReportee',
                 populate: { path: 'primaryReportee', select: '_id firstName lastName employeeId companyEmail workEmail' },
             })
             .populate('assignedBy assignedCompany')
@@ -8543,20 +8542,8 @@ export const respondToAssignment = async (req, res) => {
             item.assignedTo.primaryReportee &&
             !(handoverFlow && handoverFlow.assigneeCanSelfAcknowledge === false)
         ) {
-            // enablePortalAccess comes from EmployeeBasic; if missing, we fallback to linked User row
-            let assigneeHasPortalAccess = null;
-            if (typeof item.assignedTo.enablePortalAccess === 'boolean') {
-                assigneeHasPortalAccess = item.assignedTo.enablePortalAccess;
-            } else {
-                const assigneeEmpId = item.assignedTo.employeeId;
-                if (assigneeEmpId) {
-                    const linkedUser = await User.findOne({ employeeId: assigneeEmpId, status: 'Active' })
-                        .select('enablePortalAccess')
-                        .lean()
-                        .catch(() => null);
-                    assigneeHasPortalAccess = !!(linkedUser && linkedUser.enablePortalAccess);
-                }
-            }
+            // loginThrough decides whether the assignee can act in ERP themselves
+            const assigneeHasPortalAccess = await assigneeCanSelfAcknowledgeAssignment(item.assignedTo);
             const assigneeHasCompanyEmail = !!(
                 item.assignedTo.companyEmail && String(item.assignedTo.companyEmail).trim().length > 0
             );
@@ -9666,7 +9653,7 @@ export const bulkRespondToAssignment = async (req, res) => {
         const items = await AssetItem.find({ _id: { $in: validIds } })
             .populate({
                 path: 'assignedTo',
-                select: 'employeeId companyEmail primaryReportee enablePortalAccess',
+                select: 'employeeId companyEmail primaryReportee enablePortalAccess loginThrough',
                 populate: { path: 'primaryReportee', select: '_id' },
             })
             .populate('assignedBy assignedCompany');
@@ -9699,19 +9686,7 @@ export const bulkRespondToAssignment = async (req, res) => {
                         item.assignedTo.companyEmail && String(item.assignedTo.companyEmail).trim().length > 0
                     );
                     const managerId = item.assignedTo.primaryReportee._id || item.assignedTo.primaryReportee;
-                    let assigneeHasPortalAccess = null;
-                    if (typeof item.assignedTo.enablePortalAccess === 'boolean') {
-                        assigneeHasPortalAccess = item.assignedTo.enablePortalAccess;
-                    } else {
-                        const assigneeEmpId = item.assignedTo.employeeId;
-                        if (assigneeEmpId) {
-                            const linkedUser = await User.findOne({ employeeId: assigneeEmpId, status: 'Active' })
-                                .select('enablePortalAccess')
-                                .lean()
-                                .catch(() => null);
-                            assigneeHasPortalAccess = !!(linkedUser && linkedUser.enablePortalAccess);
-                        }
-                    }
+                    const assigneeHasPortalAccess = await assigneeCanSelfAcknowledgeAssignment(item.assignedTo);
                     const allowDelegate =
                         managerId &&
                         managerId.toString() === curBulk &&
@@ -9889,10 +9864,7 @@ const canUserActAsAssigneeForBulkItem = (currentUserStr, item) => {
             item.assignedTo.companyEmail && String(item.assignedTo.companyEmail).trim().length > 0
         );
         const managerId = item.assignedTo.primaryReportee._id || item.assignedTo.primaryReportee;
-        const assigneeHasPortalAccess =
-            typeof item.assignedTo.enablePortalAccess === 'boolean'
-                ? item.assignedTo.enablePortalAccess
-                : null;
+        const assigneeHasPortalAccess = canLoginThroughAnyChannel(item.assignedTo);
         const allowDelegate =
             managerId &&
             managerId.toString() === curBulk &&
@@ -10611,7 +10583,7 @@ export const getBulkAssignmentPendingGroup = async (req, res) => {
 
             const firstAsDoc = await AssetItem.findById(allInGroup[0]._id).populate({
                 path: 'assignedTo',
-                select: 'employeeId companyEmail primaryReportee enablePortalAccess',
+                select: 'employeeId companyEmail primaryReportee enablePortalAccess loginThrough',
                 populate: { path: 'primaryReportee', select: '_id' },
             });
             const wrapItem = firstAsDoc ? firstAsDoc.toObject() : allInGroup[0];
@@ -10748,7 +10720,7 @@ export const respondBulkAssignmentGroup = async (req, res) => {
             acceptanceStatus: 'Pending'
         }).populate({
             path: 'assignedTo',
-            select: 'employeeId companyEmail primaryReportee enablePortalAccess firstName lastName department',
+            select: 'employeeId companyEmail primaryReportee enablePortalAccess loginThrough firstName lastName department',
             populate: { path: 'primaryReportee', select: '_id companyEmail firstName lastName' },
         })
             .populate('assignedCompany', 'name companyId')

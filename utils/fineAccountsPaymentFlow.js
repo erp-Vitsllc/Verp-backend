@@ -1,5 +1,4 @@
 import User from '../models/User.js';
-import EmployeeBasic from '../models/EmployeeBasic.js';
 import { getDepartmentHOD } from './getDepartmentHOD.js';
 import { getManagementHOD } from './getManagementHOD.js';
 import { syncDashboardAction } from './syncDashboard.js';
@@ -44,23 +43,10 @@ function inboxMeta(fine, fines = []) {
 }
 
 export async function openAccountsPaymentInbox(fine, fines = []) {
+    // Fine notifications are approval-stage only. Payable / Zoho settlement
+    // is not an approval step, so do not create a Pending Fine inbox row.
     const { accountsHOD, accountsUser } = await resolveFineAccountsActor(fine);
-    if (!accountsUser) {
-        console.warn(`[FineAccountsFlow] No Accounts user for payment inbox (${fine.fineId}).`);
-        return { accountsHOD, accountsUser };
-    }
-
-    const subjectEmp = applicantEmployeeId(fine)
-        ? await EmployeeBasic.findOne({ employeeId: applicantEmployeeId(fine) })
-        : null;
-
-    await syncDashboardAction({
-        ...inboxMeta(fine, fines),
-        assignedTo: accountsUser._id,
-        status: 'Pending',
-        subjectEmployee: subjectEmp,
-    });
-
+    void fines;
     return { accountsHOD, accountsUser };
 }
 

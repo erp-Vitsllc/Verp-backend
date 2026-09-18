@@ -3,7 +3,7 @@ import Holiday from '../models/Holiday.js';
 import WorkingTime from '../models/WorkingTime.js';
 import SalaryEnrollment from '../models/SalaryEnrollment.js';
 import SalaryHistoricalProfile from '../models/SalaryHistoricalProfile.js';
-import { applySickAllowanceToLeaveRecords, leavePolicyEntitlements } from './employeeLeavePolicy.js';
+import { applySickAllowanceToLeaveRecords, latestAnnualLeaveEndFromLeaveRecords, leavePolicyEntitlements, sickDaysAfterAnnualLeave } from './employeeLeavePolicy.js';
 import { getScheduledEmailTimeZone, getCalendarPartsInTz } from './scheduleDailyAtMidnight.js';
 import {
     processingStartFromEnrollment,
@@ -47,6 +47,7 @@ import {
     getOffWeekdayKeys,
     getWeekForStaffType,
     holidayAppliesToStaff,
+    summarizePunchOvertime,
     WEEKDAY_KEYS,
 } from './workingTimeHelpers.js';
 
@@ -262,16 +263,17 @@ export async function loadEmployeeSalaryWorkingDays(employee, profileHint = null
             ? await calcWorkingDays({ from: joiningDate, to: period.end, staffType })
             : { workingDays: 0 };
     const todayKey = dubaiDateKey();
-    const live =
-        isSalaryProcessingMonthReached(todayKey, verpStartDate)
-            ? await calcWorkingDays({
-                  from: salaryProcessingStartDay(verpStartDate) || verpStartDate,
-                  to: todayKey,
-                  staffType,
-              })
-            : { workingDays: 0 };
+    const live = isSalaryProcessingMonthReached(todayKey, verpStartDate)
+        ? await loadLiveAttendanceEligibility({
+              employee,
+              from: verpStartDate,
+              to: todayKey,
+              staffType,
+          })
+        : { workingDays: 0, overtimeDays: 0 };
     const historicalWorkingDays = Number(historical.workingDays) || 0;
-    const liveWorkingDays = Number(live.workingDays) || 0;
+    const liveWorkingDays =
+        (Number(live.workingDays) || 0) + (Number(live.overtimeDays) || 0);
     return {
         historicalWorkingDays,
         liveWorkingDays,
@@ -281,39 +283,61 @@ export async function loadEmployeeSalaryWorkingDays(employee, profileHint = null
 
 async function loadLiveAttendanceEligibility({ employee, from, to, staffType }) {
     if (!isDateKey(from) || !employee) {
-        return { workingDays: 0, leaveRecords: [], from: '', to: '' };
+        return {
+            workingDays: 0,
+            leaveRecords: [],
+            overtimeHours: 0,
+            overtimeDays: 0,
+            overtimeRecords: [],
+            from: '',
+            to: '',
+        };
     }
     const periodStart = salaryProcessingStartDay(from) || from;
     const periodEnd = isDateKey(to) && to >= periodStart ? to : '';
     if (!periodEnd) {
-        return { workingDays: 0, leaveRecords: [], from: '', to: '' };
+        return {
+            workingDays: 0,
+            leaveRecords: [],
+            overtimeHours: 0,
+            overtimeDays: 0,
+            overtimeRecords: [],
+            from: '',
+            to: '',
+        };
     }
     const clauses = [];
     if (employee._id) clauses.push({ employeeMongoId: String(employee._id) });
     if (employee.employeeId) clauses.push({ employeeId: employee.employeeId });
-    const stats = await calcWorkingDays({ from: periodStart, to: periodEnd, staffType });
+    const [stats, workingTime] = await Promise.all([
+        calcWorkingDays({ from: periodStart, to: periodEnd, staffType }),
+        WorkingTime.findOne({}).lean(),
+    ]);
     if (!clauses.length) {
-        return { workingDays: stats.workingDays, leaveRecords: [], from: periodStart, to: periodEnd };
+        return {
+            workingDays: stats.workingDays,
+            leaveRecords: [],
+            overtimeHours: 0,
+            overtimeDays: 0,
+            overtimeRecords: [],
+            from: periodStart,
+            to: periodEnd,
+        };
     }
-    const leaveStatusKeys = Object.keys(LIVE_LEAVE_STATUS_MAP);
     const rows = await Attendance.find({
         date: { $gte: periodStart, $lte: periodEnd },
-        $and: [
-            { $or: clauses },
-            {
-                $or: [
-                    { statusKey: { $in: leaveStatusKeys } },
-                    { leaveRequestStatus: { $in: ['approved', 'pending'] } },
-                ],
-            },
-        ],
+        $or: clauses,
     })
-        .select('date statusKey leaveRequestStatus requestedStatusKey reason')
+        .select('date statusKey leaveRequestStatus requestedStatusKey reason timeIn timeOut')
         .lean();
     const live = summarizeAttendanceEligibility(rows);
+    const overtime = summarizePunchOvertime(rows, getWeekForStaffType(workingTime, staffType));
     return {
         workingDays: stats.workingDays,
         leaveRecords: liveLeaveRecordsInProcessingWindow(live.leaveRecords, periodStart, periodEnd),
+        overtimeHours: overtime.hours,
+        overtimeDays: overtime.days,
+        overtimeRecords: overtime.overtimeRecords,
         from: periodStart,
         to: periodEnd,
     };
@@ -369,7 +393,7 @@ export async function loadLeaveTicketEntitlement({ employee, profile, salaryDoc,
               to: todayKey,
               staffType: employee.staffType,
           })
-        : { workingDays: 0, leaveRecords: [], from: '', to: '' };
+        : { workingDays: 0, leaveRecords: [], overtimeHours: 0, overtimeDays: 0, overtimeRecords: [], from: '', to: '' };
 
     const stats =
         joiningDate && period.end
@@ -380,22 +404,23 @@ export async function loadLeaveTicketEntitlement({ employee, profile, salaryDoc,
               })
             : { workingDays: 0, calendarDays: 0 };
 
-    const priorSickDaysByYear = {};
-    for (const row of leaveRecords || []) {
-        if (String(row?.leaveType || '').toLowerCase() !== 'sick') continue;
-        const year = String(row.fromDate || row.toDate || '').slice(0, 4);
-        if (!/^\d{4}$/.test(year)) continue;
-        priorSickDaysByYear[year] =
-            (priorSickDaysByYear[year] || 0) + Math.max(1, Number(row.eligibleWorkingDays) || 1);
-    }
+    const lastHolidayEnd = latestAnnualLeaveEndFromLeaveRecords(
+        [...(leaveRecords || []), ...(annualLeaveRecords || []), ...(liveAttendance.leaveRecords || [])],
+    );
     liveAttendance.leaveRecords = applySickAllowanceToLeaveRecords(
         filterHiddenSystemLeave(liveAttendance.leaveRecords || [], profile?.hiddenSystemLeave),
         leavePolicyEntitlements(policy),
-        { priorSickDaysByYear },
+        {
+            lastAnnualLeaveEnd: lastHolidayEnd,
+            priorSickDays: sickDaysAfterAnnualLeave(leaveRecords, lastHolidayEnd),
+        },
     );
 
     const calculation = calculateHistoricalEligibility({
-        workingDays: stats.workingDays + (Number(liveAttendance.workingDays) || 0),
+        workingDays:
+            stats.workingDays +
+            (Number(liveAttendance.workingDays) || 0) +
+            (Number(liveAttendance.overtimeDays) || 0),
         calendarDays: stats.calendarDays,
         leaveRecords: [...leaveRecords, ...(liveAttendance.leaveRecords || [])],
         annualLeaveRecords,

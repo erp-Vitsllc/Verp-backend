@@ -1,6 +1,7 @@
 import DashboardAction from '../../models/DashboardAction.js';
 import Fine from '../../models/Fine.js';
 import { purgeOrphanDashboardActionRows } from '../../utils/clearDashboardActionsForRequest.js';
+import { fineStillNeedsApprovalInbox } from '../../utils/fineStageAuth.js';
 import {
     buildAssigneeClauses,
     resolveDashboardAssigneeContext,
@@ -42,11 +43,42 @@ export const getPendingFineDashboardInbox = async (req, res) => {
         const fineIds = [...new Set(rows.map((r) => String(r.requestId)).filter(Boolean))];
         const fines = fineIds.length
             ? await Fine.find({ _id: { $in: fineIds } })
-                  .select('_id fineId fineType fineStatus assignedEmployees category')
+                  .select('_id fineId fineType fineStatus assignedEmployees category workflow')
                   .lean()
             : [];
         const fineById = Object.fromEntries(fines.map((f) => [String(f._id), f]));
         const liveRows = await purgeOrphanDashboardActionRows(rows, fineById);
+
+        const idsToDismiss = [];
+        const seenRequestIds = new Set();
+        const actionableRows = [];
+        for (const da of liveRows) {
+            const fine = fineById[String(da.requestId)];
+            if (!fineStillNeedsApprovalInbox(fine)) {
+                if (da._id) idsToDismiss.push(da._id);
+                continue;
+            }
+            const requestKey = String(da.requestId);
+            if (seenRequestIds.has(requestKey)) {
+                if (da._id) idsToDismiss.push(da._id);
+                continue;
+            }
+            seenRequestIds.add(requestKey);
+            actionableRows.push(da);
+        }
+
+        if (idsToDismiss.length) {
+            await DashboardAction.updateMany(
+                { _id: { $in: idsToDismiss }, status: 'Pending' },
+                {
+                    $set: {
+                        status: 'Dismissed',
+                        actionedDate: new Date(),
+                        comment: 'Closed: fine has no pending approval stage',
+                    },
+                },
+            );
+        }
 
         const getBaseFineId = (fid = '') => {
             const parts = String(fid).split('-');
@@ -54,7 +86,7 @@ export const getPendingFineDashboardInbox = async (req, res) => {
             return fid;
         };
 
-        const items = liveRows.map((da) => {
+        const items = actionableRows.map((da) => {
             const fine = fineById[String(da.requestId)];
             const isGroup = da.requestType === 'Group Fine Request';
             const subjectLabel =

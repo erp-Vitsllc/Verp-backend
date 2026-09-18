@@ -44,11 +44,36 @@ function ipFromRequest(req) {
     return normalizeIp(getClientIp(req));
 }
 
+function toFiniteNumber(value) {
+    if (value == null || value === '') return null;
+    const n = typeof value === 'number' ? value : Number(String(value).trim());
+    return Number.isFinite(n) ? n : null;
+}
+
+/** GPS from app lat/lng fields, or from a "lat, lng" location string. */
+export function parseMobileDeviceCoordinates({ location, latitude, longitude } = {}) {
+    let lat = toFiniteNumber(latitude);
+    let lng = toFiniteNumber(longitude);
+    if (lat == null || lng == null) {
+        const text = String(location || '').trim();
+        const match = text.match(/^(-?\d+(?:\.\d+)?)\s*[, ]\s*(-?\d+(?:\.\d+)?)$/);
+        if (match) {
+            lat = toFiniteNumber(match[1]);
+            lng = toFiniteNumber(match[2]);
+        }
+    }
+    if (lat == null || lng == null) return null;
+    if (Math.abs(lat) > 90 || Math.abs(lng) > 180) return null;
+    return { latitude: lat, longitude: lng };
+}
+
 export function emptyMobileDevice() {
     return {
         deviceId: '',
         deviceName: '',
         location: '',
+        latitude: null,
+        longitude: null,
         ipAddress: '',
         lastSeenAt: null,
         status: STATUS_NOT_FIXED,
@@ -63,13 +88,16 @@ export function serializeMobileDevice(user) {
     const deviceName = String(stored.deviceName || '').trim();
     const location = String(stored.location || '').trim();
     const deviceId = String(stored.deviceId || '').trim();
-    const hasDevice = Boolean(deviceId || deviceName || location || stored.ipAddress);
+    const coords = parseMobileDeviceCoordinates(stored);
+    const hasDevice = Boolean(deviceId || deviceName || location || stored.ipAddress || coords);
     const ipAddress = hasDevice
         ? (normalizeIp(stored.ipAddress) || normalizeIp(user?.lastLoginIp))
         : '';
     return {
         deviceName: deviceName || '',
         location: location || '',
+        latitude: coords?.latitude ?? null,
+        longitude: coords?.longitude ?? null,
         ipAddress: ipAddress || '',
         lastSeenAt: stored.lastSeenAt || null,
         status,
@@ -84,15 +112,20 @@ export function readMobileDeviceFromRequest(req) {
     const deviceId = String(body.deviceId || body.deviceID || '').trim();
     const deviceName = String(body.deviceName || body.device || '').trim();
     let location = String(body.location || body.deviceLocation || '').trim();
-    const lat = body.latitude ?? body.lat;
-    const lng = body.longitude ?? body.lng ?? body.lon;
-    if (!location && lat != null && lng != null && String(lat) !== '' && String(lng) !== '') {
-        location = `${lat}, ${lng}`;
+    const coords = parseMobileDeviceCoordinates({
+        location,
+        latitude: body.latitude ?? body.lat,
+        longitude: body.longitude ?? body.lng ?? body.lon,
+    });
+    if (!location && coords) {
+        location = `${coords.latitude}, ${coords.longitude}`;
     }
     return {
         deviceId,
         deviceName,
         location,
+        latitude: coords?.latitude ?? null,
+        longitude: coords?.longitude ?? null,
         ipAddress: ipFromRequest(req),
     };
 }
@@ -104,6 +137,13 @@ function applyIncomingDevice(user, incoming) {
     if (incoming.deviceId) user.mobileDevice.deviceId = incoming.deviceId;
     if (incoming.deviceName) user.mobileDevice.deviceName = incoming.deviceName;
     if (incoming.location) user.mobileDevice.location = incoming.location;
+    if (incoming.latitude != null && incoming.longitude != null) {
+        user.mobileDevice.latitude = incoming.latitude;
+        user.mobileDevice.longitude = incoming.longitude;
+        if (!incoming.location) {
+            user.mobileDevice.location = `${incoming.latitude}, ${incoming.longitude}`;
+        }
+    }
     if (incoming.ipAddress) {
         user.mobileDevice.ipAddress = normalizeIp(incoming.ipAddress);
         user.lastLoginIp = user.mobileDevice.ipAddress;
@@ -150,8 +190,11 @@ export function recordMobileDeviceOnUser(user, incoming, { isSystemAdmin = false
     const nextId = String(payload.deviceId || '').trim();
     if (nextId && previousId && nextId !== previousId) {
         if (!payload.deviceName) user.mobileDevice.deviceName = '';
-        if (!payload.location) user.mobileDevice.location = '';
-        if (payload.ipAddress) user.mobileDevice.ipAddress = normalizeIp(payload.ipAddress);
+        if (!payload.location && payload.latitude == null && payload.longitude == null) {
+            user.mobileDevice.location = '';
+            user.mobileDevice.latitude = null;
+            user.mobileDevice.longitude = null;
+        }
         user.markModified?.('mobileDevice');
     }
 }

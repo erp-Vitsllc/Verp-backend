@@ -145,6 +145,32 @@ export function buildSalarySlipPdfHtml(slip = {}) {
     const companyName = slip.companyName || 'VEGA DIGITAL IT SOLUTIONS LLC';
     const companyLocation = slip.companyLocation || 'Dubai, UAE';
     const att = slip.attendance || {};
+    const hideLeaveTaken = Boolean(slip.exclusions?.leave || slip.exclusions?.attendance);
+    const hideAttendancePay = Boolean(slip.exclusions?.attendance);
+    const summaryLeft = [
+        ['Employee Name', slip.employeeName],
+        ['Employee ID', slip.employeeId],
+        ['Designation', slip.designation],
+        ['Salary Month', slip.monthLabel],
+        ['Calendar Days', att.calendarDays],
+    ];
+    const summaryRight = [
+        ['Holidays', att.holidays],
+        hideLeaveTaken ? null : ['Working Day Leaves', att.workingDayLeaves],
+        ['Present Days', att.presentDays],
+        hideAttendancePay ? null : ['Holidays Worked', att.holidaysWorked],
+        hideAttendancePay ? null : ['Overtime Hours', att.overtimeHours],
+        hideLeaveTaken ? null : ['Comp Off Leave', att.compOffLeave],
+    ].filter(Boolean);
+    const summaryRows = summaryLeft
+        .map((left, index) => {
+            const right = summaryRight[index] || ['', ''];
+            return summaryRow(left[0], left[1], right[0], right[1]);
+        })
+        .concat(
+            summaryRight.slice(summaryLeft.length).map((right) => summaryRow('', '', right[0], right[1])),
+        )
+        .join('');
     const { left: earnRows, right: dedRows } = padRows(slip.earnings, slip.deductions, 9);
     const calcRows = earnRows
         .map((earn, i) => {
@@ -352,12 +378,7 @@ export function buildSalarySlipPdfHtml(slip = {}) {
       <div class="p1-meta">Salary Month: ${esc(slip.monthLabel || '—')} &nbsp;|&nbsp; Slip Ref: ${esc(slip.slipRef || '—')}</div>
       ${sectionTitle('EMPLOYEE & ATTENDANCE SUMMARY')}
       <table class="p1-summary" cellpadding="0" cellspacing="0">
-        ${summaryRow('Employee Name', slip.employeeName, 'Holidays', att.holidays)}
-        ${summaryRow('Employee ID', slip.employeeId, 'Working Day Leaves', att.workingDayLeaves)}
-        ${summaryRow('Designation', slip.designation, 'Present Days', att.presentDays)}
-        ${summaryRow('Salary Month', slip.monthLabel, 'Holidays Worked', att.holidaysWorked)}
-        ${summaryRow('Calendar Days', att.calendarDays, 'Overtime Hours', att.overtimeHours)}
-        ${summaryRow('', '', 'Comp Off Leave', att.compOffLeave)}
+        ${summaryRows}
       </table>
       ${sectionTitle('SALARY CALCULATION')}
       <table width="100%" cellpadding="0" cellspacing="0" style="border-collapse:collapse;table-layout:fixed;">
@@ -419,7 +440,7 @@ export function buildSalarySlipPdfHtml(slip = {}) {
       <p style="margin:6px 0 8px;font-size:10px;color:${MUTED};">
         Employee: ${esc(slip.employeeName)} &nbsp;|&nbsp; Employee ID: ${esc(slip.employeeId)} &nbsp;|&nbsp; Salary Month: ${esc(slip.monthLabel)}
       </p>
-      <div style="font-size:10px;font-weight:700;color:${NAVY};margin:8px 0 4px;">A. ATTENDANCE-BASED DEDUCTIONS</div>
+      ${attDedRows ? `<div style="font-size:10px;font-weight:700;color:${NAVY};margin:8px 0 4px;">A. ATTENDANCE-BASED DEDUCTIONS</div>
       ${tableRows(
           `${th('Category')}${th('Qty')}${th('Rate / Unit')}${th('Calculation / Reason')}${th('Total (AED)', 'right')}`,
           `${attDedRows}
@@ -427,7 +448,7 @@ export function buildSalarySlipPdfHtml(slip = {}) {
              <td colspan="4" style="padding:5px 6px;border:1px solid ${LINE};background:${EARN_TINT};font-size:9.5px;font-weight:700;color:${NAVY};">ATTENDANCE DEDUCTION TOTAL</td>
              <td style="padding:5px 6px;border:1px solid ${LINE};background:${EARN_TINT};font-size:9.5px;font-weight:700;color:${NAVY};text-align:right;">${esc(money(slip.attendanceDeductionTotal))}</td>
            </tr>`,
-      )}
+      )}` : ''}
       <div style="font-size:10px;font-weight:700;color:${NAVY};margin:12px 0 4px;">B. SALARY ADVANCE &amp; LOAN SCHEDULE</div>
       ${tableRows(
           `${th('Type')}${th('Original Amount')}${th('This Month')}${th('Paid to Date')}${th('Remaining')}${th('Deduction Schedule')}`,

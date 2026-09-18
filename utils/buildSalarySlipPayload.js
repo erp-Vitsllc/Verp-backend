@@ -27,9 +27,13 @@ import {
 } from './lateDeductionPolicy.js';
 import { loadLeaveTicketEntitlement } from './loadLeaveTicketEntitlement.js';
 import { resolveSalarySlipApprovers } from './resolveSalarySlipApprovers.js';
+import { isSalarySlipCycle } from './salarySlipLeaveTicket.js';
 import {
-    isSalarySlipCycle,
-} from './salarySlipLeaveTicket.js';
+    applySalarySlipCountExclusions,
+    salarySlipPolicyExclusions,
+    shouldHideSalarySlipDeduction,
+    shouldHideSalarySlipEarning,
+} from './salaryPolicyExclusions.js';
 
 const MONTH_FULL = [
     'January', 'February', 'March', 'April', 'May', 'June',
@@ -834,6 +838,36 @@ export async function buildSalarySlipPayload({
         }
     }
 
+    const exclusions = salarySlipPolicyExclusions(code, policy);
+    ({
+        workingDayLeaves,
+        authorizedDays,
+        unauthorizedDays,
+        sickDays,
+        unpaidSickDays,
+        annualDays,
+        compOffDays,
+        lateEvents,
+        holidaysWorked,
+        otHours,
+        otDays,
+    } = applySalarySlipCountExclusions(
+        {
+            workingDayLeaves,
+            authorizedDays,
+            unauthorizedDays,
+            sickDays,
+            unpaidSickDays,
+            annualDays,
+            compOffDays,
+            lateEvents,
+            holidaysWorked,
+            otHours,
+            otDays,
+        },
+        exclusions,
+    ));
+
     const holidays = Math.max(holidaySet.size, holidayMarks);
     const authorizedDeductionDays = authorizedDays;
     const otHoursAmount = money((daily / 10) * otHours);
@@ -1274,6 +1308,7 @@ export async function buildSalarySlipPayload({
         employeeName: personName(emp),
         employeeId: code,
         designation: String(emp.designation || '').trim() || '—',
+        exclusions,
         attendance: {
             holidays: qtyLabel(holidays, 'day'),
             workingDayLeaves: qtyLabel(workingDayLeaves, 'day'),
@@ -1377,13 +1412,52 @@ export async function buildSalarySlipPayload({
             if (stored?.slip) {
                 const merged = preferLiveComputed(applySalarySlipOverride(payload, stored.slip), payload);
                 merged.approvers = payload.approvers;
-                return merged;
+                return presentSalarySlipPolicyExclusions({ ...merged, exclusions });
             }
         } catch (error) {
             console.error('[buildSalarySlipPayload] override', error?.message || error);
         }
     }
-    return payload;
+    return presentSalarySlipPolicyExclusions(payload);
+}
+
+function presentSalarySlipPolicyExclusions(slip) {
+    const exclusions = slip?.exclusions || {};
+    if (!exclusions.leave && !exclusions.attendance) return slip;
+    const hideLeaveStats = Boolean(exclusions.leave || exclusions.attendance);
+    const next = {
+        ...slip,
+        exclusions,
+        attendance: {
+            ...(slip.attendance || {}),
+            ...(hideLeaveStats ? { workingDayLeaves: '—', compOffLeave: '—' } : {}),
+            ...(exclusions.attendance
+                ? { overtimeHours: hoursLabel(0), holidaysWorked: qtyLabel(0, 'day') }
+                : {}),
+        },
+        earnings: (slip.earnings || []).filter(
+            (row) => !shouldHideSalarySlipEarning(row.component, exclusions),
+        ),
+        deductions: (slip.deductions || []).filter(
+            (row) => !shouldHideSalarySlipDeduction(row.component, exclusions),
+        ),
+        attendanceDeductions: (slip.attendanceDeductions || []).filter(
+            (row) => !shouldHideSalarySlipDeduction(row.category, exclusions),
+        ),
+        summary: {
+            ...(slip.summary || {}),
+            overtimeHoursCount: exclusions.attendance ? 0 : slip.summary?.overtimeHoursCount,
+            overtimeDaysCount: exclusions.attendance ? 0 : slip.summary?.overtimeDaysCount,
+            lossOfPayDays: {
+                ...(slip.summary?.lossOfPayDays || {}),
+                ...(hideLeaveStats
+                    ? { authorized: 0, unauthorized: 0, annual: 0, compOff: 0 }
+                    : {}),
+                ...(exclusions.attendance ? { late: 0 } : {}),
+            },
+        },
+    };
+    return recalcSalarySlip(next);
 }
 
 export function serializeSalarySlipForClient(slip) {

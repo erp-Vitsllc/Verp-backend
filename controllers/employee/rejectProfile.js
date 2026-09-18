@@ -5,7 +5,6 @@ import { syncDashboardAction } from "../../utils/syncDashboard.js";
 import { resolveProfileActivationSubmitterEmployee } from "../../utils/resolveProfileActivationSubmitterEmployee.js";
 import {
     buildProfileActivationEntityLine,
-    buildProfileActivationRejectedMessage,
     employeeProfileDisplayName,
 } from "../../utils/employeeProfileNotificationMessages.js";
 import { isEmployeeProfileActivationDesignatedHr } from "../../utils/isEmployeeProfileActivationDesignatedHr.js";
@@ -81,6 +80,7 @@ export const rejectProfile = async (req, res) => {
                 },
                 $set: {
                     pendingReactivationChanges: [],
+                    profileActivationLastRejectReason: String(reason).trim(),
                     "profileWorkflow.$[elem].status": "rejected",
                     "profileWorkflow.$[elem].actionedAt": new Date(),
                     "profileWorkflow.$[elem].comment": reason || "Profile activation request rejected."
@@ -122,10 +122,7 @@ export const rejectProfile = async (req, res) => {
                     requestedByName: req.user?.name || "",
                     actionedBy: req.user?.employeeObjectId || req.user?._id,
                     comment: reason || "",
-                    extra1: buildProfileActivationRejectedMessage({
-                        employeeName: rejectedName,
-                        employeeId: updated.employeeId,
-                    }),
+                    extra1: "Check the reason and update the employee profile activation",
                     extra2: buildProfileActivationEntityLine(rejectedName, updated.employeeId),
                     extra3: JSON.stringify({
                         activationSubject: "employee",

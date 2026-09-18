@@ -23,6 +23,8 @@ import {
     leavePolicyEntitlements,
     loadOffDateSet,
     resolveEmployeePayrollPolicy,
+    shiftDateKey,
+    sickCycleBounds,
 } from '../../utils/employeeLeavePolicy.js';
 import {
     applyOverlayCounts,
@@ -207,6 +209,15 @@ function yellowSourceKey(row) {
     return 'late_arrived';
 }
 
+const APPLIED_LEAVE_REQUEST_KINDS = new Set(['leave', 'future_leave', 'future_annual']);
+
+function isAppliedLeaveRequest(row) {
+    const kind = String(row?.leaveRequestKind || '').trim();
+    if (!APPLIED_LEAVE_REQUEST_KINDS.has(kind)) return false;
+    const decision = String(row?.leaveRequestStatus || '').trim();
+    return decision === 'pending' || decision === 'approved' || decision === 'rejected';
+}
+
 function requestedCountKey(row) {
     const kind = String(row?.leaveRequestKind || '').trim();
     if (kind === 'future_annual') return 'on_leave';
@@ -240,8 +251,8 @@ function tallyRequestStats(records = []) {
     const stats = emptyRequestStats();
     const seen = new Set();
     for (const row of records) {
+        if (!isAppliedLeaveRequest(row)) continue;
         const decision = String(row?.leaveRequestStatus || '').trim();
-        if (decision !== 'pending' && decision !== 'approved' && decision !== 'rejected') continue;
         const bucket = requestedCountKey(row);
         if (!bucket || !stats[bucket]) continue;
         const groupId =
@@ -264,25 +275,6 @@ function tallyRequestStats(records = []) {
     }
     stats.late_early = combineRequestBuckets(stats.late_arrived, stats.early_go);
     return stats;
-}
-
-function mergeEnrollLeaveIntoRequestStats(stats, enrollUsed = {}) {
-    const keys = [
-        'on_leave',
-        'sick_leave',
-        'authorized_leave',
-        'unauthorized_leave',
-        'compoff_leave',
-    ];
-    const next = { ...(stats || emptyRequestStats()) };
-    for (const key of keys) {
-        const bucket = { ...(next[key] || emptyRequestBucket()) };
-        const enrollApproved = Math.max(0, Number(enrollUsed?.[key]) || 0);
-        if (bucket.approved < enrollApproved) bucket.approved = enrollApproved;
-        bucket.total = (Number(bucket.request) || 0) + bucket.approved + (Number(bucket.rejected) || 0);
-        next[key] = bucket;
-    }
-    return next;
 }
 
 async function findNextBirthday(dubai) {
@@ -721,9 +713,15 @@ export async function getEmployeeAttendanceProfile(req, res) {
             Attendance.find({
                 employeeMongoId,
                 leaveRequestStatus: { $in: ['pending', 'approved', 'rejected'] },
+                leaveRequestKind: { $in: [...APPLIED_LEAVE_REQUEST_KINDS] },
+                $or: [
+                    { date: { $gte: from, $lte: to } },
+                    { leaveRequestFromDate: { $gte: from, $lte: to } },
+                    { leaveRequestToDate: { $gte: from, $lte: to } },
+                ],
             })
                 .select(
-                    'date statusKey leaveRequestStatus requestedStatusKey previousStatusKey leaveRequestKind leaveRequestGroupId',
+                    'date statusKey leaveRequestStatus requestedStatusKey previousStatusKey leaveRequestKind leaveRequestGroupId leaveRequestedAt',
                 )
                 .lean()
                 .maxTimeMS(12000),
@@ -762,7 +760,7 @@ export async function getEmployeeAttendanceProfile(req, res) {
             if (key === 'on_leave' && row.date > lastAnnualLeaveDate) {
                 lastAnnualLeaveDate = row.date;
             }
-            if (String(row.leaveRequestStatus || '').trim() === 'pending') {
+            if (isAppliedLeaveRequest(row) && String(row.leaveRequestStatus || '').trim() === 'pending') {
                 const appliedKey = requestedCountKey(row);
                 const groupId =
                     String(row.leaveRequestGroupId || '').trim() ||
@@ -869,17 +867,77 @@ export async function getEmployeeAttendanceProfile(req, res) {
         let periodRest = Math.max(0, periodDays - periodPresent - periodAnnual - periodOtherLeave);
 
         const entitlements = leavePolicyEntitlements(policy);
+        const lastHolidayEnd = leaveCycle.lastAnnualLeaveEnd || lastAnnualLeaveDate;
+        const cycleBounds = sickCycleBounds({
+            lastAnnualLeaveEnd: lastHolidayEnd,
+        });
+        const nextHolidayStart =
+            [...(records || []), ...(overlay.calendarRecords || [])]
+                .filter(
+                    (row) =>
+                        String(row.statusKey || '') === 'on_leave' &&
+                        (!lastHolidayEnd || String(row.date || '') > lastHolidayEnd),
+                )
+                .map((row) => String(row.date || '').trim())
+                .filter(Boolean)
+                .sort()[0] || '';
+        let priorCycleRecords = [];
+        if (cycleBounds.start && cycleBounds.start < from) {
+            const priorTo = shiftDateKey(from, -1);
+            const priorOverlay = overlayHistoricalLeave(historicalProfile, {
+                from: cycleBounds.start,
+                to: priorTo,
+                includeCountOnly: false,
+            });
+            priorCycleRecords = await Attendance.find({
+                employeeMongoId,
+                date: { $gte: cycleBounds.start, $lt: from },
+                statusKey: { $in: [...LEAVE_STATUS_KEYS] },
+            })
+                .select('date statusKey leaveRequestStatus requestedStatusKey leaveRequestGroupId')
+                .lean()
+                .maxTimeMS(12000);
+            priorCycleRecords = [...(priorCycleRecords || []), ...(priorOverlay.calendarRecords || [])];
+        }
+        const balanceByDate = new Map();
+        for (const row of [
+            ...priorCycleRecords,
+            ...(records || []),
+            ...(overlay.calendarRecords || []).filter((row) => LEAVE_STATUS_KEYS.has(String(row.statusKey || ''))),
+        ]) {
+            const date = String(row?.date || '').trim();
+            if (!date || balanceByDate.has(date)) continue;
+            balanceByDate.set(date, row);
+        }
         const { types: rawLeaveBalances, sandwichRows, overflowSickDates } = buildLeaveBalances({
-            records,
+            records: [...balanceByDate.values()],
             entitlements,
             offSet,
             from,
             to,
+            lastAnnualLeaveEnd: lastHolidayEnd,
+            nextAnnualLeaveStart: nextHolidayStart,
         });
-        const leaveBalances = applyOverlayCountsToBalances(rawLeaveBalances, overlay.extraCounts);
+        const countOnlyExtra = {};
+        for (const entry of overlay.entries || []) {
+            if (!entry?.countOnly) continue;
+            const key = String(entry.statusKey || '');
+            if (key === 'sick_leave') continue;
+            countOnlyExtra[key] = (Number(countOnlyExtra[key]) || 0) + (Number(entry.days) || 0);
+        }
+        const leaveBalances = applyOverlayCountsToBalances(rawLeaveBalances, countOnlyExtra);
         const enrollUsed = leaveCycle.used || {};
         const enrollAttendance = leaveCycle.attendance || {};
-        const annualEligible = Boolean(leaveCycle.leaveEligible);
+        const cycleRequiredDays =
+            Number(leaveCycle.requiredPresentDays) ||
+            Number(entitlements.requiredPresentDays) ||
+            Number(leaveCycle.remainingDays || 0) + Number(leaveCycle.eligibleDays || 0);
+        const cycleTowardDays = Number(leaveCycle.eligibleDays) || 0;
+        const cycleCompleted = Number(leaveCycle.completedCycles) || 0;
+        // Still filling this 300-day stretch (e.g. 139 / 300) — do not grant 30 days.
+        const annualGrantUnlocked =
+            cycleCompleted > 0 && !(cycleRequiredDays > 0 && cycleTowardDays > 0 && cycleTowardDays < cycleRequiredDays);
+        const annualEligible = annualGrantUnlocked;
         for (const statusKey of [
             'on_leave',
             'sick_leave',
@@ -889,7 +947,12 @@ export async function getEmployeeAttendanceProfile(req, res) {
         ]) {
             const row = leaveBalances[statusKey];
             if (!row) continue;
-            const taken = Number(enrollUsed[statusKey]) || 0;
+            const taken =
+                statusKey === 'compoff_leave'
+                    ? Number(counts.compoff_leave) || 0
+                    : statusKey === 'sick_leave' || statusKey === 'authorized_leave'
+                      ? Number(row.taken) || 0
+                      : Number(enrollUsed[statusKey]) || Number(row.taken) || 0;
             const allowed =
                 statusKey === 'on_leave' && !annualEligible
                     ? 0
@@ -939,7 +1002,7 @@ export async function getEmployeeAttendanceProfile(req, res) {
             event.statusLabel = 'Authorized leave (sick allowance used)';
             event.reason = event.reason
                 ? `${event.reason} · Converted after sick leave allowance`
-                : 'Converted from sick leave after the yearly allowance was used';
+                : 'Converted from sick leave after the allowance from last annual leave was used';
         }
         const requiredPresentDays = leaveCycle.requiredPresentDays || entitlements.requiredPresentDays;
         const airTicketRequiredDays = leaveCycle.airTicketRequiredDays || entitlements.airTicketRequiredDays;
@@ -1036,13 +1099,15 @@ export async function getEmployeeAttendanceProfile(req, res) {
                 },
                 counts,
                 appliedCounts,
-                requestStats: mergeEnrollLeaveIntoRequestStats(requestStats, enrollUsed),
+                requestStats,
                 lastAnnualLeaveDate,
             },
             annualLeave: {
                 eligible: annualEligible,
                 leaveEligible: annualEligible,
-                completedCycles: Number(leaveCycle.completedCycles) || 0,
+                grantUnlocked: annualGrantUnlocked,
+                grantDays: annualGrantUnlocked ? entitlements.annualAllowedDays || 0 : 0,
+                completedCycles: cycleCompleted,
                 presentDays: leaveCycle.eligibleDays,
                 requiredPresentDays,
                 eligibleDays: leaveCycle.eligibleDays,

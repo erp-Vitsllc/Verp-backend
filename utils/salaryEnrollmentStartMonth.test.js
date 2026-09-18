@@ -6,6 +6,7 @@ import {
     resolveExistingSalaryEnrollmentFromMonth,
     resolveNewSalaryEnrollmentFromMonth,
     salaryRegisterMonthRange,
+    salaryRegisterPayrollOpenMonth,
     salarySlipMonthAllowed,
     salarySlipMonthRange,
 } from './salaryEnrollmentStartMonth.js';
@@ -30,6 +31,28 @@ describe('salaryEnrollmentStartMonth', () => {
                 now: new Date('2026-10-01T06:00:00.000Z'),
             }),
             ['2026-09'],
+        );
+    });
+
+    it('opens October salary on 1 November when that is the nearest enrollment', () => {
+        assert.equal(salaryRegisterPayrollOpenMonth('2026-10'), '2026-11');
+        assert.deepEqual(
+            salaryRegisterMonthRange({ earliestPeriodYm: '2026-10', now: SEP_8 }),
+            [],
+        );
+        assert.deepEqual(
+            salaryRegisterMonthRange({
+                earliestPeriodYm: '2026-10',
+                now: new Date('2026-10-01T06:00:00.000Z'),
+            }),
+            [],
+        );
+        assert.deepEqual(
+            salaryRegisterMonthRange({
+                earliestPeriodYm: '2026-10',
+                now: new Date('2026-11-01T06:00:00.000Z'),
+            }),
+            ['2026-10'],
         );
     });
 

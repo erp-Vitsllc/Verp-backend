@@ -93,6 +93,17 @@ const paymentCycleSchema = new mongoose.Schema(
         includeLeave: { type: Boolean, default: true },
         includeTicket: { type: Boolean, default: true },
         reduceHistoricalWorkingDays: { type: Boolean, default: false },
+        allocations: {
+            type: [
+                {
+                    kind: { type: String, default: 'leave' },
+                    entitlementNo: { type: Number, default: 0 },
+                    entitlementDate: { type: String, default: '' },
+                    amount: { type: Number, default: 0 },
+                },
+            ],
+            default: () => [],
+        },
         attachment: { type: attachmentSchema, default: null },
         createdBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null },
         createdByName: { type: String, default: '' },

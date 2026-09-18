@@ -39,6 +39,7 @@ import {
     addCalendarMonths,
     paidLeaveSalaryMutationError,
     isPaidLeaveSalaryCycle,
+    overtimeHoursToDays,
 } from './salaryHistoricalCalculations.js';
 
 describe('salary historical calculations', () => {
@@ -1078,7 +1079,7 @@ describe('annual leave salary and ticket entitlements', () => {
         assert.equal(policyTicketRate({ workingDaysRequiredForAirTicket: 365 }), 0);
     });
 
-    it('blocks edit and delete of paid leave salary cycles', () => {
+    it('allows HR to edit paid payment cycles, and only locks salary-slip leave salary', () => {
         const paid = {
             id: 'c1',
             includeLeave: true,
@@ -1086,16 +1087,17 @@ describe('annual leave salary and ticket entitlements', () => {
             paymentStatus: 'paid',
             leaveSalaryPaymentDate: '2026-09-01',
         };
+        const slip = {
+            ...paid,
+            id: 's1',
+            source: 'salaryslip',
+            salarySlipMonthKey: '2026-07',
+            paymentReference: 'salary-slip:2026-07',
+        };
         assert.equal(isPaidLeaveSalaryCycle(paid), true);
         assert.equal(isPaidLeaveSalaryCycle({ ...paid, paymentStatus: 'draft' }), false);
-        assert.equal(
-            paidLeaveSalaryMutationError([paid], []),
-            MESSAGES.paidLeaveSalaryLocked,
-        );
-        assert.equal(
-            paidLeaveSalaryMutationError([paid], [{ ...paid, leaveSalaryAmount: 1 }]),
-            MESSAGES.paidLeaveSalaryLocked,
-        );
+        assert.equal(paidLeaveSalaryMutationError([paid], []), '');
+        assert.equal(paidLeaveSalaryMutationError([paid], [{ ...paid, leaveSalaryAmount: 1 }]), '');
         assert.equal(
             paidLeaveSalaryMutationError([paid], [{ ...paid, ticketAmount: 500 }]),
             '',
@@ -1107,5 +1109,21 @@ describe('annual leave salary and ticket entitlements', () => {
             ),
             '',
         );
+        assert.equal(
+            paidLeaveSalaryMutationError([slip], []),
+            MESSAGES.paidLeaveSalaryLocked,
+        );
+        assert.equal(
+            paidLeaveSalaryMutationError([slip], [{ ...slip, leaveSalaryAmount: 1 }]),
+            MESSAGES.paidLeaveSalaryLocked,
+        );
+    });
+
+    it('converts overtime hours to days at 10 hours = 1 day', () => {
+        assert.equal(overtimeHoursToDays(0), 0);
+        assert.equal(overtimeHoursToDays(10), 1);
+        assert.equal(overtimeHoursToDays(5), 0.5);
+        assert.equal(overtimeHoursToDays(15), 1.5);
+        assert.equal(overtimeHoursToDays(12.5), 1.25);
     });
 });

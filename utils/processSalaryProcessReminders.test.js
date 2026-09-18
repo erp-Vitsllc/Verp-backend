@@ -7,6 +7,7 @@ import {
     nextSalaryProcessingTarget,
     processingDayFromPolicy,
     salaryProcessCompanyEmail,
+    salaryProcessReminderTarget,
 } from './processSalaryProcessReminders.js';
 
 const TZ = 'Asia/Dubai';
@@ -27,6 +28,30 @@ describe('salary process reminder schedule', () => {
         const target = nextSalaryProcessingTarget(dubaiDay(2026, 8, 20), 1, TZ);
         assert.equal(target.monthKey, '2026-09');
         assert.equal(target.daysUntil, 12);
+    });
+
+    it('uses the following month 1st as the processing date for that salary month', () => {
+        const onProcessDay = salaryProcessReminderTarget(dubaiDay(2026, 10, 1), 1, TZ);
+        assert.equal(onProcessDay.monthKey, '2026-09');
+        assert.equal(onProcessDay.processingMonthKey, '2026-10');
+        assert.equal(onProcessDay.daysAfter, 0);
+
+        const afterProcessDay = salaryProcessReminderTarget(dubaiDay(2026, 10, 6), 1, TZ);
+        assert.equal(afterProcessDay.monthKey, '2026-09');
+        assert.equal(afterProcessDay.processingMonthKey, '2026-10');
+        assert.equal(afterProcessDay.daysAfter, 5);
+    });
+
+    it('does not start September reminders on 1 September', () => {
+        const septFirst = salaryProcessReminderTarget(dubaiDay(2026, 9, 1), 1, TZ);
+        assert.equal(septFirst.monthKey, '2026-08');
+        assert.equal(septFirst.processingMonthKey, '2026-09');
+        assert.equal(septFirst.daysAfter, 0);
+        assert.equal(monthKeyIsOnOrAfterStart(septFirst.monthKey, '2026-09'), false);
+
+        const septMid = salaryProcessReminderTarget(dubaiDay(2026, 9, 20), 1, TZ);
+        assert.equal(septMid.monthKey, '2026-08');
+        assert.equal(monthKeyIsOnOrAfterStart(septMid.monthKey, '2026-09'), false);
     });
 
     it('fires the processing-day stage on the 1st', () => {

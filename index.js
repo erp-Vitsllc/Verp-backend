@@ -64,6 +64,7 @@ import { setupEmailSubjectTag } from "./utils/setupEmailSubjectTag.js";
 import { purgeExpiredAdminDeletionArchives } from "./services/adminDeletionArchiveService.js";
 import { rerouteAllPendingAssetCreationApprovals } from "./utils/assetApprovalHelpers.js";
 import { processAttendanceDailyRoutine } from "./utils/processAttendanceDailyRoutine.js";
+import { subscribeWhatsAppWaba } from "./services/whatsappService.js";
 
 // Always load VERP_backend/.env (not process.cwd()), so Zoho/Locator keys work
 // whether the server is started from repo root or from VERP_backend.
@@ -151,6 +152,15 @@ app.use(
         methods: ["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"],
         allowedHeaders: ["Content-Type", "Authorization", "x-no-compression"],
     })
+);
+
+app.use(
+    compression({
+        filter: (req, res) => {
+            if (req.headers["x-no-compression"]) return false;
+            return compression.filter(req, res);
+        },
+    }),
 );
 
 // Global Rate Limiting
@@ -391,6 +401,18 @@ async function startServer() {
                 console.error('[LocatorSync] scheduled sync failed:', e?.message || e),
             );
         }, LOCATOR_ERP_SYNC_MS);
+        subscribeWhatsAppWaba()
+            .then((result) => {
+                console.log('[WhatsApp] WABA subscribed_apps', {
+                    subscribed: Boolean(result?.subscribed),
+                    appCount: result?.appCount || 0,
+                    overrideCallback: Boolean(result?.overrideCallback),
+                    error: result?.error || null,
+                });
+            })
+            .catch((error) => {
+                console.warn('[WhatsApp] WABA subscribe failed:', error?.message || error);
+            });
     };
 
     // IPv4 (LAN + 127.0.0.1). Windows IPV6_V6ONLY is on, so this does not cover ::1.

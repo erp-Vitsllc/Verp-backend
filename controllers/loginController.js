@@ -127,7 +127,7 @@ export const login = async (req, res) => {
 
             if (user.employeeId) {
                 const linkedEmployee = await EmployeeBasic.findOne({ employeeId: user.employeeId })
-                    .select('loginThrough enablePortalAccess')
+                    .select('loginThrough')
                     .lean();
                 const through = normalizeLoginThrough(linkedEmployee);
                 const isAppLogin = req.body?.source === 'portalApp' || req.body?.channel === 'app';

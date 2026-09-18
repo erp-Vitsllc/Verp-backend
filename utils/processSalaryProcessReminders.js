@@ -12,6 +12,7 @@ import {
     getScheduledEmailTimeZone,
     zonedWallTimeToUtc,
 } from './scheduleDailyAtMidnight.js';
+import { addSalaryMonths } from './salaryEnrollmentStartMonth.js';
 
 const STAGE_LABELS = ['1st reminder', '2nd reminder', '3rd reminder', 'Salary processing'];
 const REMINDER_AUDIENCE_KEYS = new Set([
@@ -104,6 +105,34 @@ export function nextSalaryProcessingTarget(now = new Date(), processingDay = 1, 
     };
 }
 
+/**
+ * Salary for month M is processed on the processing day of M+1 (September → 1 October).
+ * Reminders count days after that date, never before.
+ */
+export function salaryProcessReminderTarget(now = new Date(), processingDay = 1, timeZone = reminderTz()) {
+    const { year, month, day } = getCalendarPartsInTz(now, timeZone);
+    const today = zonedWallTimeToUtc({ year, month, day, hour: 0, minute: 0, second: 0 }, timeZone);
+    let processingMonthKey = yearMonthKeyFromParts(year, month);
+    let due = processingDateForMonth(year, month, processingDay, timeZone);
+    if (due.getTime() > today.getTime()) {
+        processingMonthKey = addSalaryMonths(processingMonthKey, -1);
+        const [prevYear, prevMonth] = processingMonthKey.split('-').map(Number);
+        due = processingDateForMonth(prevYear, prevMonth, processingDay, timeZone);
+    }
+    const [dueYear, dueMonth] = processingMonthKey.split('-').map(Number);
+    return {
+        daysAfter: Math.max(
+            0,
+            Math.round((today.getTime() - due.getTime()) / (1000 * 60 * 60 * 24)),
+        ),
+        dueDate: due,
+        processingMonthKey,
+        monthKey: addSalaryMonths(processingMonthKey, -1),
+        year: dueYear,
+        month: dueMonth,
+    };
+}
+
 export function matchingReminderStages(reminders, daysUntil) {
     const rows = Array.isArray(reminders) ? reminders : [];
     const seen = new Set();
@@ -158,7 +187,7 @@ function reminderEmailHtml({ name, stageLabel, daysBefore, monthLabel, dueDateLa
     const processLine =
         daysBefore === 0
             ? `Salary for <strong>${escapeHtml(monthLabel)}</strong> is processed today (${escapeHtml(dueDateLabel)}).`
-            : `Salary for <strong>${escapeHtml(monthLabel)}</strong> will be processed on <strong>${escapeHtml(dueDateLabel)}</strong>.`;
+            : `Salary for <strong>${escapeHtml(monthLabel)}</strong> was processed on <strong>${escapeHtml(dueDateLabel)}</strong>. This is ${escapeHtml(String(daysBefore))} day(s) after that date.`;
     const whoLine = forEmployee
         ? 'Your salary for this month is included.'
         : 'This reminder was sent because you are designated on the salary process flowchart.';
@@ -266,7 +295,7 @@ async function resolveStageRecipients(forWhom, monthKey) {
 /**
  * Daily: if salary policy reminders are set, email checked audiences
  * (flowchart company emails + enrolled employees with company email)
- * N days before the processing date, then again on the processing date.
+ * on the processing date of the following month, then N days after that date.
  */
 export async function processSalaryProcessReminders(now = new Date()) {
     try {
@@ -275,14 +304,14 @@ export async function processSalaryProcessReminders(now = new Date()) {
 
         const processingDay = processingDayFromPolicy(policy.salaryProcessingDate);
         const tz = reminderTz();
-        const target = nextSalaryProcessingTarget(now, processingDay, tz);
+        const target = salaryProcessReminderTarget(now, processingDay, tz);
         if (!monthKeyIsOnOrAfterStart(target.monthKey, policy.salaryProcessStartMonth)) {
             return { skipped: 'before-start-month', monthKey: target.monthKey, sent: 0 };
         }
 
-        const stages = matchingReminderStages(policy.salaryProcessReminders, target.daysUntil);
+        const stages = matchingReminderStages(policy.salaryProcessReminders, target.daysAfter);
         if (!stages.length) {
-            return { skipped: 'no-matching-stage', daysUntil: target.daysUntil, sent: 0 };
+            return { skipped: 'no-matching-stage', daysAfter: target.daysAfter, sent: 0 };
         }
 
         const monthLabel = formatMonthLabel(target.monthKey, tz);
@@ -334,10 +363,10 @@ export async function processSalaryProcessReminders(now = new Date()) {
 
         if (sent > 0) {
             console.log(
-                `[SalaryProcessReminders] sent ${sent} for ${target.monthKey} (${STAGE_LABELS.find((_, i) => stages[0]?.index === i) || `T-${target.daysUntil}`})`,
+                `[SalaryProcessReminders] sent ${sent} for ${target.monthKey} (${STAGE_LABELS.find((_, i) => stages[0]?.index === i) || `T+${target.daysAfter}`})`,
             );
         }
-        return { sent, skipped, monthKey: target.monthKey, daysUntil: target.daysUntil };
+        return { sent, skipped, monthKey: target.monthKey, daysAfter: target.daysAfter };
     } catch (err) {
         console.error('[processSalaryProcessReminders] Non-fatal error:', err?.message || err);
         return { sent: 0, error: err?.message || String(err) };

@@ -27,6 +27,7 @@ import { checkEmployeeLeaveAllowance, resolveEmployeePayrollPolicy, resolveSickO
 import { hasPermission } from '../../services/permissionService.js';
 import { listPendingHubInboxItems } from '../../utils/employeeHubRequestInbox.js';
 import { isReqUserSystemSuperUser } from '../../utils/systemSuperUser.js';
+import { resolveDashboardAssigneeContext } from '../../utils/resolveDashboardAssigneeContext.js';
 import { syncDashboardAction } from '../../utils/syncDashboard.js';
 import {
     LEAVE_DASHBOARD_REQUEST_TYPE,
@@ -259,59 +260,6 @@ function groupPendingRows(rows) {
     });
 }
 
-function coverLeaveDates(covered, employeeMongoId, fromKey, toKey) {
-    const from = String(fromKey || toKey || '').trim();
-    const to = String(toKey || fromKey || '').trim();
-    if (!from) return;
-    const end = to >= from ? to : from;
-    for (const dateKey of dateKeysInRange(from, end)) {
-        covered.add(`${employeeMongoId}|${dateKey}`);
-    }
-}
-
-function normalizeCompletedLeaveRow(row) {
-    const statusKey = String(row.statusKey || row.requestedStatusKey || '').trim();
-    return {
-        ...row,
-        leaveRequestStatus: 'approved',
-        requestedStatusKey: row.requestedStatusKey || statusKey,
-        requestedStatusLabel: row.requestedStatusLabel || row.statusLabel || '',
-        leaveRequestFromDate: row.leaveRequestFromDate || row.date,
-        leaveRequestToDate: row.leaveRequestToDate || row.date,
-        statusKey,
-    };
-}
-
-function mergeAdjacentApprovedItems(items) {
-    const sorted = [...items].sort((a, b) => {
-        const emp = String(a.employeeMongoId || '').localeCompare(String(b.employeeMongoId || ''));
-        if (emp) return emp;
-        const type = String(a.requestedStatusKey || '').localeCompare(String(b.requestedStatusKey || ''));
-        if (type) return type;
-        return String(a.startDateKey || '').localeCompare(String(b.startDateKey || ''));
-    });
-
-    const merged = [];
-    for (const item of sorted) {
-        const last = merged[merged.length - 1];
-        if (
-            last &&
-            last.statusKey === 'approved' &&
-            item.statusKey === 'approved' &&
-            String(last.employeeMongoId) === String(item.employeeMongoId) &&
-            String(last.requestedStatusKey) === String(item.requestedStatusKey) &&
-            nextDateKey(last.endDateKey) === item.startDateKey
-        ) {
-            last.endDateKey = item.endDateKey;
-            last.endDate = item.endDate;
-            last.attendanceIds = [...(last.attendanceIds || []), ...(item.attendanceIds || [])];
-            continue;
-        }
-        merged.push({ ...item, attendanceIds: [...(item.attendanceIds || [])] });
-    }
-    return merged;
-}
-
 async function resolveLeaveHrFlags(req) {
     const userId = req.user?._id || req.user?.id;
     const isSuper = await isReqUserSystemSuperUser(req.user);
@@ -538,7 +486,7 @@ export async function getLeavePendingRequests(req, res) {
             $and: [partyFilter, ...(year ? [yearDateFilter] : [])],
         };
 
-        const [pendingRows, decidedRows, leaveMarkRows] = await Promise.all([
+        const [pendingRows, decidedRows] = await Promise.all([
             Attendance.find({ ...baseFilter, leaveRequestStatus: 'pending' })
                 .sort({ leaveRequestedAt: -1, date: -1 })
                 .limit(1500)
@@ -550,15 +498,6 @@ export async function getLeavePendingRequests(req, res) {
             })
                 .sort({ leaveDecidedAt: -1, leaveRequestedAt: -1, date: -1 })
                 .limit(1500)
-                .lean()
-                .maxTimeMS(12000),
-            Attendance.find({
-                statusKey: { $in: LEAVE_TRACK_KEYS },
-                employeeName: { $not: /\(company\)\s*$/i },
-                $and: [partyFilter, ...(year ? [{ date: { $gte: yearFrom, $lte: yearTo } }] : [])],
-            })
-                .sort({ date: -1 })
-                .limit(4000)
                 .lean()
                 .maxTimeMS(12000),
         ]);
@@ -579,53 +518,6 @@ export async function getLeavePendingRequests(req, res) {
         });
 
         const requestItems = groupPendingRows(visibleRows);
-        const coveredDates = new Set();
-        for (const row of visibleRows) {
-            coverLeaveDates(
-                coveredDates,
-                String(row.employeeMongoId || ''),
-                row.leaveRequestFromDate || row.date,
-                row.leaveRequestToDate || row.date,
-            );
-        }
-
-        const extraLeaveRows = (leaveMarkRows || [])
-            .filter((row) => {
-                if (isCompanyShellEmployee(row.employeeName) || isCompanyShellEmployee(row)) {
-                    return false;
-                }
-                if (coveredDates.has(`${row.employeeMongoId}|${row.date}`)) return false;
-                return isLeaveRangeEntryVisible(
-                    row,
-                    row.date,
-                    row.date,
-                    visibility,
-                    visibilityByCode,
-                );
-            })
-            .map(normalizeCompletedLeaveRow);
-
-        const historicalProfiles = await loadHistoricalLeaveProfilesByEmployeeId(enrolledCodes);
-        const overlayFrom = year ? yearFrom : '';
-        const overlayTo = year ? yearTo : '';
-        for (const emp of realEmployees) {
-            if (!visibility.has(String(emp._id))) continue;
-            const overlayRows = overlayAttendanceRowsForEmployee({
-                profile: historicalProfiles.get(String(emp.employeeId || '').trim()),
-                employee: emp,
-                from: overlayFrom,
-                to: overlayTo,
-                statusKeys: new Set(LEAVE_TRACK_KEYS),
-            });
-            for (const row of overlayRows) {
-                const occupiedKey = `${row.employeeMongoId}|${row.date}`;
-                if (coveredDates.has(occupiedKey)) continue;
-                coveredDates.add(occupiedKey);
-                extraLeaveRows.push(normalizeCompletedLeaveRow(row));
-            }
-        }
-
-        const completedItems = mergeAdjacentApprovedItems(groupPendingRows(extraLeaveRows));
 
         const actor = await resolveActorEmployee(req);
         const hrFlags = await resolveLeaveHrFlags(req);
@@ -635,7 +527,7 @@ export async function getLeavePendingRequests(req, res) {
             realEmployees.map((emp) => [String(emp._id), String(emp.primaryReportee || '')]),
         );
 
-        const items = [...requestItems, ...completedItems]
+        const items = requestItems
             .map((item) => {
                 const isPrimaryReportee =
                     Boolean(actorId) && reporteeByMongoId.get(String(item.employeeMongoId)) === actorId;
@@ -735,7 +627,7 @@ export async function decideLeavePendingRequest(req, res) {
 
 /**
  * GET /api/Leave/dashboard/pending-inbox
- * Pending leave requests for the logged-in primary reportee (Leave Dashboard bell).
+ * Pending leave requests waiting on this employee (or ?targetUserId= for Team Performance).
  */
 export async function getLeavePendingInbox(req, res) {
     try {
@@ -743,7 +635,16 @@ export async function getLeavePendingInbox(req, res) {
             return res.status(503).json({ message: 'Database not connected.' });
         }
 
-        const actor = await resolveActorEmployee(req);
+        const ctx = await resolveDashboardAssigneeContext(req);
+        if (!ctx.ok) {
+            return res.status(ctx.status || 401).json({
+                message: ctx.message || 'Unauthorized',
+                count: 0,
+                items: [],
+            });
+        }
+
+        const actor = ctx.employee;
         if (!actor) {
             return res.status(200).json({
                 message: 'Leave pending inbox fetched successfully',

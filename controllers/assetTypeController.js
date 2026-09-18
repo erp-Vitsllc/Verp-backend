@@ -24,6 +24,7 @@ import { sendAssetActionApprovalEmail } from '../utils/sendAssetActionApprovalEm
 import { sendAssignedEmployeeActionEmail } from '../utils/sendAssignedEmployeeActionEmail.js';
 import EmployeeBasic from '../models/EmployeeBasic.js';
 import User from '../models/User.js';
+import { canLoginThroughAnyChannel } from '../utils/loginThrough.js';
 import {
     resolveAssetControllerEmployee,
     getAssetRequesterDisplayName,
@@ -1642,18 +1643,18 @@ export const updateAssetItem = async (req, res) => {
         let isPrimaryReporteeDelegate = false;
         if (asset.assignedToType === 'Employee' && asset.assignedTo && currentEmpObjectId) {
             const assigneeDoc = await EmployeeBasic.findById(asset.assignedTo)
-                .select('companyEmail primaryReportee employeeId')
+                .select('companyEmail primaryReportee employeeId loginThrough')
                 .lean()
                 .catch(() => null);
 
             const hasCompanyEmail = !!(assigneeDoc?.companyEmail && String(assigneeDoc.companyEmail).trim().length > 0);
-            let hasPortalAccess = null;
+            let hasPortalAccess = false;
             if (assigneeDoc?.employeeId) {
                 const linkedUser = await User.findOne({ employeeId: assigneeDoc.employeeId, status: 'Active' })
-                    .select('enablePortalAccess')
+                    .select('_id')
                     .lean()
                     .catch(() => null);
-                hasPortalAccess = !!(linkedUser && linkedUser.enablePortalAccess);
+                hasPortalAccess = !!(linkedUser && canLoginThroughAnyChannel(assigneeDoc));
             }
             const primaryId = assigneeDoc?.primaryReportee?._id
                 ? assigneeDoc.primaryReportee._id.toString()

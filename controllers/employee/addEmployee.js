@@ -11,6 +11,7 @@ import {
     assertActiveCompany,
 } from "../../utils/employeeAddValidation.js";
 import { recordActivityAsync } from "../../utils/activityLog.js";
+import { assertRegisteredWhatsAppNumber } from "../../services/whatsappService.js";
 
 // Calculate age from date of birth
 const calculateAge = (dateOfBirth) => {
@@ -98,6 +99,15 @@ export const addEmployee = async (req, res) => {
         const companyError = await assertActiveCompany(company);
         if (companyError) {
             return res.status(400).json({ message: companyError });
+        }
+
+        const waCheck = await assertRegisteredWhatsAppNumber(whatsappNumber);
+        if (!waCheck.ok) {
+            return res.status(400).json({
+                message: waCheck.message,
+                field: "whatsappNumber",
+                errors: [waCheck.message],
+            });
         }
 
         // Sanitize Employee ID: uppercase, no spaces

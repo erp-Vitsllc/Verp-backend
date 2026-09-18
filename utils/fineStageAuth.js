@@ -24,6 +24,28 @@ export function getExpectedRoleForFineStatus(fineStatus, workflow = []) {
     return STATUS_ROLE_MAP[fineStatus] || null;
 }
 
+const FINE_PENDING_APPROVAL_STATUSES = new Set([
+    'Pending',
+    'Pending HR',
+    'Pending Review',
+    'Pending Accounts',
+    'Pending Finance',
+    'Pending Authorization',
+    'Pending Management',
+]);
+
+/**
+ * Fine notifications are approval-stage only (HR / Accounts / Management).
+ * Completed, Approved, Paid, and post-approval payable settlement must not
+ * keep a Pending Fine inbox row.
+ */
+export function fineStillNeedsApprovalInbox(fine) {
+    if (!fine) return false;
+    const status = String(fine.fineStatus || '').trim();
+    if (!FINE_PENDING_APPROVAL_STATUSES.has(status)) return false;
+    return Boolean(getExpectedRoleForFineStatus(status, fine.workflow || []));
+}
+
 export function getPendingWorkflowStep(workflow = [], expectedRole = null) {
     const list = Array.isArray(workflow) ? workflow : [];
     if (expectedRole) {

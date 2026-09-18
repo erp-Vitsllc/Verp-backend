@@ -1,6 +1,6 @@
 /**
- * Removes Profile Activation dashboard rows in "On Hold" for an employee request.
- * Call when the employee resubmits after hold (send-approval-email / submit-approval) so the bell list updates.
+ * Removes Profile Activation dashboard rows in "On Hold" or "Rejected" for an employee request.
+ * Call when the employee resubmits after hold/reject so the submitter bell list updates.
  */
 export async function clearProfileActivationHoldDashboardRows(requestEmployeeMongoId) {
     if (!requestEmployeeMongoId) return;
@@ -8,6 +8,6 @@ export async function clearProfileActivationHoldDashboardRows(requestEmployeeMon
     await DashboardAction.deleteMany({
         requestId: requestEmployeeMongoId,
         requestType: "Profile Activation",
-        status: "On Hold",
+        status: { $in: ["On Hold", "Rejected"] },
     });
 }

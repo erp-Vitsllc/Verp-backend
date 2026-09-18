@@ -3,6 +3,13 @@ import { resolveFrontendBaseUrl, emailFrontendUrl } from './resolveFrontendBaseU
 
 import { pickEffectiveEmail as pickEmployeeEmail } from "./pickEffectiveEmail.js";
 
+const escapeHtml = (s) =>
+    String(s || "")
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;");
+
 /**
  * HR activation outcome email: **only** the submitter (`recipientEmployee`). Never mails the profile subject.
  * Caller must resolve `profileActivationSubmittedBy` → EmployeeBasic lean; otherwise no email is sent.
@@ -81,9 +88,10 @@ export const sendProfileNotification = async ({ employee, recipientEmployee = nu
             : `<p>The profile activation you submitted for <strong>${profileSubjectName}</strong> (Employee ID: <strong>${employee.employeeId || "—"}</strong>) has been <strong>approved</strong> by ${managerName}. That employee’s account is now fully active.</p>`;
 
         const rejectedBody = sameRecipientAsSubject
-            ? `<p>Your profile activation request has been <strong>rejected</strong> by ${managerName}. Please review the feedback below and update your profile details.</p>
-               <p>Once you've made the necessary changes, you can resubmit your profile for activation.</p>`
-            : `<p>The profile activation you submitted for <strong>${profileSubjectName}</strong> (Employee ID: <strong>${employee.employeeId || "—"}</strong>) has been <strong>rejected</strong> by ${managerName}. Please review the feedback and update that employee’s profile before sending for activation again.</p>`;
+            ? `<p>Your profile activation request has been <strong>rejected</strong> by ${managerName}.</p>
+               <p><strong>Check the reason and update the employee profile activation</strong>, then resubmit.</p>`
+            : `<p>The profile activation you submitted for <strong>${profileSubjectName}</strong> (Employee ID: <strong>${employee.employeeId || "—"}</strong>) has been <strong>rejected</strong> by ${managerName}.</p>
+               <p><strong>Check the reason and update the employee profile activation</strong>, then resubmit.</p>`;
 
         const html = `
             <div style="font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; color: #1e293b; line-height: 1.6; max-width: 600px; margin: 0 auto; border: 1px solid #e2e8f0; border-radius: 12px; overflow: hidden; background-color: #ffffff;">
@@ -100,7 +108,7 @@ export const sendProfileNotification = async ({ employee, recipientEmployee = nu
                             ? `
                         <div style="background-color: #fff1f2; padding: 20px; border-left: 4px solid #e11d48; border-radius: 4px; margin: 25px 0;">
                             <p style="margin: 0; font-weight: bold; color: #9f1239;">Feedback:</p>
-                            <p style="margin: 8px 0 0 0; color: #be123b;">${reason}</p>
+                            <p style="margin: 8px 0 0 0; color: #be123b;">${escapeHtml(reason)}</p>
                         </div>
                     `
                             : ""

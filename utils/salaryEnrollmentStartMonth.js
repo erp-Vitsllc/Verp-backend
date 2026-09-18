@@ -60,6 +60,14 @@ export function firstSalaryMonthAfterEnrollment(enrollYm, now = new Date()) {
 }
 
 /**
+ * Calendar month when salary period M first appears on the register.
+ * Nearest enrollment October → payroll row on 1 November.
+ */
+export function salaryRegisterPayrollOpenMonth(periodYm) {
+    return addSalaryMonths(salaryYearMonth(periodYm), 1);
+}
+
+/**
  * New enrollments never start in the current month.
  * A requested/VERP month is kept only when it is after that next month.
  */

@@ -47,6 +47,8 @@ const userSchema = new mongoose.Schema(
             deviceId: { type: String, default: '', trim: true },
             deviceName: { type: String, default: '', trim: true },
             location: { type: String, default: '', trim: true },
+            latitude: { type: Number, default: null },
+            longitude: { type: Number, default: null },
             ipAddress: { type: String, default: '', trim: true },
             lastSeenAt: { type: Date, default: null },
             status: {

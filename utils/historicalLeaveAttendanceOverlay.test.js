@@ -133,4 +133,43 @@ describe('historical leave attendance overlay', () => {
         assert.equal(overlay.calendarRecords.length, 0);
         assert.equal(overlay.entries[0]?.countOnly, true);
     });
+
+    it('counts comp off only when a date is set in the filtered year', () => {
+        const overlay = overlayHistoricalLeave(
+            {
+                leaveRecords: [
+                    {
+                        _id: 'co-undated',
+                        leaveType: 'compoff',
+                        source: 'manual',
+                        status: 'approved',
+                        eligibleWorkingDays: 6,
+                    },
+                    {
+                        _id: 'co-other-year',
+                        leaveType: 'compoff',
+                        source: 'manual',
+                        status: 'approved',
+                        fromDate: '2025-04-02',
+                        toDate: '2025-04-03',
+                        eligibleWorkingDays: 2,
+                    },
+                    {
+                        _id: 'co-year',
+                        leaveType: 'compoff',
+                        source: 'manual',
+                        status: 'approved',
+                        fromDate: '2026-09-10',
+                        toDate: '2026-09-11',
+                        eligibleWorkingDays: 2,
+                    },
+                ],
+            },
+            { from: '2026-01-01', to: '2026-12-31' },
+        );
+        assert.equal(overlay.extraCounts.compoff_leave, 2);
+        assert.equal(overlay.calendarRecords.length, 2);
+        assert.equal(overlay.calendarRecords.every((row) => row.date.startsWith('2026-')), true);
+        assert.equal(overlay.entries.some((row) => row.countOnly), false);
+    });
 });

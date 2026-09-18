@@ -16,6 +16,12 @@ export function normalizeLoginThrough(source) {
     };
 }
 
+/** True when the employee can sign in on at least one channel (Web or Portal App). */
+export function canLoginThroughAnyChannel(source) {
+    const through = normalizeLoginThrough(source);
+    return through.portalApp === true || through.web === true;
+}
+
 export function loginThroughFromBody(body, current) {
     const next = normalizeLoginThrough(current);
     const incoming = body?.loginThrough;

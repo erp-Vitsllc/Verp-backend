@@ -78,6 +78,7 @@ import {
 } from '../utils/getDepartmentHOD.js';
 import { isUserAdministrator, hasPermission } from '../services/permissionService.js';
 import { isJwtSystemSuperUser } from '../utils/systemSuperUser.js';
+import { canLoginThroughAnyChannel } from '../utils/loginThrough.js';
 import {
     actorMayManageOilService,
     actorMayCreateOrInitiateVehicleService,
@@ -661,7 +662,7 @@ const requireAssetFullAccess = async (req, res, next) => {
 
                     // Delegate allowed only when assignee has no ERP user account
                     const assignedEmp = await EmployeeBasic.findById(asset.assignedTo)
-                        .select('primaryReportee employeeId companyEmail enablePortalAccess')
+                        .select('primaryReportee employeeId companyEmail loginThrough')
                         .lean()
                         .catch(() => null);
 
@@ -669,15 +670,14 @@ const requireAssetFullAccess = async (req, res, next) => {
 
                     const assignedEmployeeUser = assignedEmp?.employeeId
                         ? await User.findOne({ employeeId: assignedEmp.employeeId, status: 'Active' })
-                            .select('enablePortalAccess')
+                            .select('_id')
                             .lean()
                             .catch(() => null)
                         : null;
 
                     const assignedHasUserAccount = !!(
-                        assignedEmp?.enablePortalAccess !== false &&
                         assignedEmployeeUser &&
-                        assignedEmployeeUser.enablePortalAccess !== false
+                        canLoginThroughAnyChannel(assignedEmp)
                     );
                     const assigneeCanSelfAck = assignedHasUserAccount;
 

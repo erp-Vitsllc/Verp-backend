@@ -2,6 +2,7 @@ import PayrollSettings from '../../models/PayrollSettings.js';
 import { ensureAttachmentPersistedToS3 } from '../../utils/s3Upload.js';
 import { normalizeStaffTypeKey } from '../../utils/workLocationHelpers.js';
 import { readGroupLeavePercent } from '../../utils/groupLeaveSlots.js';
+import { normalizeEmployeeIdList } from '../../utils/salaryPolicyExclusions.js';
 
 const DEFAULT_RULES = {
     allAttendanceMarked: false,
@@ -148,9 +149,11 @@ function toReminders(value) {
     const rows = Array.isArray(value) ? value : [];
     const first = toReminderDays(rows[0]?.daysBefore);
     const secondRaw = toReminderDays(rows[1]?.daysBefore);
-    const second = first && secondRaw && secondRaw >= 1 && secondRaw <= first - 1 ? secondRaw : null;
+    const second =
+        first && secondRaw && secondRaw > first && secondRaw <= MAX_REMINDER_DAYS ? secondRaw : null;
     const thirdRaw = toReminderDays(rows[2]?.daysBefore);
-    const third = second && thirdRaw && thirdRaw >= 1 && thirdRaw <= second ? thirdRaw : null;
+    const third =
+        second && thirdRaw && thirdRaw > second && thirdRaw <= MAX_REMINDER_DAYS ? thirdRaw : null;
     return [
         { daysBefore: first, forWhom: reminderAudienceList(rows[0]?.forWhom) },
         { daysBefore: second, forWhom: reminderAudienceList(rows[1]?.forWhom) },
@@ -263,6 +266,8 @@ export function serializePayrollSettings(doc) {
         salaryProcessReminders: serializeReminders(doc?.salaryProcessReminders),
         minAllowedLeavePerGroupPercent: readGroupLeavePercent(doc?.minAllowedLeavePerGroupPercent),
         maxAllowedLeavePerGroupPercent: readGroupLeavePercent(doc?.maxAllowedLeavePerGroupPercent),
+        attendanceExclusionEmployeeIds: normalizeEmployeeIdList(doc?.attendanceExclusionEmployeeIds),
+        leaveExclusionEmployeeIds: normalizeEmployeeIdList(doc?.leaveExclusionEmployeeIds),
         attachment: serializePolicyAttachment(doc?.attachment),
     };
 }
@@ -332,6 +337,14 @@ export function buildPayrollPolicyPayload(body, existing) {
             body?.maxAllowedLeavePerGroupPercent !== undefined
                 ? readGroupLeavePercent(body.maxAllowedLeavePerGroupPercent)
                 : readGroupLeavePercent(existing?.maxAllowedLeavePerGroupPercent),
+        attendanceExclusionEmployeeIds:
+            body?.attendanceExclusionEmployeeIds !== undefined
+                ? normalizeEmployeeIdList(body.attendanceExclusionEmployeeIds)
+                : normalizeEmployeeIdList(existing?.attendanceExclusionEmployeeIds),
+        leaveExclusionEmployeeIds:
+            body?.leaveExclusionEmployeeIds !== undefined
+                ? normalizeEmployeeIdList(body.leaveExclusionEmployeeIds)
+                : normalizeEmployeeIdList(existing?.leaveExclusionEmployeeIds),
     };
 }
 
