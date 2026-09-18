@@ -93,7 +93,7 @@ export const getUsers = async (req, res) => {
                 employeeObjectId: employeeObjectId || null,
                 loginThrough: isSystemAdmin
                     ? { portalApp: true, web: true }
-                    : (loginThroughMap[user.employeeId] || { portalApp: true, web: true }),
+                    : (loginThroughMap[user.employeeId] || { portalApp: false, web: false }),
             };
         }));
 

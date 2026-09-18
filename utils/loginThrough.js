@@ -1,18 +1,15 @@
-/** Portal App / Web login flags. Unset employees keep both on (legacy). */
+/** Portal App / Web login flags. Unset until someone checks them on the profile. */
 
 export const ACCESS_CONTROL_PATCH_KEYS = ["loginThrough", "enablePortalAccess"];
 
 export function normalizeLoginThrough(source) {
     const stored = source?.loginThrough;
-    const hasStored =
-        stored &&
-        (typeof stored.portalApp === 'boolean' || typeof stored.web === 'boolean');
-    if (!hasStored) {
-        return { portalApp: true, web: true };
+    if (!stored || typeof stored !== 'object') {
+        return { portalApp: false, web: false };
     }
     return {
-        portalApp: stored.portalApp !== false,
-        web: stored.web !== false,
+        portalApp: stored.portalApp === true,
+        web: stored.web === true,
     };
 }
 
