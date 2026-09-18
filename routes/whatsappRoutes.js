@@ -21,10 +21,62 @@ router.get('/webhook', getWhatsAppWebhook);
 router.post('/webhook', postWhatsAppWebhook);
 
 router.get('/status', protect, requireAdmin, getWhatsAppStatus);
-router.get('/access', protect, requireAdmin, getWhatsAppInboxAccess);
-router.get('/conversations', protect, requireAdmin, listWhatsAppConversations);
-router.get('/thread', protect, requireAdmin, listWhatsAppThread);
-router.post('/thread', protect, requireAdmin, postWhatsAppThreadReply);
+router.get(
+    '/access',
+    protect,
+    checkAnyModulePermission(
+        [
+            ['hrm_employees_list', 'view'],
+            ['hrm_employees', 'view'],
+            ['hrm_employees_view', 'view'],
+            ['hrm_employees_view_basic', 'view'],
+        ],
+        'Access denied. HR or admin permission is required to view WhatsApp messages.',
+    ),
+    getWhatsAppInboxAccess,
+);
+router.get(
+    '/conversations',
+    protect,
+    checkAnyModulePermission(
+        [
+            ['hrm_employees_list', 'view'],
+            ['hrm_employees', 'view'],
+            ['hrm_employees_view', 'view'],
+            ['hrm_employees_view_basic', 'view'],
+        ],
+        'Access denied. HR or admin permission is required to view WhatsApp messages.',
+    ),
+    listWhatsAppConversations,
+);
+router.get(
+    '/thread',
+    protect,
+    checkAnyModulePermission(
+        [
+            ['hrm_employees_list', 'view'],
+            ['hrm_employees', 'view'],
+            ['hrm_employees_view', 'view'],
+            ['hrm_employees_view_basic', 'view'],
+        ],
+        'Access denied. HR or admin permission is required to view WhatsApp messages.',
+    ),
+    listWhatsAppThread,
+);
+router.post(
+    '/thread',
+    protect,
+    checkAnyModulePermission(
+        [
+            ['hrm_employees_list', 'view'],
+            ['hrm_employees', 'view'],
+            ['hrm_employees_view', 'view'],
+            ['hrm_employees_view_basic', 'view'],
+        ],
+        'Access denied. HR or admin permission is required to view WhatsApp messages.',
+    ),
+    postWhatsAppThreadReply,
+);
 router.post('/test', protect, requireAdmin, postWhatsAppTest);
 router.post('/test-employees', protect, requireAdmin, postWhatsAppTestEmployees);
 router.post(
