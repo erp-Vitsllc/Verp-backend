@@ -1,10 +1,21 @@
 import User from "../../models/User.js";
 import EmployeeBasic from "../../models/EmployeeBasic.js";
+import Attendance from "../../models/Attendance.js";
 import { signOrKeepAttachmentUrl } from "../../utils/s3Upload.js";
-import { serializeMobileDevice } from "../../utils/userMobileDevice.js";
+import { serializeMobileDevice, serializeWebLogin } from "../../utils/userMobileDevice.js";
+import { normalizeLoginThrough } from "../../utils/loginThrough.js";
 
 const USER_DETAIL_SELECT =
-    "username name email companyEmail employeeId group groupName status enablePortalAccess isAdmin lastLogin lastLoginIp profilePicture createdAt mobileDevice";
+    "username name email companyEmail employeeId group groupName status enablePortalAccess isAdmin lastLogin lastLoginIp profilePicture createdAt mobileDevice webLogin";
+
+function getDubaiDateKey(date = new Date()) {
+    return new Intl.DateTimeFormat("en-CA", {
+        timeZone: "Asia/Dubai",
+        year: "numeric",
+        month: "2-digit",
+        day: "2-digit",
+    }).format(date);
+}
 
 async function resolveProfilePicture(stored) {
     if (!stored || typeof stored !== "string") return null;
@@ -40,8 +51,31 @@ export const getUserById = async (req, res) => {
         let employee = null;
         if (user.employeeId) {
             employee = await EmployeeBasic.findOne({ employeeId: user.employeeId })
-                .select("employeeId firstName lastName email designation profilePicture")
+                .select("_id employeeId firstName lastName email designation profilePicture loginThrough")
                 .lean();
+        }
+
+        let todayAttendance = null;
+        if (employee?._id) {
+            const rec = await Attendance.findOne({
+                date: getDubaiDateKey(),
+                employeeMongoId: String(employee._id),
+            })
+                .select("date timeIn timeOut punchSource checkOutSource checkInLocation checkOutLocation statusKey statusLabel")
+                .lean();
+            if (rec) {
+                todayAttendance = {
+                    date: rec.date,
+                    timeIn: rec.timeIn || "",
+                    timeOut: rec.timeOut || "",
+                    punchSource: rec.punchSource || "",
+                    checkOutSource: rec.checkOutSource || "",
+                    checkInLocation: rec.checkInLocation || null,
+                    checkOutLocation: rec.checkOutLocation || null,
+                    statusKey: rec.statusKey || "",
+                    statusLabel: rec.statusLabel || "",
+                };
+            }
         }
 
         const storedPicture = employee?.profilePicture || user.profilePicture || null;
@@ -55,13 +89,19 @@ export const getUserById = async (req, res) => {
                       lastName: employee.lastName,
                       email: employee.email,
                       designation: employee.designation,
+                      loginThrough: normalizeLoginThrough(employee),
                   }
                 : null,
             designation: employee?.designation || null,
             profilePicture: await resolveProfilePicture(storedPicture),
             employeeId: isSystemAdmin ? "System Users" : user.employeeId || null,
             isSystemAdmin,
+            loginThrough: isSystemAdmin
+                ? { portalApp: true, web: true }
+                : normalizeLoginThrough(employee),
             mobileDevice: serializeMobileDevice(user),
+            webLogin: serializeWebLogin(user),
+            todayAttendance,
         };
 
         return res.status(200).json({

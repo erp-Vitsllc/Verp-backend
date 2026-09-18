@@ -6,6 +6,7 @@ import { getManagementHOD } from "../../utils/getManagementHOD.js";
 import { isUserAdministrator } from "../../services/permissionService.js";
 import { synthesizeSingleRecordGroupFineView } from "../../utils/fineGroupClassification.js";
 import { attachZohoBillNumbers } from "../../utils/attachZohoDocumentNumbers.js";
+import { repairSkippedFineAccountsStage } from "../../utils/fineStageAuth.js";
 
 /** Per-party service charge (sibling rows store their share; group view has full SC on parent). */
 function partyServiceShare(fine, entry = {}) {
@@ -289,6 +290,29 @@ export const getFineById = async (req, res) => {
 
         if (!fine) {
             return res.status(404).json({ message: "Fine not found" });
+        }
+
+        if (fine.fineStatus === 'Pending Authorization' || fine.fineStatus === 'Pending Management') {
+            try {
+                const liveDoc = await Fine.findById(fine._id);
+                const repaired = liveDoc ? await repairSkippedFineAccountsStage(liveDoc) : null;
+                if (repaired && repaired.fineStatus === 'Pending Accounts') {
+                    fine.fineStatus = repaired.fineStatus;
+                    fine.submittedTo = repaired.submittedTo;
+                    fine.workflow = repaired.workflow;
+                    relatedFines.forEach((sibling) => {
+                        sibling.fineStatus = repaired.fineStatus;
+                        sibling.submittedTo = repaired.submittedTo;
+                        sibling.workflow = repaired.workflow;
+                    });
+                }
+            } catch (repairErr) {
+                console.error(
+                    '[getFineById] Accounts-stage repair failed:',
+                    fine.fineId,
+                    repairErr?.message || repairErr,
+                );
+            }
         }
 
         // Visibility: Draft - only creator sees; Admin sees all

@@ -1,6 +1,6 @@
 import express from 'express';
 import { protect } from '../middleware/authMiddleware.js';
-import { requireAdmin } from '../middleware/permissionMiddleware.js';
+import { requireAdminOrFlowchartHr } from '../middleware/permissionMiddleware.js';
 import {
     getNotificationEmailPermissionAccess,
     getNotificationEmailPermissionMap,
@@ -10,9 +10,9 @@ import {
 
 const router = express.Router();
 
-router.get('/access', protect, requireAdmin, getNotificationEmailPermissionAccess);
-router.get('/', protect, requireAdmin, listNotificationEmailPermissions);
+router.get('/access', protect, getNotificationEmailPermissionAccess);
+router.get('/', protect, requireAdminOrFlowchartHr, listNotificationEmailPermissions);
 router.get('/map', protect, getNotificationEmailPermissionMap);
-router.patch('/', protect, requireAdmin, updateNotificationEmailPermission);
+router.patch('/', protect, requireAdminOrFlowchartHr, updateNotificationEmailPermission);
 
 export default router;

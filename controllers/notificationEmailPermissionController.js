@@ -4,11 +4,18 @@ import {
     clearNotificationEmailPermissionCache,
 } from '../utils/notificationEmailPermission.js';
 import { flattenNotificationEmailCatalog } from '../constants/notificationEmailCatalog.js';
+import { canManageNotificationEmailPermission } from '../utils/settingsInboxAccess.js';
 
 const ALLOWED_KEYS = new Set(flattenNotificationEmailCatalog().map((item) => item.key));
 
 export async function getNotificationEmailPermissionAccess(req, res) {
-    return res.status(200).json({ allowed: true });
+    try {
+        const allowed = await canManageNotificationEmailPermission(req);
+        return res.status(200).json({ allowed });
+    } catch (error) {
+        console.error('[NotificationEmailPermission] access check failed:', error?.message || error);
+        return res.status(200).json({ allowed: false });
+    }
 }
 
 export async function listNotificationEmailPermissions(req, res) {

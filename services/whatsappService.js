@@ -352,7 +352,101 @@ export function resolveWhatsAppAccountProbe(waMessageId, delivery = {}) {
     if (!id) return;
     const pending = pendingAccountProbes.get(id);
     if (!pending) return;
+    const status = String(delivery?.status || '').toLowerCase();
+    if (status === 'sent') return;
     pending.resolve(delivery || {});
+}
+
+const DELIVERED_STATUSES = new Set(['delivered', 'read', 'failed']);
+
+export async function waitForWhatsAppDelivery(messageId, { timeoutMs = 18000 } = {}) {
+    const id = String(messageId || '').trim();
+    if (!id) return { status: 'timeout' };
+
+    const WhatsAppMessage = (await import('../models/WhatsAppMessage.js')).default;
+
+    async function readStatus() {
+        const row = await WhatsAppMessage.findOne({ waMessageId: id }).select('status error').lean();
+        const status = String(row?.status || '').toLowerCase();
+        if (DELIVERED_STATUSES.has(status)) {
+            return { status, errorMessage: row?.error || '' };
+        }
+        return null;
+    }
+
+    const already = await readStatus();
+    if (already) return already;
+
+    return new Promise((resolve) => {
+        let settled = false;
+        const finish = (value) => {
+            if (settled) return;
+            settled = true;
+            clearTimeout(timer);
+            clearInterval(poll);
+            pendingAccountProbes.delete(id);
+            resolve(value);
+        };
+
+        const timer = setTimeout(() => finish({ status: 'timeout' }), timeoutMs);
+        const poll = setInterval(async () => {
+            try {
+                const row = await readStatus();
+                if (row) finish(row);
+            } catch {
+                // keep waiting until timeout
+            }
+        }, 500);
+
+        pendingAccountProbes.set(id, {
+            resolve: (delivery) => {
+                const status = String(delivery?.status || '').toLowerCase();
+                if (status === 'sent' || !status) return;
+                finish({
+                    status,
+                    errorCode: delivery?.errorCode,
+                    errorMessage: delivery?.errorMessage || '',
+                });
+            },
+        });
+    });
+}
+
+const VALIDATION_TEMPLATE_NAME = 'vega_digital_it_solution';
+
+export async function sendWhatsAppValidationTemplate(to, extras = {}) {
+    const firstName = String(extras.firstName || extras.contactName || 'there')
+        .replace(/[\r\n\t]+/g, ' ')
+        .trim()
+        .slice(0, 200) || 'there';
+    const templateText = await fetchTemplateBodyText(VALIDATION_TEMPLATE_NAME);
+    const placeholders = [...new Set(
+        [...String(templateText || '').matchAll(/\{\{(\d+)\}\}/g)].map((match) => Number(match[1])),
+    )];
+    const maxParam = placeholders.length ? Math.max(...placeholders) : 0;
+    const values = [firstName, 'Vega Digital IT Solution'];
+    const parameters = [];
+    for (let i = 1; i <= maxParam; i += 1) {
+        parameters.push({ type: 'text', text: values[i - 1] || firstName });
+    }
+    const components = parameters.length
+        ? [{ type: 'body', parameters }]
+        : (templateText
+            ? []
+            : [{
+                type: 'body',
+                parameters: [
+                    { type: 'text', text: firstName },
+                    { type: 'text', text: 'Vega Digital IT Solution' },
+                ],
+            }]);
+
+    return sendTemplateMessage(to, VALIDATION_TEMPLATE_NAME, 'en', components, {
+        source: extras.source || 'template',
+        actor: extras.actor || null,
+        employeeId: extras.employeeId || '',
+        contactName: extras.contactName || firstName,
+    });
 }
 
 /**

@@ -28,8 +28,10 @@ const FINE_LIST_SELECT = [
     'accountsPaymentPath',
     'awardedDate',
     'zohoBillId',
+    'zohoBillNumber',
     'vendorBillStatus',
     'zohoVendorPaymentId',
+    'zohoVendorPaymentNumber',
     'zohoOrganizationId',
     'createdAt',
     'updatedAt',
@@ -45,9 +47,11 @@ const FINE_LIST_SELECT = [
 function fillCompanyNameFromPopulate(fine) {
     if (!fine) return;
     const populatedName = fine.company?.name;
+    const shortName = String(fine.company?.nickName || '').trim();
     if (populatedName && (!fine.companyName || fine.companyName === 'N/A')) {
         fine.companyName = populatedName;
     }
+    if (shortName) fine.companyShortName = shortName;
 }
 
 function formatVehiclePlate(asset) {
@@ -220,7 +224,7 @@ export const getFines = async (req, res) => {
         const [fines, total] = await Promise.all([
             Fine.find(query)
                 .select(FINE_LIST_SELECT)
-                .populate('company', 'companyId _id name')
+                .populate('company', 'companyId _id name nickName')
                 .sort({ createdAt: -1 })
                 .skip(skip)
                 .limit(limitNum)
@@ -259,7 +263,7 @@ export const getFines = async (req, res) => {
                 )];
                 const employees = await EmployeeBasic.find({ employeeId: { $in: empIds } })
                     .select('employeeId company')
-                    .populate('company', 'name')
+                    .populate('company', 'name nickName')
                     .lean()
                     .maxTimeMS(8000);
                 const companyByEmpId = new Map(
@@ -270,6 +274,9 @@ export const getFines = async (req, res) => {
                     if (company?.name) {
                         fine.companyName = company.name;
                         if (!fine.company) fine.company = company._id;
+                    }
+                    if (company?.nickName) {
+                        fine.companyShortName = String(company.nickName).trim();
                     }
                 }
             } catch (companyFillErr) {

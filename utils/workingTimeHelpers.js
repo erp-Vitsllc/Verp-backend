@@ -196,7 +196,7 @@ export function dayScheduleToMinutes(day, which = 'start') {
     return hour * 60 + minute;
 }
 
-/** Extra punch hours convert to leave-eligibility days at 10 hours = 1 day. */
+/** Extra punch hours convert to leave-eligibility days only in full 10-hour blocks. Leftover hours stay as hours. */
 export const OVERTIME_HOURS_PER_DAY = 10;
 
 export function overtimeHoursFromPunch({ timeIn, timeOut, date, week }) {
@@ -225,7 +225,13 @@ export function overtimeHoursFromPunch({ timeIn, timeOut, date, week }) {
 export function overtimeHoursToDays(hours) {
     const h = Math.max(0, Number(hours) || 0);
     if (!h) return 0;
-    return Math.round((h / OVERTIME_HOURS_PER_DAY) * 100) / 100;
+    return Math.floor(h / OVERTIME_HOURS_PER_DAY + 1e-9);
+}
+
+export function overtimeHoursRemainder(hours) {
+    const h = Math.max(0, Number(hours) || 0);
+    const days = overtimeHoursToDays(h);
+    return Math.round((h - days * OVERTIME_HOURS_PER_DAY) * 100) / 100;
 }
 
 /** Sum overtime from attendance punches after VERP processing start. */

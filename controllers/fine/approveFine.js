@@ -86,18 +86,22 @@ export const approveFine = async (req, res) => {
 
         console.log("ApproveFine:", { fineId: fine.fineId, status: currentStatus, userId: req.user._id });
 
-        // --- STAGE 1: HR (Pending HR -> Pending Authorization / Management) ---
+        // --- STAGE 1: HR (Pending HR -> Pending Accounts) ---
         const isHRStage = currentStatus === 'Pending HR' || currentStatus === 'Pending Review' ||
             (currentStatus === 'Pending' && (!fine.workflow || fine.workflow.length === 0 || fine.workflow.some(w => w.status === 'Pending' && w.role === 'HR')));
 
         if (isHRStage) {
             if (await canActOnFine()) {
-                fine.fineStatus = 'Pending Authorization';
+                const { accountsHOD, accountsUser } = await resolveFineAccountsActor(fine);
+                if (!accountsHOD || !accountsUser) {
+                    return res.status(400).json({
+                        message: 'Cannot proceed. Accounts/Finance is not assigned in Flowchart. Please assign Accounts before HR can approve this fine.',
+                    });
+                }
+
+                fine.fineStatus = 'Pending Accounts';
                 fine.hrApprovedBy = req.user._id;
                 modified = true;
-
-                const { managementHOD, mgmtUser } = await resolveFineManagementActor(fine);
-                let nextApproverFound = false;
 
                 const hrEntry = fine.workflow?.find(w =>
                     w.status === 'Pending' &&
@@ -109,43 +113,35 @@ export const approveFine = async (req, res) => {
                     fine.workflow.push({ role: 'HR', assignedTo: req.user._id, status: 'Approved', assignedAt: new Date(), actionedAt: new Date() });
                 }
 
-                if (mgmtUser) {
-                    fine.submittedTo = mgmtUser._id;
-                    nextApproverFound = true;
-                    const nextStepExists = fine.workflow.some(w =>
-                        (w.role === 'Management' || w.role === 'CEO') && w.status === 'Pending'
-                    );
-                    if (!nextStepExists) {
-                        fine.workflow.push({
-                            role: 'Management',
-                            assignedTo: mgmtUser._id,
-                            status: 'Pending',
-                            assignedAt: new Date(),
-                        });
-                    }
-                } else {
-                    console.warn(`[Fine ${fine.fineId}] Management Approver NOT FOUND after HR. Releasing submittedTo.`);
-                    fine.submittedTo = null;
+                fine.submittedTo = accountsUser._id;
+                const nextStepExists = fine.workflow.some(w =>
+                    w.role === 'Accounts' && w.status === 'Pending'
+                );
+                if (!nextStepExists) {
+                    fine.workflow.push({
+                        role: 'Accounts',
+                        assignedTo: accountsUser._id,
+                        status: 'Pending',
+                        assignedAt: new Date(),
+                    });
                 }
 
                 for (const f of fines) {
-                    f.fineStatus = 'Pending Authorization';
+                    f.fineStatus = 'Pending Accounts';
                     f.hrApprovedBy = req.user._id;
                     f.submittedTo = fine.submittedTo;
                     f.workflow = fine.workflow;
                     await f.save();
                 }
 
-                console.log(`[Fine ${fine.fineId}] HR Approved. Next Management: ${nextApproverFound}`);
-                if (managementHOD) {
-                    const fineSnapshot = fine.toObject?.() ? fine.toObject() : { ...fine };
-                    runAfterResponse('approveFine-hr-email', () =>
-                        sendHODAuthorizationEmail('Fine', fineSnapshot, managementHOD, {
-                            name: req.user.name || `${req.user.firstName || ''} ${req.user.lastName || ''}`.trim() || 'HR',
-                            designation: 'HR',
-                        }),
-                    );
-                }
+                console.log(`[Fine ${fine.fineId}] HR Approved. Next Accounts: ${accountsHOD.employeeId}`);
+                const fineSnapshot = fine.toObject?.() ? fine.toObject() : { ...fine };
+                runAfterResponse('approveFine-hr-email', () =>
+                    sendHODAuthorizationEmail('Fine', fineSnapshot, accountsHOD, {
+                        name: req.user.name || `${req.user.firstName || ''} ${req.user.lastName || ''}`.trim() || 'HR',
+                        designation: 'HR',
+                    }),
+                );
             } else {
                 return res.status(403).json({ message: "Only the assigned HR approver can approve at this stage." });
             }

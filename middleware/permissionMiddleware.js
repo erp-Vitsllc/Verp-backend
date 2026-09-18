@@ -623,3 +623,43 @@ export const requireAdmin = async (req, res, next) => {
     }
 };
 
+/** Portal admin or active flowchart HR. */
+export const requireAdminOrFlowchartHr = async (req, res, next) => {
+    try {
+        const userId = req.user?.id;
+        if (!userId) {
+            return res.status(401).json({ message: "Not authorized, no user found" });
+        }
+        const { canManageNotificationEmailPermission } = await import("../utils/settingsInboxAccess.js");
+        if (await canManageNotificationEmailPermission(req)) {
+            return next();
+        }
+        return res.status(403).json({
+            message: "Access denied. Admin or flowchart HR permission is required.",
+        });
+    } catch (error) {
+        console.error("Error checking admin or flowchart HR status:", error);
+        return res.status(500).json({ message: "Error checking permissions" });
+    }
+};
+
+/** Admin, HR with employee view, or active flowchart HR — WhatsApp inbox. */
+export const requireWhatsAppInboxAccess = async (req, res, next) => {
+    try {
+        const userId = req.user?.id;
+        if (!userId) {
+            return res.status(401).json({ message: "Not authorized, no user found" });
+        }
+        const { canAccessWhatsAppInbox } = await import("../utils/settingsInboxAccess.js");
+        if (await canAccessWhatsAppInbox(req)) {
+            return next();
+        }
+        return res.status(403).json({
+            message: "Access denied. HR or admin permission is required to view WhatsApp messages.",
+        });
+    } catch (error) {
+        console.error("Error checking WhatsApp inbox access:", error);
+        return res.status(500).json({ message: "Error checking permissions" });
+    }
+};
+

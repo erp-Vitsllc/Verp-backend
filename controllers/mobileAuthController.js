@@ -144,6 +144,11 @@ export async function mobileLogin(req, res) {
       location: incomingDevice.location || null,
       ipAddress: incomingDevice.ipAddress || null,
     });
+    if (incomingDevice.latitude == null || incomingDevice.longitude == null) {
+      return res.status(400).json({
+        message: 'Location is off. Turn on location, then login.',
+      });
+    }
     const deviceDenied = mobileDeviceLoginDenied(user, incomingDevice, { isSystemAdmin: isAdminLogin });
     if (deviceDenied) {
       return res.status(403).json({ message: deviceDenied });

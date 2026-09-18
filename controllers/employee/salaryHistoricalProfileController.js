@@ -43,12 +43,14 @@ import {
     liveLeaveRecordsInProcessingWindow,
     salaryProcessingStartDay,
     summarizeAttendanceEligibility,
+    implicitUnauthorizedLeaveForSchedule,
     uniqueConsumingCycles,
     validateLeaveDates,
     consolidateCountOnlyLeaveRecords,
     validateVerpStart,
     workflowIsLocked,
     paidLeaveSalaryMutationError,
+    overtimeHoursToDays,
 } from '../../utils/salaryHistoricalCalculations.js';
 import { serializePayrollSettings, requireMainSalaryPolicy } from './payrollSettingsController.js';
 import { applySickAllowanceToLeaveRecords, latestAnnualLeaveEndFromLeaveRecords, leavePolicyEntitlements, resolveEmployeePayrollPolicy, sickDaysAfterAnnualLeave } from '../../utils/employeeLeavePolicy.js';
@@ -316,7 +318,7 @@ async function calcWorkingDays({ from, to, staffType }) {
     const endDate = fromKey(to);
     const calendarDays = isDateKey(from) && isDateKey(to) && to >= from ? inclusiveCalendarDays(from, to) : 0;
     if (!startDate || !endDate || endDate < startDate) {
-        return { workingDays: 0, weeklyOffs: 0, holidays: 0, calendarDays: 0 };
+        return { workingDays: 0, weeklyOffs: 0, holidays: 0, calendarDays: 0, workingDateKeys: [] };
     }
 
     const [workingTime, holidays] = await Promise.all([
@@ -334,6 +336,7 @@ async function calcWorkingDays({ from, to, staffType }) {
     let workingDays = 0;
     let weeklyOffs = 0;
     let holidayHits = 0;
+    const workingDateKeys = [];
     const cursor = new Date(startDate.getTime());
     const last = new Date(endDate.getTime());
     while (cursor <= last) {
@@ -341,11 +344,14 @@ async function calcWorkingDays({ from, to, staffType }) {
         const day = weekdayKey(cursor);
         if (holidayDates.has(key)) holidayHits += 1;
         else if (offKeys.has(day)) weeklyOffs += 1;
-        else workingDays += 1;
+        else {
+            workingDays += 1;
+            workingDateKeys.push(key);
+        }
         cursor.setDate(cursor.getDate() + 1);
     }
 
-    return { workingDays, weeklyOffs, holidays: holidayHits, calendarDays };
+    return { workingDays, weeklyOffs, holidays: holidayHits, calendarDays, workingDateKeys };
 }
 
 function dubaiDateKey(date = new Date()) {
@@ -382,7 +388,7 @@ async function loadLiveAttendanceEligibility({ employee, from, to, staffType }) 
         WorkingTime.findOne({}).lean(),
     ]);
     if (!clauses.length) {
-        return emptyLiveAttendance(periodStart, periodEnd, stats.workingDays);
+        return emptyLiveAttendance(periodStart, periodEnd, 0);
     }
 
     const rows = await Attendance.find({
@@ -391,11 +397,23 @@ async function loadLiveAttendanceEligibility({ employee, from, to, staffType }) 
     })
         .select('date statusKey leaveRequestStatus requestedStatusKey reason timeIn timeOut')
         .lean();
-    const live = summarizeAttendanceEligibility(rows);
+    const live = summarizeAttendanceEligibility(rows, { throughDate: periodEnd });
     const overtime = summarizePunchOvertime(rows, getWeekForStaffType(workingTime, staffType));
+    const coveredDates = new Set(
+        (rows || []).map((row) => String(row?.date || '').trim()).filter((date) => isDateKey(date)),
+    );
+    const implicitLeave = implicitUnauthorizedLeaveForSchedule({
+        scheduledDates: stats.workingDateKeys,
+        coveredDates,
+        throughDate: periodEnd,
+    });
     return {
-        workingDays: stats.workingDays,
-        leaveRecords: liveLeaveRecordsInProcessingWindow(live.leaveRecords, periodStart, periodEnd),
+        workingDays: live.workingDays,
+        leaveRecords: liveLeaveRecordsInProcessingWindow(
+            [...live.leaveRecords, ...implicitLeave],
+            periodStart,
+            periodEnd,
+        ),
         overtimeHours: overtime.hours,
         overtimeDays: overtime.days,
         overtimeRecords: overtime.overtimeRecords,
@@ -894,7 +912,7 @@ export async function buildPayload(req, employeeId, overlay = {}) {
         workingDays:
             stats.workingDays +
             (Number(liveAttendance.workingDays) || 0) +
-            (Number(liveAttendance.overtimeDays) || 0),
+            overtimeHoursToDays(Number(liveAttendance.overtimeHours) || 0),
         calendarDays: stats.calendarDays,
         leaveRecords: [...leaveRecords, ...(liveAttendance.leaveRecords || [])],
         annualLeaveRecords,

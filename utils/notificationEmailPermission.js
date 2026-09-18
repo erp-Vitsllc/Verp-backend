@@ -39,8 +39,8 @@ export async function loadNotificationEmailPermissionMap() {
         const key = String(row.eventKey || '').trim();
         if (!key) continue;
         map[key] = {
-            notification: row.notification !== false,
-            email: row.email !== false,
+            notification: true,
+            email: true,
             whatsapp: row.whatsapp !== false,
         };
     }
@@ -59,18 +59,12 @@ export async function getEventChannels(eventKey) {
     return map[key] ? { ...map[key] } : { ...DEFAULT_CHANNELS };
 }
 
-export async function isNotificationEnabledForType(dashboardType) {
-    const key = eventKeyForDashboardType(dashboardType);
-    if (!key) return true;
-    const channels = await getEventChannels(key);
-    return channels.notification !== false;
+export async function isNotificationEnabledForType() {
+    return true;
 }
 
-export async function isEmailEnabledForEvent(eventKey, emailType = '') {
-    const key = String(eventKey || '').trim() || eventKeyForEmailType(emailType);
-    if (!key) return true;
-    const channels = await getEventChannels(key);
-    return channels.email !== false;
+export async function isEmailEnabledForEvent() {
+    return true;
 }
 
 export function employeeCompanyEmail(employee) {
@@ -179,8 +173,8 @@ export async function buildPermissionCatalogView() {
             label: item.label,
             hint: item.hint,
             detail: item.detail,
-            notification: channels.notification !== false,
-            email: channels.email !== false,
+            notification: true,
+            email: true,
             whatsapp: channels.whatsapp !== false,
         });
         return groups;

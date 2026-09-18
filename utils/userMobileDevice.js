@@ -222,3 +222,73 @@ export function changeMobileDeviceOnUser(user) {
     user.markModified?.('mobileDevice');
     return { ok: true };
 }
+
+function deviceNameFromUserAgent(ua) {
+    const text = String(ua || '');
+    if (/Windows/i.test(text)) return 'Windows PC';
+    if (/Mac OS X|Macintosh/i.test(text)) return 'Mac';
+    if (/CrOS/i.test(text)) return 'Chromebook';
+    if (/Linux/i.test(text)) return 'Linux PC';
+    if (/Android/i.test(text)) return 'Android browser';
+    if (/iPhone|iPad|iPod/i.test(text)) return 'iOS browser';
+    return text ? 'Web browser' : '';
+}
+
+export function emptyWebLogin() {
+    return {
+        latitude: null,
+        longitude: null,
+        location: '',
+        ipAddress: '',
+        userAgent: '',
+        lastSeenAt: null,
+    };
+}
+
+export function serializeWebLogin(user) {
+    const stored = user?.webLogin && typeof user.webLogin === 'object' ? user.webLogin : {};
+    const coords = parseMobileDeviceCoordinates(stored);
+    const userAgent = String(stored.userAgent || '').trim();
+    const ipAddress = normalizeIp(stored.ipAddress) || '';
+    const location = String(stored.location || '').trim();
+    const hasSession = Boolean(coords || location || ipAddress || stored.lastSeenAt || userAgent);
+    return {
+        deviceName: deviceNameFromUserAgent(userAgent),
+        location: location || '',
+        latitude: coords?.latitude ?? null,
+        longitude: coords?.longitude ?? null,
+        ipAddress: hasSession ? (ipAddress || normalizeIp(user?.lastLoginIp)) : '',
+        userAgent,
+        lastSeenAt: stored.lastSeenAt || null,
+        hasSession,
+    };
+}
+
+export function recordWebLoginOnUser(user, incoming = {}) {
+    if (!user) return;
+    if (!user.webLogin || typeof user.webLogin !== 'object') {
+        user.webLogin = emptyWebLogin();
+    }
+    const lat = toFiniteNumber(incoming.latitude);
+    const lng = toFiniteNumber(incoming.longitude);
+    if (lat != null && lng != null) {
+        user.webLogin.latitude = lat;
+        user.webLogin.longitude = lng;
+        user.webLogin.location = String(incoming.location || incoming.label || `${lat}, ${lng}`).trim();
+    } else if (incoming.location) {
+        user.webLogin.location = String(incoming.location).trim();
+        const parsed = parseMobileDeviceCoordinates({ location: incoming.location });
+        if (parsed) {
+            user.webLogin.latitude = parsed.latitude;
+            user.webLogin.longitude = parsed.longitude;
+        }
+    }
+    if (incoming.ipAddress) {
+        user.webLogin.ipAddress = normalizeIp(incoming.ipAddress);
+    }
+    if (incoming.userAgent) {
+        user.webLogin.userAgent = String(incoming.userAgent).trim().slice(0, 240);
+    }
+    user.webLogin.lastSeenAt = new Date();
+    user.markModified?.('webLogin');
+}

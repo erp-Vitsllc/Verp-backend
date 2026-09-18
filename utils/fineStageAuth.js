@@ -263,3 +263,114 @@ export async function syncPendingFineAssigneeFromFlowchart(fineDoc) {
 
     return fineDoc;
 }
+
+function getFineBaseId(fineId = '') {
+    const parts = String(fineId).split('-');
+    if (parts.length > 3) return parts.slice(0, 3).join('-');
+    return fineId;
+}
+
+function accountsAlreadyApproved(fine) {
+    if (!fine) return false;
+    if (fine.accountsApprovedBy) return true;
+    return (fine.workflow || []).some((w) => w.role === 'Accounts' && w.status === 'Approved');
+}
+
+function hrAlreadyApproved(fine) {
+    if (!fine) return false;
+    if (fine.hrApprovedBy) return true;
+    return (fine.workflow || []).some((w) => w.role === 'HR' && w.status === 'Approved');
+}
+
+/**
+ * Fines that skipped Accounts after HR (went straight to Pending Authorization)
+ * must return to Accounts so the Accounts bell and Accept/Reject buttons work.
+ */
+export async function repairSkippedFineAccountsStage(fineDoc) {
+    if (!fineDoc) return fineDoc;
+
+    const status = String(fineDoc.fineStatus || '');
+    if (status !== 'Pending Authorization' && status !== 'Pending Management') {
+        return fineDoc;
+    }
+    if (accountsAlreadyApproved(fineDoc) || !hrAlreadyApproved(fineDoc)) {
+        return fineDoc;
+    }
+
+    const Fine = (await import('../models/Fine.js')).default;
+    const EmployeeBasic = (await import('../models/EmployeeBasic.js')).default;
+    const { resolveFineAccountsActor } = await import('./fineAccountsPaymentFlow.js');
+    const { syncDashboardAction } = await import('./syncDashboard.js');
+
+    const { accountsHOD, accountsUser } = await resolveFineAccountsActor(fineDoc);
+    if (!accountsUser?._id) {
+        console.warn(`[repairSkippedFineAccountsStage] No Accounts user for ${fineDoc.fineId}`);
+        return fineDoc;
+    }
+
+    const baseId = getFineBaseId(fineDoc.fineId);
+    const baseIdRegex = new RegExp(`^${baseId}(-[A-Z0-9]+)?$`, 'i');
+    const fines = await Fine.find({ fineId: baseIdRegex });
+    const primary = fines[0] || fineDoc;
+
+    const workflow = Array.isArray(primary.workflow) ? [...primary.workflow] : [];
+    const hrEntry = workflow.find((w) => w.role === 'HR' && w.status === 'Pending');
+    if (hrEntry) {
+        hrEntry.status = 'Approved';
+        hrEntry.actionedAt = new Date();
+    }
+
+    const nextWorkflow = workflow.filter(
+        (w) => !((w.role === 'Management' || w.role === 'CEO') && w.status === 'Pending'),
+    );
+    if (!nextWorkflow.some((w) => w.role === 'Accounts' && w.status === 'Pending')) {
+        nextWorkflow.push({
+            role: 'Accounts',
+            assignedTo: accountsUser._id,
+            status: 'Pending',
+            assignedAt: new Date(),
+        });
+    }
+
+    const workflowPayload = nextWorkflow.map((w) => (typeof w.toObject === 'function' ? w.toObject() : { ...w }));
+    for (const f of fines) {
+        f.fineStatus = 'Pending Accounts';
+        f.submittedTo = accountsUser._id;
+        f.workflow = workflowPayload;
+        await f.save();
+    }
+
+    try {
+        const targetEmpId = getTargetEmployeeIdFromFine(primary);
+        const subjectEmp = targetEmpId
+            ? await EmployeeBasic.findOne({ employeeId: targetEmpId })
+            : null;
+        const isGroup = fines.length > 1;
+        const reqType = isGroup ? 'Group Fine Request' : 'Fine';
+        const subjectName = isGroup ? `Group Fine - ${fines.length} Employees` : undefined;
+
+        await syncDashboardAction({
+            requestId: primary._id,
+            requestType: reqType,
+            assignedTo: null,
+            status: 'Approved',
+            subjectEmployee: subjectEmp,
+            subjectName,
+        });
+        await syncDashboardAction({
+            requestId: primary._id,
+            requestType: reqType,
+            assignedTo: accountsUser._id,
+            status: 'Pending',
+            subjectEmployee: subjectEmp,
+            subjectName,
+            extra1: primary.fineType,
+            extra2: `AED ${primary.fineAmount || 0}`,
+        });
+        console.log(`[repairSkippedFineAccountsStage] ${primary.fineId} → Pending Accounts (${accountsHOD?.employeeId || accountsUser._id})`);
+    } catch (syncErr) {
+        console.error('[repairSkippedFineAccountsStage] Dashboard sync failed:', syncErr?.message || syncErr);
+    }
+
+    return fines[0] || fineDoc;
+}

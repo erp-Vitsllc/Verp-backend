@@ -28,6 +28,7 @@ import {
     liveLeaveRecordsInProcessingWindow,
     salaryProcessingStartDay,
     summarizeAttendanceEligibility,
+    implicitUnauthorizedLeaveForSchedule,
     validateLeaveDates,
     validateVerpStart,
     workflowIsLocked,
@@ -37,9 +38,10 @@ import {
     resolveEntitlementCalculationStart,
     roundMoney,
     addCalendarMonths,
+    overtimeHoursToDays,
+    overtimeHoursRemainder,
     paidLeaveSalaryMutationError,
     isPaidLeaveSalaryCycle,
-    overtimeHoursToDays,
 } from './salaryHistoricalCalculations.js';
 
 describe('salary historical calculations', () => {
@@ -83,11 +85,13 @@ describe('salary historical calculations', () => {
             },
         ]);
         assert.equal(live.workingDays, 2);
-        assert.equal(live.leaveRecords.length, 8);
+        assert.equal(live.leaveRecords.length, 9);
         assert.deepEqual(
             live.leaveRecords.map((row) => row.leaveType).sort(),
-            ['annual', 'annual', 'authorized', 'authorized', 'holiday', 'sick', 'sick', 'unauthorized'],
+            ['annual', 'annual', 'authorized', 'authorized', 'holiday', 'sick', 'sick', 'unauthorized', 'unauthorized'],
         );
+        const unmarked = live.leaveRecords.find((row) => row.fromDate === '2026-08-08');
+        assert.equal(unmarked.leaveType, 'unauthorized');
         const holiday = live.leaveRecords.find((row) => row.fromDate === '2026-08-07');
         assert.equal(holiday.leaveType, 'holiday');
         assert.equal(holiday.source, 'system');
@@ -108,11 +112,39 @@ describe('salary historical calculations', () => {
         });
         assert.equal(result.workingDays, 42);
         assert.equal(result.authorizedDeduction, 6);
-        assert.equal(result.unauthorizedDeduction, 2);
+        assert.equal(result.unauthorizedDeduction, 4);
         assert.equal(result.sickDeduction, 2);
         assert.equal(result.annualDeduction, 2);
         assert.equal(result.holidayDays, 1);
-        assert.equal(result.eligibleBalance, 29);
+        assert.equal(result.eligibleBalance, 27);
+    });
+
+    it('treats calendar Absent as unauthorized leave, not a present working day', () => {
+        const live = summarizeAttendanceEligibility(
+            [
+                { date: '2026-09-01', statusKey: 'not_marked' },
+                { date: '2026-09-02', statusKey: 'absent' },
+                { date: '2026-09-03', statusKey: 'on_office' },
+                { date: '2026-09-18', statusKey: 'not_marked' },
+            ],
+            { throughDate: '2026-09-18' },
+        );
+        assert.equal(live.workingDays, 1);
+        assert.deepEqual(
+            live.leaveRecords.map((row) => row.fromDate).sort(),
+            ['2026-09-01', '2026-09-02'],
+        );
+        assert.ok(live.leaveRecords.every((row) => row.leaveType === 'unauthorized'));
+
+        const implicit = implicitUnauthorizedLeaveForSchedule({
+            scheduledDates: ['2026-09-01', '2026-09-04', '2026-09-18'],
+            coveredDates: ['2026-09-01', '2026-09-02', '2026-09-03', '2026-09-18'],
+            throughDate: '2026-09-18',
+        });
+        assert.deepEqual(
+            implicit.map((row) => row.fromDate),
+            ['2026-09-04'],
+        );
     });
 
     it('lists system leave and holidays only after the salary processing month starts', () => {
@@ -1119,11 +1151,17 @@ describe('annual leave salary and ticket entitlements', () => {
         );
     });
 
-    it('converts overtime hours to days at 10 hours = 1 day', () => {
+    it('converts overtime hours to days only in full 10-hour blocks', () => {
         assert.equal(overtimeHoursToDays(0), 0);
+        assert.equal(overtimeHoursToDays(9), 0);
         assert.equal(overtimeHoursToDays(10), 1);
-        assert.equal(overtimeHoursToDays(5), 0.5);
-        assert.equal(overtimeHoursToDays(15), 1.5);
-        assert.equal(overtimeHoursToDays(12.5), 1.25);
+        assert.equal(overtimeHoursToDays(5), 0);
+        assert.equal(overtimeHoursToDays(15), 1);
+        assert.equal(overtimeHoursToDays(12.5), 1);
+        assert.equal(overtimeHoursToDays(20), 2);
+        assert.equal(overtimeHoursRemainder(5), 5);
+        assert.equal(overtimeHoursRemainder(15), 5);
+        assert.equal(overtimeHoursRemainder(12.5), 2.5);
+        assert.equal(overtimeHoursRemainder(20), 0);
     });
 });

@@ -57,6 +57,15 @@ const userSchema = new mongoose.Schema(
                 default: 'not_fixed',
             },
         },
+        /** Latest website (laptop/browser) login GPS — separate from mobile device lock. */
+        webLogin: {
+            latitude: { type: Number, default: null },
+            longitude: { type: Number, default: null },
+            location: { type: String, default: '', trim: true },
+            ipAddress: { type: String, default: '', trim: true },
+            userAgent: { type: String, default: '', trim: true },
+            lastSeenAt: { type: Date, default: null },
+        },
         passwordExpiryDate: { type: Date, default: null }, // Password expires in 180 days
         passwordHistory: [{ type: String }], // Array of hashed previous passwords
 

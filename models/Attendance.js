@@ -71,6 +71,34 @@ const attendanceSchema = new mongoose.Schema(
             default: '',
             trim: true,
         },
+        /** app = mobile dashboard punch, web = website dashboard punch, manual = Mark Attendance modal */
+        punchSource: {
+            type: String,
+            enum: ['', 'app', 'web', 'manual'],
+            default: '',
+            trim: true,
+            index: true,
+        },
+        checkOutSource: {
+            type: String,
+            enum: ['', 'app', 'web', 'manual'],
+            default: '',
+            trim: true,
+        },
+        checkInLocation: {
+            latitude: { type: Number, default: null },
+            longitude: { type: Number, default: null },
+            accuracy: { type: Number, default: null },
+            label: { type: String, default: '', trim: true },
+            source: { type: String, enum: ['', 'app', 'web', 'manual'], default: '', trim: true },
+        },
+        checkOutLocation: {
+            latitude: { type: Number, default: null },
+            longitude: { type: Number, default: null },
+            accuracy: { type: Number, default: null },
+            label: { type: String, default: '', trim: true },
+            source: { type: String, enum: ['', 'app', 'web', 'manual'], default: '', trim: true },
+        },
         reason: {
             type: String,
             default: '',

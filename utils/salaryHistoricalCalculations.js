@@ -570,6 +570,9 @@ export const LIVE_WORKING_STATUS_KEYS = new Set([
     'mispunch',
 ]);
 
+/** Calendar Absent (no punch) — not present, same bucket as unauthorized leave. */
+export const ABSENT_STATUS_KEYS = new Set(['not_marked', 'absent']);
+
 export const LIVE_LEAVE_STATUS_MAP = {
     authorized_leave: 'authorized',
     unauthorized_leave: 'unauthorized',
@@ -578,6 +581,53 @@ export const LIVE_LEAVE_STATUS_MAP = {
     compoff_leave: 'annual',
     holiday: 'holiday',
 };
+
+function systemDayLeaveRecord(date, leaveType, status = 'approved', remarks = '') {
+    return {
+        leaveType,
+        fromDate: date,
+        toDate: date,
+        eligibleWorkingDays: 1,
+        actualDays: 1,
+        calendarDays: 1,
+        source: 'system',
+        status,
+        remarks,
+    };
+}
+
+/** Past days are closed; `throughDate` (today) is still open for a punch. */
+export function isClosedAttendanceDay(date, throughDate) {
+    const day = String(date || '').trim();
+    if (!isDateKey(day)) return false;
+    const asOf = String(throughDate || '').trim();
+    if (!isDateKey(asOf)) return true;
+    return day < asOf;
+}
+
+/** Scheduled work days with no attendance row count as unauthorized leave. */
+export function implicitUnauthorizedLeaveForSchedule({
+    scheduledDates = [],
+    coveredDates = [],
+    throughDate,
+} = {}) {
+    const covered =
+        coveredDates instanceof Set
+            ? coveredDates
+            : new Set(
+                  (Array.isArray(coveredDates) ? coveredDates : []).map((value) =>
+                      String(value || '').trim(),
+                  ),
+              );
+    const records = [];
+    for (const date of scheduledDates || []) {
+        const key = String(date || '').trim();
+        if (!isDateKey(key) || covered.has(key)) continue;
+        if (!isClosedAttendanceDay(key, throughDate)) continue;
+        records.push(systemDayLeaveRecord(key, 'unauthorized'));
+    }
+    return records;
+}
 
 export const OWNED_LEAVE_REQUEST_STATUSES = new Set(['approved', 'pending']);
 
@@ -599,10 +649,11 @@ export function resolveOwnedAttendanceLeave(row) {
 }
 
 /**
- * Map daily attendance rows (after VERP start) into working days + leave deductions.
+ * Map daily attendance rows (after VERP start) into present working days + leave deductions.
+ * Absent / not_marked days are unauthorized leave, not working days.
  * Policy multipliers are applied later by calculateHistoricalEligibility.
  */
-export function summarizeAttendanceEligibility(rows = []) {
+export function summarizeAttendanceEligibility(rows = [], { throughDate } = {}) {
     const byDate = new Map();
     (Array.isArray(rows) ? rows : []).forEach((row) => {
         const date = String(row?.date || '').trim();
@@ -613,35 +664,38 @@ export function summarizeAttendanceEligibility(rows = []) {
     let workingDays = 0;
     const leaveRecords = [];
     for (const row of byDate.values()) {
+        const date = String(row.date).trim();
+        const remarks = String(row?.reason || '').trim();
         const owned = resolveOwnedAttendanceLeave(row);
         if (owned) {
-            const date = String(row.date).trim();
-            leaveRecords.push({
-                leaveType: owned.leaveType,
-                fromDate: date,
-                toDate: date,
-                eligibleWorkingDays: 1,
-                actualDays: 1,
-                calendarDays: 1,
-                source: 'system',
-                status: owned.status,
-                remarks: String(row?.reason || '').trim(),
-            });
+            leaveRecords.push(systemDayLeaveRecord(date, owned.leaveType, owned.status, remarks));
             continue;
         }
         const key = String(row?.statusKey || '').trim();
-        if (LIVE_WORKING_STATUS_KEYS.has(key)) workingDays += 1;
+        if (LIVE_WORKING_STATUS_KEYS.has(key)) {
+            workingDays += 1;
+            continue;
+        }
+        if (ABSENT_STATUS_KEYS.has(key) && isClosedAttendanceDay(date, throughDate)) {
+            leaveRecords.push(systemDayLeaveRecord(date, 'unauthorized', 'approved', remarks));
+        }
     }
     return { workingDays, leaveRecords };
 }
 
-/** Extra punch hours after VERP start convert to qualifying days at 10 hours = 1 day. */
+/** Extra punch hours after VERP start convert to qualifying days only in full 10-hour blocks. Leftover hours stay as hours. */
 export const OVERTIME_HOURS_PER_DAY = 10;
 
 export function overtimeHoursToDays(hours) {
     const h = Math.max(0, Number(hours) || 0);
     if (!h) return 0;
-    return Math.round((h / OVERTIME_HOURS_PER_DAY) * 100) / 100;
+    return Math.floor(h / OVERTIME_HOURS_PER_DAY + 1e-9);
+}
+
+export function overtimeHoursRemainder(hours) {
+    const h = Math.max(0, Number(hours) || 0);
+    const days = overtimeHoursToDays(h);
+    return Math.round((h - days * OVERTIME_HOURS_PER_DAY) * 100) / 100;
 }
 
 export function calculateHistoricalEligibility({

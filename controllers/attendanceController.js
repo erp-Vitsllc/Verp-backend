@@ -37,6 +37,14 @@ import {
     notifyPrimaryReporteeOfLeaveRequest,
 } from '../utils/notifyLeaveDashboardRequest.js';
 import {
+    parsePunchLocation,
+    resolvePunchSource,
+} from '../utils/attendancePunchMeta.js';
+import {
+    loadPunchContactFlags,
+    rejectIfMissingPunchContact,
+} from '../utils/attendanceContactGate.js';
+import {
     daysUntilProcessingStart,
     firstOfProcessingMonth,
     isSalaryMonthOpen,
@@ -877,7 +885,13 @@ export async function markAttendance(req, res) {
                         reason,
                         attachmentName: String(raw?.attachmentName || '').trim(),
                         approvalStatus: approvalStatusForMark(finalStatusKey),
+                        punchSource: 'manual',
+                        checkOutSource: timeOut ? 'manual' : '',
                         markedBy,
+                    },
+                    $unset: {
+                        checkInLocation: 1,
+                        checkOutLocation: 1,
                     },
                 },
                 { upsert: true, new: true, setDefaultsOnInsert: true },
@@ -921,7 +935,7 @@ export async function getMyAttendanceMonth(req, res) {
                 }
             }
             const target = await EmployeeBasic.findById(forEmployeeId)
-                .select('_id employeeId firstName lastName staffType')
+                .select('_id employeeId firstName lastName staffType companyEmail')
                 .lean();
             if (!target) {
                 return res.status(404).json({ message: 'Employee not found.' });
@@ -929,7 +943,7 @@ export async function getMyAttendanceMonth(req, res) {
             employee = target;
         } else if (self) {
             employee = await EmployeeBasic.findById(self._id)
-                .select('_id employeeId firstName lastName staffType')
+                .select('_id employeeId firstName lastName staffType companyEmail')
                 .lean();
             if (!employee) employee = self;
         }
@@ -959,12 +973,19 @@ export async function getMyAttendanceMonth(req, res) {
         const staffType = normalizeStaffType(employee.staffType);
 
         const requestedMonth = `${year}-${String(monthNum).padStart(2, '0')}`;
-        const gate = await loadSalaryAttendanceGate(employee, { monthKey: requestedMonth });
+        const [gate, contactGate] = await Promise.all([
+            loadSalaryAttendanceGate(employee, { monthKey: requestedMonth }),
+            loadPunchContactFlags(employee),
+        ]);
         const employeePayload = {
             id: employeeMongoId,
             employeeId: employee.employeeId,
             name: [employee.firstName, employee.lastName].filter(Boolean).join(' ').trim(),
             staffType,
+            hasCompanyEmail: contactGate.hasCompanyEmail,
+            hasWhatsappNumber: contactGate.hasWhatsappNumber,
+            portalApp: contactGate.portalApp,
+            web: contactGate.web,
         };
         if (gate.attendanceLocked) {
             return res.status(200).json({
@@ -975,6 +996,7 @@ export async function getMyAttendanceMonth(req, res) {
                 today: todayKey,
                 isSelf,
                 employee: employeePayload,
+                contactGate,
                 offWeekdays: [],
                 workingTime: { site: {}, office: {}, extra: {} },
                 records: [],
@@ -994,6 +1016,7 @@ export async function getMyAttendanceMonth(req, res) {
                 today: todayKey,
                 isSelf,
                 employee: employeePayload,
+                contactGate,
                 offWeekdays: [],
                 workingTime: { site: {}, office: {}, extra: {} },
                 records: [],
@@ -1032,6 +1055,7 @@ export async function getMyAttendanceMonth(req, res) {
             today: todayKey,
             isSelf,
             employee: employeePayload,
+            contactGate,
             offWeekdays,
             workingTime: {
                 site: workingTime.site,
@@ -1574,7 +1598,7 @@ async function resolveMarkTargetEmployee(req) {
     }
 
     const target = await EmployeeBasic.findById(forEmployeeId)
-        .select('_id employeeId firstName lastName staffType')
+        .select('_id employeeId firstName lastName staffType companyEmail')
         .lean();
     if (!target) {
         return { error: { status: 404, message: 'Employee not found.' } };
@@ -1634,25 +1658,39 @@ export async function checkInMyAttendance(req, res) {
             console.error('[checkInMyAttendance] schedule lookup failed:', scheduleErr);
         }
 
+        const punchSource = resolvePunchSource(req, 'web');
+        if (await rejectIfMissingPunchContact(res, employee, punchSource, 'check in')) return;
+        const checkInLocation = parsePunchLocation(req.body, punchSource);
+        if (!checkInLocation) {
+            return res.status(400).json({
+                message: 'Location is off. Turn on location, then check in.',
+            });
+        }
+        const checkInSet = {
+            date,
+            employeeMongoId,
+            employeeId: String(employee.employeeId || ''),
+            employeeName,
+            statusKey,
+            statusLabel,
+            timeIn,
+            timeOut: '',
+            reason,
+            attachmentName: existing?.attachmentName || '',
+            approvalStatus: approvalStatusForMark(statusKey),
+            punchSource,
+            checkOutSource: '',
+            markedBy: req.user?.id || null,
+            checkInLocation,
+        };
+
         // Self check-in is allowed even if HR previously marked leave for the day —
         // checking in means the employee is present and starts the timer.
         const doc = await Attendance.findOneAndUpdate(
             { date, employeeMongoId },
             {
-                $set: {
-                    date,
-                    employeeMongoId,
-                    employeeId: String(employee.employeeId || ''),
-                    employeeName,
-                    statusKey,
-                    statusLabel,
-                    timeIn,
-                    timeOut: '',
-                    reason,
-                    attachmentName: existing?.attachmentName || '',
-                    approvalStatus: approvalStatusForMark(statusKey),
-                    markedBy: req.user?.id || null,
-                },
+                $set: checkInSet,
+                $unset: { checkOutLocation: 1 },
             },
             { upsert: true, new: true, setDefaultsOnInsert: true },
         );
@@ -1701,6 +1739,17 @@ export async function checkOutMyAttendance(req, res) {
 
         existing.timeOut = timeOut;
         existing.markedBy = req.user?.id || existing.markedBy || null;
+        const punchSource = resolvePunchSource(req, 'web');
+        if (await rejectIfMissingPunchContact(res, employee, punchSource, 'check out')) return;
+        existing.checkOutSource = punchSource;
+        if (!existing.punchSource) existing.punchSource = punchSource;
+        const checkOutLocation = parsePunchLocation(req.body, punchSource);
+        if (!checkOutLocation) {
+            return res.status(400).json({
+                message: 'Location is off. Turn on location, then check out.',
+            });
+        }
+        existing.checkOutLocation = checkOutLocation;
 
         const wasLate = existing.statusKey === 'late_arrived';
         const lateReason = wasLate ? String(existing.reason || '').trim() : '';
@@ -1901,7 +1950,13 @@ export async function markTeamAttendance(req, res) {
                         reason: finalReason,
                         attachmentName,
                         approvalStatus: approvalStatusForMark(finalStatusKey),
+                        punchSource: 'manual',
+                        checkOutSource: timeOut ? 'manual' : '',
                         markedBy,
+                    },
+                    $unset: {
+                        checkInLocation: 1,
+                        checkOutLocation: 1,
                     },
                 },
                 { upsert: true, new: true, setDefaultsOnInsert: true },

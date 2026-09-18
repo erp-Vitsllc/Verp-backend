@@ -2,6 +2,7 @@ import User from "../../models/User.js";
 import { resolveFrontendBaseUrl, emailFrontendUrl } from '../../utils/resolveFrontendBaseUrl.js';
 import Group from "../../models/Group.js";
 import EmployeeBasic from "../../models/EmployeeBasic.js";
+import { loginThroughFromBody } from "../../utils/loginThrough.js";
 import bcrypt from "bcryptjs";
 import nodemailer from "nodemailer";
 import jwt from "jsonwebtoken";
@@ -88,7 +89,8 @@ const updateUserHandler = async (req, res) => {
             group,
             status,
             enablePortalAccess,
-            isAdmin
+            isAdmin,
+            loginThrough,
         } = req.body;
 
         // Type validation
@@ -353,11 +355,28 @@ const updateUserHandler = async (req, res) => {
             }
         }
 
+        let syncedLoginThrough = null;
         if (updatedUser.employeeId) {
             try {
                 const syncData = {};
                 if (updateData.companyEmail !== undefined) syncData.companyEmail = updateData.companyEmail;
                 if (updateData.enablePortalAccess !== undefined) syncData.enablePortalAccess = updateData.enablePortalAccess;
+
+                if (loginThrough !== undefined) {
+                    if (isSystemAdmin) {
+                        return res.status(400).json({
+                            message: "System admin always has App and Web access.",
+                        });
+                    }
+                    const employee = await EmployeeBasic.findOne({ employeeId: updatedUser.employeeId })
+                        .select("loginThrough")
+                        .lean();
+                    if (!employee) {
+                        return res.status(400).json({ message: "Employee not found" });
+                    }
+                    syncedLoginThrough = loginThroughFromBody({ loginThrough }, employee);
+                    syncData.loginThrough = syncedLoginThrough;
+                }
 
                 if (Object.keys(syncData).length > 0) {
                     await EmployeeBasic.findOneAndUpdate(
@@ -368,11 +387,22 @@ const updateUserHandler = async (req, res) => {
             } catch (err) {
                 console.error('[updateUser] Error syncing data to Employee record for:', updatedUser.employeeId, err);
             }
+        } else if (loginThrough !== undefined && !isSystemAdmin) {
+            return res.status(400).json({
+                message: "Link an employee before changing App or Web access.",
+            });
+        }
+
+        const userPayload = updatedUser.toObject ? updatedUser.toObject() : { ...updatedUser };
+        if (isSystemAdmin) {
+            userPayload.loginThrough = { portalApp: true, web: true };
+        } else if (syncedLoginThrough) {
+            userPayload.loginThrough = syncedLoginThrough;
         }
 
         return res.status(200).json({
             message: "User updated successfully",
-            user: updatedUser,
+            user: userPayload,
         });
     } catch (error) {
         console.error('Error updating user:', error);

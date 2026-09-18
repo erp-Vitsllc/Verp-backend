@@ -1,4 +1,4 @@
-import { checkWhatsAppConfiguration, checkWhatsAppAccount, sendTextMessage, sendTemplateMessage, getWhatsAppWabaSubscribeResult, WHATSAPP_NOT_REGISTERED_ERROR, resolveWhatsAppAccountProbe } from '../../services/whatsappService.js';
+import { checkWhatsAppConfiguration, checkWhatsAppAccount, sendTextMessage, sendTemplateMessage, sendWhatsAppValidationTemplate, waitForWhatsAppDelivery, getWhatsAppWabaSubscribeResult, resolveWhatsAppAccountProbe } from '../../services/whatsappService.js';
 import { getWhatsAppConfig, isWhatsAppEnabled } from '../../config/whatsapp.js';
 import { isValidWhatsAppPhone, normalizeWhatsAppPhone, whatsAppPhoneKeys } from '../../utils/normalizeWhatsAppPhone.js';
 import { isAutoWhatsAppSource } from '../../utils/whatsappMessageLog.js';
@@ -6,6 +6,7 @@ import { getWhatsAppWebhookHealth, rememberWhatsAppWebhook } from '../../utils/w
 import WhatsAppMessage from '../../models/WhatsAppMessage.js';
 import EmployeeBasic from '../../models/EmployeeBasic.js';
 import EmployeeContact from '../../models/EmployeeContact.js';
+import { canAccessWhatsAppInbox } from '../../utils/settingsInboxAccess.js';
 import mongoose from 'mongoose';
 
 function hubQuery(req, key) {
@@ -251,10 +252,11 @@ export async function postWhatsAppCheckNumber(req, res) {
     try {
         const phone = normalizeWhatsAppPhone(req.body?.phone || req.body?.whatsappNumber || '');
         if (!phone) {
-            return res.status(200).json({
-                success: true,
-                onWhatsApp: null,
-                skipped: true,
+            return res.status(400).json({
+                success: false,
+                onWhatsApp: false,
+                error: 'Please enter a WhatsApp number',
+                field: 'whatsappNumber',
             });
         }
         if (!isValidWhatsAppPhone(phone)) {
@@ -267,41 +269,60 @@ export async function postWhatsAppCheckNumber(req, res) {
         }
 
         if (!isWhatsAppEnabled()) {
-            return res.status(200).json({
-                success: true,
-                onWhatsApp: null,
-                skipped: true,
-                checkUnavailable: true,
-            });
-        }
-
-        const account = await checkWhatsAppAccount(phone);
-        if (account.onWhatsApp === true) {
-            return res.status(200).json({
-                success: true,
-                onWhatsApp: true,
-            });
-        }
-        if (account.onWhatsApp === false && !account.checkUnavailable) {
             return res.status(400).json({
                 success: false,
                 onWhatsApp: false,
-                error: account.error || WHATSAPP_NOT_REGISTERED_ERROR,
+                error: 'WhatsApp validation is unavailable',
                 field: 'whatsappNumber',
             });
         }
 
-        return res.status(200).json({
-            success: true,
-            onWhatsApp: null,
-            checkUnavailable: true,
+        const firstName = String(req.body?.firstName || req.body?.name || 'there')
+            .replace(/[\r\n\t]+/g, ' ')
+            .trim()
+            .slice(0, 200) || 'there';
+
+        const result = await sendWhatsAppValidationTemplate(phone, {
+            firstName,
+            actor: req.user,
+            employeeId: String(req.body?.employeeId || '').trim(),
+            contactName: firstName,
+        });
+        if (!result.success) {
+            return res.status(400).json({
+                success: false,
+                onWhatsApp: false,
+                error: isNotOnWhatsAppSendError(result)
+                    ? 'Not a valid WhatsApp number'
+                    : publicSendError(result),
+                field: 'whatsappNumber',
+            });
+        }
+
+        const delivery = await waitForWhatsAppDelivery(result.messageId, { timeoutMs: 18000 });
+        const status = String(delivery?.status || '').toLowerCase();
+        if (status === 'delivered' || status === 'read') {
+            return res.status(200).json({
+                success: true,
+                onWhatsApp: true,
+                delivered: true,
+                messageId: result.messageId || '',
+            });
+        }
+
+        return res.status(400).json({
+            success: false,
+            onWhatsApp: false,
+            error: 'Not a valid WhatsApp number',
+            field: 'whatsappNumber',
         });
     } catch (error) {
         console.error('[WhatsApp] number check failed:', error?.message || error);
-        return res.status(200).json({
-            success: true,
-            onWhatsApp: null,
-            checkUnavailable: true,
+        return res.status(400).json({
+            success: false,
+            onWhatsApp: false,
+            error: 'Not a valid WhatsApp number',
+            field: 'whatsappNumber',
         });
     }
 }
@@ -559,8 +580,14 @@ function sourceFilter(source) {
     return {};
 }
 
-export function getWhatsAppInboxAccess(req, res) {
-    return res.status(200).json({ allowed: true });
+export async function getWhatsAppInboxAccess(req, res) {
+    try {
+        const allowed = await canAccessWhatsAppInbox(req);
+        return res.status(200).json({ allowed });
+    } catch (error) {
+        console.error('[WhatsApp] access check failed:', error?.message || error);
+        return res.status(200).json({ allowed: false });
+    }
 }
 
 export async function listWhatsAppConversations(req, res) {

@@ -5,6 +5,8 @@ import EmployeeBasic from "../models/EmployeeBasic.js";
 import { getUserPermissions } from "../services/permissionService.js";
 import { getClientIp, recordActivityAsync } from "../utils/activityLog.js";
 import { normalizeLoginThrough } from "../utils/loginThrough.js";
+import { parsePunchLocation } from "../utils/attendancePunchMeta.js";
+import { recordWebLoginOnUser } from "../utils/userMobileDevice.js";
 
 
 export const login = async (req, res) => {
@@ -182,6 +184,13 @@ export const login = async (req, res) => {
             return res.status(401).json({ message: "Invalid credentials" });
         }
 
+        const webLocation = parsePunchLocation(req.body, 'web');
+        if (!webLocation) {
+            return res.status(400).json({
+                message: 'Location is off. Turn on location, then login.',
+            });
+        }
+
         // Login success - Reset attempts and lockout
         if (!isAdminLogin) {
             user.loginAttempts = 0;
@@ -194,10 +203,17 @@ export const login = async (req, res) => {
         // Extract permissions object from the response
         const permissions = permissionData?.permissions || {};
 
-        // Update last login
+        // Update last login + laptop/browser GPS for the user details page
         const loginIp = getClientIp(req);
         user.lastLogin = new Date();
         user.lastLoginIp = loginIp || user.lastLoginIp || '';
+        recordWebLoginOnUser(user, {
+            latitude: webLocation.latitude,
+            longitude: webLocation.longitude,
+            location: webLocation.label || '',
+            ipAddress: loginIp,
+            userAgent: req.headers?.['user-agent'] || '',
+        });
         await user.save();
 
         // Long-lived JWT; session end is enforced by frontend idle logout (1 hour of inactivity).
