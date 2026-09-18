@@ -109,13 +109,26 @@ export function serializeMobileDevice(user) {
 
 export function readMobileDeviceFromRequest(req) {
     const body = req?.body && typeof req.body === 'object' ? req.body : {};
+    const nested =
+        body.location && typeof body.location === 'object' && !Array.isArray(body.location)
+            ? body.location
+            : {};
     const deviceId = String(body.deviceId || body.deviceID || '').trim();
     const deviceName = String(body.deviceName || body.device || '').trim();
-    let location = String(body.location || body.deviceLocation || '').trim();
+    let location =
+        typeof body.location === 'string'
+            ? body.location.trim()
+            : String(body.deviceLocation || nested.label || '').trim();
     const coords = parseMobileDeviceCoordinates({
         location,
-        latitude: body.latitude ?? body.lat,
-        longitude: body.longitude ?? body.lng ?? body.lon,
+        latitude: body.latitude ?? body.lat ?? nested.latitude ?? nested.lat,
+        longitude:
+            body.longitude ??
+            body.lng ??
+            body.lon ??
+            nested.longitude ??
+            nested.lng ??
+            nested.lon,
     });
     if (!location && coords) {
         location = `${coords.latitude}, ${coords.longitude}`;
