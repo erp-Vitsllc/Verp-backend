@@ -3,6 +3,7 @@ import NotificationEmailPermission from '../models/NotificationEmailPermission.j
 import EmployeeContact from '../models/EmployeeContact.js';
 import {
     flattenNotificationEmailCatalog,
+    flattenWhatsAppPermissionPageCatalog,
     eventKeyForDashboardType,
     eventKeyForEmailType,
 } from '../constants/notificationEmailCatalog.js';
@@ -156,7 +157,7 @@ export async function deliverEmployeePaidMessage({
 
 export async function buildPermissionCatalogView() {
     const map = await loadNotificationEmailPermissionMap();
-    return flattenNotificationEmailCatalog().reduce((groups, item) => {
+    return flattenWhatsAppPermissionPageCatalog().reduce((groups, item) => {
         let group = groups.find((g) => g.group === item.group);
         if (!group) {
             group = { group: item.group, modules: [] };

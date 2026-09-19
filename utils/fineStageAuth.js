@@ -194,74 +194,207 @@ export function getFlowchartEmployeeIdForRole(fine, expectedRole) {
     return null;
 }
 
+const FINE_INBOX_PENDING_STATUSES = [
+    'Pending HR',
+    'Pending Review',
+    'Pending Accounts',
+    'Pending Finance',
+    'Pending Authorization',
+    'Pending Management',
+    'Pending',
+];
+
+async function upsertFineApprovalDashboardRow(fineDoc, assignedTo, requestType = 'Fine', keepEmpId = null) {
+    if (!fineDoc || !assignedTo) return;
+    const EmployeeBasic = (await import('../models/EmployeeBasic.js')).default;
+    const DashboardAction = (await import('../models/DashboardAction.js')).default;
+    const { syncDashboardAction } = await import('./syncDashboard.js');
+    const targetEmpId = getTargetEmployeeIdFromFine(fineDoc);
+    const subjectEmp = targetEmpId
+        ? await EmployeeBasic.findOne({ employeeId: targetEmpId })
+        : null;
+
+    await syncDashboardAction({
+        requestId: fineDoc._id,
+        requestType,
+        assignedTo,
+        status: 'Pending',
+        subjectEmployee: subjectEmp,
+        requestedByName: fineDoc.createdBy?.name || '',
+        extra1: fineDoc.fineType,
+        extra2: `AED ${fineDoc.fineAmount || 0}`,
+    });
+
+    if (keepEmpId) {
+        await DashboardAction.updateMany(
+            {
+                requestId: fineDoc._id,
+                requestType: { $in: ['Fine', 'Group Fine Request'] },
+                status: 'Pending',
+                assignedToEmpId: { $ne: keepEmpId },
+            },
+            {
+                $set: {
+                    status: 'Dismissed',
+                    actionedDate: new Date(),
+                    comment: 'Reassigned to current Fine approver',
+                },
+            },
+        );
+    }
+}
+
 /**
  * When flowchart HR/Accounts/Management is reassigned, update pending workflow + dashboard
  * so the new assignee gets actions (not the old stored user id).
+ * Always upserts the inbox row — missing DashboardAction is why Accounts bells stay empty
+ * even when Approve/Reject still works via live flowchart HOD.
  */
-export async function syncPendingFineAssigneeFromFlowchart(fineDoc) {
+export async function syncPendingFineAssigneeFromFlowchart(fineDoc, { requestType = 'Fine', assignee: presetAssignee } = {}) {
     if (!fineDoc) return fineDoc;
+    if (!FINE_INBOX_PENDING_STATUSES.includes(fineDoc.fineStatus)) return fineDoc;
 
-    const pendingStatuses = [
-        'Pending HR',
-        'Pending Review',
-        'Pending Accounts',
-        'Pending Finance',
-        'Pending Authorization',
-        'Pending Management',
-        'Pending',
-    ];
-    if (!pendingStatuses.includes(fineDoc.fineStatus)) return fineDoc;
+    const assignee = presetAssignee || await resolveCurrentStageAssignee(fineDoc);
+    const assignedToId = assignee?.userId || assignee?.employeeObjectId;
+    if (!assignedToId) return fineDoc;
 
-    const assignee = await resolveCurrentStageAssignee(fineDoc);
-    if (!assignee?.userId) return fineDoc;
-
-    const workflow = fineDoc.workflow || [];
-    const expectedRole = getExpectedRoleForFineStatus(fineDoc.fineStatus, workflow);
-    const pendingStep = getPendingWorkflowStep(workflow, expectedRole);
+    if (!Array.isArray(fineDoc.workflow)) fineDoc.workflow = [];
+    const expectedRole = getExpectedRoleForFineStatus(fineDoc.fineStatus, fineDoc.workflow);
+    let pendingStep = getPendingWorkflowStep(fineDoc.workflow, expectedRole);
+    if (!pendingStep && expectedRole) {
+        fineDoc.workflow.push({
+            role: expectedRole,
+            assignedTo: assignedToId,
+            status: 'Pending',
+            assignedAt: new Date(),
+        });
+        pendingStep = getPendingWorkflowStep(fineDoc.workflow, expectedRole);
+    }
     if (!pendingStep) return fineDoc;
 
     const currentAssignedId =
         pendingStep.assignedTo?._id?.toString?.() ||
         pendingStep.assignedTo?.toString?.() ||
         '';
-    const nextAssignedId = String(assignee.userId);
-
+    const nextAssignedId = String(assignedToId);
     const submittedToId =
         fineDoc.submittedTo?._id?.toString?.() ||
         fineDoc.submittedTo?.toString?.() ||
         '';
 
-    if (currentAssignedId === nextAssignedId && submittedToId === nextAssignedId) {
-        return fineDoc;
+    if (currentAssignedId !== nextAssignedId || submittedToId !== nextAssignedId) {
+        pendingStep.assignedTo = assignedToId;
+        fineDoc.submittedTo = assignedToId;
+        if (typeof fineDoc.save === 'function') {
+            await fineDoc.save();
+        }
     }
 
-    pendingStep.assignedTo = assignee.userId;
-    fineDoc.submittedTo = assignee.userId;
-    await fineDoc.save();
-
     try {
-        const EmployeeBasic = (await import('../models/EmployeeBasic.js')).default;
-        const { syncDashboardAction } = await import('./syncDashboard.js');
-        const targetEmpId = getTargetEmployeeIdFromFine(fineDoc);
-        const subjectEmp = targetEmpId
-            ? await EmployeeBasic.findOne({ employeeId: targetEmpId })
-            : null;
-
-        await syncDashboardAction({
-            requestId: fineDoc._id,
-            requestType: 'Fine',
-            assignedTo: assignee.userId,
-            status: 'Pending',
-            subjectEmployee: subjectEmp,
-            requestedByName: fineDoc.createdBy?.name || '',
-            extra1: fineDoc.fineType,
-            extra2: `AED ${fineDoc.fineAmount || 0}`,
-        });
+        await upsertFineApprovalDashboardRow(fineDoc, assignedToId, requestType, assignee.employeeId);
     } catch (syncErr) {
         console.error('[syncPendingFineAssigneeFromFlowchart] Dashboard sync failed:', syncErr?.message || syncErr);
     }
 
     return fineDoc;
+}
+
+function viewerMatchesFlowchartHod(ctx, hod) {
+    if (!hod) return false;
+    return identitiesMatch(
+        {
+            _id: ctx.employee?._id || ctx.portalUser?._id,
+            employeeId: ctx.employeeIdCode || ctx.portalUser?.employeeId,
+            employeeObjectId: ctx.employee?._id || ctx.portalUser?.employeeObjectId,
+        },
+        {
+            _id: hod._id,
+            employeeId: hod.employeeId,
+        },
+    );
+}
+
+/**
+ * Repair missing / stale Fine inbox rows for the current viewer.
+ * Includes flowchart HODs (Accounts especially) who can approve but are not
+ * stored on workflow.assignedTo / DashboardAction.assignedTo.
+ */
+export async function backfillFineApprovalInboxForViewer(ctx) {
+    if (!ctx?.ok) return;
+
+    const Fine = (await import('../models/Fine.js')).default;
+    const pendingQuery = { fineStatus: { $in: FINE_INBOX_PENDING_STATUSES } };
+    const found = [];
+
+    if (ctx.relevantIds?.length) {
+        const workflowAssigned = await Fine.find({
+            ...pendingQuery,
+            workflow: {
+                $elemMatch: {
+                    status: 'Pending',
+                    assignedTo: { $in: ctx.relevantIds },
+                },
+            },
+        }).limit(100);
+        found.push(...workflowAssigned);
+    }
+
+    const [hrHod, accountsHod, mgmtHod] = await Promise.all([
+        getDepartmentHOD('hr'),
+        getDepartmentHOD('finance'),
+        getManagementHOD(),
+    ]);
+
+    const flowchartStatuses = [];
+    if (viewerMatchesFlowchartHod(ctx, hrHod)) {
+        flowchartStatuses.push('Pending HR', 'Pending Review', 'Pending');
+    }
+    if (viewerMatchesFlowchartHod(ctx, accountsHod)) {
+        flowchartStatuses.push('Pending Accounts', 'Pending Finance');
+    }
+    if (viewerMatchesFlowchartHod(ctx, mgmtHod)) {
+        flowchartStatuses.push('Pending Authorization', 'Pending Management');
+    }
+
+    if (flowchartStatuses.length) {
+        const flowchartAssigned = await Fine.find({
+            fineStatus: { $in: flowchartStatuses },
+        }).limit(150);
+        found.push(...flowchartAssigned);
+    }
+
+    const byBase = new Map();
+    for (const fine of found) {
+        if (!fineStillNeedsApprovalInbox(fine)) continue;
+        const baseId = getFineBaseId(fine.fineId);
+        if (!byBase.has(baseId)) byBase.set(baseId, []);
+        byBase.get(baseId).push(fine);
+    }
+
+    const assigneeByRole = new Map();
+    const assigneeForFine = async (fine) => {
+        const role = getExpectedRoleForFineStatus(fine.fineStatus, fine.workflow || []);
+        if (!role) return null;
+        if (assigneeByRole.has(role)) return assigneeByRole.get(role);
+        const resolved = await resolveCurrentStageAssignee(fine);
+        assigneeByRole.set(role, resolved);
+        return resolved;
+    };
+
+    for (const group of byBase.values()) {
+        const primary = group.find((f) => getFineBaseId(f.fineId) === f.fineId) || group[0];
+        const requestType = group.length > 1 ? 'Group Fine Request' : 'Fine';
+        try {
+            const assignee = await assigneeForFine(primary);
+            await syncPendingFineAssigneeFromFlowchart(primary, { requestType, assignee });
+        } catch (backfillErr) {
+            console.error(
+                '[backfillFineApprovalInboxForViewer] Inbox backfill failed:',
+                primary?.fineId,
+                backfillErr?.message || backfillErr,
+            );
+        }
+    }
 }
 
 function getFineBaseId(fineId = '') {

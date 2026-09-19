@@ -412,7 +412,7 @@ export async function waitForWhatsAppDelivery(messageId, { timeoutMs = 18000 } =
     });
 }
 
-const VALIDATION_TEMPLATE_NAME = 'vega_digital_it_solution';
+const VALIDATION_TEMPLATE_NAME = 'welcome_to_vega';
 
 export async function sendWhatsAppValidationTemplate(to, extras = {}) {
     const firstName = String(extras.firstName || extras.contactName || 'there')
@@ -424,7 +424,7 @@ export async function sendWhatsAppValidationTemplate(to, extras = {}) {
         [...String(templateText || '').matchAll(/\{\{(\d+)\}\}/g)].map((match) => Number(match[1])),
     )];
     const maxParam = placeholders.length ? Math.max(...placeholders) : 0;
-    const values = [firstName, 'Vega Digital IT Solution'];
+    const values = [firstName, 'Vega'];
     const parameters = [];
     for (let i = 1; i <= maxParam; i += 1) {
         parameters.push({ type: 'text', text: values[i - 1] || firstName });
@@ -437,7 +437,7 @@ export async function sendWhatsAppValidationTemplate(to, extras = {}) {
                 type: 'body',
                 parameters: [
                     { type: 'text', text: firstName },
-                    { type: 'text', text: 'Vega Digital IT Solution' },
+                    { type: 'text', text: 'Vega' },
                 ],
             }]);
 
@@ -558,6 +558,94 @@ export async function sendTextMessage(to, message, extras = {}) {
             body: text,
             messageType: 'text',
             source: extras.source || 'manual',
+            result,
+            actor: extras.actor || null,
+            employeeId: extras.employeeId || '',
+            contactName: extras.contactName || '',
+        });
+        return result;
+    } catch (error) {
+        return fail(error);
+    }
+}
+
+export async function uploadWhatsAppMedia(buffer, { mimeType = 'application/pdf', filename = 'document.pdf' } = {}) {
+    try {
+        const config = assertWhatsAppSendConfig();
+        const bytes = Buffer.isBuffer(buffer) ? buffer : Buffer.from(buffer || []);
+        if (!bytes.length) return fail('Media file is empty.');
+
+        const url = `${config.apiUrl}/${config.apiVersion}/${config.phoneNumberId}/media`;
+        const form = new FormData();
+        form.append('messaging_product', 'whatsapp');
+        form.append('type', mimeType);
+        form.append('file', new Blob([new Uint8Array(bytes)], { type: mimeType }), filename);
+
+        const response = await fetch(url, {
+            method: 'POST',
+            headers: { Authorization: `Bearer ${config.accessToken}` },
+            body: form,
+            signal: AbortSignal.timeout(45000),
+        });
+        const payload = await response.json().catch(() => ({}));
+        if (!response.ok || !payload?.id) {
+            const metaError = safeMetaError(payload);
+            return fail(metaError.message || 'WhatsApp media upload failed', metaError);
+        }
+        return { success: true, mediaId: String(payload.id) };
+    } catch (error) {
+        if (error?.code === 'WHATSAPP_DISABLED' || error?.code === 'WHATSAPP_NOT_CONFIGURED') {
+            return fail(error);
+        }
+        return fail(error);
+    }
+}
+
+export async function sendDocumentMessage(to, { buffer, filename, caption = '', mimeType = 'application/pdf' } = {}, extras = {}) {
+    try {
+        if (!isWhatsAppEnabled()) {
+            return fail('WhatsApp is disabled. Set WHATSAPP_ENABLED=true after credentials are filled.');
+        }
+
+        const phone = normalizeWhatsAppPhone(to);
+        if (!isValidWhatsAppPhone(phone)) {
+            return fail('A valid destination phone number is required.');
+        }
+        if (!buffer?.length) {
+            return fail('Document file is required.');
+        }
+
+        if (extras.eventKey && extras.skipPaidChannelCheck !== true) {
+            const { getEventChannels } = await import('../utils/notificationEmailPermission.js');
+            const channels = await getEventChannels(extras.eventKey);
+            if (!channels.whatsapp) {
+                return fail('WhatsApp is turned off for this event.');
+            }
+        }
+
+        const safeName = String(filename || 'document.pdf').replace(/[^\w.\-]+/g, '_') || 'document.pdf';
+        const uploaded = await uploadWhatsAppMedia(buffer, { mimeType, filename: safeName });
+        if (!uploaded.success || !uploaded.mediaId) {
+            return uploaded;
+        }
+
+        const document = { id: uploaded.mediaId, filename: safeName };
+        const note = String(caption || '').trim();
+        if (note) document.caption = note.slice(0, 1024);
+
+        const result = await postWhatsAppMessage({
+            messaging_product: 'whatsapp',
+            recipient_type: 'individual',
+            to: phone,
+            type: 'document',
+            document,
+        });
+        const { logOutboundWhatsAppMessage } = await import('../utils/whatsappMessageLog.js');
+        await logOutboundWhatsAppMessage({
+            phone,
+            body: note || `Document: ${safeName}`,
+            messageType: 'document',
+            source: extras.source || 'auto',
             result,
             actor: extras.actor || null,
             employeeId: extras.employeeId || '',

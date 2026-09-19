@@ -2,13 +2,10 @@ import DashboardAction from '../../models/DashboardAction.js';
 import Fine from '../../models/Fine.js';
 import { purgeOrphanDashboardActionRows } from '../../utils/clearDashboardActionsForRequest.js';
 import {
+    backfillFineApprovalInboxForViewer,
     fineStillNeedsApprovalInbox,
-    getExpectedRoleForFineStatus,
-    getPendingWorkflowStep,
     repairSkippedFineAccountsStage,
 } from '../../utils/fineStageAuth.js';
-import { syncDashboardAction } from '../../utils/syncDashboard.js';
-import EmployeeBasic from '../../models/EmployeeBasic.js';
 import {
     buildAssigneeClauses,
     resolveDashboardAssigneeContext,
@@ -53,55 +50,13 @@ export const getPendingFineDashboardInbox = async (req, res) => {
             }
         }
 
-        const pendingStatuses = [
-            'Pending',
-            'Pending HR',
-            'Pending Review',
-            'Pending Accounts',
-            'Pending Finance',
-            'Pending Authorization',
-            'Pending Management',
-        ];
-        if (ctx.relevantIds?.length) {
-            const workflowAssigned = await Fine.find({
-                fineStatus: { $in: pendingStatuses },
-                workflow: {
-                    $elemMatch: {
-                        status: 'Pending',
-                        assignedTo: { $in: ctx.relevantIds },
-                    },
-                },
-            }).limit(100);
-
-            for (const fine of workflowAssigned) {
-                if (!fineStillNeedsApprovalInbox(fine)) continue;
-                const expectedRole = getExpectedRoleForFineStatus(fine.fineStatus, fine.workflow || []);
-                const pendingStep = getPendingWorkflowStep(fine.workflow, expectedRole);
-                if (!pendingStep?.assignedTo) continue;
-                try {
-                    const targetEmp = fine.assignedEmployees?.find(
-                        (e) => e.employeeId && e.employeeId !== 'VEGA-HR-0000',
-                    ) || fine.assignedEmployees?.[0];
-                    const subjectEmp = targetEmp?.employeeId
-                        ? await EmployeeBasic.findOne({ employeeId: targetEmp.employeeId })
-                        : null;
-                    await syncDashboardAction({
-                        requestId: fine._id,
-                        requestType: 'Fine',
-                        assignedTo: pendingStep.assignedTo,
-                        status: 'Pending',
-                        subjectEmployee: subjectEmp,
-                        extra1: fine.fineType,
-                        extra2: `AED ${fine.fineAmount || 0}`,
-                    });
-                } catch (backfillErr) {
-                    console.error(
-                        '[getPendingFineDashboardInbox] Inbox backfill failed:',
-                        fine.fineId,
-                        backfillErr?.message || backfillErr,
-                    );
-                }
-            }
+        try {
+            await backfillFineApprovalInboxForViewer(ctx);
+        } catch (backfillErr) {
+            console.error(
+                '[getPendingFineDashboardInbox] Inbox backfill failed:',
+                backfillErr?.message || backfillErr,
+            );
         }
 
         if (assigneeClauses.length === 0) {

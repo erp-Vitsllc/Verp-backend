@@ -64,6 +64,7 @@ import { setupEmailSubjectTag } from "./utils/setupEmailSubjectTag.js";
 import { purgeExpiredAdminDeletionArchives } from "./services/adminDeletionArchiveService.js";
 import { rerouteAllPendingAssetCreationApprovals } from "./utils/assetApprovalHelpers.js";
 import { processAttendanceDailyRoutine } from "./utils/processAttendanceDailyRoutine.js";
+import { processToolsMonthlyAssetReports } from "./utils/processToolsMonthlyAssetReports.js";
 import { subscribeWhatsAppWaba } from "./services/whatsappService.js";
 
 // Always load VERP_backend/.env (not process.cwd()), so Zoho/Locator keys work
@@ -368,6 +369,9 @@ function startScheduledJobs() {
 
     later(140 * 1000, "AttendanceDailyRoutine", processAttendanceDailyRoutine);
     scheduleDailyAtMidnight(() => processAttendanceDailyRoutine(), { name: "AttendanceDailyRoutine" });
+
+    later(155 * 1000, "ToolsMonthlyAssetReports", processToolsMonthlyAssetReports);
+    scheduleDailyAtMidnight(() => processToolsMonthlyAssetReports(), { name: "ToolsMonthlyAssetReports" });
 
     later(20 * 1000, "AssetApprovalReroute", async () => {
         const counts = await rerouteAllPendingAssetCreationApprovals();

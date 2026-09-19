@@ -3,10 +3,13 @@ import {
     buildPermissionCatalogView,
     clearNotificationEmailPermissionCache,
 } from '../utils/notificationEmailPermission.js';
-import { flattenNotificationEmailCatalog } from '../constants/notificationEmailCatalog.js';
+import {
+    flattenNotificationEmailCatalog,
+    flattenWhatsAppPermissionPageCatalog,
+} from '../constants/notificationEmailCatalog.js';
 import { canManageNotificationEmailPermission } from '../utils/settingsInboxAccess.js';
 
-const ALLOWED_KEYS = new Set(flattenNotificationEmailCatalog().map((item) => item.key));
+const ALLOWED_KEYS = new Set(flattenWhatsAppPermissionPageCatalog().map((item) => item.key));
 
 export async function getNotificationEmailPermissionAccess(req, res) {
     try {

@@ -435,6 +435,22 @@ export const NOTIFICATION_EMAIL_CATALOG = [
                         types: ['Asset Retention'],
                         emailTypes: ['AssetRetention'],
                     }),
+                    row({
+                        key: 'hrm.tools.handover_report',
+                        label: 'Tools handover report',
+                        hint: 'WhatsApp when a tools handover report is sent.',
+                        detail: detail('Tools Handover Report'),
+                        types: ['Tools Handover Report'],
+                        emailTypes: ['ToolsHandoverReport'],
+                    }),
+                    row({
+                        key: 'hrm.tools.monthly_report',
+                        label: 'Tools monthly report',
+                        hint: 'WhatsApp when a tools monthly report is sent.',
+                        detail: detail('Tools Monthly Report'),
+                        types: ['Tools Monthly Report'],
+                        emailTypes: ['ToolsMonthlyReport'],
+                    }),
                 ],
             },
             {
@@ -645,6 +661,18 @@ export function eventKeyForDashboardType(type) {
 
 export function eventKeyForEmailType(emailType) {
     return EMAIL_TYPE_TO_KEY.get(String(emailType || '').trim()) || '';
+}
+
+/** Settings → WhatsApp Permission page shows only these events. */
+export const WHATSAPP_PERMISSION_PAGE_KEYS = [
+    'hrm.tools.handover_report',
+    'hrm.tools.monthly_report',
+];
+
+export function flattenWhatsAppPermissionPageCatalog() {
+    return flattenNotificationEmailCatalog().filter((item) =>
+        WHATSAPP_PERMISSION_PAGE_KEYS.includes(item.key),
+    );
 }
 
 export function flattenNotificationEmailCatalog() {

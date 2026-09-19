@@ -114,10 +114,13 @@ export const approveFine = async (req, res) => {
                 }
 
                 fine.submittedTo = accountsUser._id;
-                const nextStepExists = fine.workflow.some(w =>
+                const existingAccountsStep = fine.workflow.find(w =>
                     w.role === 'Accounts' && w.status === 'Pending'
                 );
-                if (!nextStepExists) {
+                if (existingAccountsStep) {
+                    existingAccountsStep.assignedTo = accountsUser._id;
+                    existingAccountsStep.assignedAt = existingAccountsStep.assignedAt || new Date();
+                } else {
                     fine.workflow.push({
                         role: 'Accounts',
                         assignedTo: accountsUser._id,

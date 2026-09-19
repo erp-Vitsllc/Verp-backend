@@ -26,7 +26,7 @@ export async function viewerIsActiveFlowchartHr(req) {
     }
 }
 
-/** Super User / admin, or active flowchart HR — Notifications & Emails page. */
+/** Super User / admin, or active flowchart HR — WhatsApp Permission page. */
 export async function canManageNotificationEmailPermission(req) {
     if (await viewerIsAdministrator(req)) return true;
     return viewerIsActiveFlowchartHr(req);

@@ -806,21 +806,25 @@ export const updateFine = async (req, res) => {
             const reqType = isGroup ? 'Group Fine Request' : 'Fine';
             const subjectName = isGroup ? `Group Fine - ${fines.length} Employees` : undefined;
 
-            // 1. Resolve current pending steps
-            await syncDashboardAction({
-                requestId: updatedFine._id,
-                requestType: reqType,
-                status: updatedFine.fineStatus,
-                subjectEmployee: subjectEmp,
-                subjectName: subjectName,
-                requestedByName: updatedFine.createdBy?.name || '',
-                actionedBy: req.user?._id,
-                comment: updatedFine.rejectionReason
-            });
+            const stillNeedsApproval = fineStillNeedsApprovalInbox(updatedFine);
+            // Never write raw fineStatus (e.g. "Pending Accounts") — DashboardAction
+            // only accepts Pending/Approved/Rejected. Invalid status hid Accounts bells.
+            if (!stillNeedsApproval) {
+                await syncDashboardAction({
+                    requestId: updatedFine._id,
+                    requestType: reqType,
+                    status: updatedFine.fineStatus === 'Rejected' ? 'Rejected' : 'Approved',
+                    subjectEmployee: subjectEmp,
+                    subjectName: subjectName,
+                    requestedByName: updatedFine.createdBy?.name || '',
+                    actionedBy: req.user?._id,
+                    comment: updatedFine.rejectionReason
+                });
+            }
 
             // 2. If there's a new pending step (e.g., after resubmit or rejection back to creator), create it
             const nextPendingStep = updatedFine.workflow?.find(w => w.status === 'Pending');
-            if (nextPendingStep && fineStillNeedsApprovalInbox(updatedFine)) {
+            if (nextPendingStep && stillNeedsApproval) {
                 await syncDashboardAction({
                     requestId: updatedFine._id,
                     requestType: reqType,

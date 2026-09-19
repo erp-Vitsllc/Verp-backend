@@ -380,14 +380,13 @@ export async function postWhatsAppToEmployee(req, res) {
                 type: 'body',
                 parameters: [
                     { type: 'text', text: firstName },
-                    { type: 'text', text: 'SR-1025' },
                 ],
             },
         ];
 
         const result = await sendTemplateMessage(
             phone,
-            'vega_digital_it_solution',
+            'welcome_to_vega',
             'en',
             templateComponents,
             {
@@ -406,7 +405,7 @@ export async function postWhatsAppToEmployee(req, res) {
 
         console.log('[WhatsApp] employee template accepted', {
             employeeId: employee.employeeId,
-            template: 'vega_digital_it_solution',
+            template: 'welcome_to_vega',
             messageId: result.messageId || '',
         });
 
@@ -415,7 +414,7 @@ export async function postWhatsAppToEmployee(req, res) {
             messageId: result.messageId || '',
             employeeId: employee.employeeId,
             name: employeeName,
-            template: 'vega_digital_it_solution',
+            template: 'welcome_to_vega',
         });
     } catch (error) {
         console.error('[WhatsApp] employee send failed:', error?.message || error);

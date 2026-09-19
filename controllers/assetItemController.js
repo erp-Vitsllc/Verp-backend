@@ -9,6 +9,7 @@ import User from '../models/User.js';
 import { signOrKeepAttachmentUrl, uploadDocumentToS3, persistStoredAttachmentValue, deleteDocumentFromS3, normalizeS3Key } from '../utils/s3Upload.js';
 import { generatePdf } from '../utils/generatePdf.js';
 import { sendAssetAssignmentEmail } from '../utils/sendAssetAssignmentEmail.js';
+import { isToolsAssetItem, sendToolsHandoverReportWhatsApp } from '../utils/sendToolsAssetWhatsAppReport.js';
 import {
     advanceFleetHandoverOnAccept,
     buildHandoverAssignDetailsUrl,
@@ -7579,6 +7580,16 @@ export const assignAssetItem = async (req, res) => {
                     assignedToType === 'Employee' && item.acceptanceStatus === 'Accepted';
 
                 if (isDirectEmployeeAssign) {
+                    if (!fleetVehicle && isToolsAssetItem(item) && assignAttachments[0]?.content) {
+                        void sendToolsHandoverReportWhatsApp({
+                            employee: employeeToAssign,
+                            pdfBuffer: assignAttachments[0].content,
+                            filename: `tools-handover-${item.assetId || item._id}.pdf`,
+                            caption: `Tools handover report — ${item.assetId || ''} ${item.name || ''}`.trim(),
+                        }).catch((err) =>
+                            console.error('[ToolsHandoverWhatsApp] assign failed:', err?.message || err),
+                        );
+                    }
                     await sendAssetAssignmentEmail({
                         asset: itemForEmail || item,
                         employee: employeeToAssign,
@@ -7996,6 +8007,17 @@ export const bulkAssignAssetItems = async (req, res) => {
 
             if (employeeToAssign && firstAsset) {
                 if (autoAcceptOnAssign) {
+                    const toolsInBulk = assetsForEmail.filter((row) => isToolsAssetItem(row));
+                    if (toolsInBulk.length && bulkAssignmentAttachments[0]?.content) {
+                        void sendToolsHandoverReportWhatsApp({
+                            employee: employeeToAssign,
+                            pdfBuffer: bulkAssignmentAttachments[0].content,
+                            filename: `tools-handover-bulk-${employeeToAssign.employeeId || 'employee'}.pdf`,
+                            caption: `Tools handover report — ${toolsInBulk.length} asset${toolsInBulk.length === 1 ? '' : 's'}`,
+                        }).catch((err) =>
+                            console.error('[ToolsHandoverWhatsApp] bulk assign failed:', err?.message || err),
+                        );
+                    }
                     await sendAssetAssignmentEmail({
                         asset: firstAsset,
                         assets: assetsForEmail,
@@ -9483,6 +9505,30 @@ export const respondToAssignment = async (req, res) => {
                     ];
                 }
 
+                if (
+                    !fleetVehicleRespond &&
+                    isToolsAssetItem(item) &&
+                    item.assignedToType === 'Employee' &&
+                    pdfBuf?.length
+                ) {
+                    const assigneeForWp =
+                        assigneeForAck ||
+                        (await EmployeeBasic.findById(item.assignedTo?._id || item.assignedTo)
+                            .select('firstName lastName employeeId')
+                            .lean()
+                            .catch(() => null));
+                    if (assigneeForWp) {
+                        void sendToolsHandoverReportWhatsApp({
+                            employee: assigneeForWp,
+                            pdfBuffer: pdfBuf,
+                            filename: `tools-handover-${item.assetId || item._id}.pdf`,
+                            caption: `Tools handover report — ${item.assetId || ''} ${item.name || ''}`.trim(),
+                        }).catch((err) =>
+                            console.error('[ToolsHandoverWhatsApp] accept failed:', err?.message || err),
+                        );
+                    }
+                }
+
                 const recipients = [];
                 const pushUniqueRecipient = (emp) => {
                     if (!emp) return;
@@ -10652,6 +10698,33 @@ async function runBulkAssignmentRespondSideEffects(
         }
     }
 
+    const toolsJobs = acceptedPdfJobs.filter((job) => job.isTools);
+    if (toolsJobs.length && emailBundle?.firstAssignedTo) {
+        try {
+            const combined = await generateBulkAssignmentHandoverPdf(
+                req,
+                toolsJobs.map((job) => job.assetMongoId),
+                await finalizeHandoverPdfCtx(
+                    buildFullySignedHandoverCtx(toolsJobs[0].handoverPdfCtx),
+                    {
+                        assigner: toolsJobs[0].handoverPdfCtx.assigner,
+                        assignee: toolsJobs[0].handoverPdfCtx.assignee,
+                    },
+                ),
+            );
+            if (combined?.length) {
+                await sendToolsHandoverReportWhatsApp({
+                    employee: emailBundle.firstAssignedTo,
+                    pdfBuffer: combined,
+                    filename: `tools-handover-bulk-${emailBundle.firstAssignedTo.employeeId || 'employee'}.pdf`,
+                    caption: `Tools handover report — ${toolsJobs.length} asset${toolsJobs.length === 1 ? '' : 's'}`,
+                });
+            }
+        } catch (toolsWpErr) {
+            console.error('[ToolsHandoverWhatsApp] bulk accept failed:', toolsWpErr?.message || toolsWpErr);
+        }
+    }
+
     if (!emailBundle) return;
 
     const {
@@ -10849,6 +10922,7 @@ export const respondBulkAssignmentGroup = async (req, res) => {
                 assetCode: item.assetId,
                 acceptHistDocId: acceptHistDoc._id,
                 priorAcceptedCount,
+                isTools: isToolsAssetItem(item),
                 handoverPdfCtx: {
                     assigner: snap.assignedBy,
                     assignerName: assignerNameStr,
