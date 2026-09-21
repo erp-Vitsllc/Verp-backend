@@ -33,7 +33,12 @@ import { salaryMonthKeyFromDate } from "../../utils/salaryHistoryDateUtils.js";
 import { validateEmployeeBankPayload } from "../../utils/employeeBankValidation.js";
 import { validateEmployeeAddressPayload } from "../../utils/employeeAddressValidation.js";
 import { denyCoreEmployeeProfileDelete } from "../../utils/employeeCardDeleteAccess.js";
-import { loginThroughFromBody, normalizeLoginThrough } from "../../utils/loginThrough.js";
+import {
+    assertLoginThroughCompanyEmail,
+    assertLoginThroughWhatsApp,
+    loginThroughFromBody,
+    normalizeLoginThrough,
+} from "../../utils/loginThrough.js";
 
 const isEmptyProfileValue = (value) =>
     value === null ||
@@ -151,6 +156,20 @@ export const updateBasicDetails = async (req, res) => {
         });
         if (updatePayload.loginThrough !== undefined) {
             updatePayload.loginThrough = loginThroughFromBody(req.body, existingBasic);
+            const loginThroughBlock = assertLoginThroughCompanyEmail(
+                existingBasic,
+                updatePayload.loginThrough,
+            );
+            if (loginThroughBlock) {
+                return res.status(400).json({ message: loginThroughBlock });
+            }
+            const whatsappBlock = await assertLoginThroughWhatsApp(
+                employeeId,
+                updatePayload.loginThrough,
+            );
+            if (whatsappBlock) {
+                return res.status(400).json({ message: whatsappBlock });
+            }
         }
 
         const accessUpdate = {};

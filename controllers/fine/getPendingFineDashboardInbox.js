@@ -3,9 +3,12 @@ import Fine from '../../models/Fine.js';
 import { purgeOrphanDashboardActionRows } from '../../utils/clearDashboardActionsForRequest.js';
 import {
     backfillFineApprovalInboxForViewer,
-    fineStillNeedsApprovalInbox,
+    fineStillNeedsInbox,
+    identitiesMatch,
     repairSkippedFineAccountsStage,
 } from '../../utils/fineStageAuth.js';
+import { openAccountsPaymentInbox } from '../../utils/fineAccountsPaymentFlow.js';
+import { getDepartmentHOD } from '../../utils/getDepartmentHOD.js';
 import {
     buildAssigneeClauses,
     resolveDashboardAssigneeContext,
@@ -59,6 +62,41 @@ export const getPendingFineDashboardInbox = async (req, res) => {
             );
         }
 
+        try {
+            const accountsHod = await getDepartmentHOD('finance');
+            const viewerIsAccounts = identitiesMatch(
+                {
+                    _id: ctx.employee?._id || ctx.portalUser?._id,
+                    employeeId: ctx.employeeIdCode || ctx.portalUser?.employeeId,
+                    employeeObjectId: ctx.employee?._id || ctx.portalUser?.employeeObjectId,
+                },
+                { _id: accountsHod?._id, employeeId: accountsHod?.employeeId },
+            );
+            if (viewerIsAccounts) {
+                const unsettled = await Fine.find({
+                    fineStatus: { $in: ['Approved', 'Active'] },
+                    $or: [
+                        { accountsPaymentPath: { $exists: false } },
+                        { accountsPaymentPath: null },
+                        { accountsPaymentPath: '' },
+                    ],
+                }).limit(80);
+                const seenBases = new Set();
+                for (const row of unsettled) {
+                    const parts = String(row.fineId || '').split('-');
+                    const baseId = parts.length > 3 ? parts.slice(0, 3).join('-') : row.fineId;
+                    if (seenBases.has(baseId)) continue;
+                    seenBases.add(baseId);
+                    await openAccountsPaymentInbox(row, [row]);
+                }
+            }
+        } catch (payBackfillErr) {
+            console.error(
+                '[getPendingFineDashboardInbox] Accounts payment inbox backfill failed:',
+                payBackfillErr?.message || payBackfillErr,
+            );
+        }
+
         if (assigneeClauses.length === 0) {
             const hubItems = await listPendingHubInboxItems({
                 assigneeIds: ctx.relevantIds,
@@ -79,7 +117,7 @@ export const getPendingFineDashboardInbox = async (req, res) => {
         const fineIds = [...new Set(rows.map((r) => String(r.requestId)).filter(Boolean))];
         const fines = fineIds.length
             ? await Fine.find({ _id: { $in: fineIds } })
-                  .select('_id fineId fineType fineStatus assignedEmployees category workflow')
+                  .select('_id fineId fineType fineStatus assignedEmployees category workflow accountsPaymentPath')
                   .lean()
             : [];
         const fineById = Object.fromEntries(fines.map((f) => [String(f._id), f]));
@@ -90,7 +128,7 @@ export const getPendingFineDashboardInbox = async (req, res) => {
         const actionableRows = [];
         for (const da of liveRows) {
             const fine = fineById[String(da.requestId)];
-            if (!fineStillNeedsApprovalInbox(fine)) {
+            if (!fineStillNeedsInbox(fine)) {
                 if (da._id) idsToDismiss.push(da._id);
                 continue;
             }
@@ -110,7 +148,7 @@ export const getPendingFineDashboardInbox = async (req, res) => {
                     $set: {
                         status: 'Dismissed',
                         actionedDate: new Date(),
-                        comment: 'Closed: fine has no pending approval stage',
+                        comment: 'Closed: fine has no pending approval or Accounts payment stage',
                     },
                 },
             );
@@ -148,6 +186,7 @@ export const getPendingFineDashboardInbox = async (req, res) => {
                     baseFineId: getBaseFineId(fine.fineId),
                     fineType: fine.fineType,
                     fineStatus: fine.fineStatus,
+                    accountsPaymentPath: fine.accountsPaymentPath || '',
                 },
             };
         });

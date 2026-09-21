@@ -5,6 +5,7 @@ import AssetItem from '../models/AssetItem.js';
 import { buildAcceptedAssetHandoverAttachments } from './buildAssignmentHandoverEmailAttachments.js';
 import { normalizePdfAttachments } from './normalizeEmailAttachments.js';
 import { resolveEmployeeEmail } from './resolveEmployeeEmail.js';
+import { skipVehicleHandoverEmail } from './vehicleHandoverEmailGate.js';
 
 async function resolvePreviousAssigneeFromHistory(assetMongoId) {
     const rows = await AssetHistory.find({ assetId: assetMongoId, action: 'Assigned' })
@@ -39,10 +40,12 @@ export async function notifyPreviousAssigneeReassignmentAcceptedWithHandover(req
         const current = await AssetItem.findById(assetMongoId)
             .populate('assignedTo', 'firstName lastName employeeId')
             .populate('acceptedBy', 'firstName lastName employeeId')
-            .select('assetId name assignedTo acceptedBy')
+            .populate('typeId', 'name')
+            .select('assetId name assignedTo acceptedBy plateNumber vehicleBrand vehicleCode typeId')
             .lean();
 
         if (!current) return;
+        if (skipVehicleHandoverEmail(current)) return;
 
         const nowId = current.assignedTo?._id?.toString?.() || (current.assignedTo && String(current.assignedTo));
         const prevId =

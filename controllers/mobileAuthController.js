@@ -6,7 +6,14 @@ import EmployeeBasic from '../models/EmployeeBasic.js';
 import RefreshToken from '../models/RefreshToken.js';
 import { recordActivityAsync } from '../utils/activityLog.js';
 import { normalizeLoginThrough } from '../utils/loginThrough.js';
+import MobileLoginOtp from '../models/MobileLoginOtp.js';
+import { sendTextMessage } from '../services/whatsappService.js';
+import { resolveEmployeeWhatsAppPhone } from '../utils/sendToolsAssetWhatsAppReport.js';
 import {
+  applyDeviceTrust,
+  expireDeviceTrustIfNeeded,
+  getDeviceTrust,
+  isDeviceTrustedForOtp,
   mobileDeviceLoginDenied,
   readMobileDeviceFromRequest,
   recordMobileDeviceOnUser,
@@ -85,6 +92,132 @@ async function linkedEmployeeObjectId(employeeId) {
   return emp;
 }
 
+function maskPhone(phone) {
+  const value = String(phone || '').replace(/\s/g, '');
+  if (value.length < 7) return 'WhatsApp';
+  return `${value.slice(0, 4)}****${value.slice(-3)}`;
+}
+
+function hasLoginCoordinates(device) {
+  return Number.isFinite(device?.latitude) && Number.isFinite(device?.longitude);
+}
+
+function hashOtp(otp) {
+  return crypto.createHash('sha256').update(String(otp)).digest('hex');
+}
+
+async function resolveLoginWhatsApp(user) {
+  const fromEmployee = await resolveEmployeeWhatsAppPhone(user.employeeId);
+  if (fromEmployee) return fromEmployee;
+  return '';
+}
+
+async function sendLoginOtp(user, deviceId) {
+  const phone = await resolveLoginWhatsApp(user);
+  if (!phone) {
+    const error = new Error('No WhatsApp number on this user. Ask admin to add it on the employee profile.');
+    error.status = 400;
+    throw error;
+  }
+
+  await MobileLoginOtp.deleteMany({ userId: user._id });
+  const otp = String(crypto.randomInt(100000, 1000000));
+  const otpToken = crypto.randomUUID();
+  await MobileLoginOtp.create({
+    otpToken,
+    userId: user._id,
+    otpHash: hashOtp(otp),
+    deviceId: String(deviceId || '').trim(),
+    phone,
+    expiresAt: new Date(Date.now() + 5 * 60 * 1000),
+  });
+
+  const sent = await sendTextMessage(
+    phone,
+    `Your VERP login OTP is ${otp}. It is valid for 5 minutes. Do not share this code.`,
+    {
+      skipPaidChannelCheck: true,
+      source: 'mobile_login_otp',
+      employeeId: user.employeeId || '',
+    },
+  );
+  if (!sent?.success) {
+    await MobileLoginOtp.deleteMany({ otpToken });
+    const error = new Error(sent?.error || 'Could not send WhatsApp OTP.');
+    error.status = 502;
+    throw error;
+  }
+
+  const maskedPhone = maskPhone(phone);
+  console.log('[mobileLogin] OTP sent via WhatsApp', {
+    username: user.username,
+    employeeId: user.employeeId || null,
+    maskedPhone,
+  });
+  return { otpToken, maskedPhone };
+}
+
+async function issueMobileSession(req, res, user, incomingDevice, isAdminLogin, { fixDevice } = {}) {
+  expireDeviceTrustIfNeeded(user);
+  const deviceDenied = mobileDeviceLoginDenied(user, incomingDevice, { isSystemAdmin: isAdminLogin });
+  if (deviceDenied) {
+    return res.status(403).json({ message: deviceDenied });
+  }
+
+  recordMobileDeviceOnUser(user, incomingDevice, { isSystemAdmin: isAdminLogin });
+  if (!isAdminLogin && fixDevice === true && incomingDevice.deviceId) {
+    applyDeviceTrust(user, true);
+  }
+  if (incomingDevice.ipAddress) {
+    user.lastLoginIp = incomingDevice.ipAddress;
+    if (user.mobileDevice && !isAdminLogin) {
+      user.mobileDevice.ipAddress = incomingDevice.ipAddress;
+      user.markModified('mobileDevice');
+    }
+  }
+
+  const employee = await linkedEmployeeObjectId(user.employeeId);
+  const accessToken = signAccessToken(user._id);
+  const refreshToken = signRefreshToken(user._id, crypto.randomUUID());
+  await persistRefreshToken(user._id, refreshToken, req.headers['user-agent'], incomingDevice.deviceId);
+
+  user.lastLogin = new Date();
+  await user.save();
+
+  recordActivityAsync({
+    req,
+    module: 'Mobile',
+    action: 'login',
+    entityType: 'User',
+    entityId: String(user._id),
+    summary: 'user mobile login',
+    actor: {
+      userId: user._id,
+      name: user.name || user.username,
+      employeeId: user.employeeId || '',
+    },
+  });
+
+  return res.status(200).json({
+    needsOtp: false,
+    message: 'Login successful',
+    accessToken,
+    refreshToken,
+    expiresIn: ACCESS_EXPIRES,
+    user: {
+      id: user._id,
+      name: user.name,
+      email: user.email,
+      username: user.username,
+      employeeId: user.employeeId,
+      employeeObjectId: employee?._id || null,
+      profilePicture: user.profilePicture || employee?.profilePicture || null,
+    },
+    mobileDevice: serializeMobileDevice(user),
+    deviceTrust: getDeviceTrust(user),
+  });
+}
+
 export async function mobileLogin(req, res) {
   try {
     const identifier = String(req.body?.email || req.body?.username || '').trim();
@@ -144,66 +277,110 @@ export async function mobileLogin(req, res) {
       location: incomingDevice.location || null,
       ipAddress: incomingDevice.ipAddress || null,
     });
-    if (incomingDevice.latitude == null || incomingDevice.longitude == null) {
-      return res.status(400).json({
-        message: 'Location is off. Turn on location, then login.',
-      });
-    }
+    expireDeviceTrustIfNeeded(user);
     const deviceDenied = mobileDeviceLoginDenied(user, incomingDevice, { isSystemAdmin: isAdminLogin });
     if (deviceDenied) {
+      if (user.isModified?.()) await user.save();
       return res.status(403).json({ message: deviceDenied });
     }
-
-    recordMobileDeviceOnUser(user, incomingDevice, { isSystemAdmin: isAdminLogin });
-    if (incomingDevice.ipAddress) {
-      user.lastLoginIp = incomingDevice.ipAddress;
-      if (user.mobileDevice && !isAdminLogin) {
-        user.mobileDevice.ipAddress = incomingDevice.ipAddress;
-        user.markModified('mobileDevice');
+    if (isAdminLogin || isDeviceTrustedForOtp(user, incomingDevice.deviceId)) {
+      if (!hasLoginCoordinates(incomingDevice)) {
+        return res.status(400).json({
+          code: 'LOCATION_REQUIRED',
+          message: 'Turn on location, then finish login.',
+        });
       }
+      return issueMobileSession(req, res, user, incomingDevice, isAdminLogin);
+    }
+    if (user.isModified?.()) {
+      await user.save();
     }
 
-    const employee = await linkedEmployeeObjectId(user.employeeId);
-    const accessToken = signAccessToken(user._id);
-    const refreshToken = signRefreshToken(user._id, crypto.randomUUID());
-    await persistRefreshToken(user._id, refreshToken, req.headers['user-agent'], incomingDevice.deviceId);
-
-    user.lastLogin = new Date();
-    await user.save();
-
-    recordActivityAsync({
-      req,
-      module: 'Mobile',
-      action: 'login',
-      entityType: 'User',
-      entityId: String(user._id),
-      summary: 'user mobile login',
-      actor: {
-        userId: user._id,
-        name: user.name || user.username,
-        employeeId: user.employeeId || '',
-      },
-    });
-
+    const otp = await sendLoginOtp(user, incomingDevice.deviceId);
     return res.status(200).json({
-      message: 'Login successful',
-      accessToken,
-      refreshToken,
-      expiresIn: ACCESS_EXPIRES,
-      user: {
-        id: user._id,
-        name: user.name,
-        email: user.email,
-        username: user.username,
-        employeeId: user.employeeId,
-        employeeObjectId: employee?._id || null,
-        profilePicture: user.profilePicture || employee?.profilePicture || null,
-      },
-      mobileDevice: serializeMobileDevice(user),
+      needsOtp: true,
+      otpToken: otp.otpToken,
+      maskedPhone: otp.maskedPhone,
+      message: `OTP sent to WhatsApp ${otp.maskedPhone}`,
     });
   } catch (error) {
     console.error('[mobileLogin]', error);
-    return res.status(500).json({ message: error.message || 'Login failed.' });
+    return res.status(error.status || 500).json({ message: error.message || 'Login failed.' });
+  }
+}
+
+export async function verifyMobileOtp(req, res) {
+  try {
+    const otpToken = String(req.body?.otpToken || '').trim();
+    const otp = String(req.body?.otp || '').replace(/\s/g, '');
+    if (!otpToken || !otp) {
+      return res.status(400).json({ message: 'Enter the OTP sent to WhatsApp.' });
+    }
+
+    const challenge = await MobileLoginOtp.findOne({ otpToken });
+    if (!challenge || challenge.expiresAt.getTime() < Date.now()) {
+      return res.status(400).json({ message: 'OTP expired. Tap Login again.' });
+    }
+    if (challenge.attempts >= 5) {
+      await challenge.deleteOne();
+      return res.status(400).json({ message: 'Too many attempts. Tap Login again.' });
+    }
+    if (challenge.otpHash !== hashOtp(otp)) {
+      challenge.attempts += 1;
+      if (challenge.attempts >= 5) {
+        await challenge.deleteOne();
+        return res.status(400).json({ message: 'Too many attempts. Tap Login again.' });
+      }
+      await challenge.save();
+      return res.status(400).json({ message: 'Wrong OTP. Check WhatsApp and try again.' });
+    }
+
+    const user = await User.findById(challenge.userId);
+    if (!user || user.status !== 'Active') {
+      await challenge.deleteOne();
+      return res.status(401).json({ message: 'User is no longer allowed to sign in.' });
+    }
+
+    const incomingDevice = readMobileDeviceFromRequest(req);
+    if (!incomingDevice.deviceId) incomingDevice.deviceId = challenge.deviceId;
+    if (!hasLoginCoordinates(incomingDevice)) {
+      return res.status(400).json({
+        code: 'LOCATION_REQUIRED',
+        message: 'Turn on location, then finish login.',
+      });
+    }
+    await challenge.deleteOne();
+    return issueMobileSession(req, res, user, incomingDevice, false, { fixDevice: true });
+  } catch (error) {
+    console.error('[verifyMobileOtp]', error);
+    return res.status(500).json({ message: error.message || 'OTP check failed.' });
+  }
+}
+
+export async function resendMobileOtp(req, res) {
+  try {
+    const otpToken = String(req.body?.otpToken || '').trim();
+    if (!otpToken) {
+      return res.status(400).json({ message: 'OTP session is missing. Tap Login again.' });
+    }
+    const challenge = await MobileLoginOtp.findOne({ otpToken });
+    if (!challenge) {
+      return res.status(400).json({ message: 'OTP expired. Tap Login again.' });
+    }
+    const user = await User.findById(challenge.userId);
+    if (!user) {
+      return res.status(401).json({ message: 'User not found' });
+    }
+    const otp = await sendLoginOtp(user, challenge.deviceId);
+    return res.status(200).json({
+      needsOtp: true,
+      otpToken: otp.otpToken,
+      maskedPhone: otp.maskedPhone,
+      message: `OTP sent to WhatsApp ${otp.maskedPhone}`,
+    });
+  } catch (error) {
+    console.error('[resendMobileOtp]', error);
+    return res.status(error.status || 500).json({ message: error.message || 'Could not resend OTP.' });
   }
 }
 
@@ -289,7 +466,11 @@ export async function reportMobileDevice(req, res) {
       return res.status(401).json({ message: 'User is no longer allowed to sign in.' });
     }
 
+    expireDeviceTrustIfNeeded(user);
     const incomingDevice = readMobileDeviceFromRequest(req);
+    if (req.body?.fixDevice === false) {
+      applyDeviceTrust(user, false);
+    }
     const deviceDenied = mobileDeviceLoginDenied(user, incomingDevice, {
       isSystemAdmin: Boolean(req.user?.isSystemSuperUser),
     });
@@ -307,6 +488,7 @@ export async function reportMobileDevice(req, res) {
     return res.status(200).json({
       message: 'Device recorded.',
       mobileDevice: serializeMobileDevice(user),
+      deviceTrust: getDeviceTrust(user),
     });
   } catch (error) {
     console.error('[reportMobileDevice]', error);

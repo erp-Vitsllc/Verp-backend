@@ -8,6 +8,7 @@ import { canUserActOnFineStageAsync, fineStillNeedsApprovalInbox } from "../../u
 import { runAfterResponse } from "../../utils/runAfterResponse.js";
 import {
     emailAccountsPaymentRequest,
+    openAccountsPaymentInbox,
     resolveFineManagementActor,
     resolveFineAccountsActor,
 } from "../../utils/fineAccountsPaymentFlow.js";
@@ -426,6 +427,8 @@ export const approveFine = async (req, res) => {
                     extra1: fine.fineType,
                     extra2: `Total: AED ${fines.reduce((sum, f) => sum + (f.fineAmount || 0), 0)}` // total for group
                 });
+            } else if (fine.fineStatus === 'Approved') {
+                await openAccountsPaymentInbox(fine, fines);
             }
         } catch (syncErr) {
             console.error("[ApproveFine] Dashboard Sync Error:", syncErr);

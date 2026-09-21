@@ -76,15 +76,61 @@ export function emptyMobileDevice() {
         longitude: null,
         ipAddress: '',
         lastSeenAt: null,
+        trustedUntil: null,
         status: STATUS_NOT_FIXED,
     };
 }
 
+export function getDeviceTrust(user) {
+    const until = user?.mobileDevice?.trustedUntil;
+    const untilMs = until ? new Date(until).getTime() : 0;
+    const daysLeft = untilMs > Date.now() ? Math.ceil((untilMs - Date.now()) / 86400000) : 0;
+    return {
+        fixed: daysLeft > 0,
+        daysLeft,
+        trustedUntil: daysLeft > 0 ? until : null,
+    };
+}
+
+export function expireDeviceTrustIfNeeded(user) {
+    if (!user?.mobileDevice) return;
+    const until = user.mobileDevice.trustedUntil;
+    if (until && new Date(until).getTime() <= Date.now()) {
+        user.mobileDevice.trustedUntil = null;
+        user.mobileDevice.status = STATUS_NOT_FIXED;
+        user.markModified?.('mobileDevice');
+    }
+}
+
+export function isDeviceTrustedForOtp(user, deviceId) {
+    expireDeviceTrustIfNeeded(user);
+    const storedId = String(user?.mobileDevice?.deviceId || '').trim();
+    const nextId = String(deviceId || '').trim();
+    if (!storedId || !nextId || storedId !== nextId) return false;
+    return getDeviceTrust(user).fixed;
+}
+
+export function applyDeviceTrust(user, enabled) {
+    if (!user?.mobileDevice || typeof user.mobileDevice !== 'object') {
+        user.mobileDevice = emptyMobileDevice();
+    }
+    if (enabled) {
+        user.mobileDevice.status = STATUS_FIXED;
+        user.mobileDevice.trustedUntil = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000);
+    } else {
+        user.mobileDevice.status = STATUS_NOT_FIXED;
+        user.mobileDevice.trustedUntil = null;
+    }
+    user.markModified?.('mobileDevice');
+}
+
 export function serializeMobileDevice(user) {
+    expireDeviceTrustIfNeeded(user);
     const stored = user?.mobileDevice && typeof user.mobileDevice === 'object'
         ? user.mobileDevice
         : {};
-    const status = stored.status === STATUS_FIXED ? STATUS_FIXED : STATUS_NOT_FIXED;
+    const trust = getDeviceTrust(user);
+    const status = trust.fixed ? STATUS_FIXED : STATUS_NOT_FIXED;
     const deviceName = String(stored.deviceName || '').trim();
     const location = String(stored.location || '').trim();
     const deviceId = String(stored.deviceId || '').trim();
@@ -104,6 +150,7 @@ export function serializeMobileDevice(user) {
         statusLabel: status === STATUS_FIXED ? 'Fixed' : 'Not Fixed',
         hasDevice,
         canFix: Boolean(deviceId),
+        ...trust,
     };
 }
 
@@ -130,9 +177,6 @@ export function readMobileDeviceFromRequest(req) {
             nested.lng ??
             nested.lon,
     });
-    if (!location && coords) {
-        location = `${coords.latitude}, ${coords.longitude}`;
-    }
     return {
         deviceId,
         deviceName,
@@ -153,9 +197,6 @@ function applyIncomingDevice(user, incoming) {
     if (incoming.latitude != null && incoming.longitude != null) {
         user.mobileDevice.latitude = incoming.latitude;
         user.mobileDevice.longitude = incoming.longitude;
-        if (!incoming.location) {
-            user.mobileDevice.location = `${incoming.latitude}, ${incoming.longitude}`;
-        }
     }
     if (incoming.ipAddress) {
         user.mobileDevice.ipAddress = normalizeIp(incoming.ipAddress);
@@ -224,8 +265,7 @@ export function fixMobileDeviceOnUser(user) {
             message: 'No mobile has logged in yet. Ask the user to open the VeRP app first, then click Fix.',
         };
     }
-    user.mobileDevice.status = STATUS_FIXED;
-    user.markModified?.('mobileDevice');
+    applyDeviceTrust(user, true);
     return { ok: true };
 }
 
@@ -247,34 +287,129 @@ function deviceNameFromUserAgent(ua) {
     return text ? 'Web browser' : '';
 }
 
+export function osFromUserAgent(ua) {
+    const text = String(ua || '');
+    if (/Windows NT|Windows/i.test(text)) return 'Windows';
+    if (/Mac OS X|Macintosh/i.test(text)) return 'macOS';
+    if (/CrOS/i.test(text)) return 'ChromeOS';
+    if (/Android/i.test(text)) return 'Android';
+    if (/iPhone|iPad|iPod/i.test(text)) return 'iOS';
+    if (/Linux/i.test(text)) return 'Linux';
+    return '';
+}
+
 export function emptyWebLogin() {
     return {
+        deviceId: '',
+        deviceName: '',
+        os: '',
         latitude: null,
         longitude: null,
         location: '',
         ipAddress: '',
         userAgent: '',
         lastSeenAt: null,
+        trustedUntil: null,
+        status: STATUS_NOT_FIXED,
     };
 }
 
+export function getWebDeviceTrust(user) {
+    const until = user?.webLogin?.trustedUntil;
+    const untilMs = until ? new Date(until).getTime() : 0;
+    const daysLeft = untilMs > Date.now() ? Math.ceil((untilMs - Date.now()) / 86400000) : 0;
+    return {
+        fixed: daysLeft > 0,
+        daysLeft,
+        trustedUntil: daysLeft > 0 ? until : null,
+    };
+}
+
+export function expireWebTrustIfNeeded(user) {
+    if (!user?.webLogin) return;
+    const until = user.webLogin.trustedUntil;
+    if (until && new Date(until).getTime() <= Date.now()) {
+        user.webLogin.trustedUntil = null;
+        user.webLogin.status = STATUS_NOT_FIXED;
+        user.markModified?.('webLogin');
+    }
+}
+
+export function isWebDeviceTrusted(user, deviceId) {
+    expireWebTrustIfNeeded(user);
+    const storedId = String(user?.webLogin?.deviceId || '').trim();
+    const nextId = String(deviceId || '').trim();
+    if (!storedId || !nextId || storedId !== nextId) return false;
+    return getWebDeviceTrust(user).fixed;
+}
+
+export function applyWebDeviceTrust(user, enabled) {
+    if (!user?.webLogin || typeof user.webLogin !== 'object') {
+        user.webLogin = emptyWebLogin();
+    }
+    if (enabled) {
+        user.webLogin.status = STATUS_FIXED;
+        user.webLogin.trustedUntil = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000);
+    } else {
+        user.webLogin.status = STATUS_NOT_FIXED;
+        user.webLogin.trustedUntil = null;
+    }
+    user.markModified?.('webLogin');
+}
+
+export function webDeviceLoginDenied(user, incoming, { isSystemAdmin = false } = {}) {
+    if (isSystemAdmin) return null;
+    expireWebTrustIfNeeded(user);
+    const stored = user?.webLogin;
+    if (!stored || stored.status !== STATUS_FIXED) return null;
+    const lockedId = String(stored.deviceId || '').trim();
+    if (!lockedId) return null;
+    const nextId = String(incoming?.deviceId || '').trim();
+    if (!nextId) {
+        return 'This account is fixed to one laptop/browser for 30 days. Open that same system, or ask admin to click Change device.';
+    }
+    if (nextId !== lockedId) {
+        return 'This account can only be used from the fixed laptop/browser for 30 days. Ask admin to click Change device on the user page.';
+    }
+    return null;
+}
+
 export function serializeWebLogin(user) {
+    expireWebTrustIfNeeded(user);
     const stored = user?.webLogin && typeof user.webLogin === 'object' ? user.webLogin : {};
+    const trust = getWebDeviceTrust(user);
+    const status = trust.fixed ? STATUS_FIXED : STATUS_NOT_FIXED;
     const coords = parseMobileDeviceCoordinates(stored);
     const userAgent = String(stored.userAgent || '').trim();
+    const os = String(stored.os || osFromUserAgent(userAgent)).trim();
+    const deviceName = String(stored.deviceName || deviceNameFromUserAgent(userAgent)).trim();
     const ipAddress = normalizeIp(stored.ipAddress) || '';
     const location = String(stored.location || '').trim();
-    const hasSession = Boolean(coords || location || ipAddress || stored.lastSeenAt || userAgent);
+    const deviceId = String(stored.deviceId || '').trim();
+    const hasSession = Boolean(deviceId || coords || location || ipAddress || stored.lastSeenAt || userAgent || deviceName);
     return {
-        deviceName: deviceNameFromUserAgent(userAgent),
+        deviceId,
+        deviceName: deviceName || '',
+        os: os || '',
         location: location || '',
         latitude: coords?.latitude ?? null,
         longitude: coords?.longitude ?? null,
         ipAddress: hasSession ? (ipAddress || normalizeIp(user?.lastLoginIp)) : '',
         userAgent,
         lastSeenAt: stored.lastSeenAt || null,
+        status,
+        statusLabel: status === STATUS_FIXED ? 'Fixed' : 'Not Fixed',
         hasSession,
+        canChange: hasSession || trust.fixed,
+        ...trust,
     };
+}
+
+export function changeWebDeviceOnUser(user) {
+    if (!user) return { ok: false, message: 'User not found' };
+    user.webLogin = emptyWebLogin();
+    user.markModified?.('webLogin');
+    return { ok: true };
 }
 
 export function recordWebLoginOnUser(user, incoming = {}) {
@@ -287,7 +422,9 @@ export function recordWebLoginOnUser(user, incoming = {}) {
     if (lat != null && lng != null) {
         user.webLogin.latitude = lat;
         user.webLogin.longitude = lng;
-        user.webLogin.location = String(incoming.location || incoming.label || `${lat}, ${lng}`).trim();
+        if (incoming.location || incoming.label) {
+            user.webLogin.location = String(incoming.location || incoming.label).trim();
+        }
     } else if (incoming.location) {
         user.webLogin.location = String(incoming.location).trim();
         const parsed = parseMobileDeviceCoordinates({ location: incoming.location });
@@ -301,6 +438,15 @@ export function recordWebLoginOnUser(user, incoming = {}) {
     }
     if (incoming.userAgent) {
         user.webLogin.userAgent = String(incoming.userAgent).trim().slice(0, 240);
+    }
+    if (incoming.deviceId) user.webLogin.deviceId = String(incoming.deviceId).trim();
+    if (incoming.deviceName) user.webLogin.deviceName = String(incoming.deviceName).trim().slice(0, 80);
+    else if (!user.webLogin.deviceName && incoming.userAgent) {
+        user.webLogin.deviceName = deviceNameFromUserAgent(incoming.userAgent);
+    }
+    if (incoming.os) user.webLogin.os = String(incoming.os).trim().slice(0, 40);
+    else if (!user.webLogin.os && incoming.userAgent) {
+        user.webLogin.os = osFromUserAgent(incoming.userAgent);
     }
     user.webLogin.lastSeenAt = new Date();
     user.markModified?.('webLogin');

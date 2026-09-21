@@ -2,6 +2,7 @@ import nodemailer from 'nodemailer';
 import { resolveFrontendBaseUrl, emailFrontendUrl } from './resolveFrontendBaseUrl.js';
 import { resolveEmployeeEmailTargets } from './resolveEmployeeEmail.js';
 import { normalizePdfAttachments } from './normalizeEmailAttachments.js';
+import { skipVehicleHandoverEmail } from './vehicleHandoverEmailGate.js';
 
 /**
  * Sends an email to the Reporting Authority requesting approval for Asset End of Life or Loss & Damage.
@@ -13,6 +14,9 @@ import { normalizePdfAttachments } from './normalizeEmailAttachments.js';
  * @param {string} reason - The reason provided
  */
 export const sendAssetActionApprovalEmail = async (asset, actionType, manager, requester, reason, attachments = []) => {
+    if (actionType === 'Reassign Asset' && skipVehicleHandoverEmail(asset)) {
+        return;
+    }
     try {
         const { to: managerEmail, cc: managerCc } = resolveEmployeeEmailTargets(manager);
         if (!managerEmail) {

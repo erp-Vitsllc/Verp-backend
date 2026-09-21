@@ -7,7 +7,7 @@ import { updateUser } from '../controllers/user/updateUser.js';
 import { deleteUser } from '../controllers/user/deleteUser.js';
 import { validatePassword } from '../controllers/user/validatePassword.js';
 import { uploadUserProfilePicture } from '../controllers/user/uploadUserProfilePicture.js';
-import { changeUserMobileDevice, fixUserMobileDevice } from '../controllers/user/userMobileDeviceController.js';
+import { changeUserMobileDevice, changeUserWebDevice, fixUserMobileDevice } from '../controllers/user/userMobileDeviceController.js';
 import { getGroups } from '../controllers/group/getGroups.js';
 import { getGroupById } from '../controllers/group/getGroupById.js';
 import { createGroup } from '../controllers/group/createGroup.js';
@@ -55,6 +55,7 @@ router.post('/:id/upload-profile-picture', checkPermission('settings_user_group'
 
 router.post('/:id/mobile-device/fix', checkPermission('settings_user_group', 'edit'), fixUserMobileDevice);
 router.post('/:id/mobile-device/change', checkPermission('settings_user_group', 'edit'), changeUserMobileDevice);
+router.post('/:id/web-device/change', checkPermission('settings_user_group', 'edit'), changeUserWebDevice);
 
 // Delete user - requires delete permission
 router.delete('/:id', checkPermission('settings_user_group', 'delete'), deleteUser);

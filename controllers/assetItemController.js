@@ -47,6 +47,11 @@ import {
     buildFleetHandoverDisplayLabels,
     formatEmployeeDisplayName,
 } from '../utils/vehicleHandoverApprovalFlow.js';
+import {
+    maybeNotifyVehicleHandoverReportsReady,
+    notifyVehicleHandoverAfterTargetApprove,
+    notifyVehicleHandoverAfterHrDecision,
+} from '../utils/sendVehicleHandoverLifecycleMessages.js';
 import { allocateNextServiceReqNo } from '../utils/assetServiceReqNo.js';
 import { canLoginThroughAnyChannel } from '../utils/loginThrough.js';
 import {
@@ -174,6 +179,8 @@ import {
     MAX_ASSET_LEAVE_DAYS,
     MAX_ASSET_SERVICE_DAYS,
     ON_LEAVE_TRANSFER_BLOCKED_MESSAGE,
+    ZERO_ASSET_VALUE_TRANSFER_MESSAGE,
+    assertAssetHasPositiveValueForTransfer,
     assertAssetNotOnLeaveForTransfer,
 } from '../utils/assetOperationalFlags.js';
 import { sendParkingReassignAcceptedEmail } from '../utils/sendParkingReassignAcceptedEmail.js';
@@ -6811,6 +6818,11 @@ export const assignAssetItem = async (req, res) => {
             });
         }
 
+        const valueBlock = assertAssetHasPositiveValueForTransfer(item);
+        if (!valueBlock.ok) {
+            return res.status(400).json({ message: valueBlock.message });
+        }
+
         // Check if this is a reassignment (asset was previously assigned, or assignee acknowledgment is still open)
         const isReassignment =
             (item.status === 'Assigned' || isAssetAssignmentAcknowledgmentPending(item)) &&
@@ -7600,7 +7612,7 @@ export const assignAssetItem = async (req, res) => {
                     const assetController = fleetVehicle
                         ? await getResolvedFleetHrEmployee()
                         : await getDepartmentHOD('assetcontroller').catch(() => null);
-                    if (assetController) {
+                    if (assetController && !fleetVehicle) {
                         await sendAssetControllerDirectAssignmentRecordEmail({
                             assetControllerEmployee: assetController,
                             assigneeEmployee: employeeToAssign,
@@ -7794,7 +7806,7 @@ export const bulkAssignAssetItems = async (req, res) => {
 
         const actionRequiredBy = autoAcceptOnAssign ? null : pendingActionActorId;
 
-        const existingItems = await AssetItem.find({ _id: { $in: assetIds } }).select('status assetId');
+        const existingItems = await AssetItem.find({ _id: { $in: assetIds } }).select('status assetId assetValue');
         if (existingItems.length !== assetIds.length) {
             return res.status(400).json({ message: 'One or more assets were not found.' });
         }
@@ -7803,6 +7815,13 @@ export const bulkAssignAssetItems = async (req, res) => {
             const ids = notAssignable.map((d) => `${d.assetId || d._id} (${d.status})`).join(', ');
             return res.status(400).json({
                 message: `Bulk assign is only allowed for Unassigned or Returned assets. Not assignable: ${ids}`,
+            });
+        }
+        const zeroValueItems = existingItems.filter((doc) => !assertAssetHasPositiveValueForTransfer(doc).ok);
+        if (zeroValueItems.length > 0) {
+            const ids = zeroValueItems.map((d) => d.assetId || d._id).join(', ');
+            return res.status(400).json({
+                message: `${ZERO_ASSET_VALUE_TRANSFER_MESSAGE} (${ids})`,
             });
         }
 
@@ -8155,7 +8174,7 @@ export const bulkAssignAssetItemsToCompany = async (req, res) => {
             updateData.assignedDays = parsedDays;
         }
 
-        const existingItems = await AssetItem.find({ _id: { $in: assetIds } }).select('status assetId');
+        const existingItems = await AssetItem.find({ _id: { $in: assetIds } }).select('status assetId assetValue');
         if (existingItems.length !== assetIds.length) {
             return res.status(400).json({ message: 'One or more assets were not found.' });
         }
@@ -8164,6 +8183,13 @@ export const bulkAssignAssetItemsToCompany = async (req, res) => {
             const ids = notAssignable.map((d) => `${d.assetId || d._id} (${d.status})`).join(', ');
             return res.status(400).json({
                 message: `Bulk assign is only allowed for Unassigned or Returned assets. Not assignable: ${ids}`,
+            });
+        }
+        const zeroValueCompanyItems = existingItems.filter((doc) => !assertAssetHasPositiveValueForTransfer(doc).ok);
+        if (zeroValueCompanyItems.length > 0) {
+            const ids = zeroValueCompanyItems.map((d) => d.assetId || d._id).join(', ');
+            return res.status(400).json({
+                message: `${ZERO_ASSET_VALUE_TRANSFER_MESSAGE} (${ids})`,
             });
         }
 
@@ -8716,9 +8742,19 @@ export const respondToAssignment = async (req, res) => {
                         .populate('actionRequiredBy', 'firstName lastName employeeId')
                         .populate('typeId', 'name imagePreview')
                         .populate('categoryId', 'name imagePreview');
+                    const vehicleHandoverNotify = await notifyVehicleHandoverAfterTargetApprove({
+                        req,
+                        asset: stagedItem || item,
+                        historyId: advance.historyId || handoverFlow?.historyId,
+                        requiresHr: true,
+                    }).catch((err) => {
+                        console.error('[VehicleHandoverNotify] FAILED target_approve_hr:', err?.message || err);
+                        return { ok: false, failed: 1, failures: [{ sent: false, reason: err?.message || 'notify_failed' }] };
+                    });
                     return res.status(200).json({
                         message: 'Handover advanced to the next approval stage.',
                         asset: stagedItem,
+                        vehicleHandoverNotify,
                     });
                 }
             }
@@ -9026,6 +9062,26 @@ export const respondToAssignment = async (req, res) => {
                             }
                         } catch {
                             /* non-fatal */
+                        }
+                        if (fleetHandoverHrSkipped) {
+                            req.vehicleHandoverNotify = await notifyVehicleHandoverAfterTargetApprove({
+                                req,
+                                asset: item,
+                                historyId,
+                                requiresHr: false,
+                            }).catch((err) => {
+                                console.error('[VehicleHandoverNotify] FAILED target_approve:', err?.message || err);
+                                return { ok: false, failed: 1, failures: [{ sent: false, reason: err?.message || 'notify_failed' }] };
+                            });
+                        } else if (hrStage) {
+                            req.vehicleHandoverNotify = await notifyVehicleHandoverAfterHrDecision({
+                                asset: item,
+                                historyId,
+                                hasFine: uniqueFineIds.length > 0,
+                            }).catch((err) => {
+                                console.error('[VehicleHandoverNotify] FAILED hr_decision:', err?.message || err);
+                                return { ok: false, failed: 1, failures: [{ sent: false, reason: err?.message || 'notify_failed' }] };
+                            });
                         }
                     }
                     if (item.pendingActionDetails?.vehicleHandoverFlow) {
@@ -9652,7 +9708,11 @@ export const respondToAssignment = async (req, res) => {
             }
         }
 
-        res.status(200).json(item);
+        const payload = typeof item.toObject === 'function' ? item.toObject() : item;
+        if (req.vehicleHandoverNotify) {
+            payload.vehicleHandoverNotify = req.vehicleHandoverNotify;
+        }
+        res.status(200).json(payload);
     } catch (error) {
         res.status(500).json({ message: 'Server Error' });
     }
@@ -13007,6 +13067,9 @@ export const updateHistoryReceiverAssessment = async (req, res) => {
 
         const recordObj = populated.toObject();
         // Keep assessment photos as storage keys — UI proxies via /storage/file.
+        if (req.body.assessmentCompleted === true) {
+            recordObj.vehicleHandoverNotify = await maybeNotifyVehicleHandoverReportsReady(req, record);
+        }
 
         res.status(200).json(recordObj);
     } catch (error) {
@@ -13218,6 +13281,9 @@ export const updateHistoryBodyCondition = async (req, res) => {
 
         const responseBody = populated.toObject();
         // Keep body-condition photos as storage keys — UI proxies via /storage/file.
+        if (bodyConditionCompleted === true) {
+            responseBody.vehicleHandoverNotify = await maybeNotifyVehicleHandoverReportsReady(req, record);
+        }
         if (inspectionSubmitResult?.asset) {
             responseBody.vehicleAsset = inspectionSubmitResult.asset;
             responseBody.inspectionSubmittedForHr = inspectionSubmitResult.submitted === true;
@@ -15112,6 +15178,11 @@ export const transferAsset = async (req, res) => {
             return res.status(400).json({ message: onLeaveBlock.message });
         }
 
+        const valueBlock = assertAssetHasPositiveValueForTransfer(asset);
+        if (!valueBlock.ok) {
+            return res.status(400).json({ message: valueBlock.message });
+        }
+
         // Permission: asset controller/admin OR assignee
         // Also allow assigner (asset.assignedBy) + primary reportee delegation when assignee has NO companyEmail
         const actorFlags = await getActorPermissionFlagsForAsset(req.user, asset);
@@ -15186,6 +15257,11 @@ export const transferAssigneeAsset = async (req, res) => {
         }
         if (item.acceptanceStatus === 'Pending' && item.actionRequiredBy) {
             return res.status(400).json({ message: 'Asset already has a pending assignment. Resolve it before transferring.' });
+        }
+
+        const valueBlock = assertAssetHasPositiveValueForTransfer(item);
+        if (!valueBlock.ok) {
+            return res.status(400).json({ message: valueBlock.message });
         }
 
         const oldAssigneeId = (item.assignedTo._id || item.assignedTo).toString();

@@ -441,6 +441,39 @@ export const approveLoan = async (req, res) => {
         const paymentDueAccountsHod = paymentDueAccountsHodDoc;
         const req = reqDoc;
         let applicant = applicantDoc;
+        let employeeGotWhatsApp = false;
+        let approvalPdfBuffer = null;
+        let approvalAckFilename = '';
+
+        if (finalStatus === 'Approved' && nextStage === LOAN_PENDING_PAYMENT_STATUS) {
+            try {
+                const { persistLoanApprovalAttachments, getLoanAcknowledgmentPdfBuffer } =
+                    await import('../../utils/persistLoanApprovalAttachments.js');
+                await persistLoanApprovalAttachments(loan);
+                approvalPdfBuffer = await getLoanAcknowledgmentPdfBuffer(loan);
+                const typeSlug = loan.type === 'Advance' ? 'Advance' : 'Loan';
+                approvalAckFilename = `${typeSlug}_Acknowledgment_${loan.loanId || loan._id}.pdf`;
+
+                if (!applicant) {
+                    applicant = await EmployeeBasic.findOne({ employeeId: loan.employeeId });
+                }
+                const { sendLoanApprovalWhatsApp } = await import('../../utils/sendLoanApprovalWhatsApp.js');
+                const waResult = await sendLoanApprovalWhatsApp({
+                    loan,
+                    employee: applicant,
+                    pdfBuffer: approvalPdfBuffer,
+                    filename: approvalAckFilename,
+                });
+                employeeGotWhatsApp = waResult?.sent === true;
+                if (employeeGotWhatsApp) {
+                    console.log(`[ApproveLoan] Approval document sent on WhatsApp to ${applicant?.employeeId}.`);
+                } else {
+                    console.log(`[ApproveLoan] WhatsApp approval skipped (${waResult?.reason || 'unknown'}).`);
+                }
+            } catch (waErr) {
+                console.error('[ApproveLoan] WhatsApp approval document failed:', waErr?.message || waErr);
+            }
+        }
 
         if (emailUser && emailPass) {
             const transporter = nodemailer.createTransport({
@@ -582,9 +615,10 @@ export const approveLoan = async (req, res) => {
                         const toEmails = new Set();
                         const ccEmails = new Set();
 
-                        // 1. Applicant Email (fallback to primaryReportee when applicant has no email)
+                        // 1. Applicant Email (fallback to primaryReportee when applicant has no email).
+                        // Skip employee mail when the acknowledgment already went on WhatsApp.
                         const { email: appEmail, isFallbackToReportee, employeeName, reporteeName } = resolveEmployeeEmail(applicant);
-                        if (appEmail) toEmails.add(appEmail);
+                        if (appEmail && !employeeGotWhatsApp) toEmails.add(appEmail);
 
                         // 2. Manager Email (His Reportee/Supervisor) - only if not already added from fallback
                         if (applicant.primaryReportee) {
@@ -610,17 +644,22 @@ export const approveLoan = async (req, res) => {
                             console.warn("[ApproveLoan] Could not fetch HOD emails for CC", e.message);
                         }
 
-                        const toRecipients = Array.from(toEmails);
-                        const ccRecipients = Array.from(ccEmails);
+                        let toRecipients = Array.from(toEmails);
+                        let ccRecipients = Array.from(ccEmails).filter((email) => !toEmails.has(email));
+                        if (toRecipients.length === 0 && ccRecipients.length > 0) {
+                            toRecipients = ccRecipients;
+                            ccRecipients = [];
+                        }
 
                         if (toRecipients.length > 0 || ccRecipients.length > 0) {
                             const { persistLoanApprovalAttachments, getLoanAcknowledgmentPdfBuffer } =
                                 await import('../../utils/persistLoanApprovalAttachments.js');
 
                             await persistLoanApprovalAttachments(loan);
-                            const pdfBuffer = await getLoanAcknowledgmentPdfBuffer(loan);
+                            const pdfBuffer = approvalPdfBuffer || await getLoanAcknowledgmentPdfBuffer(loan);
                             const typeSlug = loan.type === 'Advance' ? 'Advance' : 'Loan';
-                            const ackFilename = `${typeSlug}_Acknowledgment_${loan.loanId || loan._id}.pdf`;
+                            const ackFilename = approvalAckFilename
+                                || `${typeSlug}_Acknowledgment_${loan.loanId || loan._id}.pdf`;
 
                             const mailOptions = {
                                 from: `"VeRP Notification" <${emailUser}>`,
@@ -633,7 +672,7 @@ export const approveLoan = async (req, res) => {
                                              <h2 style="margin: 0;">${typeSlug} Approved</h2>
                                          </div>
                                          <div style="padding: 30px; background-color: #ffffff;">
-                                             ${isFallbackToReportee ? getFallbackEmailNote(employeeName, reporteeName) : ''}
+                                             ${!employeeGotWhatsApp && isFallbackToReportee ? getFallbackEmailNote(employeeName, reporteeName) : ''}
                                              <p>Dear All,</p>
                                              <p>Please find attached the <strong>${typeSlug} Acknowledgment &amp; Salary Deduction Authorization</strong> for <strong>${applicant.firstName} ${applicant.lastName}</strong>, which has been <strong>fully approved</strong> by Management.</p>
                                              

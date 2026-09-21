@@ -8,6 +8,7 @@ import {
     buildEmailDedupeKey,
     sendErpEmail,
 } from "./emailDispatch.js";
+import { skipVehicleHandoverEmail } from "./vehicleHandoverEmailGate.js";
 
 export const sendAssetAssignmentEmail = async ({
     asset,
@@ -30,6 +31,7 @@ export const sendAssetAssignmentEmail = async ({
     /** Optional extra dedupe segment (e.g. handover history id) */
     dedupeEvent = '',
 }) => {
+    if (skipVehicleHandoverEmail(asset)) return false;
     try {
         const { email: recipientEmail, isFallbackToReportee, employee: resolvedRecipient } =
             await resolveEmployeeEmailWithReporteeLoaded(recipient);

@@ -81,6 +81,18 @@ export const hasActiveParkingContext = (item) => isLeaveActive(item);
 export const ON_LEAVE_TRANSFER_BLOCKED_MESSAGE =
     'Assets on leave cannot be transferred. Only Return and Loss & Damage are allowed.';
 
+export const ZERO_ASSET_VALUE_TRANSFER_MESSAGE =
+    'Transfer is disabled because the asset value is 0.';
+
+export const hasPositiveAssetValue = (item) => Number(item?.assetValue) > 0;
+
+export const assertAssetHasPositiveValueForTransfer = (item) => {
+    if (!hasPositiveAssetValue(item)) {
+        return { ok: false, message: ZERO_ASSET_VALUE_TRANSFER_MESSAGE };
+    }
+    return { ok: true };
+};
+
 export const assertAssetNotOnLeaveForTransfer = (item) => {
     if (hasActiveParkingContext(item)) {
         return { ok: false, message: ON_LEAVE_TRANSFER_BLOCKED_MESSAGE };

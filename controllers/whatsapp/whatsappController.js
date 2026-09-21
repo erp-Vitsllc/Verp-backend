@@ -299,22 +299,27 @@ export async function postWhatsAppCheckNumber(req, res) {
             });
         }
 
-        const delivery = await waitForWhatsAppDelivery(result.messageId, { timeoutMs: 18000 });
+        // Meta accepted the welcome template, so the number is on WhatsApp.
+        // Delivery webhooks often never reach a local server; do not treat that as invalid.
+        const delivery = await waitForWhatsAppDelivery(result.messageId, { timeoutMs: 8000 });
         const status = String(delivery?.status || '').toLowerCase();
-        if (status === 'delivered' || status === 'read') {
-            return res.status(200).json({
-                success: true,
-                onWhatsApp: true,
-                delivered: true,
-                messageId: result.messageId || '',
+        if (status === 'failed' && isNotOnWhatsAppSendError({
+            error: delivery.errorMessage,
+            metaError: { code: delivery.errorCode },
+        })) {
+            return res.status(400).json({
+                success: false,
+                onWhatsApp: false,
+                error: 'Not a valid WhatsApp number',
+                field: 'whatsappNumber',
             });
         }
 
-        return res.status(400).json({
-            success: false,
-            onWhatsApp: false,
-            error: 'Not a valid WhatsApp number',
-            field: 'whatsappNumber',
+        return res.status(200).json({
+            success: true,
+            onWhatsApp: true,
+            delivered: status === 'delivered' || status === 'read',
+            messageId: result.messageId || '',
         });
     } catch (error) {
         console.error('[WhatsApp] number check failed:', error?.message || error);

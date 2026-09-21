@@ -4,6 +4,7 @@ import { getDepartmentHOD } from './getDepartmentHOD.js';
 import { resolveEmployeeEmail } from './resolveEmployeeEmail.js';
 import { buildAcceptedAssetHandoverAttachments } from './buildAssignmentHandoverEmailAttachments.js';
 import { normalizePdfAttachments } from './normalizeEmailAttachments.js';
+import { skipVehicleHandoverEmail } from './vehicleHandoverEmailGate.js';
 
 /**
  * Emails the Asset Controller (flowchart HOD) with the updated asset handover PDF
@@ -29,7 +30,11 @@ export async function notifyAssetControllerReassignmentAcceptedWithHandover(req,
             return;
         }
 
-        const asset = await AssetItem.findById(assetMongoId).select('assetId name').lean();
+        const asset = await AssetItem.findById(assetMongoId)
+            .select('assetId name plateNumber vehicleBrand vehicleCode typeId')
+            .populate('typeId', 'name')
+            .lean();
+        if (skipVehicleHandoverEmail(asset)) return;
         const displayId = asset?.assetId || String(assetMongoId);
         const displayName = asset?.name || 'Asset';
 

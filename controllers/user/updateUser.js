@@ -2,7 +2,7 @@ import User from "../../models/User.js";
 import { resolveFrontendBaseUrl, emailFrontendUrl } from '../../utils/resolveFrontendBaseUrl.js';
 import Group from "../../models/Group.js";
 import EmployeeBasic from "../../models/EmployeeBasic.js";
-import { loginThroughFromBody } from "../../utils/loginThrough.js";
+import { assertLoginThroughCompanyEmail, assertLoginThroughWhatsApp, loginThroughFromBody } from "../../utils/loginThrough.js";
 import bcrypt from "bcryptjs";
 import nodemailer from "nodemailer";
 import jwt from "jsonwebtoken";
@@ -369,12 +369,26 @@ const updateUserHandler = async (req, res) => {
                         });
                     }
                     const employee = await EmployeeBasic.findOne({ employeeId: updatedUser.employeeId })
-                        .select("loginThrough")
+                        .select("loginThrough companyEmail")
                         .lean();
                     if (!employee) {
                         return res.status(400).json({ message: "Employee not found" });
                     }
                     syncedLoginThrough = loginThroughFromBody({ loginThrough }, employee);
+                    const loginThroughBlock = assertLoginThroughCompanyEmail(
+                        employee,
+                        syncedLoginThrough,
+                    );
+                    if (loginThroughBlock) {
+                        return res.status(400).json({ message: loginThroughBlock });
+                    }
+                    const whatsappBlock = await assertLoginThroughWhatsApp(
+                        updatedUser.employeeId,
+                        syncedLoginThrough,
+                    );
+                    if (whatsappBlock) {
+                        return res.status(400).json({ message: whatsappBlock });
+                    }
                     syncData.loginThrough = syncedLoginThrough;
                 }
 

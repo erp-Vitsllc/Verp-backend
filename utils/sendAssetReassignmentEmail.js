@@ -2,6 +2,7 @@ import nodemailer from "nodemailer";
 import { resolveFrontendBaseUrl, emailFrontendUrl } from './resolveFrontendBaseUrl.js';
 import { resolveEmployeeEmailWithReporteeLoaded } from "./resolveEmployeeEmail.js";
 import { normalizePdfAttachments } from "./normalizeEmailAttachments.js";
+import { skipVehicleHandoverEmail } from "./vehicleHandoverEmailGate.js";
 
 /**
  * Sends email notification to the previous assignee when an asset is reassigned (at assign time).
@@ -16,6 +17,7 @@ export const sendAssetReassignmentEmail = async ({
     newAssigneeType,
     attachments = []
 }) => {
+    if (skipVehicleHandoverEmail(asset)) return false;
     try {
         let recipientEmail = null;
         let recipientName = '';

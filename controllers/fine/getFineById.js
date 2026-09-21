@@ -77,6 +77,7 @@ function applyFineDetailPopulate(query) {
         .populate('hrApprovedBy', 'name firstName lastName email department designation employeeId')
         .populate('accountsApprovedBy', 'name firstName lastName email department designation employeeId')
         .populate('approvedBy', 'name firstName lastName email department designation employeeId')
+        .populate('accountsPaymentBy', 'name firstName lastName employeeId')
         .populate('rejectedBy', 'name firstName lastName email department designation')
         .populate('submittedTo', 'name firstName lastName email department designation employeeId')
         .populate('workflow.assignedTo', 'name firstName lastName employeeId')

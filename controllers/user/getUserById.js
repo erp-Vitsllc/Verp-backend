@@ -51,7 +51,7 @@ export const getUserById = async (req, res) => {
         let employee = null;
         if (user.employeeId) {
             employee = await EmployeeBasic.findOne({ employeeId: user.employeeId })
-                .select("_id employeeId firstName lastName email designation profilePicture loginThrough")
+                .select("_id employeeId firstName lastName email companyEmail designation profilePicture loginThrough")
                 .lean();
         }
 
@@ -88,6 +88,7 @@ export const getUserById = async (req, res) => {
                       firstName: employee.firstName,
                       lastName: employee.lastName,
                       email: employee.email,
+                      companyEmail: employee.companyEmail || '',
                       designation: employee.designation,
                       loginThrough: normalizeLoginThrough(employee),
                   }

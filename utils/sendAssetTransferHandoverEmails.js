@@ -5,6 +5,7 @@ import {
     buildAssignmentHandoverEmailAttachments,
     hodDisplayFromEmployee,
 } from './buildAssignmentHandoverEmailAttachments.js';
+import { skipVehicleHandoverEmail } from './vehicleHandoverEmailGate.js';
 
 /**
  * Notify target assignee, asset controller, and transfer sender with the same handover PDF
@@ -23,6 +24,7 @@ export async function sendAssetTransferHandoverEmails({
     skipRecipientIds = [],
 }) {
     if (!asset || !req) return { sent: 0, attachments: [] };
+    if (skipVehicleHandoverEmail(asset)) return { sent: 0, attachments: [] };
 
     const ids = [...new Set((assetIds || [asset._id]).map(String).filter(Boolean))];
     if (!ids.length) return { sent: 0, attachments: [] };

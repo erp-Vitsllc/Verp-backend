@@ -79,6 +79,11 @@ export const createUser = async (req, res) => {
             if (existingUser) {
                 return res.status(400).json({ message: "This employee is already a user" });
             }
+            if (!String(employee.companyEmail || companyEmail || "").trim()) {
+                return res.status(400).json({
+                    message: "Add a company email address on the employee profile before creating portal access.",
+                });
+            }
         }
 
         // Hash password

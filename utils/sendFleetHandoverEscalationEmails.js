@@ -1,6 +1,7 @@
 import nodemailer from 'nodemailer';
 import { buildHandoverAssignDetailsUrl, formatEmployeeDisplayName } from './vehicleHandoverApprovalFlow.js';
 import { pickEffectiveEmail } from './resolveEmployeeEmail.js';
+import { VEHICLE_HANDOVER_EMAILS_ENABLED } from './vehicleHandoverEmailGate.js';
 
 async function sendHtmlEmail({ to, subject, html }) {
     const emailUser = process.env.EMAIL_USER?.trim();
@@ -51,6 +52,7 @@ export async function sendFleetHandoverReminderEmail({
     daysElapsed,
     daysLeft,
 }) {
+    if (!VEHICLE_HANDOVER_EMAILS_ENABLED) return;
     const detailUrl = buildHandoverAssignDetailsUrl(asset._id, historyId);
     const subject = `Reminder (day ${daysElapsed}): vehicle handover pending — ${asset.assetId || asset.name || 'Vehicle'}`;
 
@@ -83,6 +85,7 @@ export async function sendFleetHandoverAutoAcceptedEmail({
     reportsCopied,
     autoAcceptDay = 10,
 }) {
+    if (!VEHICLE_HANDOVER_EMAILS_ENABLED) return;
     const detailUrl = buildHandoverAssignDetailsUrl(asset._id, historyId);
     const assigneeName = formatEmployeeDisplayName(assigneeDoc) || 'the assigned employee';
     const subject = `Auto-accepted: vehicle handover — ${asset.assetId || asset.name || 'Vehicle'}`;

@@ -1,4 +1,7 @@
-/** Portal App / Web login flags. Unset until someone checks them on the profile. */
+export const PORTAL_APP_WHATSAPP_REQUIRED =
+    'Cannot activate Portal App. Add a WhatsApp number on the employee profile first.';
+export const WEB_LOGIN_EMAIL_REQUIRED =
+    'Cannot activate Web. Add a Company Email ID in Work Details first.';
 
 export const ACCESS_CONTROL_PATCH_KEYS = ["loginThrough", "enablePortalAccess"];
 
@@ -26,6 +29,22 @@ export function loginThroughFromBody(body, current) {
     if (typeof incoming.portalApp === 'boolean') next.portalApp = incoming.portalApp;
     if (typeof incoming.web === 'boolean') next.web = incoming.web;
     return next;
+}
+
+export function assertLoginThroughCompanyEmail(employee, nextLoginThrough) {
+    if (!nextLoginThrough?.web) return '';
+    const email = String(employee?.companyEmail || employee?.workEmail || '').trim();
+    return email ? '' : WEB_LOGIN_EMAIL_REQUIRED;
+}
+
+export async function assertLoginThroughWhatsApp(employeeId, nextLoginThrough) {
+    if (!nextLoginThrough?.portalApp) return '';
+    const id = String(employeeId || '').trim();
+    if (!id) return 'Link an employee before activating Portal App.';
+    const { default: EmployeeContact } = await import('../models/EmployeeContact.js');
+    const { usableWhatsAppNumber } = await import('./normalizeWhatsAppPhone.js');
+    const contact = await EmployeeContact.findOne({ employeeId: id }).select('whatsappNumber').lean();
+    return usableWhatsAppNumber(contact?.whatsappNumber) ? '' : PORTAL_APP_WHATSAPP_REQUIRED;
 }
 
 function pendingProposedPayload(entry) {

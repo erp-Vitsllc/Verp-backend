@@ -1,12 +1,205 @@
+import crypto from "crypto";
 import bcrypt from "bcryptjs";
 import jwt from "jsonwebtoken";
+import nodemailer from "nodemailer";
 import User from "../models/User.js";
 import EmployeeBasic from "../models/EmployeeBasic.js";
+import WebLoginOtp from "../models/WebLoginOtp.js";
 import { getUserPermissions } from "../services/permissionService.js";
 import { getClientIp, recordActivityAsync } from "../utils/activityLog.js";
 import { normalizeLoginThrough } from "../utils/loginThrough.js";
 import { parsePunchLocation } from "../utils/attendancePunchMeta.js";
-import { recordWebLoginOnUser } from "../utils/userMobileDevice.js";
+import {
+    applyWebDeviceTrust,
+    expireWebTrustIfNeeded,
+    getWebDeviceTrust,
+    isWebDeviceTrusted,
+    osFromUserAgent,
+    recordWebLoginOnUser,
+    serializeWebLogin,
+    webDeviceLoginDenied,
+} from "../utils/userMobileDevice.js";
+
+function hashOtp(otp) {
+    return crypto.createHash("sha256").update(String(otp)).digest("hex");
+}
+
+function maskEmail(email) {
+    const value = String(email || "").trim().toLowerCase();
+    const at = value.indexOf("@");
+    if (at < 1) return "company email";
+    return `${value.slice(0, 1)}****${value.slice(at)}`;
+}
+
+function readWebDeviceFromRequest(req) {
+    const body = req?.body && typeof req.body === "object" ? req.body : {};
+    const userAgent = String(req.headers?.["user-agent"] || "").slice(0, 240);
+    return {
+        deviceId: String(body.deviceId || body.webDeviceId || "").trim(),
+        deviceName: String(body.deviceName || "").trim(),
+        os: String(body.os || osFromUserAgent(userAgent)).trim(),
+        userAgent,
+        ipAddress: getClientIp(req) || "",
+    };
+}
+
+async function resolveCompanyEmail(user) {
+    const fromUser = String(user?.companyEmail || "").trim().toLowerCase();
+    if (fromUser) return fromUser;
+    if (!user?.employeeId) return "";
+    const emp = await EmployeeBasic.findOne({ employeeId: user.employeeId })
+        .select("companyEmail")
+        .lean();
+    return String(emp?.companyEmail || "").trim().toLowerCase();
+}
+
+async function sendWebLoginOtpEmail(to, otp, name) {
+    const emailUser = process.env.EMAIL_USER?.trim();
+    const emailPass = process.env.EMAIL_PASS?.trim();
+    if (!emailUser || !emailPass) {
+        const error = new Error("Email is not configured. Cannot send login OTP.");
+        error.status = 502;
+        throw error;
+    }
+    const transporter = nodemailer.createTransport({
+        host: "smtp.office365.com",
+        port: 587,
+        secure: false,
+        auth: { user: emailUser, pass: emailPass },
+    });
+    await transporter.sendMail({
+        from: `"VeRP Portal" <${emailUser}>`,
+        to,
+        subject: "Your VERP login OTP",
+        html: `
+            <div style="font-family: Arial, sans-serif; color: #1f2937; line-height: 1.6;">
+                <p>Hello ${String(name || "User").replace(/[<>]/g, "")},</p>
+                <p>Your VERP website login OTP is <strong>${otp}</strong>.</p>
+                <p>It is valid for 5 minutes. Do not share this code.</p>
+            </div>
+        `,
+        text: `Your VERP website login OTP is ${otp}. It is valid for 5 minutes. Do not share this code.`,
+    });
+}
+
+async function sendWebLoginOtp(user, deviceId) {
+    const email = await resolveCompanyEmail(user);
+    if (!email) {
+        const error = new Error("No company email on this user. Ask admin to add it.");
+        error.status = 400;
+        throw error;
+    }
+
+    await WebLoginOtp.deleteMany({ userId: user._id });
+    const otp = String(crypto.randomInt(100000, 1000000));
+    const otpToken = crypto.randomUUID();
+    await WebLoginOtp.create({
+        otpToken,
+        userId: user._id,
+        otpHash: hashOtp(otp),
+        deviceId: String(deviceId || "").trim(),
+        email,
+        expiresAt: new Date(Date.now() + 5 * 60 * 1000),
+    });
+
+    try {
+        await sendWebLoginOtpEmail(email, otp, user.name || user.username);
+    } catch (err) {
+        await WebLoginOtp.deleteMany({ otpToken });
+        if (err.status) throw err;
+        const error = new Error(err.message || "Could not send login OTP email.");
+        error.status = 502;
+        throw error;
+    }
+
+    const maskedEmail = maskEmail(email);
+    console.log("[webLogin] OTP sent to company email", {
+        username: user.username,
+        maskedEmail,
+    });
+    return { otpToken, maskedEmail };
+}
+
+async function completeWebLogin(req, res, { user, isSystemAdmin, webLocation, incomingDevice, fixDevice }) {
+    expireWebTrustIfNeeded(user);
+    const deviceDenied = webDeviceLoginDenied(user, incomingDevice, { isSystemAdmin });
+    if (deviceDenied) {
+        return res.status(403).json({ message: deviceDenied });
+    }
+
+    const loginIp = incomingDevice.ipAddress || getClientIp(req);
+    user.lastLogin = new Date();
+    user.lastLoginIp = loginIp || user.lastLoginIp || "";
+    recordWebLoginOnUser(user, {
+            latitude: webLocation.latitude,
+            longitude: webLocation.longitude,
+            location: webLocation.label || "",
+            ipAddress: loginIp,
+            userAgent: incomingDevice.userAgent,
+            deviceId: incomingDevice.deviceId,
+            deviceName: incomingDevice.deviceName,
+            os: incomingDevice.os,
+        });
+    if (!isSystemAdmin && fixDevice) {
+        applyWebDeviceTrust(user, true);
+    }
+    await user.save();
+
+    const permissionData = await getUserPermissions(user._id, isSystemAdmin);
+    const permissions = permissionData?.permissions || {};
+    const token = jwt.sign({ id: user._id }, process.env.JWT_SECRET, { expiresIn: "7d" });
+
+    let employeeObjectId = null;
+    if (user.employeeId) {
+        const emp = await EmployeeBasic.findOne({ employeeId: user.employeeId }).select("_id");
+        if (emp) employeeObjectId = emp._id;
+    }
+
+    recordActivityAsync({
+        req,
+        module: "Settings",
+        action: "login",
+        entityType: "User",
+        entityId: String(user._id),
+        summary: `logged in${loginIp ? ` from IP ${loginIp}` : ""}`,
+        viewHref: "/Settings/User",
+        ip: loginIp,
+        actor: {
+            userId: user._id,
+            name: user.name || user.username || "User",
+            employeeId: user.employeeId || "",
+        },
+        metadata: {
+            actorName: user.name || user.username || "",
+            employeeId: user.employeeId || "",
+            username: user.username || "",
+            email: user.email || "",
+        },
+    });
+
+    return res.status(200).json({
+        needsOtp: false,
+        message: "Login successful",
+        token,
+        user: {
+            id: user._id,
+            name: user.name,
+            email: user.email,
+            username: user.username,
+            employeeId: user.employeeId,
+            employeeObjectId,
+            isSystemSuperUser: isSystemAdmin,
+            isAdmin: isSystemAdmin,
+            isAdministrator: isSystemAdmin,
+        },
+        permissions,
+        isSystemSuperUser: isSystemAdmin,
+        isAdmin: isSystemAdmin,
+        isAdministrator: isSystemAdmin,
+        webLogin: serializeWebLogin(user),
+        deviceTrust: getWebDeviceTrust(user),
+    });
+}
 
 
 export const login = async (req, res) => {
@@ -184,97 +377,134 @@ export const login = async (req, res) => {
             return res.status(401).json({ message: "Invalid credentials" });
         }
 
-        const webLocation = parsePunchLocation(req.body, 'web');
-        if (!webLocation) {
-            return res.status(400).json({
-                message: 'Location is off. Turn on location, then login.',
+        const incomingDevice = readWebDeviceFromRequest(req);
+        expireWebTrustIfNeeded(user);
+        const deviceDenied = webDeviceLoginDenied(user, incomingDevice, { isSystemAdmin });
+        if (deviceDenied) {
+            if (user.isModified?.()) await user.save();
+            return res.status(403).json({ message: deviceDenied });
+        }
+
+        const trusted = isSystemAdmin || isWebDeviceTrusted(user, incomingDevice.deviceId);
+        if (trusted) {
+            const webLocation = parsePunchLocation(req.body, "web");
+            if (!webLocation) {
+                if (user.isModified?.()) await user.save();
+                return res.status(400).json({
+                    message: "Location is off. Turn on location, then login.",
+                });
+            }
+            if (!isSystemAdmin) {
+                user.loginAttempts = 0;
+                user.lockUntil = null;
+            }
+            return completeWebLogin(req, res, {
+                user,
+                isSystemAdmin,
+                webLocation,
+                incomingDevice,
+                fixDevice: false,
             });
         }
 
-        // Login success - Reset attempts and lockout
-        if (!isAdminLogin) {
+        if (!isSystemAdmin) {
             user.loginAttempts = 0;
             user.lockUntil = null;
+            if (user.isModified?.()) await user.save();
         }
 
-        // Get user permissions (for system admin, this will return all permissions)
-        const permissionData = await getUserPermissions(user._id, isSystemAdmin);
-
-        // Extract permissions object from the response
-        const permissions = permissionData?.permissions || {};
-
-        // Update last login + laptop/browser GPS for the user details page
-        const loginIp = getClientIp(req);
-        user.lastLogin = new Date();
-        user.lastLoginIp = loginIp || user.lastLoginIp || '';
-        recordWebLoginOnUser(user, {
-            latitude: webLocation.latitude,
-            longitude: webLocation.longitude,
-            location: webLocation.label || '',
-            ipAddress: loginIp,
-            userAgent: req.headers?.['user-agent'] || '',
-        });
-        await user.save();
-
-        // Long-lived JWT; session end is enforced by frontend idle logout (1 hour of inactivity).
-        const token = jwt.sign(
-            { id: user._id },
-            process.env.JWT_SECRET,
-            { expiresIn: "7d" }
-        );
-
-        // Find associated EmployeeBasic record to get its ObjectId
-        let employeeObjectId = null;
-        if (user.employeeId) {
-            const emp = await EmployeeBasic.findOne({ employeeId: user.employeeId }).select('_id');
-            if (emp) employeeObjectId = emp._id;
-        }
-
-        recordActivityAsync({
-            req,
-            module: 'Settings',
-            action: 'login',
-            entityType: 'User',
-            entityId: String(user._id),
-            summary: `logged in${loginIp ? ` from IP ${loginIp}` : ''}`,
-            viewHref: '/Settings/User',
-            ip: loginIp,
-            actor: {
-                userId: user._id,
-                name: user.name || user.username || 'User',
-                employeeId: user.employeeId || '',
-            },
-            metadata: {
-                actorName: user.name || user.username || '',
-                employeeId: user.employeeId || '',
-                username: user.username || '',
-                email: user.email || '',
-            },
-        });
-
+        const otp = await sendWebLoginOtp(user, incomingDevice.deviceId);
         return res.status(200).json({
-            message: "Login successful",
-            token,
-            user: {
-                id: user._id,
-                name: user.name,
-                email: user.email,
-                username: user.username,
-                employeeId: user.employeeId,
-                employeeObjectId: employeeObjectId, // Added for frontend logic
-                isSystemSuperUser: isSystemAdmin,
-                isAdmin: isSystemAdmin,
-                isAdministrator: isSystemAdmin
-            },
-            permissions: permissions,
-            // Top-level flags must match portal Super User only (never Flowchart Admin Officer).
-            isSystemSuperUser: isSystemAdmin,
-            isAdmin: isSystemAdmin,
-            isAdministrator: isSystemAdmin,
+            needsOtp: true,
+            otpToken: otp.otpToken,
+            maskedEmail: otp.maskedEmail,
+            message: `OTP sent to company email ${otp.maskedEmail}`,
         });
     } catch (error) {
-        console.error('Login error:', error);
-        return res.status(500).json({ message: error.message });
+        console.error("Login error:", error);
+        return res.status(error.status || 500).json({ message: error.message });
+    }
+};
+
+export const verifyWebOtp = async (req, res) => {
+    try {
+        const otpToken = String(req.body?.otpToken || "").trim();
+        const otp = String(req.body?.otp || "").replace(/\s/g, "");
+        if (!otpToken || !otp) {
+            return res.status(400).json({ message: "Enter the OTP sent to your company email." });
+        }
+
+        const challenge = await WebLoginOtp.findOne({ otpToken });
+        if (!challenge || challenge.expiresAt.getTime() < Date.now()) {
+            return res.status(400).json({ message: "OTP expired. Sign in again." });
+        }
+        if (challenge.attempts >= 5) {
+            await challenge.deleteOne();
+            return res.status(400).json({ message: "Too many attempts. Sign in again." });
+        }
+        if (challenge.otpHash !== hashOtp(otp)) {
+            challenge.attempts += 1;
+            if (challenge.attempts >= 5) {
+                await challenge.deleteOne();
+                return res.status(400).json({ message: "Too many attempts. Sign in again." });
+            }
+            await challenge.save();
+            return res.status(400).json({ message: "Wrong OTP. Check your company email and try again." });
+        }
+
+        const webLocation = parsePunchLocation(req.body, "web");
+        if (!webLocation) {
+            return res.status(400).json({
+                message: "Location is off. Turn on location, then login.",
+            });
+        }
+
+        const user = await User.findById(challenge.userId);
+        if (!user || user.status !== "Active") {
+            await challenge.deleteOne();
+            return res.status(401).json({ message: "User is no longer allowed to sign in." });
+        }
+
+        const incomingDevice = readWebDeviceFromRequest(req);
+        if (!incomingDevice.deviceId) incomingDevice.deviceId = challenge.deviceId;
+        await challenge.deleteOne();
+        return completeWebLogin(req, res, {
+            user,
+            isSystemAdmin: false,
+            webLocation,
+            incomingDevice,
+            fixDevice: true,
+        });
+    } catch (error) {
+        console.error("[verifyWebOtp]", error);
+        return res.status(error.status || 500).json({ message: error.message || "OTP check failed." });
+    }
+};
+
+export const resendWebOtp = async (req, res) => {
+    try {
+        const otpToken = String(req.body?.otpToken || "").trim();
+        if (!otpToken) {
+            return res.status(400).json({ message: "OTP session is missing. Sign in again." });
+        }
+        const challenge = await WebLoginOtp.findOne({ otpToken });
+        if (!challenge) {
+            return res.status(400).json({ message: "OTP expired. Sign in again." });
+        }
+        const user = await User.findById(challenge.userId);
+        if (!user) {
+            return res.status(401).json({ message: "User not found" });
+        }
+        const otp = await sendWebLoginOtp(user, challenge.deviceId);
+        return res.status(200).json({
+            needsOtp: true,
+            otpToken: otp.otpToken,
+            maskedEmail: otp.maskedEmail,
+            message: `OTP sent to company email ${otp.maskedEmail}`,
+        });
+    } catch (error) {
+        console.error("[resendWebOtp]", error);
+        return res.status(error.status || 500).json({ message: error.message || "Could not resend OTP." });
     }
 };
 

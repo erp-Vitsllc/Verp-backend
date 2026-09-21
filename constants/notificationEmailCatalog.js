@@ -273,6 +273,22 @@ export const NOTIFICATION_EMAIL_CATALOG = [
                         types: ['Employee Loan Request'],
                         emailTypes: ['EmployeeLoanRequest'],
                     }),
+                    row({
+                        key: 'hrm.loan.approved',
+                        label: 'Loan approved',
+                        hint: 'WhatsApp when a loan is approved. If the employee has a WhatsApp number, the acknowledgment PDF is sent on WhatsApp instead of email.',
+                        detail: 'When a loan is fully approved, the employee receives the acknowledgment PDF on WhatsApp if this is on and they have a WhatsApp number. If they have no WhatsApp number, they still get email.',
+                        types: ['Loan Approved'],
+                        emailTypes: ['LoanApproved'],
+                    }),
+                    row({
+                        key: 'hrm.loan.advance_approved',
+                        label: 'Advance approved',
+                        hint: 'WhatsApp when an advance is approved. If the employee has a WhatsApp number, the acknowledgment PDF is sent on WhatsApp instead of email.',
+                        detail: 'When an advance is fully approved, the employee receives the acknowledgment PDF on WhatsApp if this is on and they have a WhatsApp number. If they have no WhatsApp number, they still get email.',
+                        types: ['Advance Approved'],
+                        emailTypes: ['AdvanceApproved'],
+                    }),
                 ],
             },
             {
@@ -505,6 +521,14 @@ export const NOTIFICATION_EMAIL_CATALOG = [
                         emailTypes: ['VehicleAssignmentPhotoReview'],
                     }),
                     row({
+                        key: 'hrm.vehicle.handover',
+                        label: 'Vehicle handover',
+                        hint: 'WhatsApp when a vehicle handover message is sent. If unchecked, company email is used.',
+                        detail: detail('Vehicle Handover'),
+                        types: ['Vehicle Handover'],
+                        emailTypes: ['VehicleHandover'],
+                    }),
+                    row({
                         key: 'hrm.vehicle.mortgage_close',
                         label: 'Vehicle mortgage close',
                         hint: 'Mortgage close request.',
@@ -665,8 +689,11 @@ export function eventKeyForEmailType(emailType) {
 
 /** Settings → WhatsApp Permission page shows only these events. */
 export const WHATSAPP_PERMISSION_PAGE_KEYS = [
+    'hrm.loan.approved',
+    'hrm.loan.advance_approved',
     'hrm.tools.handover_report',
     'hrm.tools.monthly_report',
+    'hrm.vehicle.handover',
 ];
 
 export function flattenWhatsAppPermissionPageCatalog() {

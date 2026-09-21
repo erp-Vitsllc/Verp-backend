@@ -35,15 +35,25 @@ const FINE_PENDING_APPROVAL_STATUSES = new Set([
 ]);
 
 /**
- * Fine notifications are approval-stage only (HR / Accounts / Management).
- * Completed, Approved, Paid, and post-approval payable settlement must not
- * keep a Pending Fine inbox row.
+ * Fine notifications: approval stages, plus Accounts Make Payment after Management approve
+ * until Zoho entry or paid-by-employee is done.
  */
 export function fineStillNeedsApprovalInbox(fine) {
     if (!fine) return false;
     const status = String(fine.fineStatus || '').trim();
     if (!FINE_PENDING_APPROVAL_STATUSES.has(status)) return false;
     return Boolean(getExpectedRoleForFineStatus(status, fine.workflow || []));
+}
+
+export function fineNeedsAccountsPaymentInbox(fine) {
+    if (!fine) return false;
+    const status = String(fine.fineStatus || '').trim();
+    if (!['Approved', 'Active'].includes(status)) return false;
+    return !String(fine.accountsPaymentPath || '').trim();
+}
+
+export function fineStillNeedsInbox(fine) {
+    return fineStillNeedsApprovalInbox(fine) || fineNeedsAccountsPaymentInbox(fine);
 }
 
 export function getPendingWorkflowStep(workflow = [], expectedRole = null) {

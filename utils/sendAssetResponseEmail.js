@@ -5,8 +5,10 @@ import {
     employeeDisplayName,
 } from "./resolveEmployeeEmail.js";
 import { normalizePdfAttachments } from "./normalizeEmailAttachments.js";
+import { skipVehicleHandoverEmail } from "./vehicleHandoverEmailGate.js";
 
 export const sendAssetResponseEmail = async ({ asset, actor, recipient, action, comment, assignedToType, assignedCompany, attachments = [] }) => {
+    if (skipVehicleHandoverEmail(asset)) return false;
     try {
         const { email: recipientEmail, isFallbackToReportee, employee: resolvedRecipient } =
             await resolveEmployeeEmailWithReporteeLoaded(recipient);

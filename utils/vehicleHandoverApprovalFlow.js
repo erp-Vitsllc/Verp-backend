@@ -9,6 +9,7 @@ import { resolveAssetControllerEmployee, getResolvedFleetHrEmployee } from './as
 import { emailFrontendUrl } from './resolveFrontendBaseUrl.js';
 import { sendAssetAssignmentEmail } from './sendAssetAssignmentEmail.js';
 import { sendAssetResponseEmail } from './sendAssetResponseEmail.js';
+import { VEHICLE_HANDOVER_EMAILS_ENABLED } from './vehicleHandoverEmailGate.js';
 import nodemailer from 'nodemailer';
 import { pickEffectiveEmail } from './resolveEmployeeEmail.js';
 import { normalizeS3Key } from './s3Upload.js';
@@ -772,6 +773,7 @@ export async function notifyHandoverRejectedToPrevious({
     historyId,
     stageLabel = 'Vehicle Handover',
 }) {
+    if (!VEHICLE_HANDOVER_EMAILS_ENABLED) return;
     const email = pickEffectiveEmail(recipient);
     if (!email) {
         const adminOfficer = await resolveAdminOfficerEmployee();
@@ -1157,6 +1159,7 @@ export async function notifyHandoverStageEmail({
     historyId,
     pendingAssignment = true,
 }) {
+    if (!VEHICLE_HANDOVER_EMAILS_ENABLED) return;
     const detailsPath = buildHandoverAssignDetailsUrl(asset._id, historyId);
     await sendAssetAssignmentEmail({
         asset,
@@ -1189,6 +1192,7 @@ async function sendSimpleEmail({ to, subject, html }) {
 }
 
 export async function notifyHandoverRejectedToAdmin({ asset, adminOfficer, actor, comment, historyId }) {
+    if (!VEHICLE_HANDOVER_EMAILS_ENABLED) return;
     const email = pickEffectiveEmail(adminOfficer);
     if (!email) return;
     const detailsUrl = buildHandoverAssignDetailsUrl(asset._id, historyId);
@@ -1230,6 +1234,7 @@ export async function notifyHandoverCompletionEmails({
     historyId,
     attachmentBuffers = [],
 }) {
+    if (!VEHICLE_HANDOVER_EMAILS_ENABLED) return;
     const attachmentUrl = buildHandoverAttachmentTabUrl(asset._id, historyId);
     const detailsUrl = buildHandoverAssignDetailsUrl(asset._id, historyId);
     const assigneeName = `${assignee?.firstName || ''} ${assignee?.lastName || ''}`.trim() || assignee?.employeeId || 'Assignee';
