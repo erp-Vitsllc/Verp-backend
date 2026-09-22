@@ -1,5 +1,12 @@
 import EmployeeContact from '../models/EmployeeContact.js';
-import { usableWhatsAppNumber } from './normalizeWhatsAppPhone.js';
+import { normalizeWhatsAppPhone, isValidWhatsAppPhone } from './normalizeWhatsAppPhone.js';
+
+function hasUsableWhatsAppNumber(input) {
+    const raw = String(input || '').trim();
+    if (!raw) return false;
+    const phone = normalizeWhatsAppPhone(raw);
+    return isValidWhatsAppPhone(phone) && phone.length >= 11;
+}
 
 export const PORTAL_APP_WHATSAPP_REQUIRED =
     'Cannot activate Portal App. Add a WhatsApp number on the employee profile first.';
@@ -45,7 +52,7 @@ export async function assertLoginThroughWhatsApp(employeeId, nextLoginThrough) {
     const id = String(employeeId || '').trim();
     if (!id) return 'Link an employee before activating Portal App.';
     const contact = await EmployeeContact.findOne({ employeeId: id }).select('whatsappNumber').lean();
-    return usableWhatsAppNumber(contact?.whatsappNumber) ? '' : PORTAL_APP_WHATSAPP_REQUIRED;
+    return hasUsableWhatsAppNumber(contact?.whatsappNumber) ? '' : PORTAL_APP_WHATSAPP_REQUIRED;
 }
 
 function pendingProposedPayload(entry) {

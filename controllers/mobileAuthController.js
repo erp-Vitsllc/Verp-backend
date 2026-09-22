@@ -290,26 +290,27 @@ export async function mobileLogin(req, res) {
     if (isMobileReviewBypass(user)) {
       return issueMobileSession(req, res, user, incomingDevice, isAdminLogin);
     }
-    if (isAdminLogin || isDeviceTrustedForOtp(user, incomingDevice.deviceId)) {
-      if (!hasLoginCoordinates(incomingDevice)) {
-        return res.status(400).json({
-          code: 'LOCATION_REQUIRED',
-          message: 'Turn on location, then finish login.',
-        });
-      }
-      return issueMobileSession(req, res, user, incomingDevice, isAdminLogin);
+    if (!hasLoginCoordinates(incomingDevice)) {
+      return res.status(400).json({
+        code: 'LOCATION_REQUIRED',
+        message: 'Turn on location, then finish login.',
+      });
     }
-    if (user.isModified?.()) {
-      await user.save();
-    }
-
-    const otp = await sendLoginOtp(user, incomingDevice.deviceId);
-    return res.status(200).json({
-      needsOtp: true,
-      otpToken: otp.otpToken,
-      maskedPhone: otp.maskedPhone,
-      message: `OTP sent to WhatsApp ${otp.maskedPhone}`,
-    });
+    // WhatsApp OTP paused. Login goes to Home after password + location.
+    // Restore by sending OTP instead of issueMobileSession below.
+    // if (isAdminLogin || isDeviceTrustedForOtp(user, incomingDevice.deviceId)) {
+    //   return issueMobileSession(req, res, user, incomingDevice, isAdminLogin);
+    // }
+    // if (user.isModified?.()) await user.save();
+    // const otp = await sendLoginOtp(user, incomingDevice.deviceId);
+    // return res.status(200).json({
+    //   needsOtp: true,
+    //   otpToken: otp.otpToken,
+    //   maskedPhone: otp.maskedPhone,
+    //   message: `OTP sent to WhatsApp ${otp.maskedPhone}`,
+    // });
+    if (user.isModified?.()) await user.save();
+    return issueMobileSession(req, res, user, incomingDevice, isAdminLogin);
   } catch (error) {
     console.error('[mobileLogin]', error);
     return res.status(error.status || 500).json({ message: error.message || 'Login failed.' });
