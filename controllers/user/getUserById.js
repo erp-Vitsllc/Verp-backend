@@ -6,7 +6,7 @@ import { serializeMobileDevice, serializeWebLogin } from "../../utils/userMobile
 import { normalizeLoginThrough } from "../../utils/loginThrough.js";
 
 const USER_DETAIL_SELECT =
-    "username name email companyEmail employeeId group groupName status enablePortalAccess isAdmin lastLogin lastLoginIp profilePicture createdAt mobileDevice webLogin";
+    "username name email companyEmail employeeId group groupName status enablePortalAccess isAdmin lastLogin lastLoginIp profilePicture createdAt mobileDevice webLogin webLoginDevices";
 
 function getDubaiDateKey(date = new Date()) {
     return new Intl.DateTimeFormat("en-CA", {

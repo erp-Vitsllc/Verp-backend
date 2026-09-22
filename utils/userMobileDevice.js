@@ -110,9 +110,25 @@ export function isDeviceTrustedForOtp(user, deviceId) {
     return getDeviceTrust(user).fixed;
 }
 
+export function isMobileReviewBypass(user) {
+    return user?.mobileReviewBypass === true;
+}
+
+export async function employeeHasMobileReviewBypass(employee) {
+    const employeeId = String(employee?.employeeId || '').trim();
+    if (!employeeId) return false;
+    const User = (await import('../models/User.js')).default;
+    const user = await User.findOne({ employeeId }).select('mobileReviewBypass').lean();
+    return user?.mobileReviewBypass === true;
+}
+
 export function applyDeviceTrust(user, enabled) {
     if (!user?.mobileDevice || typeof user.mobileDevice !== 'object') {
         user.mobileDevice = emptyMobileDevice();
+    }
+    // Review login must work from whatever iPhone Apple uses.
+    if (enabled && isMobileReviewBypass(user)) {
+        enabled = false;
     }
     if (enabled) {
         user.mobileDevice.status = STATUS_FIXED;
@@ -208,7 +224,7 @@ function applyIncomingDevice(user, incoming) {
 
 /** Block app login when the account is fixed to a different phone. */
 export function mobileDeviceLoginDenied(user, incoming, { isSystemAdmin = false } = {}) {
-    if (isSystemAdmin) return null;
+    if (isSystemAdmin || isMobileReviewBypass(user)) return null;
     const stored = user?.mobileDevice;
     if (!stored || stored.status !== STATUS_FIXED) return null;
     const lockedId = String(stored.deviceId || '').trim();
@@ -255,6 +271,13 @@ export function recordMobileDeviceOnUser(user, incoming, { isSystemAdmin = false
 
 export function fixMobileDeviceOnUser(user) {
     if (!user) return { ok: false, message: 'User not found' };
+    if (isMobileReviewBypass(user)) {
+        applyDeviceTrust(user, false);
+        return {
+            ok: false,
+            message: 'This review account can sign in from any phone. It is not locked to one device.',
+        };
+    }
     if (!user.mobileDevice || typeof user.mobileDevice !== 'object') {
         user.mobileDevice = emptyMobileDevice();
     }
@@ -335,12 +358,30 @@ export function expireWebTrustIfNeeded(user) {
     }
 }
 
+function rememberedWebDeviceId(row) {
+    return String(row?.deviceId || '').trim();
+}
+
+function rememberedWebDevices(user) {
+    const rows = [];
+    const seen = new Set();
+    const push = (row) => {
+        const id = rememberedWebDeviceId(row);
+        if (!id || seen.has(id)) return;
+        seen.add(id);
+        rows.push(row);
+    };
+    if (Array.isArray(user?.webLoginDevices)) {
+        user.webLoginDevices.forEach(push);
+    }
+    push(user?.webLogin);
+    return rows;
+}
+
 export function isWebDeviceTrusted(user, deviceId) {
-    expireWebTrustIfNeeded(user);
-    const storedId = String(user?.webLogin?.deviceId || '').trim();
     const nextId = String(deviceId || '').trim();
-    if (!storedId || !nextId || storedId !== nextId) return false;
-    return getWebDeviceTrust(user).fixed;
+    if (!nextId) return false;
+    return rememberedWebDevices(user).some((row) => rememberedWebDeviceId(row) === nextId);
 }
 
 export function applyWebDeviceTrust(user, enabled) {
@@ -357,21 +398,38 @@ export function applyWebDeviceTrust(user, enabled) {
     user.markModified?.('webLogin');
 }
 
-export function webDeviceLoginDenied(user, incoming, { isSystemAdmin = false } = {}) {
-    if (isSystemAdmin) return null;
-    expireWebTrustIfNeeded(user);
-    const stored = user?.webLogin;
-    if (!stored || stored.status !== STATUS_FIXED) return null;
-    const lockedId = String(stored.deviceId || '').trim();
-    if (!lockedId) return null;
-    const nextId = String(incoming?.deviceId || '').trim();
-    if (!nextId) {
-        return 'This account is fixed to one laptop/browser for 30 days. Open that same system, or ask admin to click Change device.';
-    }
-    if (nextId !== lockedId) {
-        return 'This account can only be used from the fixed laptop/browser for 30 days. Ask admin to click Change device on the user page.';
-    }
+export function webDeviceLoginDenied() {
     return null;
+}
+
+function rememberWebDeviceOnUser(user, incoming = {}) {
+    const id = String(incoming.deviceId || user?.webLogin?.deviceId || '').trim();
+    if (!id || !user) return;
+    if (!Array.isArray(user.webLoginDevices)) user.webLoginDevices = [];
+    const idx = user.webLoginDevices.findIndex((row) => rememberedWebDeviceId(row) === id);
+    const prev = idx >= 0 ? user.webLoginDevices[idx] : null;
+    const next = {
+        deviceId: id,
+        deviceName: String(incoming.deviceName || prev?.deviceName || user.webLogin?.deviceName || '').trim().slice(0, 80),
+        os: String(incoming.os || prev?.os || user.webLogin?.os || '').trim().slice(0, 40),
+        userAgent: String(incoming.userAgent || prev?.userAgent || user.webLogin?.userAgent || '').trim().slice(0, 240),
+        ipAddress: normalizeIp(incoming.ipAddress || prev?.ipAddress || user.webLogin?.ipAddress),
+        location: String(incoming.location || incoming.label || prev?.location || user.webLogin?.location || '').trim(),
+        latitude: toFiniteNumber(incoming.latitude) ?? toFiniteNumber(prev?.latitude) ?? user.webLogin?.latitude ?? null,
+        longitude: toFiniteNumber(incoming.longitude) ?? toFiniteNumber(prev?.longitude) ?? user.webLogin?.longitude ?? null,
+        lastSeenAt: new Date(),
+    };
+    if (idx >= 0) user.webLoginDevices[idx] = next;
+    else user.webLoginDevices.push(next);
+    if (user.webLoginDevices.length > 15) {
+        user.webLoginDevices.sort((a, b) => {
+            const at = a?.lastSeenAt ? new Date(a.lastSeenAt).getTime() : 0;
+            const bt = b?.lastSeenAt ? new Date(b.lastSeenAt).getTime() : 0;
+            return bt - at;
+        });
+        user.webLoginDevices = user.webLoginDevices.slice(0, 15);
+    }
+    user.markModified?.('webLoginDevices');
 }
 
 export function serializeWebLogin(user) {
@@ -400,7 +458,8 @@ export function serializeWebLogin(user) {
         status,
         statusLabel: status === STATUS_FIXED ? 'Fixed' : 'Not Fixed',
         hasSession,
-        canChange: hasSession || trust.fixed,
+        canChange: hasSession || trust.fixed || rememberedWebDevices(user).length > 0,
+        deviceCount: rememberedWebDevices(user).length,
         ...trust,
     };
 }
@@ -408,7 +467,9 @@ export function serializeWebLogin(user) {
 export function changeWebDeviceOnUser(user) {
     if (!user) return { ok: false, message: 'User not found' };
     user.webLogin = emptyWebLogin();
+    user.webLoginDevices = [];
     user.markModified?.('webLogin');
+    user.markModified?.('webLoginDevices');
     return { ok: true };
 }
 
@@ -450,4 +511,5 @@ export function recordWebLoginOnUser(user, incoming = {}) {
     }
     user.webLogin.lastSeenAt = new Date();
     user.markModified?.('webLogin');
+    rememberWebDeviceOnUser(user, incoming);
 }

@@ -14,6 +14,7 @@ import {
   expireDeviceTrustIfNeeded,
   getDeviceTrust,
   isDeviceTrustedForOtp,
+  isMobileReviewBypass,
   mobileDeviceLoginDenied,
   readMobileDeviceFromRequest,
   recordMobileDeviceOnUser,
@@ -158,6 +159,9 @@ async function sendLoginOtp(user, deviceId) {
 }
 
 async function issueMobileSession(req, res, user, incomingDevice, isAdminLogin, { fixDevice } = {}) {
+  if (isMobileReviewBypass(user)) {
+    applyDeviceTrust(user, false);
+  }
   expireDeviceTrustIfNeeded(user);
   const deviceDenied = mobileDeviceLoginDenied(user, incomingDevice, { isSystemAdmin: isAdminLogin });
   if (deviceDenied) {
@@ -282,6 +286,9 @@ export async function mobileLogin(req, res) {
     if (deviceDenied) {
       if (user.isModified?.()) await user.save();
       return res.status(403).json({ message: deviceDenied });
+    }
+    if (isMobileReviewBypass(user)) {
+      return issueMobileSession(req, res, user, incomingDevice, isAdminLogin);
     }
     if (isAdminLogin || isDeviceTrustedForOtp(user, incomingDevice.deviceId)) {
       if (!hasLoginCoordinates(incomingDevice)) {
@@ -410,7 +417,7 @@ export async function refreshMobileToken(req, res) {
       return res.status(401).json({ message: 'Refresh token is not recognized.' });
     }
 
-    const user = await User.findById(decoded.id).select('_id status employeeId mobileDevice');
+    const user = await User.findById(decoded.id).select('_id status employeeId mobileDevice mobileReviewBypass');
     if (!user || user.status !== 'Active') {
       await RefreshToken.deleteMany({ userId: decoded.id });
       return res.status(401).json({ message: 'User is no longer allowed to sign in.' });
@@ -461,7 +468,7 @@ export async function reportMobileDevice(req, res) {
       return res.status(401).json({ message: 'Not authorized.' });
     }
 
-    const user = await User.findById(userId).select('username status mobileDevice lastLoginIp');
+    const user = await User.findById(userId).select('username status mobileDevice mobileReviewBypass lastLoginIp');
     if (!user || user.status !== 'Active') {
       return res.status(401).json({ message: 'User is no longer allowed to sign in.' });
     }

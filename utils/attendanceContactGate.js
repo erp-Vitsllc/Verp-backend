@@ -61,6 +61,8 @@ export function punchContactLockMessage(flags, punchSource, action = 'check in')
 }
 
 export async function rejectIfMissingPunchContact(res, employee, punchSource, action = 'check in') {
+    const { employeeHasMobileReviewBypass } = await import('./userMobileDevice.js');
+    if (await employeeHasMobileReviewBypass(employee)) return false;
     const flags = await loadPunchContactFlags(employee);
     const message = punchContactLockMessage(flags, punchSource, action);
     if (!message) return false;

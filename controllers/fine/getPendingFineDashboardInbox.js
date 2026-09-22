@@ -75,10 +75,29 @@ export const getPendingFineDashboardInbox = async (req, res) => {
             if (viewerIsAccounts) {
                 const unsettled = await Fine.find({
                     fineStatus: { $in: ['Approved', 'Active'] },
-                    $or: [
-                        { accountsPaymentPath: { $exists: false } },
-                        { accountsPaymentPath: null },
-                        { accountsPaymentPath: '' },
+                    $and: [
+                        {
+                            $or: [
+                                { accountsPaymentPath: { $exists: false } },
+                                { accountsPaymentPath: null },
+                                { accountsPaymentPath: '' },
+                            ],
+                        },
+                        {
+                            $or: [
+                                { zohoBillId: { $exists: false } },
+                                { zohoBillId: null },
+                                { zohoBillId: '' },
+                            ],
+                        },
+                        {
+                            $or: [
+                                { zohoBillNumber: { $exists: false } },
+                                { zohoBillNumber: null },
+                                { zohoBillNumber: '' },
+                            ],
+                        },
+                        { vendorBillStatus: { $ne: 'Paid' } },
                     ],
                 }).limit(80);
                 const seenBases = new Set();
@@ -117,7 +136,7 @@ export const getPendingFineDashboardInbox = async (req, res) => {
         const fineIds = [...new Set(rows.map((r) => String(r.requestId)).filter(Boolean))];
         const fines = fineIds.length
             ? await Fine.find({ _id: { $in: fineIds } })
-                  .select('_id fineId fineType fineStatus assignedEmployees category workflow accountsPaymentPath')
+                  .select('_id fineId fineType fineStatus assignedEmployees category workflow accountsPaymentPath zohoBillId zohoBillNumber vendorBillStatus')
                   .lean()
             : [];
         const fineById = Object.fromEntries(fines.map((f) => [String(f._id), f]));
@@ -187,6 +206,9 @@ export const getPendingFineDashboardInbox = async (req, res) => {
                     fineType: fine.fineType,
                     fineStatus: fine.fineStatus,
                     accountsPaymentPath: fine.accountsPaymentPath || '',
+                    zohoBillId: fine.zohoBillId || '',
+                    zohoBillNumber: fine.zohoBillNumber || '',
+                    vendorBillStatus: fine.vendorBillStatus || '',
                 },
             };
         });

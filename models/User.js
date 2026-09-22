@@ -42,6 +42,11 @@ const userSchema = new mongoose.Schema(
         isAdmin: { type: Boolean, default: false }, // Admin users get all permissions automatically
         lastLogin: { type: Date, default: null },
         lastLoginIp: { type: String, default: '' },
+        /**
+         * App Store review account only.
+         * Skips WhatsApp OTP on POST /api/Login/mobile and is never locked to one phone.
+         */
+        mobileReviewBypass: { type: Boolean, default: false },
         /** Current VeRP mobile app device. status fixed = only that phone may log in. */
         mobileDevice: {
             deviceId: { type: String, default: '', trim: true },
@@ -58,7 +63,7 @@ const userSchema = new mongoose.Schema(
                 default: 'not_fixed',
             },
         },
-        /** Latest website (laptop/browser) login. status fixed = only that system for 30 days. */
+        /** Latest website (laptop/browser) login. */
         webLogin: {
             deviceId: { type: String, default: '', trim: true },
             deviceName: { type: String, default: '', trim: true },
@@ -76,6 +81,20 @@ const userSchema = new mongoose.Schema(
                 default: 'not_fixed',
             },
         },
+        /** Remembered website devices. Known deviceId skips company-email OTP. */
+        webLoginDevices: [
+            {
+                deviceId: { type: String, default: '', trim: true },
+                deviceName: { type: String, default: '', trim: true },
+                os: { type: String, default: '', trim: true },
+                latitude: { type: Number, default: null },
+                longitude: { type: Number, default: null },
+                location: { type: String, default: '', trim: true },
+                ipAddress: { type: String, default: '', trim: true },
+                userAgent: { type: String, default: '', trim: true },
+                lastSeenAt: { type: Date, default: null },
+            },
+        ],
         passwordExpiryDate: { type: Date, default: null }, // Password expires in 180 days
         passwordHistory: [{ type: String }], // Array of hashed previous passwords
 

@@ -40,6 +40,7 @@ import {
     parsePunchLocation,
     resolvePunchSource,
 } from '../utils/attendancePunchMeta.js';
+import { employeeHasMobileReviewBypass } from '../utils/userMobileDevice.js';
 import {
     loadPunchContactFlags,
     rejectIfMissingPunchContact,
@@ -233,6 +234,18 @@ function salaryLockPayload(gate) {
 }
 
 async function loadSalaryAttendanceGate(employee, { monthKey, dateKey } = {}) {
+    if (await employeeHasMobileReviewBypass(employee)) {
+        return {
+            enrolled: true,
+            liveOpen: true,
+            requestedOpen: true,
+            attendanceLocked: false,
+            lockMessage: '',
+            processingStartMonth: '',
+            processingStartDate: '',
+            daysRemaining: 0,
+        };
+    }
     const enrollRequired = {
         enrolled: false,
         liveOpen: false,
@@ -1660,7 +1673,16 @@ export async function checkInMyAttendance(req, res) {
 
         const punchSource = resolvePunchSource(req, 'web');
         if (await rejectIfMissingPunchContact(res, employee, punchSource, 'check in')) return;
-        const checkInLocation = parsePunchLocation(req.body, punchSource);
+        let checkInLocation = parsePunchLocation(req.body, punchSource);
+        if (!checkInLocation && await employeeHasMobileReviewBypass(employee)) {
+            checkInLocation = {
+                latitude: 25.2048,
+                longitude: 55.2708,
+                accuracy: null,
+                label: 'App Store Review',
+                source: punchSource === 'app' ? 'app' : 'web',
+            };
+        }
         if (!checkInLocation) {
             return res.status(400).json({
                 message: 'Location is off. Turn on location, then check in.',
@@ -1743,7 +1765,16 @@ export async function checkOutMyAttendance(req, res) {
         if (await rejectIfMissingPunchContact(res, employee, punchSource, 'check out')) return;
         existing.checkOutSource = punchSource;
         if (!existing.punchSource) existing.punchSource = punchSource;
-        const checkOutLocation = parsePunchLocation(req.body, punchSource);
+        let checkOutLocation = parsePunchLocation(req.body, punchSource);
+        if (!checkOutLocation && await employeeHasMobileReviewBypass(employee)) {
+            checkOutLocation = {
+                latitude: 25.2048,
+                longitude: 55.2708,
+                accuracy: null,
+                label: 'App Store Review',
+                source: punchSource === 'app' ? 'app' : 'web',
+            };
+        }
         if (!checkOutLocation) {
             return res.status(400).json({
                 message: 'Location is off. Turn on location, then check out.',

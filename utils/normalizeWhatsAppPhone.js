@@ -45,6 +45,15 @@ export function isValidWhatsAppPhone(input) {
     return /^\d{8,15}$/.test(normalized);
 }
 
+/** Full mobile WhatsApp only — not an empty field or a country code by itself. */
+export function usableWhatsAppNumber(input) {
+    const raw = String(input || '').trim();
+    if (!raw) return '';
+    const phone = normalizeWhatsAppPhone(raw);
+    if (!isValidWhatsAppPhone(phone) || phone.length < 11) return '';
+    return phone;
+}
+
 /** All stored forms we may have used for the same WhatsApp number. */
 export function whatsAppPhoneKeys(input) {
     const n = normalizeWhatsAppPhone(input);

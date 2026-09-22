@@ -14,7 +14,7 @@ function invalidId(id) {
 }
 
 async function loadUser(id) {
-    return User.findById(id).select('username mobileDevice webLogin lastLoginIp');
+    return User.findById(id).select('username mobileDevice mobileReviewBypass webLogin webLoginDevices lastLoginIp');
 }
 
 function jsonDevice(user) {
@@ -110,7 +110,7 @@ export async function changeUserWebDevice(req, res) {
         await user.save();
 
         return res.status(200).json({
-            message: 'Fixed laptop cleared. The next website login will send a company-email OTP.',
+            message: 'Remembered web devices cleared. The next website login will send a company-email OTP.',
             webLogin: serializeWebLogin(user),
         });
     } catch (error) {

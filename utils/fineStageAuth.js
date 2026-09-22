@@ -45,11 +45,22 @@ export function fineStillNeedsApprovalInbox(fine) {
     return Boolean(getExpectedRoleForFineStatus(status, fine.workflow || []));
 }
 
+/** Zoho bill linked, vendor bill paid, or Accounts already chose Zoho / employee pay. */
+export function fineAccountsSettlementDone(fine) {
+    if (!fine) return false;
+    const path = String(fine.accountsPaymentPath || '').trim().toLowerCase();
+    if (path === 'zoho' || path === 'employee') return true;
+    if (String(fine.vendorBillStatus || '').toLowerCase() === 'paid') return true;
+    return Boolean(
+        String(fine.zohoBillId || '').trim() || String(fine.zohoBillNumber || '').trim(),
+    );
+}
+
 export function fineNeedsAccountsPaymentInbox(fine) {
     if (!fine) return false;
     const status = String(fine.fineStatus || '').trim();
     if (!['Approved', 'Active'].includes(status)) return false;
-    return !String(fine.accountsPaymentPath || '').trim();
+    return !fineAccountsSettlementDone(fine);
 }
 
 export function fineStillNeedsInbox(fine) {

@@ -77,6 +77,10 @@ export async function finalizeFineVendorPayment({
 
     fine.vendorBillStatus = 'Paid';
     fine.vendorBillPaidAt = new Date();
+    if (!String(fine.accountsPaymentPath || '').trim()) {
+        fine.accountsPaymentPath = 'zoho';
+        fine.accountsPaymentAt = fine.accountsPaymentAt || new Date();
+    }
     fine.zohoVendorPaymentId = zohoPaymentId || fine.zohoVendorPaymentId;
     fine.zohoVendorPaymentNumber = zohoPaymentNumber || fine.zohoVendorPaymentNumber;
     await fine.save();

@@ -256,6 +256,26 @@ export async function syncFineListVendorBillStatusFromZoho(
                         { _id: fine._id, vendorBillStatus: { $ne: 'Paid' } },
                         { $set: { vendorBillStatus: 'Paid', vendorBillPaidAt: now } },
                     );
+                    if (!String(fine.accountsPaymentPath || '').trim()) {
+                        await Fine.updateOne(
+                            {
+                                _id: fine._id,
+                                $or: [
+                                    { accountsPaymentPath: { $exists: false } },
+                                    { accountsPaymentPath: null },
+                                    { accountsPaymentPath: '' },
+                                ],
+                            },
+                            {
+                                $set: {
+                                    accountsPaymentPath: 'zoho',
+                                    accountsPaymentAt: fine.accountsPaymentAt || now,
+                                },
+                            },
+                        );
+                        fine.accountsPaymentPath = 'zoho';
+                        fine.accountsPaymentAt = fine.accountsPaymentAt || now;
+                    }
                     fine.vendorBillStatus = 'Paid';
                     fine.vendorBillPaidAt = now;
                     updatedCount += 1;
@@ -283,5 +303,39 @@ export async function syncFineListVendorBillStatusFromZoho(
         }
     }
 
+    await stampMissingZohoPaymentPath(list);
     return { updatedCount, checked };
+}
+
+const emptyPaymentPath = [
+    { accountsPaymentPath: { $exists: false } },
+    { accountsPaymentPath: null },
+    { accountsPaymentPath: '' },
+];
+
+/** Bills created before Accounts path was stored still count as Zoho settlement. */
+async function stampMissingZohoPaymentPath(fines = []) {
+    for (const fine of fines) {
+        if (!fine?._id || String(fine.accountsPaymentPath || '').trim()) continue;
+        const hasBill = Boolean(
+            String(fine.zohoBillId || '').trim() || String(fine.zohoBillNumber || '').trim(),
+        );
+        const vendorPaid = String(fine.vendorBillStatus || '').toLowerCase() === 'paid';
+        if (!hasBill && !vendorPaid) continue;
+        const now = fine.zohoSyncedAt || fine.vendorBillPaidAt || new Date();
+        try {
+            await Fine.updateOne(
+                { _id: fine._id, $or: emptyPaymentPath },
+                { $set: { accountsPaymentPath: 'zoho', accountsPaymentAt: now } },
+            );
+            fine.accountsPaymentPath = 'zoho';
+            if (!fine.accountsPaymentAt) fine.accountsPaymentAt = now;
+        } catch (err) {
+            console.warn(
+                '[stampMissingZohoPaymentPath]',
+                String(fine._id),
+                err?.message || err,
+            );
+        }
+    }
 }

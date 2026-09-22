@@ -4,6 +4,7 @@ import { getManagementHOD } from './getManagementHOD.js';
 import { syncDashboardAction } from './syncDashboard.js';
 import { sendFineAccountsActionEmail } from './sendFineAccountsActionEmail.js';
 import { addEmployeeEmailToSet } from './resolveEmployeeEmail.js';
+import { fineAccountsSettlementDone } from './fineStageAuth.js';
 
 function applicantEmployeeId(fine) {
     const real = (fine.assignedEmployees || []).find(
@@ -48,7 +49,7 @@ export async function openAccountsPaymentInbox(fine, fines = []) {
         console.warn(`[openAccountsPaymentInbox] No Accounts user for ${fine?.fineId || fine?._id}`);
         return { accountsHOD, accountsUser };
     }
-    if (String(fine?.accountsPaymentPath || '').trim()) {
+    if (fineAccountsSettlementDone(fine)) {
         return { accountsHOD, accountsUser };
     }
 
