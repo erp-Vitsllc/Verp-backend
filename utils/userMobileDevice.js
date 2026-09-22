@@ -593,10 +593,10 @@ export function recordWebLoginOnUser(user, incoming = {}) {
     rememberWebDeviceOnUser(user, incoming);
 }
 
-function sessionLocation(row) {
+function sessionPlaceLabel(row) {
     const label = String(row?.location || '').trim();
-    if (label && !/^-?\d+(?:\.\d+)?\s*[, ]\s*-?\d+(?:\.\d+)?$/.test(label)) return label;
-    return label || '';
+    if (!label || /^-?\d+(?:\.\d+)?\s*[, ]\s*-?\d+(?:\.\d+)?$/.test(label)) return '';
+    return label;
 }
 
 export function collectStoredDeviceSessions(user) {
@@ -611,7 +611,8 @@ export function collectStoredDeviceSessions(user) {
         const deviceName = String(row.deviceName || deviceNameFromUserAgent(userAgent) || '').trim();
         const os = String(row.os || osFromUserAgent(userAgent) || '').trim();
         const ipAddress = normalizeIp(row.ipAddress);
-        const hasTrace = Boolean(deviceId || deviceName || os || ipAddress || row.lastSeenAt || row.location);
+        const coords = parseMobileDeviceCoordinates(row);
+        const hasTrace = Boolean(deviceId || deviceName || os || ipAddress || row.lastSeenAt || row.location || coords);
         if (!hasTrace) return;
         const id = deviceId || 'web-latest';
         if (seen.has(id)) return;
@@ -622,7 +623,9 @@ export function collectStoredDeviceSessions(user) {
             deviceName: deviceName || 'Web browser',
             os,
             ipAddress,
-            location: sessionLocation(row),
+            location: sessionPlaceLabel(row),
+            latitude: coords?.latitude ?? null,
+            longitude: coords?.longitude ?? null,
             lastSeenAt: row.lastSeenAt || null,
             trustedUntil: row.trustedUntil || null,
         });
@@ -634,13 +637,16 @@ export function collectStoredDeviceSessions(user) {
     const mobileId = String(user?.mobileDevice?.deviceId || '').trim();
     if (trust.fixed && mobileId) {
         const mobile = user.mobileDevice;
+        const mobileCoords = parseMobileDeviceCoordinates(mobile);
         sessions.push({
             source: 'app',
             deviceId: mobileId,
             deviceName: String(mobile.deviceName || 'Mobile').trim(),
             os: '',
             ipAddress: normalizeIp(mobile.ipAddress),
-            location: sessionLocation(mobile),
+            location: sessionPlaceLabel(mobile),
+            latitude: mobileCoords?.latitude ?? null,
+            longitude: mobileCoords?.longitude ?? null,
             lastSeenAt: mobile.lastSeenAt || null,
             trustedUntil: mobile.trustedUntil || null,
         });
