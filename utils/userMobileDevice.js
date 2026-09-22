@@ -122,7 +122,7 @@ export async function employeeHasMobileReviewBypass(employee) {
     return user?.mobileReviewBypass === true;
 }
 
-export function applyDeviceTrust(user, enabled) {
+export function applyDeviceTrust(user, enabled, options = {}) {
     if (!user?.mobileDevice || typeof user.mobileDevice !== 'object') {
         user.mobileDevice = emptyMobileDevice();
     }
@@ -132,7 +132,9 @@ export function applyDeviceTrust(user, enabled) {
     }
     if (enabled) {
         user.mobileDevice.status = STATUS_FIXED;
-        user.mobileDevice.trustedUntil = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000);
+        user.mobileDevice.trustedUntil = options.permanent
+            ? new Date('2099-12-31T00:00:00.000Z')
+            : new Date(Date.now() + 30 * 24 * 60 * 60 * 1000);
     } else {
         user.mobileDevice.status = STATUS_NOT_FIXED;
         user.mobileDevice.trustedUntil = null;
