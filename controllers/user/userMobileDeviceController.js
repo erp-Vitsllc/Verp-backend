@@ -126,8 +126,12 @@ export async function listUserDevices(req, res) {
         const users = await User.find({
             $or: [
                 { 'webLoginDevices.0': { $exists: true } },
+                { 'mobileDevice.deviceId': { $nin: [null, ''] } },
                 { 'mobileDevice.status': 'fixed' },
                 { 'webLogin.deviceId': { $nin: [null, ''] } },
+                { 'webLogin.ipAddress': { $nin: [null, ''] } },
+                { 'webLogin.userAgent': { $nin: [null, ''] } },
+                { 'webLogin.lastSeenAt': { $ne: null } },
             ],
         }).select('name username profilePicture mobileDevice webLogin webLoginDevices');
 

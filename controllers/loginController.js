@@ -390,7 +390,7 @@ export const login = async (req, res) => {
             user.lockUntil = null;
         }
 
-        const trusted = isSystemAdmin || isWebDeviceTrusted(user, incomingDevice.deviceId);
+        const trusted = isSystemAdmin || isWebDeviceTrusted(user, incomingDevice.deviceId, incomingDevice.os);
         if (!trusted) {
             if (user.isModified?.()) await user.save();
             const otp = await sendWebLoginOtp(user, incomingDevice.deviceId);

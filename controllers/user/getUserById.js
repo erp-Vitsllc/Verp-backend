@@ -3,6 +3,7 @@ import EmployeeBasic from "../../models/EmployeeBasic.js";
 import Attendance from "../../models/Attendance.js";
 import { signOrKeepAttachmentUrl } from "../../utils/s3Upload.js";
 import { serializeMobileDevice, serializeWebLogin } from "../../utils/userMobileDevice.js";
+import { listUserDevices } from "./userMobileDeviceController.js";
 import { normalizeLoginThrough } from "../../utils/loginThrough.js";
 
 const USER_DETAIL_SELECT =
@@ -31,6 +32,9 @@ async function resolveProfilePicture(stored) {
 export const getUserById = async (req, res) => {
     try {
         const { id } = req.params;
+        if (String(id || '').trim().toLowerCase() === 'devices') {
+            return listUserDevices(req, res);
+        }
 
         if (!id || !id.match(/^[0-9a-fA-F]{24}$/)) {
             return res.status(400).json({ message: "Invalid user ID format" });

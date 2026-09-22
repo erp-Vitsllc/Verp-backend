@@ -442,11 +442,17 @@ function rememberedWebDevices(user) {
     return rows;
 }
 
-export function isWebDeviceTrusted(user, deviceId) {
+export function isWebDeviceTrusted(user, deviceId, os) {
     expireWebDevicesIfNeeded(user);
     const nextId = String(deviceId || '').trim();
     if (!nextId) return false;
-    return rememberedWebDevices(user).some((row) => rememberedWebDeviceId(row) === nextId);
+    const nextOs = String(os || '').trim().toLowerCase();
+    return rememberedWebDevices(user).some((row) => {
+        if (rememberedWebDeviceId(row) !== nextId) return false;
+        const rowOs = String(row.os || osFromUserAgent(row.userAgent) || '').trim().toLowerCase();
+        if (rowOs && nextOs && rowOs !== nextOs) return false;
+        return true;
+    });
 }
 
 export function applyWebDeviceTrust(user, enabled) {
@@ -597,21 +603,33 @@ export function collectStoredDeviceSessions(user) {
     expireDeviceTrustIfNeeded(user);
     expireWebDevicesIfNeeded(user);
     const sessions = [];
-    const webRows = Array.isArray(user?.webLoginDevices) ? user.webLoginDevices : [];
-    for (const row of webRows) {
+    const seen = new Set();
+    const pushWeb = (row) => {
+        if (!row || typeof row !== 'object') return;
+        const userAgent = String(row.userAgent || '');
         const deviceId = rememberedWebDeviceId(row);
-        if (!deviceId) continue;
+        const deviceName = String(row.deviceName || deviceNameFromUserAgent(userAgent) || '').trim();
+        const os = String(row.os || osFromUserAgent(userAgent) || '').trim();
+        const ipAddress = normalizeIp(row.ipAddress);
+        const hasTrace = Boolean(deviceId || deviceName || os || ipAddress || row.lastSeenAt || row.location);
+        if (!hasTrace) return;
+        const id = deviceId || 'web-latest';
+        if (seen.has(id)) return;
+        seen.add(id);
         sessions.push({
             source: 'web',
-            deviceId,
-            deviceName: String(row.deviceName || 'Web browser').trim(),
-            os: String(row.os || '').trim(),
-            ipAddress: normalizeIp(row.ipAddress),
+            deviceId: id,
+            deviceName: deviceName || 'Web browser',
+            os,
+            ipAddress,
             location: sessionLocation(row),
             lastSeenAt: row.lastSeenAt || null,
             trustedUntil: row.trustedUntil || null,
         });
-    }
+    };
+    const webRows = Array.isArray(user?.webLoginDevices) ? user.webLoginDevices : [];
+    for (const row of webRows) pushWeb(row);
+    pushWeb(user?.webLogin);
     const trust = getDeviceTrust(user);
     const mobileId = String(user?.mobileDevice?.deviceId || '').trim();
     if (trust.fixed && mobileId) {
@@ -642,12 +660,11 @@ export function removeStoredDevice(user, { source, deviceId } = {}) {
     if (kind === 'web') {
         const rows = Array.isArray(user.webLoginDevices) ? user.webLoginDevices : [];
         const next = rows.filter((row) => rememberedWebDeviceId(row) !== id);
-        if (next.length === rows.length && String(user.webLogin?.deviceId || '').trim() !== id) {
-            return false;
-        }
+        const clearsLatest = id === 'web-latest' || String(user.webLogin?.deviceId || '').trim() === id;
+        if (next.length === rows.length && !clearsLatest) return false;
         user.webLoginDevices = next;
         user.markModified?.('webLoginDevices');
-        if (String(user.webLogin?.deviceId || '').trim() === id) {
+        if (String(user.webLogin?.deviceId || '').trim() === id || id === 'web-latest') {
             user.webLogin = emptyWebLogin();
             user.markModified?.('webLogin');
         }
