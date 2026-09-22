@@ -13,7 +13,7 @@ import {
     applyWebDeviceTrust,
     expireWebTrustIfNeeded,
     getWebDeviceTrust,
-    // isWebDeviceTrusted,
+    isWebDeviceTrusted,
     osFromUserAgent,
     recordWebLoginOnUser,
     serializeWebLogin,
@@ -385,34 +385,31 @@ export const login = async (req, res) => {
             return res.status(403).json({ message: deviceDenied });
         }
 
-        const webLocation = parsePunchLocation(req.body, "web");
-        if (!webLocation) {
-            if (user.isModified?.()) await user.save();
-            return res.status(400).json({
-                message: "Location is off. Turn on location, then login.",
-            });
-        }
         if (!isSystemAdmin) {
             user.loginAttempts = 0;
             user.lockUntil = null;
         }
-        // Company-email OTP paused. Password + location opens the dashboard.
-        // Restore by requiring OTP for untrusted devices instead of completeWebLogin below.
-        // const trusted = isSystemAdmin || isWebDeviceTrusted(user, incomingDevice.deviceId);
-        // if (!trusted) {
-        //     if (!isSystemAdmin) {
-        //         user.loginAttempts = 0;
-        //         user.lockUntil = null;
-        //         if (user.isModified?.()) await user.save();
-        //     }
-        //     const otp = await sendWebLoginOtp(user, incomingDevice.deviceId);
-        //     return res.status(200).json({
-        //         needsOtp: true,
-        //         otpToken: otp.otpToken,
-        //         maskedEmail: otp.maskedEmail,
-        //         message: `OTP sent to company email ${otp.maskedEmail}`,
-        //     });
-        // }
+
+        const trusted = isSystemAdmin || isWebDeviceTrusted(user, incomingDevice.deviceId);
+        if (!trusted) {
+            if (user.isModified?.()) await user.save();
+            const otp = await sendWebLoginOtp(user, incomingDevice.deviceId);
+            return res.status(200).json({
+                needsOtp: true,
+                otpToken: otp.otpToken,
+                maskedEmail: otp.maskedEmail,
+                message: `OTP sent to company email ${otp.maskedEmail}`,
+            });
+        }
+
+        const webLocation = parsePunchLocation(req.body, "web");
+        if (!webLocation) {
+            if (user.isModified?.()) await user.save();
+            return res.status(400).json({
+                code: "LOCATION_REQUIRED",
+                message: "Location is off. Turn on location, then login.",
+            });
+        }
         return completeWebLogin(req, res, {
             user,
             isSystemAdmin,

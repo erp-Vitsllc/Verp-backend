@@ -188,7 +188,7 @@ async function issueMobileSession(req, res, user, incomingDevice, isAdminLogin, 
 
   recordMobileDeviceOnUser(user, incomingDevice, { isSystemAdmin: isAdminLogin });
   if (!isAdminLogin && fixDevice === true && incomingDevice.deviceId) {
-    applyDeviceTrust(user, true, { permanent: true });
+    applyDeviceTrust(user, true);
   }
   if (incomingDevice.ipAddress) {
     user.lastLoginIp = incomingDevice.ipAddress;
@@ -327,7 +327,7 @@ export async function mobileLogin(req, res) {
       otpToken: otp.otpToken,
       maskedPhone: otp.maskedPhone,
       message: isNivilTestUser(user)
-        ? 'Enter OTP 1234'
+        ? 'Enter OTP 7865'
         : `OTP sent to WhatsApp ${otp.maskedPhone}`,
     });
   } catch (error) {

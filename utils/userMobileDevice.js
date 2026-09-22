@@ -2,6 +2,13 @@ import { getClientIp } from './activityLog.js';
 
 const STATUS_FIXED = 'fixed';
 const STATUS_NOT_FIXED = 'not_fixed';
+const DEVICE_STORE_MS = 30 * 24 * 60 * 60 * 1000;
+
+function storeUntil(start) {
+    const base = start ? new Date(start).getTime() : Date.now();
+    const startMs = Number.isFinite(base) ? base : Date.now();
+    return new Date(startMs + DEVICE_STORE_MS);
+}
 
 function normalizeIp(value) {
     let ip = String(value || '').trim();
@@ -76,6 +83,7 @@ export function emptyMobileDevice() {
         longitude: null,
         ipAddress: '',
         lastSeenAt: null,
+        storedAt: null,
         trustedUntil: null,
         status: STATUS_NOT_FIXED,
     };
@@ -94,10 +102,21 @@ export function getDeviceTrust(user) {
 
 export function expireDeviceTrustIfNeeded(user) {
     if (!user?.mobileDevice) return;
-    const until = user.mobileDevice.trustedUntil;
-    if (until && new Date(until).getTime() <= Date.now()) {
-        user.mobileDevice.trustedUntil = null;
-        user.mobileDevice.status = STATUS_NOT_FIXED;
+    const device = user.mobileDevice;
+    const trusted = device.status === STATUS_FIXED || device.trustedUntil;
+    if (!trusted) return;
+    if (!device.storedAt) {
+        device.storedAt = device.lastSeenAt || new Date();
+        user.markModified?.('mobileDevice');
+    }
+    const maxUntil = storeUntil(device.storedAt);
+    const current = device.trustedUntil ? new Date(device.trustedUntil).getTime() : 0;
+    if (!current || current > maxUntil.getTime()) {
+        device.trustedUntil = maxUntil;
+        user.markModified?.('mobileDevice');
+    }
+    if (maxUntil.getTime() <= Date.now()) {
+        user.mobileDevice = emptyMobileDevice();
         user.markModified?.('mobileDevice');
     }
 }
@@ -122,7 +141,7 @@ export async function employeeHasMobileReviewBypass(employee) {
     return user?.mobileReviewBypass === true;
 }
 
-export function applyDeviceTrust(user, enabled, options = {}) {
+export function applyDeviceTrust(user, enabled) {
     if (!user?.mobileDevice || typeof user.mobileDevice !== 'object') {
         user.mobileDevice = emptyMobileDevice();
     }
@@ -131,12 +150,13 @@ export function applyDeviceTrust(user, enabled, options = {}) {
         enabled = false;
     }
     if (enabled) {
+        const now = new Date();
         user.mobileDevice.status = STATUS_FIXED;
-        user.mobileDevice.trustedUntil = options.permanent
-            ? new Date('2099-12-31T00:00:00.000Z')
-            : new Date(Date.now() + 30 * 24 * 60 * 60 * 1000);
+        user.mobileDevice.storedAt = now;
+        user.mobileDevice.trustedUntil = storeUntil(now);
     } else {
         user.mobileDevice.status = STATUS_NOT_FIXED;
+        user.mobileDevice.storedAt = null;
         user.mobileDevice.trustedUntil = null;
     }
     user.markModified?.('mobileDevice');
@@ -350,14 +370,56 @@ export function getWebDeviceTrust(user) {
     };
 }
 
-export function expireWebTrustIfNeeded(user) {
-    if (!user?.webLogin) return;
-    const until = user.webLogin.trustedUntil;
-    if (until && new Date(until).getTime() <= Date.now()) {
+function webDeviceStillStored(row, now = Date.now()) {
+    const id = rememberedWebDeviceId(row);
+    if (!id) return false;
+    if (!row.storedAt) {
+        row.storedAt = row.lastSeenAt || new Date();
+    }
+    const maxUntil = storeUntil(row.storedAt);
+    const current = row.trustedUntil ? new Date(row.trustedUntil).getTime() : 0;
+    if (!current || current > maxUntil.getTime()) {
+        row.trustedUntil = maxUntil;
+    }
+    return maxUntil.getTime() > now;
+}
+
+export function expireWebDevicesIfNeeded(user) {
+    if (!user) return;
+    const now = Date.now();
+    const rows = Array.isArray(user.webLoginDevices) ? user.webLoginDevices : [];
+    const keep = [];
+    let changed = false;
+    for (const row of rows) {
+        const hadWindow = Boolean(row?.storedAt && row?.trustedUntil);
+        const alive = webDeviceStillStored(row, now);
+        if (!alive) {
+            changed = true;
+            continue;
+        }
+        if (!hadWindow) changed = true;
+        keep.push(row);
+    }
+    if (changed || keep.length !== rows.length) {
+        user.webLoginDevices = keep;
+        user.markModified?.('webLoginDevices');
+    }
+    const liveIds = new Set(keep.map((row) => rememberedWebDeviceId(row)));
+    const currentId = String(user.webLogin?.deviceId || '').trim();
+    if (currentId && !liveIds.has(currentId)) {
+        user.webLogin.deviceId = '';
+        user.webLogin.trustedUntil = null;
+        user.webLogin.status = STATUS_NOT_FIXED;
+        user.markModified?.('webLogin');
+    } else if (user.webLogin?.trustedUntil && new Date(user.webLogin.trustedUntil).getTime() <= now) {
         user.webLogin.trustedUntil = null;
         user.webLogin.status = STATUS_NOT_FIXED;
         user.markModified?.('webLogin');
     }
+}
+
+export function expireWebTrustIfNeeded(user) {
+    expireWebDevicesIfNeeded(user);
 }
 
 function rememberedWebDeviceId(row) {
@@ -381,6 +443,7 @@ function rememberedWebDevices(user) {
 }
 
 export function isWebDeviceTrusted(user, deviceId) {
+    expireWebDevicesIfNeeded(user);
     const nextId = String(deviceId || '').trim();
     if (!nextId) return false;
     return rememberedWebDevices(user).some((row) => rememberedWebDeviceId(row) === nextId);
@@ -410,6 +473,10 @@ function rememberWebDeviceOnUser(user, incoming = {}) {
     if (!Array.isArray(user.webLoginDevices)) user.webLoginDevices = [];
     const idx = user.webLoginDevices.findIndex((row) => rememberedWebDeviceId(row) === id);
     const prev = idx >= 0 ? user.webLoginDevices[idx] : null;
+    const storedAt = prev?.storedAt ? new Date(prev.storedAt) : new Date();
+    const trustedUntil = prev?.trustedUntil && new Date(prev.trustedUntil).getTime() > Date.now()
+        ? new Date(prev.trustedUntil)
+        : storeUntil(storedAt);
     const next = {
         deviceId: id,
         deviceName: String(incoming.deviceName || prev?.deviceName || user.webLogin?.deviceName || '').trim().slice(0, 80),
@@ -420,6 +487,10 @@ function rememberWebDeviceOnUser(user, incoming = {}) {
         latitude: toFiniteNumber(incoming.latitude) ?? toFiniteNumber(prev?.latitude) ?? user.webLogin?.latitude ?? null,
         longitude: toFiniteNumber(incoming.longitude) ?? toFiniteNumber(prev?.longitude) ?? user.webLogin?.longitude ?? null,
         lastSeenAt: new Date(),
+        storedAt,
+        trustedUntil: storeUntil(storedAt).getTime() < new Date(trustedUntil).getTime()
+            ? storeUntil(storedAt)
+            : trustedUntil,
     };
     if (idx >= 0) user.webLoginDevices[idx] = next;
     else user.webLoginDevices.push(next);
@@ -514,4 +585,73 @@ export function recordWebLoginOnUser(user, incoming = {}) {
     user.webLogin.lastSeenAt = new Date();
     user.markModified?.('webLogin');
     rememberWebDeviceOnUser(user, incoming);
+}
+
+function sessionLocation(row) {
+    const label = String(row?.location || '').trim();
+    if (label && !/^-?\d+(?:\.\d+)?\s*[, ]\s*-?\d+(?:\.\d+)?$/.test(label)) return label;
+    return label || '';
+}
+
+export function collectStoredDeviceSessions(user) {
+    expireDeviceTrustIfNeeded(user);
+    expireWebDevicesIfNeeded(user);
+    const sessions = [];
+    const webRows = Array.isArray(user?.webLoginDevices) ? user.webLoginDevices : [];
+    for (const row of webRows) {
+        const deviceId = rememberedWebDeviceId(row);
+        if (!deviceId) continue;
+        sessions.push({
+            source: 'web',
+            deviceId,
+            deviceName: String(row.deviceName || 'Web browser').trim(),
+            os: String(row.os || '').trim(),
+            ipAddress: normalizeIp(row.ipAddress),
+            location: sessionLocation(row),
+            lastSeenAt: row.lastSeenAt || null,
+            trustedUntil: row.trustedUntil || null,
+        });
+    }
+    const trust = getDeviceTrust(user);
+    const mobileId = String(user?.mobileDevice?.deviceId || '').trim();
+    if (trust.fixed && mobileId) {
+        const mobile = user.mobileDevice;
+        sessions.push({
+            source: 'app',
+            deviceId: mobileId,
+            deviceName: String(mobile.deviceName || 'Mobile').trim(),
+            os: '',
+            ipAddress: normalizeIp(mobile.ipAddress),
+            location: sessionLocation(mobile),
+            lastSeenAt: mobile.lastSeenAt || null,
+            trustedUntil: mobile.trustedUntil || null,
+        });
+    }
+    return sessions;
+}
+
+export function removeStoredDevice(user, { source, deviceId } = {}) {
+    const id = String(deviceId || '').trim();
+    const kind = String(source || '').trim().toLowerCase();
+    if (!user || !id) return false;
+    if (kind === 'app') {
+        if (String(user.mobileDevice?.deviceId || '').trim() !== id) return false;
+        changeMobileDeviceOnUser(user);
+        return true;
+    }
+    if (kind === 'web') {
+        const rows = Array.isArray(user.webLoginDevices) ? user.webLoginDevices : [];
+        const next = rows.filter((row) => rememberedWebDeviceId(row) !== id);
+        if (next.length === rows.length && String(user.webLogin?.deviceId || '').trim() !== id) {
+            return false;
+        }
+        user.webLoginDevices = next;
+        user.markModified?.('webLoginDevices');
+        if (String(user.webLogin?.deviceId || '').trim() === id) {
+            user.webLogin = emptyWebLogin();
+            user.markModified?.('webLogin');
+        }
+        return true;
+    }
+    return false;
 }

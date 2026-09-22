@@ -7,7 +7,7 @@ import { updateUser } from '../controllers/user/updateUser.js';
 import { deleteUser } from '../controllers/user/deleteUser.js';
 import { validatePassword } from '../controllers/user/validatePassword.js';
 import { uploadUserProfilePicture } from '../controllers/user/uploadUserProfilePicture.js';
-import { changeUserMobileDevice, changeUserWebDevice, fixUserMobileDevice } from '../controllers/user/userMobileDeviceController.js';
+import { changeUserMobileDevice, changeUserWebDevice, fixUserMobileDevice, listUserDevices, terminateUserDevice } from '../controllers/user/userMobileDeviceController.js';
 import { getGroups } from '../controllers/group/getGroups.js';
 import { getGroupById } from '../controllers/group/getGroupById.js';
 import { createGroup } from '../controllers/group/createGroup.js';
@@ -26,6 +26,8 @@ router.use(protect);
 // Group routes (must come before /:id to avoid route conflicts)
 // All group routes require settings_user_group permission
 router.get('/groups/all', checkPermission('settings_user_group', 'view'), getGroups);
+router.get('/devices', checkPermission('settings_user_group', 'view'), listUserDevices);
+router.delete('/devices', checkPermission('settings_user_group', 'edit'), terminateUserDevice);
 router.get('/groups/:id', checkPermission('settings_user_group', 'view'), getGroupById);
 router.post('/groups', checkPermission('settings_user_group', 'create'), createGroup);
 router.patch('/groups/:id', checkPermission('settings_user_group', 'edit'), updateGroup);

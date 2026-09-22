@@ -56,6 +56,7 @@ const userSchema = new mongoose.Schema(
             longitude: { type: Number, default: null },
             ipAddress: { type: String, default: '', trim: true },
             lastSeenAt: { type: Date, default: null },
+            storedAt: { type: Date, default: null },
             trustedUntil: { type: Date, default: null },
             status: {
                 type: String,
@@ -93,6 +94,8 @@ const userSchema = new mongoose.Schema(
                 ipAddress: { type: String, default: '', trim: true },
                 userAgent: { type: String, default: '', trim: true },
                 lastSeenAt: { type: Date, default: null },
+                storedAt: { type: Date, default: null },
+                trustedUntil: { type: Date, default: null },
             },
         ],
         passwordExpiryDate: { type: Date, default: null }, // Password expires in 180 days
