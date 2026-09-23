@@ -175,6 +175,7 @@ export const sendVehicleProfileActivationReviewRequestEmail = async ({
     vehicleLabel,
     detailUrl,
     sectionsHtml = '',
+    changesHtml = '',
     noteText = '',
     requesterName = '',
 }) => {
@@ -196,6 +197,7 @@ export const sendVehicleProfileActivationReviewRequestEmail = async ({
             <div style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;padding:16px;margin:18px 0;">
                 <p style="margin:0;"><strong>Vehicle:</strong> ${escapeHtmlBasic(vehicleLabel)}</p>
                 ${sectionsHtml ? `<p style="margin:8px 0 0 0;"><strong>Sections:</strong></p><ul style="margin:8px 0 0 18px;">${sectionsHtml}</ul>` : ''}
+                ${changesHtml || ''}
                 ${noteBlock}
             </div>
         `,

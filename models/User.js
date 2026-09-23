@@ -47,6 +47,8 @@ const userSchema = new mongoose.Schema(
          * Skips WhatsApp OTP on POST /api/Login/mobile and is never locked to one phone.
          */
         mobileReviewBypass: { type: Boolean, default: false },
+        /** Bumped when the app session is ended from ERP. Old app tokens no longer match. */
+        mobileSessionVersion: { type: Number, default: 0 },
         /** Current VeRP mobile app device. status fixed = only that phone may log in. */
         mobileDevice: {
             deviceId: { type: String, default: '', trim: true },

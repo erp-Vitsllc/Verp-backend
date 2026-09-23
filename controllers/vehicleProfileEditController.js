@@ -8,6 +8,7 @@ import { syncDashboardAction } from '../utils/syncDashboard.js';
 import { resolveProfileActivationSubmitterId } from '../utils/resolveProfileActivationSubmitterId.js';
 import { sendVehicleProfileEditOutcomeEmail } from '../utils/sendVehicleProfileEditEmails.js';
 import { applyAllVehiclePendingProfileEdits, applyVehiclePendingProfileEditEntry } from '../utils/applyVehiclePendingProfileEdits.js';
+import { pendingEditsChangeHtml } from '../utils/vehicleProfileChangeSummary.js';
 import { VEHICLE_PROFILE_ACTIVATION_SECTION_IDS } from '../utils/vehicleProfileCompletion.js';
 import { userCanManageFleetVehicleHandover } from '../utils/assetApprovalHelpers.js';
 
@@ -76,6 +77,7 @@ async function notifyHrOfVehicleProfileEditSubmission(req, asset, designatedHr, 
             });
             const hrName = `${designatedHr.firstName || ''} ${designatedHr.lastName || ''}`.trim() || 'HR';
             const detailUrl = `${resolveFrontendBaseUrl(req)}/HRM/Asset/Vehicle/details/${asset._id}`;
+            const changesHtml = pendingEditsChangeHtml(pending, (sectionId) => SECTION_LABEL[sectionId]);
             await transporter.sendMail({
                 from: `"VeRP Portal" <${emailUser}>`,
                 to: hrEmail,
@@ -85,6 +87,7 @@ async function notifyHrOfVehicleProfileEditSubmission(req, asset, designatedHr, 
                         <h2 style="color:#1d4ed8;">Vehicle profile edit — HR review</h2>
                         <p>Hello <strong>${hrName}</strong>,</p>
                         <p>Submitted changes for activated vehicle <strong>${vehicleLabel}</strong>${sectionSummary ? `: <strong>${sectionSummary}</strong>` : ''}.</p>
+                        ${changesHtml || '<p>Open the vehicle to review the submitted fields.</p>'}
                         <p>Please review and approve or reject in VeRP.</p>
                         <p><a href="${detailUrl}" style="background:#2563eb;color:#fff;padding:12px 20px;text-decoration:none;border-radius:8px;">Open vehicle</a></p>
                     </div>

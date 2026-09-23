@@ -4,6 +4,7 @@ import EmployeeBasic from "../models/EmployeeBasic.js";
 import { isUsernameSystemSuperUser } from "../utils/systemSuperUser.js";
 import { normalizeLoginThrough } from "../utils/loginThrough.js";
 import { isWebDeviceTrusted, noteWebDeviceIp, resolvePublicClientIp } from "../utils/userMobileDevice.js";
+import { isLeftUserStatus } from "../utils/applyEmployeeLeftUserStatus.js";
 
 /**
  * Authentication middleware - verifies JWT token and attaches user to request
@@ -47,7 +48,7 @@ export const protect = async (req, res, next) => {
         }
 
         // Check if user still exists and is active
-        const user = await User.findById(decoded.id).select('_id name username status email isAdmin companyEmail employeeId groupName webLogin webLoginDevices');
+        const user = await User.findById(decoded.id).select('_id name username status email isAdmin companyEmail employeeId groupName webLogin webLoginDevices mobileSessionVersion');
 
         if (!user) {
             return res.status(401).json({ message: "User not found" });
@@ -61,7 +62,7 @@ export const protect = async (req, res, next) => {
         let employeeObjectId = null;
         let linkedEmployee = null;
         if (user.employeeId) {
-            let emp = await EmployeeBasic.findOne({ employeeId: user.employeeId }).select('_id loginThrough');
+            let emp = await EmployeeBasic.findOne({ employeeId: user.employeeId }).select('_id loginThrough status');
             if (!emp) {
                 const norm = (s) => (s || '').toString().toLowerCase().replace(/\s+/g, '');
                 const userNorm = norm(user.employeeId);
@@ -79,7 +80,7 @@ export const protect = async (req, res, next) => {
                                 userNorm
                             ]
                         }
-                    }).select('_id loginThrough');
+                    }).select('_id loginThrough status');
                 }
             }
             if (emp) {
@@ -100,7 +101,7 @@ export const protect = async (req, res, next) => {
                         { workEmail: { $in: emails } },
                         { email: { $in: emails } },
                     ],
-                }).select('_id loginThrough');
+                }).select('_id loginThrough status');
                 if (empByEmail) {
                     employeeObjectId = empByEmail._id;
                     linkedEmployee = empByEmail;
@@ -110,6 +111,23 @@ export const protect = async (req, res, next) => {
 
         const isSystemSuperUser = isUsernameSystemSuperUser(user.username);
         const isAppLogin = decoded.typ === 'access';
+
+        if (isAppLogin && !isSystemSuperUser && isLeftUserStatus(linkedEmployee?.status)) {
+            return res.status(403).json({
+                code: 'SESSION_TERMINATED',
+                message: 'This account is closed. Please contact administrator.',
+            });
+        }
+
+        if (
+            isAppLogin &&
+            (Number(decoded.sv) || 0) !== (Number(user.mobileSessionVersion) || 0)
+        ) {
+            return res.status(403).json({
+                code: 'SESSION_TERMINATED',
+                message: 'This session was ended from ERP. Please login again.',
+            });
+        }
 
         if (!isAppLogin) {
             const deviceId = String(req.headers['x-verp-device-id'] || '').trim();

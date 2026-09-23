@@ -26,7 +26,7 @@ function formatPersonName(value) {
 }
 
 async function loadUser(id) {
-    return User.findById(id).select('username mobileDevice mobileReviewBypass webLogin webLoginDevices lastLoginIp');
+    return User.findById(id).select('username mobileDevice mobileReviewBypass webLogin webLoginDevices lastLoginIp mobileSessionVersion');
 }
 
 function jsonDevice(user) {
@@ -196,9 +196,12 @@ export async function terminateUserDevice(req, res) {
         if (!removed) {
             return res.status(404).json({ message: 'That device is no longer saved.' });
         }
+        if (source === 'app') {
+            user.mobileSessionVersion = (Number(user.mobileSessionVersion) || 0) + 1;
+        }
         await user.save();
         if (source === 'app') {
-            await RefreshToken.deleteMany({ userId: user._id, deviceId });
+            await RefreshToken.deleteMany({ userId: user._id });
         }
 
         return res.status(200).json({

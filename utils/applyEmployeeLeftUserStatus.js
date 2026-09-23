@@ -1,4 +1,5 @@
 import User from "../models/User.js";
+import RefreshToken from "../models/RefreshToken.js";
 import { resolveEmployeeProfileStatusWrite } from "./employeeProfileStatusLock.js";
 import { archiveEmployeeProfileForLeftUserReturn } from "./archiveEmployeeProfileForLeftUserReturn.js";
 
@@ -51,10 +52,15 @@ export async function applyEmployeeLeftUserStatus(employeeDoc) {
     );
     await employeeDoc.save();
 
-    await User.findOneAndUpdate(
-        { employeeId: employeeDoc.employeeId },
-        { $set: { enablePortalAccess: false } },
+    const linkedUser = await User.findOne({ employeeId: employeeDoc.employeeId }).select(
+        "_id enablePortalAccess mobileSessionVersion",
     );
+    if (linkedUser) {
+        linkedUser.enablePortalAccess = false;
+        linkedUser.mobileSessionVersion = (Number(linkedUser.mobileSessionVersion) || 0) + 1;
+        await linkedUser.save();
+        await RefreshToken.deleteMany({ userId: linkedUser._id });
+    }
 
     const DashboardAction = (await import("../models/DashboardAction.js")).default;
     const employeeObjectId = employeeDoc._id;

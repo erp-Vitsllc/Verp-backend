@@ -6,6 +6,7 @@ import EmployeeBasic from '../models/EmployeeBasic.js';
 import RefreshToken from '../models/RefreshToken.js';
 import { recordActivityAsync } from '../utils/activityLog.js';
 import { normalizeLoginThrough } from '../utils/loginThrough.js';
+import { isLeftUserStatus } from '../utils/applyEmployeeLeftUserStatus.js';
 import MobileLoginOtp from '../models/MobileLoginOtp.js';
 import { sendLoginOtpMessage } from '../services/whatsappService.js';
 import { resolveEmployeeWhatsAppPhone } from '../utils/sendToolsAssetWhatsAppReport.js';
@@ -32,6 +33,8 @@ async function readIncomingMobileDevice(req) {
 const ACCESS_EXPIRES = process.env.MOBILE_ACCESS_EXPIRES_IN || '15m';
 const REFRESH_DAYS = Number(process.env.MOBILE_REFRESH_DAYS) || 30;
 const NO_APP_PERMISSION = 'You don\'t have permission to login ERP application';
+const ACCOUNT_CLOSED = 'This account is closed. Please contact administrator.';
+const SESSION_ENDED = 'This session was ended from ERP. Please login again.';
 
 function refreshSecret() {
   return process.env.JWT_REFRESH_SECRET || `${process.env.JWT_SECRET}.mobile-refresh`;
@@ -41,17 +44,17 @@ function hashToken(token) {
   return crypto.createHash('sha256').update(token).digest('hex');
 }
 
-function signAccessToken(userId) {
+function signAccessToken(userId, sessionVersion = 0) {
   return jwt.sign(
-    { id: userId, typ: 'access', actor: 'user' },
+    { id: userId, typ: 'access', actor: 'user', sv: Number(sessionVersion) || 0 },
     process.env.JWT_SECRET,
     { expiresIn: ACCESS_EXPIRES },
   );
 }
 
-function signRefreshToken(userId, jti) {
+function signRefreshToken(userId, jti, sessionVersion = 0) {
   return jwt.sign(
-    { id: userId, typ: 'refresh', actor: 'user', jti },
+    { id: userId, typ: 'refresh', actor: 'user', jti, sv: Number(sessionVersion) || 0 },
     refreshSecret(),
     { expiresIn: `${REFRESH_DAYS}d` },
   );
@@ -84,15 +87,17 @@ async function findUser(identifier) {
   });
 }
 
-async function portalAppAllowed(user, isSystemAdmin) {
-  if (isSystemAdmin) return true;
-  if (!user.employeeId) return true;
+async function mobileLoginBlockReason(user, isSystemAdmin) {
+  if (isSystemAdmin) return null;
+  if (!user?.employeeId) return null;
 
   const employee = await EmployeeBasic.findOne({ employeeId: user.employeeId })
-    .select('loginThrough')
+    .select('loginThrough status')
     .lean();
-  if (!employee) return true;
-  return normalizeLoginThrough(employee).portalApp;
+  if (!employee) return null;
+  if (isLeftUserStatus(employee.status)) return ACCOUNT_CLOSED;
+  if (!normalizeLoginThrough(employee).portalApp) return NO_APP_PERMISSION;
+  return null;
 }
 
 async function linkedEmployeeObjectId(employeeId) {
@@ -201,8 +206,9 @@ async function issueMobileSession(req, res, user, incomingDevice, isAdminLogin, 
   }
 
   const employee = await linkedEmployeeObjectId(user.employeeId);
-  const accessToken = signAccessToken(user._id);
-  const refreshToken = signRefreshToken(user._id, crypto.randomUUID());
+  const sessionVersion = Number(user.mobileSessionVersion) || 0;
+  const accessToken = signAccessToken(user._id, sessionVersion);
+  const refreshToken = signRefreshToken(user._id, crypto.randomUUID(), sessionVersion);
   await persistRefreshToken(user._id, refreshToken, req.headers['user-agent'], incomingDevice.deviceId);
 
   user.lastLogin = new Date();
@@ -288,9 +294,9 @@ export async function mobileLogin(req, res) {
       }
     }
 
-    const allowed = await portalAppAllowed(user, isAdminLogin);
-    if (!allowed) {
-      return res.status(403).json({ message: NO_APP_PERMISSION });
+    const blocked = await mobileLoginBlockReason(user, isAdminLogin);
+    if (blocked) {
+      return res.status(403).json({ message: blocked });
     }
 
     const incomingDevice = await readIncomingMobileDevice(req);
@@ -369,6 +375,11 @@ export async function verifyMobileOtp(req, res) {
       await challenge.deleteOne();
       return res.status(401).json({ message: 'User is no longer allowed to sign in.' });
     }
+    const blocked = await mobileLoginBlockReason(user, false);
+    if (blocked) {
+      await challenge.deleteOne();
+      return res.status(403).json({ message: blocked });
+    }
 
     const incomingDevice = await readIncomingMobileDevice(req);
     if (!incomingDevice.deviceId) incomingDevice.deviceId = challenge.deviceId;
@@ -439,16 +450,24 @@ export async function refreshMobileToken(req, res) {
       return res.status(401).json({ message: 'Refresh token is not recognized.' });
     }
 
-    const user = await User.findById(decoded.id).select('_id status employeeId mobileDevice mobileReviewBypass');
+    const user = await User.findById(decoded.id).select('_id status employeeId mobileDevice mobileReviewBypass mobileSessionVersion');
     if (!user || user.status !== 'Active') {
       await RefreshToken.deleteMany({ userId: decoded.id });
       return res.status(401).json({ message: 'User is no longer allowed to sign in.' });
     }
 
-    const allowed = await portalAppAllowed(user, false);
-    if (!allowed) {
+    if ((Number(decoded.sv) || 0) !== (Number(user.mobileSessionVersion) || 0)) {
       await RefreshToken.deleteMany({ userId: decoded.id });
-      return res.status(403).json({ message: NO_APP_PERMISSION });
+      return res.status(403).json({ code: 'SESSION_TERMINATED', message: SESSION_ENDED });
+    }
+
+    const blocked = await mobileLoginBlockReason(user, false);
+    if (blocked) {
+      await RefreshToken.deleteMany({ userId: decoded.id });
+      return res.status(403).json({
+        code: blocked === ACCOUNT_CLOSED ? 'SESSION_TERMINATED' : undefined,
+        message: blocked,
+      });
     }
 
     const incomingDevice = await readIncomingMobileDevice(req);
@@ -468,8 +487,9 @@ export async function refreshMobileToken(req, res) {
     }
 
     await stored.deleteOne();
-    const accessToken = signAccessToken(user._id);
-    const nextRefresh = signRefreshToken(user._id, crypto.randomUUID());
+    const sessionVersion = Number(user.mobileSessionVersion) || 0;
+    const accessToken = signAccessToken(user._id, sessionVersion);
+    const nextRefresh = signRefreshToken(user._id, crypto.randomUUID(), sessionVersion);
     await persistRefreshToken(user._id, nextRefresh, req.headers['user-agent'], refreshDevice.deviceId);
 
     return res.status(200).json({

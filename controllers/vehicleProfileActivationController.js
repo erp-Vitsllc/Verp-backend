@@ -22,6 +22,7 @@ import {
     userCanDirectAddAssetToPool,
 } from '../utils/assetApprovalHelpers.js';
 import { isJwtSystemSuperUser } from '../utils/systemSuperUser.js';
+import { activationSubmittedHtml, pendingEditsChangeHtml } from '../utils/vehicleProfileChangeSummary.js';
 
 const ALLOWED_SECTIONS = new Set([
     ...VEHICLE_PROFILE_ACTIVATION_SECTION_IDS,
@@ -36,6 +37,14 @@ const SECTION_LABEL = {
     profile_picture: 'Profile picture',
     warranty: 'Warranty',
     documents: 'Documents summary',
+};
+
+const reviewerChangesHtml = (asset, sections) => {
+    const pendingEdits = Array.isArray(asset?.vehiclePendingProfileEdits) ? asset.vehiclePendingProfileEdits : [];
+    return (
+        pendingEditsChangeHtml(pendingEdits, (sectionId) => SECTION_LABEL[sectionId]) ||
+        activationSubmittedHtml(asset, sections, (sectionId) => SECTION_LABEL[sectionId])
+    );
 };
 
 const isFleetVehicleAsset = (asset) => {
@@ -440,6 +449,7 @@ export const submitVehicleProfileActivation = async (req, res) => {
                 vehicleLabel,
                 detailUrl,
                 sectionsHtml,
+                changesHtml: reviewerChangesHtml(asset, sections),
                 noteText: descText,
                 requesterName: requestedByName,
             });
@@ -513,6 +523,7 @@ export const submitVehicleProfileActivation = async (req, res) => {
                 vehicleLabel,
                 detailUrl,
                 sectionsHtml,
+                changesHtml: reviewerChangesHtml(asset, sections),
                 noteText: descText,
                 requesterName: requestedByName,
             }).catch(() => {});
@@ -662,6 +673,7 @@ export const approveVehicleProfileActivation = async (req, res) => {
                 vehicleLabel,
                 detailUrl,
                 sectionsHtml,
+                changesHtml: reviewerChangesHtml(asset, sections),
                 noteText: descText,
                 requesterName: requestedByName,
             });
