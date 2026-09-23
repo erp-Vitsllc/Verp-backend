@@ -413,6 +413,39 @@ export async function waitForWhatsAppDelivery(messageId, { timeoutMs = 18000 } =
 }
 
 const VALIDATION_TEMPLATE_NAME = 'welcome_to_vega';
+const LOGIN_OTP_TEMPLATE_NAME = 'verp_login_otp';
+
+/** Approved authentication template. Free text cannot open a new WhatsApp chat. */
+export async function sendLoginOtpMessage(to, otp, extras = {}) {
+    const code = String(otp || '').replace(/\s/g, '');
+    if (!/^\d{4,8}$/.test(code)) {
+        return fail('OTP code is invalid.');
+    }
+
+    return sendTemplateMessage(
+        to,
+        LOGIN_OTP_TEMPLATE_NAME,
+        'en',
+        [
+            {
+                type: 'body',
+                parameters: [{ type: 'text', text: code }],
+            },
+            {
+                type: 'button',
+                sub_type: 'url',
+                index: '0',
+                parameters: [{ type: 'text', text: code }],
+            },
+        ],
+        {
+            source: 'template',
+            actor: extras.actor || null,
+            employeeId: extras.employeeId || '',
+            contactName: extras.contactName || '',
+        },
+    );
+}
 
 export async function sendWhatsAppValidationTemplate(to, extras = {}) {
     const firstName = String(extras.firstName || extras.contactName || 'there')

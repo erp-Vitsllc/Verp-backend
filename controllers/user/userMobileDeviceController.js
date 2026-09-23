@@ -6,13 +6,24 @@ import {
     changeWebDeviceOnUser,
     collectStoredDeviceSessions,
     fixMobileDeviceOnUser,
+    isLoopbackIp,
+    presentSessionIp,
     removeStoredDevice,
     serializeMobileDevice,
     serializeWebLogin,
 } from '../../utils/userMobileDevice.js';
+import { getClientIp } from '../../utils/activityLog.js';
 
 function invalidId(id) {
     return !id || !String(id).match(/^[0-9a-fA-F]{24}$/);
+}
+
+function formatPersonName(value) {
+    const text = String(value || '').trim();
+    if (!text) return '';
+    return text
+        .toLowerCase()
+        .replace(/(^|[^a-z])([a-z])/g, (_, sep, letter) => sep + letter.toUpperCase());
 }
 
 async function loadUser(id) {
@@ -135,6 +146,7 @@ export async function listUserDevices(req, res) {
             ],
         }).select('name username profilePicture mobileDevice webLogin webLoginDevices');
 
+        const viewerIsLocal = isLoopbackIp(getClientIp(req));
         const sessions = [];
         for (const user of users) {
             const rows = collectStoredDeviceSessions(user);
@@ -142,10 +154,13 @@ export async function listUserDevices(req, res) {
             for (const row of rows) {
                 sessions.push({
                     userId: String(user._id),
-                    name: user.name || user.username || 'User',
+                    name: formatPersonName(user.name || user.username) || 'User',
                     username: user.username || '',
                     profilePicture: user.profilePicture || '',
                     ...row,
+                    ipAddress: await presentSessionIp(row.ipAddress, {
+                        allowMachinePublicIp: viewerIsLocal,
+                    }),
                 });
             }
         }

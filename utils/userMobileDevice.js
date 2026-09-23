@@ -26,29 +26,105 @@ function normalizeIp(value) {
     return ip.slice(0, 64);
 }
 
+export function isLoopbackIp(value) {
+    const ip = normalizeIp(value);
+    return ip === '127.0.0.1' || ip === '::1' || ip === '0.0.0.0';
+}
+
+/** Routable address. Loopback and LAN addresses are not the system's public IP. */
+export function isPublicIp(value) {
+    const ip = normalizeIp(value);
+    if (!ip || isLoopbackIp(ip)) return false;
+    if (ip.includes(':')) {
+        const lower = ip.toLowerCase();
+        if (lower.startsWith('fe80') || lower.startsWith('fc') || lower.startsWith('fd')) return false;
+        return true;
+    }
+    const parts = ip.split('.').map((part) => Number(part));
+    if (parts.length !== 4 || parts.some((part) => !Number.isInteger(part) || part < 0 || part > 255)) {
+        return false;
+    }
+    const [a, b] = parts;
+    if (a === 10) return false;
+    if (a === 172 && b >= 16 && b <= 31) return false;
+    if (a === 192 && b === 168) return false;
+    if (a === 169 && b === 254) return false;
+    if (a === 100 && b >= 64 && b <= 127) return false;
+    return true;
+}
+
 function ipFromRequest(req) {
     const body = req?.body && typeof req.body === 'object' ? req.body : {};
     const fromApp = [
+        body.publicIp,
+        body.publicIP,
         body.ipAddress,
         body.ip,
         body.clientIp,
-        body.publicIp,
-        body.publicIP,
         body.wifiIP,
         body.wifiIp,
-    ].map(normalizeIp).find(Boolean);
+    ].map(normalizeIp).find(isPublicIp);
     if (fromApp) return fromApp;
 
     const headers = req?.headers || {};
+    const forwarded = headers['x-forwarded-for'];
+    const forwardedList = Array.isArray(forwarded)
+        ? forwarded
+        : String(forwarded || '').split(',');
     const fromHeader = [
+        ...forwardedList,
         headers['cf-connecting-ip'],
         headers['true-client-ip'],
         headers['x-client-ip'],
         headers['x-real-ip'],
-    ].map(normalizeIp).find(Boolean);
+    ].map(normalizeIp).find(isPublicIp);
     if (fromHeader) return fromHeader;
 
-    return normalizeIp(getClientIp(req));
+    const seen = normalizeIp(getClientIp(req));
+    return isPublicIp(seen) ? seen : seen;
+}
+
+let outboundPublicIpCache = { at: 0, ip: '' };
+
+async function lookupOutboundPublicIp() {
+    const now = Date.now();
+    if (outboundPublicIpCache.ip && now - outboundPublicIpCache.at < 10 * 60 * 1000) {
+        return outboundPublicIpCache.ip;
+    }
+    try {
+        const response = await fetch('https://api.ipify.org?format=json', {
+            signal: AbortSignal.timeout(4000),
+        });
+        const payload = await response.json().catch(() => ({}));
+        const ip = normalizeIp(payload?.ip);
+        if (isPublicIp(ip)) {
+            outboundPublicIpCache = { at: now, ip };
+            return ip;
+        }
+    } catch {
+        /* keep the stored address when the lookup is unreachable */
+    }
+    return outboundPublicIpCache.ip || '';
+}
+
+/**
+ * Public IP of the system that signed in.
+ * A localhost request has no client address, so use this machine's public IP.
+ */
+export async function resolvePublicClientIp(req) {
+    const seen = ipFromRequest(req);
+    if (isPublicIp(seen)) return seen;
+    if (seen && !isLoopbackIp(seen)) return seen;
+    const outbound = await lookupOutboundPublicIp();
+    return outbound || '';
+}
+
+export async function presentSessionIp(ip, { allowMachinePublicIp = false } = {}) {
+    const value = normalizeIp(ip);
+    if (isPublicIp(value)) return value;
+    if (value && !isLoopbackIp(value)) return value;
+    if (!allowMachinePublicIp) return '';
+    return lookupOutboundPublicIp();
 }
 
 function toFiniteNumber(value) {

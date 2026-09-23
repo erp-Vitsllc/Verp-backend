@@ -1,6 +1,6 @@
 import EmployeeContact from '../models/EmployeeContact.js';
 import { getEventChannels } from './notificationEmailPermission.js';
-import { isValidWhatsAppPhone, normalizeWhatsAppPhone } from './normalizeWhatsAppPhone.js';
+import { usableWhatsAppNumber } from './normalizeWhatsAppPhone.js';
 import { isFleetVehicleAsset } from './assetApprovalHelpers.js';
 
 export const TOOLS_HANDOVER_REPORT_EVENT = 'hrm.tools.handover_report';
@@ -12,12 +12,12 @@ export function isToolsAssetItem(asset) {
     return /^VEGA-ASSET-/i.test(String(asset.assetId || ''));
 }
 
+/** Basic Details WhatsApp number only. Contact number is never used. */
 export async function resolveEmployeeWhatsAppPhone(employeeId) {
     const code = String(employeeId || '').trim();
     if (!code) return '';
     const contact = await EmployeeContact.findOne({ employeeId: code }).select('whatsappNumber').lean();
-    const phone = normalizeWhatsAppPhone(contact?.whatsappNumber || '');
-    return isValidWhatsAppPhone(phone) ? phone : '';
+    return usableWhatsAppNumber(contact?.whatsappNumber || '');
 }
 
 async function resolveEmployeeRecord(employee) {

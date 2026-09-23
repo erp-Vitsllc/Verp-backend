@@ -7,7 +7,7 @@ import RefreshToken from '../models/RefreshToken.js';
 import { recordActivityAsync } from '../utils/activityLog.js';
 import { normalizeLoginThrough } from '../utils/loginThrough.js';
 import MobileLoginOtp from '../models/MobileLoginOtp.js';
-import { sendTextMessage } from '../services/whatsappService.js';
+import { sendLoginOtpMessage } from '../services/whatsappService.js';
 import { resolveEmployeeWhatsAppPhone } from '../utils/sendToolsAssetWhatsAppReport.js';
 import {
   applyDeviceTrust,
@@ -18,8 +18,16 @@ import {
   mobileDeviceLoginDenied,
   readMobileDeviceFromRequest,
   recordMobileDeviceOnUser,
+  resolvePublicClientIp,
   serializeMobileDevice,
 } from '../utils/userMobileDevice.js';
+
+async function readIncomingMobileDevice(req) {
+  const device = readMobileDeviceFromRequest(req);
+  const publicIp = await resolvePublicClientIp(req);
+  if (publicIp) device.ipAddress = publicIp;
+  return device;
+}
 
 const ACCESS_EXPIRES = process.env.MOBILE_ACCESS_EXPIRES_IN || '15m';
 const REFRESH_DAYS = Number(process.env.MOBILE_REFRESH_DAYS) || 30;
@@ -151,15 +159,9 @@ async function sendLoginOtp(user, deviceId) {
     expiresAt: new Date(Date.now() + 5 * 60 * 1000),
   });
 
-  const sent = await sendTextMessage(
-    phone,
-    `Your VERP login OTP is ${otp}. It is valid for 5 minutes. Do not share this code.`,
-    {
-      skipPaidChannelCheck: true,
-      source: 'mobile_login_otp',
-      employeeId: user.employeeId || '',
-    },
-  );
+  const sent = await sendLoginOtpMessage(phone, otp, {
+    employeeId: user.employeeId || '',
+  });
   if (!sent?.success) {
     await MobileLoginOtp.deleteMany({ otpToken });
     const error = new Error(sent?.error || 'Could not send WhatsApp OTP.');
@@ -291,7 +293,7 @@ export async function mobileLogin(req, res) {
       return res.status(403).json({ message: NO_APP_PERMISSION });
     }
 
-    const incomingDevice = readMobileDeviceFromRequest(req);
+    const incomingDevice = await readIncomingMobileDevice(req);
     console.log('[mobileLogin] device', {
       username: user.username,
       deviceId: incomingDevice.deviceId || null,
@@ -368,7 +370,7 @@ export async function verifyMobileOtp(req, res) {
       return res.status(401).json({ message: 'User is no longer allowed to sign in.' });
     }
 
-    const incomingDevice = readMobileDeviceFromRequest(req);
+    const incomingDevice = await readIncomingMobileDevice(req);
     if (!incomingDevice.deviceId) incomingDevice.deviceId = challenge.deviceId;
     if (!hasLoginCoordinates(incomingDevice)) {
       return res.status(400).json({
@@ -449,7 +451,7 @@ export async function refreshMobileToken(req, res) {
       return res.status(403).json({ message: NO_APP_PERMISSION });
     }
 
-    const incomingDevice = readMobileDeviceFromRequest(req);
+    const incomingDevice = await readIncomingMobileDevice(req);
     const refreshDevice = {
       ...incomingDevice,
       deviceId: incomingDevice.deviceId || stored.deviceId || '',
@@ -494,7 +496,7 @@ export async function reportMobileDevice(req, res) {
     }
 
     expireDeviceTrustIfNeeded(user);
-    const incomingDevice = readMobileDeviceFromRequest(req);
+    const incomingDevice = await readIncomingMobileDevice(req);
     if (req.body?.fixDevice === false) {
       applyDeviceTrust(user, false);
     }

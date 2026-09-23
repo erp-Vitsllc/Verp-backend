@@ -28,6 +28,15 @@ const S3_STORAGE_FOLDER_PREFIXES = [
     'salary-policy',
 ];
 
+function isStoredObjectKey(key) {
+    const cleaned = String(key || '').replace(/^\/+/, '');
+    if (!cleaned || cleaned.startsWith('data:')) return false;
+    if (S3_STORAGE_FOLDER_PREFIXES.some((prefix) => cleaned === prefix || cleaned.startsWith(`${prefix}/`))) {
+        return true;
+    }
+    return /^[\w.-]+\/.+\.(pdf|jpe?g|png)$/i.test(cleaned);
+}
+
 /**
  * Resolve a DB value or signed URL to the underlying S3 object key.
  * @param {string} keyOrUrl
@@ -61,7 +70,7 @@ export function normalizeS3Key(keyOrUrl) {
                 }
             }
             // Filenames may include spaces / parentheses (e.g. "Report (2).pdf").
-            if (pathKey) return pathKey;
+            if (pathKey && isStoredObjectKey(pathKey)) return pathKey;
         } catch {
             return null;
         }

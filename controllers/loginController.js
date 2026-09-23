@@ -16,6 +16,7 @@ import {
     isWebDeviceTrusted,
     osFromUserAgent,
     recordWebLoginOnUser,
+    resolvePublicClientIp,
     serializeWebLogin,
     webDeviceLoginDenied,
 } from "../utils/userMobileDevice.js";
@@ -31,7 +32,7 @@ function maskEmail(email) {
     return `${value.slice(0, 1)}****${value.slice(at)}`;
 }
 
-function readWebDeviceFromRequest(req) {
+async function readWebDeviceFromRequest(req) {
     const body = req?.body && typeof req.body === "object" ? req.body : {};
     const userAgent = String(req.headers?.["user-agent"] || "").slice(0, 240);
     return {
@@ -39,7 +40,7 @@ function readWebDeviceFromRequest(req) {
         deviceName: String(body.deviceName || "").trim(),
         os: String(body.os || osFromUserAgent(userAgent)).trim(),
         userAgent,
-        ipAddress: getClientIp(req) || "",
+        ipAddress: await resolvePublicClientIp(req),
     };
 }
 
@@ -377,7 +378,7 @@ export const login = async (req, res) => {
             return res.status(401).json({ message: "Invalid credentials" });
         }
 
-        const incomingDevice = readWebDeviceFromRequest(req);
+        const incomingDevice = await readWebDeviceFromRequest(req);
         expireWebTrustIfNeeded(user);
         const deviceDenied = webDeviceLoginDenied(user, incomingDevice, { isSystemAdmin });
         if (deviceDenied) {
@@ -462,7 +463,7 @@ export const verifyWebOtp = async (req, res) => {
             return res.status(401).json({ message: "User is no longer allowed to sign in." });
         }
 
-        const incomingDevice = readWebDeviceFromRequest(req);
+        const incomingDevice = await readWebDeviceFromRequest(req);
         if (!incomingDevice.deviceId) incomingDevice.deviceId = challenge.deviceId;
         await challenge.deleteOne();
         return completeWebLogin(req, res, {

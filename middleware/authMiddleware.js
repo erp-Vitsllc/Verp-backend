@@ -3,6 +3,7 @@ import User from "../models/User.js";
 import EmployeeBasic from "../models/EmployeeBasic.js";
 import { isUsernameSystemSuperUser } from "../utils/systemSuperUser.js";
 import { normalizeLoginThrough } from "../utils/loginThrough.js";
+import { isWebDeviceTrusted } from "../utils/userMobileDevice.js";
 
 /**
  * Authentication middleware - verifies JWT token and attaches user to request
@@ -46,7 +47,7 @@ export const protect = async (req, res, next) => {
         }
 
         // Check if user still exists and is active
-        const user = await User.findById(decoded.id).select('_id name username status email isAdmin companyEmail employeeId groupName');
+        const user = await User.findById(decoded.id).select('_id name username status email isAdmin companyEmail employeeId groupName webLogin webLoginDevices');
 
         if (!user) {
             return res.status(401).json({ message: "User not found" });
@@ -108,10 +109,22 @@ export const protect = async (req, res, next) => {
         }
 
         const isSystemSuperUser = isUsernameSystemSuperUser(user.username);
+        const isAppLogin = decoded.typ === 'access';
+
+        if (!isAppLogin) {
+            const deviceId = String(req.headers['x-verp-device-id'] || '').trim();
+            if (!isWebDeviceTrusted(user, deviceId)) {
+                if (user.isModified?.()) await user.save();
+                return res.status(401).json({
+                    code: 'SESSION_TERMINATED',
+                    message: 'This device was signed out. Sign in again.',
+                });
+            }
+            if (user.isModified?.()) await user.save();
+        }
 
         if (!isSystemSuperUser && linkedEmployee) {
             const through = normalizeLoginThrough(linkedEmployee);
-            const isAppLogin = decoded.typ === 'access';
             if (isAppLogin && !through.portalApp) {
                 return res.status(403).json({
                     message: "You don't have permission to login ERP application",
