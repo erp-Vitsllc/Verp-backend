@@ -287,6 +287,11 @@ import {
 } from '../utils/cleanupAssetDashboardActions.js';
 import { isAcceptedAssignmentOutcomeNotification } from '../utils/isAcceptedAssignmentOutcomeNotification.js';
 import { syncVehicleAccessFuelReminder } from '../utils/processVehicleAccessFuelReminders.js';
+import {
+    syncAllZeroAssetValueToolsNotifications,
+    syncAllZeroAssetValueVehicleNotifications,
+    syncZeroAssetValueNotification,
+} from '../utils/syncZeroAssetValueVehicleNotifications.js';
 import { closeCompletedAssignmentNotificationsForAssets } from '../utils/closeCompletedAssignmentNotifications.js';
 import { listPendingHubInboxItems } from '../utils/employeeHubRequestInbox.js';
 import {
@@ -5152,6 +5157,7 @@ export const updateAssetItem = async (req, res) => {
         }
 
         await item.save();
+        void syncZeroAssetValueNotification(item).catch(() => null);
         await notifyAssignedEmployeeIfController(req, item, 'Return Asset', 'Asset return was processed by Asset Controller.');
 
         // Create history log
@@ -20037,6 +20043,14 @@ export const getPendingAssetDashboardInbox = async (req, res) => {
                 requestType: 'Asset Approval',
                 extra3: { $not: { $regex: '"isFleetVehicle"\\s*:\\s*true', $options: 'i' } },
             });
+            if (scope !== 'tools') {
+                assigneeClauses.push({ requestType: 'Vehicle Value Missing' });
+                await syncAllZeroAssetValueVehicleNotifications().catch(() => {});
+            }
+            if (scope !== 'vehicle') {
+                assigneeClauses.push({ requestType: 'Asset Value Missing' });
+                await syncAllZeroAssetValueToolsNotifications().catch(() => {});
+            }
         }
 
         if (assigneeClauses.length === 0) {

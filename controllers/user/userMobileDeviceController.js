@@ -6,14 +6,13 @@ import {
     changeWebDeviceOnUser,
     collectStoredDeviceSessions,
     fixMobileDeviceOnUser,
-    isLoopbackIp,
-    presentSessionIp,
+    displaySessionIp,
+    noteWebDeviceIp,
     removeStoredDevice,
+    resolvePublicClientIp,
     serializeMobileDevice,
     serializeWebLogin,
 } from '../../utils/userMobileDevice.js';
-import { getClientIp } from '../../utils/activityLog.js';
-
 function invalidId(id) {
     return !id || !String(id).match(/^[0-9a-fA-F]{24}$/);
 }
@@ -146,9 +145,11 @@ export async function listUserDevices(req, res) {
             ],
         }).select('name username profilePicture mobileDevice webLogin webLoginDevices');
 
-        const viewerIsLocal = isLoopbackIp(getClientIp(req));
+        const clientIp = await resolvePublicClientIp(req);
+        const currentDeviceId = String(req.headers['x-verp-device-id'] || '').trim();
         const sessions = [];
         for (const user of users) {
+            if (currentDeviceId && clientIp) noteWebDeviceIp(user, currentDeviceId, clientIp);
             const rows = collectStoredDeviceSessions(user);
             if (user.isModified?.()) await user.save();
             for (const row of rows) {
@@ -158,8 +159,9 @@ export async function listUserDevices(req, res) {
                     username: user.username || '',
                     profilePicture: user.profilePicture || '',
                     ...row,
-                    ipAddress: await presentSessionIp(row.ipAddress, {
-                        allowMachinePublicIp: viewerIsLocal,
+                    ipAddress: await displaySessionIp(row.ipAddress, {
+                        clientIp,
+                        isCurrentDevice: row.source === 'web' && row.deviceId === currentDeviceId,
                     }),
                 });
             }

@@ -55,6 +55,7 @@ export function isPublicIp(value) {
 
 function ipFromRequest(req) {
     const body = req?.body && typeof req.body === 'object' ? req.body : {};
+    const headers = req?.headers || {};
     const fromApp = [
         body.publicIp,
         body.publicIP,
@@ -63,10 +64,10 @@ function ipFromRequest(req) {
         body.clientIp,
         body.wifiIP,
         body.wifiIp,
+        headers['x-verp-public-ip'],
     ].map(normalizeIp).find(isPublicIp);
     if (fromApp) return fromApp;
 
-    const headers = req?.headers || {};
     const forwarded = headers['x-forwarded-for'];
     const forwardedList = Array.isArray(forwarded)
         ? forwarded
@@ -108,23 +109,51 @@ async function lookupOutboundPublicIp() {
 }
 
 /**
- * Public IP of the system that signed in.
- * A localhost request has no client address, so use this machine's public IP.
+ * Public IP of the browser or phone that made this request.
+ * Never substitutes this API machine's own address.
  */
 export async function resolvePublicClientIp(req) {
     const seen = ipFromRequest(req);
     if (isPublicIp(seen)) return seen;
     if (seen && !isLoopbackIp(seen)) return seen;
-    const outbound = await lookupOutboundPublicIp();
-    return outbound || '';
+    return '';
 }
 
-export async function presentSessionIp(ip, { allowMachinePublicIp = false } = {}) {
-    const value = normalizeIp(ip);
-    if (isPublicIp(value)) return value;
-    if (value && !isLoopbackIp(value)) return value;
-    if (!allowMachinePublicIp) return '';
-    return lookupOutboundPublicIp();
+/**
+ * Address to show on Active Session.
+ * Loopback and this API machine's own public IP are hidden, because those
+ * were stored for every user when the real client address was missing.
+ */
+export async function displaySessionIp(ip, { clientIp = '', isCurrentDevice = false } = {}) {
+    const stored = normalizeIp(ip);
+    const client = normalizeIp(clientIp);
+    if (isCurrentDevice && isPublicIp(client)) return client;
+    if (!stored || isLoopbackIp(stored)) return '';
+    if (!isPublicIp(stored)) return stored;
+    const serverIp = await lookupOutboundPublicIp();
+    if (serverIp && stored === serverIp && client !== serverIp) return '';
+    return stored;
+}
+
+/** Keep the saved session address in step with the system that is using it. */
+export function noteWebDeviceIp(user, deviceId, ipAddress) {
+    const id = String(deviceId || '').trim();
+    const ip = normalizeIp(ipAddress);
+    if (!user || !id || !isPublicIp(ip)) return false;
+    let changed = false;
+    const rows = Array.isArray(user.webLoginDevices) ? user.webLoginDevices : [];
+    const row = rows.find((item) => rememberedWebDeviceId(item) === id);
+    if (row && normalizeIp(row.ipAddress) !== ip) {
+        row.ipAddress = ip;
+        user.markModified?.('webLoginDevices');
+        changed = true;
+    }
+    if (String(user.webLogin?.deviceId || '').trim() === id && normalizeIp(user.webLogin?.ipAddress) !== ip) {
+        user.webLogin.ipAddress = ip;
+        user.markModified?.('webLogin');
+        changed = true;
+    }
+    return changed;
 }
 
 function toFiniteNumber(value) {

@@ -20,6 +20,7 @@ import {
 } from '../utils/buildAssignmentHandoverEmailAttachments.js';
 import { sendAssetCreatedByAdminInfoEmail } from '../utils/sendAssetCreationDecisionEmail.js';
 import { notifyAdminOfficerNewVehicleFirstInspection } from '../utils/notifyAdminOfficerNewVehicleFirstInspection.js';
+import { syncZeroAssetValueNotification } from '../utils/syncZeroAssetValueVehicleNotifications.js';
 import { sendAssetActionApprovalEmail } from '../utils/sendAssetActionApprovalEmail.js';
 import { sendAssignedEmployeeActionEmail } from '../utils/sendAssignedEmployeeActionEmail.js';
 import EmployeeBasic from '../models/EmployeeBasic.js';
@@ -560,6 +561,7 @@ export const createAssetType = async (req, res) => {
                         requestedByName: requesterDisplayName,
                     }).catch(() => null);
                 }
+                void syncZeroAssetValueNotification(newAsset).catch(() => null);
             }
 
             // Submitted for approval (single or bulk): create one dashboard request and one email. (Draft / Unassigned skip this.)
@@ -2234,6 +2236,7 @@ export const updateAssetItem = async (req, res) => {
         }
 
         await asset.save();
+        void syncZeroAssetValueNotification(asset).catch(() => null);
 
         await asset.populate('typeId', 'name imagePreview');
         await asset.populate('categoryId', 'name imagePreview');

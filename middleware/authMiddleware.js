@@ -3,7 +3,7 @@ import User from "../models/User.js";
 import EmployeeBasic from "../models/EmployeeBasic.js";
 import { isUsernameSystemSuperUser } from "../utils/systemSuperUser.js";
 import { normalizeLoginThrough } from "../utils/loginThrough.js";
-import { isWebDeviceTrusted } from "../utils/userMobileDevice.js";
+import { isWebDeviceTrusted, noteWebDeviceIp, resolvePublicClientIp } from "../utils/userMobileDevice.js";
 
 /**
  * Authentication middleware - verifies JWT token and attaches user to request
@@ -120,6 +120,7 @@ export const protect = async (req, res, next) => {
                     message: 'This device was signed out. Sign in again.',
                 });
             }
+            noteWebDeviceIp(user, deviceId, await resolvePublicClientIp(req));
             if (user.isModified?.()) await user.save();
         }
 

@@ -316,6 +316,14 @@ export const NOTIFICATION_EMAIL_CATALOG = [
                         emailTypes: ['Asset'],
                     }),
                     row({
+                        key: 'hrm.tools.zero_value',
+                        label: 'Asset value missing',
+                        hint: 'Tools asset saved with value 0.',
+                        detail: detail('Asset Value Missing'),
+                        types: ['Asset Value Missing'],
+                        emailTypes: [],
+                    }),
+                    row({
                         key: 'hrm.tools.approval',
                         label: 'Asset approval',
                         hint: 'New / edited asset waiting approval.',
@@ -503,6 +511,14 @@ export const NOTIFICATION_EMAIL_CATALOG = [
                         detail: detail('Vehicle Profile Incomplete'),
                         types: ['Vehicle Profile Incomplete'],
                         emailTypes: ['VehicleProfileIncomplete'],
+                    }),
+                    row({
+                        key: 'hrm.vehicle.zero_value',
+                        label: 'Vehicle value missing',
+                        hint: 'Fleet vehicle saved with value 0.',
+                        detail: detail('Vehicle Value Missing'),
+                        types: ['Vehicle Value Missing'],
+                        emailTypes: [],
                     }),
                     row({
                         key: 'hrm.vehicle.inspection',
