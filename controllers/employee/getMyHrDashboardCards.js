@@ -41,33 +41,81 @@ function displayRepaymentPayment(outstanding) {
     return outstanding <= 0.01 ? "Paid" : "Not Paid";
 }
 
-function buildMonthSchedule(startRaw, durationRaw, total, paid, fallbackDate) {
-    const duration = Math.max(1, Number(durationRaw) || 1);
+function resolveScheduleStart(startRaw, fallbackDate) {
+    const fallback = fallbackDate ? new Date(fallbackDate) : new Date();
+    const base = Number.isNaN(fallback.getTime()) ? new Date() : fallback;
     const start = String(startRaw || "").trim();
-    let startIndex = -1;
+
     if (/^\d{4}-\d{2}$/.test(start)) {
-        startIndex = parseInt(start.split("-")[1], 10) - 1;
-    } else if (start) {
-        startIndex = MONTH_NAMES.findIndex((m) => m.toLowerCase() === start.toLowerCase());
-    }
-    if (startIndex < 0) {
-        const d = fallbackDate ? new Date(fallbackDate) : new Date();
-        startIndex = Number.isNaN(d.getTime()) ? new Date().getMonth() : (d.getMonth() + 1) % 12;
+        const [yearText, monthText] = start.split("-");
+        return { year: parseInt(yearText, 10), monthIndex: parseInt(monthText, 10) - 1 };
     }
 
+    if (start) {
+        const nameIndex = MONTH_NAMES.findIndex((month) => month.toLowerCase() === start.toLowerCase());
+        if (nameIndex >= 0) return { year: base.getFullYear(), monthIndex: nameIndex };
+    }
+
+    const nextMonth = base.getMonth() + 1;
+    return {
+        year: nextMonth > 11 ? base.getFullYear() + 1 : base.getFullYear(),
+        monthIndex: nextMonth % 12,
+    };
+}
+
+function buildMonthSchedule(startRaw, durationRaw, total, paid, fallbackDate, options = {}) {
+    const duration = Math.max(1, Number(durationRaw) || 1);
+    const { year: startYear, monthIndex: startIndex } = resolveScheduleStart(startRaw, fallbackDate);
     const monthly = total > 0 ? total / duration : 0;
-    let remainingPaid = paid;
+    let remainingPaid = Math.max(0, Number(paid) || 0);
+    let monthIndex = startIndex;
+    let year = startYear;
     const boxes = [];
+
     for (let i = 0; i < duration; i++) {
-        const monthIndex = (startIndex + i) % 12;
         const thisPaid = Math.min(remainingPaid, monthly);
         remainingPaid = Math.max(0, remainingPaid - monthly);
+        const isPaid = monthly <= 0.01 || thisPaid >= monthly - 0.5;
+        const isPartial = !isPaid && thisPaid > 0.01;
+        const monthName = MONTH_NAMES[monthIndex];
         boxes.push({
-            label: MONTH_NAMES[monthIndex].slice(0, 3),
-            paid: monthly <= 0.01 || thisPaid >= monthly - 0.5,
+            key: `${year}-${String(monthIndex + 1).padStart(2, "0")}`,
+            label: monthName.slice(0, 3),
+            year,
+            monthTitle: `${monthName} ${year}`,
+            monthlyAmount: roundMoney(monthly),
+            paidAmount: roundMoney(thisPaid),
+            remaining: roundMoney(Math.max(0, monthly - thisPaid)),
+            isPaid,
+            isPartial,
+            isEos: Boolean(options.isEos),
+            paid: isPaid,
         });
+        monthIndex += 1;
+        if (monthIndex > 11) {
+            monthIndex = 0;
+            year += 1;
+        }
     }
     return boxes;
+}
+
+function mapDocument(file, fallbackName) {
+    if (!file || typeof file !== "object") return null;
+    const url = String(file.url || file.attachment || "").trim();
+    const name = String(file.name || file.label || file.type || fallbackName || "").trim();
+    if (!url && !name) return null;
+    return {
+        name: name || "Document",
+        url,
+        mimeType: String(file.mimeType || ""),
+    };
+}
+
+function collectDocuments(files, fallbackName) {
+    return (Array.isArray(files) ? files : [files])
+        .map((file) => mapDocument(file, fallbackName))
+        .filter(Boolean);
 }
 
 function mapLoanItem(item) {
@@ -88,6 +136,13 @@ function mapLoanItem(item) {
         deduction: roundMoney(amount / duration),
         status,
         payment: displayRepaymentPayment(outstanding),
+        duration,
+        monthStart: item.monthStart || item.originalMonthStart || "",
+        reason: String(item.reason || "").trim(),
+        documents: [
+            ...collectDocuments(item.attachment, "Loan document"),
+            ...collectDocuments(item.approvalAttachments, "Approval document"),
+        ],
         schedule: buildMonthSchedule(
             item.monthStart || item.originalMonthStart,
             duration,
@@ -129,6 +184,10 @@ function mapRewardItem(item) {
         description: String(item.description || "").trim(),
         amount: roundMoney(item.amount),
         status,
+        documents: [
+            ...collectDocuments(item.attachment, "Reward document"),
+            ...collectDocuments(item.certificateAttachment, "Reward certificate"),
+        ],
         date: item.awardedDate || item.createdAt || null,
         href: `/HRM/Reward/rewrd.${encodeURIComponent(code)}`,
     };
@@ -169,12 +228,21 @@ function mapFineItem(item, employeeId) {
         outstanding,
         status,
         payment: displayFinePayment(outstanding),
+        duration: Math.max(1, Number(item.payableDuration || item.originalPayableDuration) || 1),
+        monthStart: item.monthStart || item.originalMonthStart || "",
+        description: String(item.description || "").trim(),
+        sourceOfIncome: item.sourceOfIncome || "Salary",
+        documents: [
+            ...collectDocuments(item.attachment, "Fine document"),
+            ...collectDocuments(item.attachments, "Fine attachment"),
+        ],
         schedule: buildMonthSchedule(
             item.monthStart || item.originalMonthStart,
             item.payableDuration || item.originalPayableDuration,
             share,
             paid,
             item.awardedDate || item.createdAt,
+            { isEos: item.sourceOfIncome === "End of Service" },
         ),
         date: item.awardedDate || item.createdAt || null,
         href: `/HRM/Fine/${encodeURIComponent(code)}`,
@@ -216,17 +284,17 @@ export const getMyHrDashboardCards = async (req, res) => {
         const [loans, rewards, fines] = await Promise.all([
             Loan.find(loanQuery)
                 .select(
-                    "type loanId amount paidAmount repaidAmount duration monthStart originalMonthStart originalDuration status approvalStatus createdAt appliedDate",
+                    "type loanId amount paidAmount repaidAmount duration monthStart originalMonthStart originalDuration status approvalStatus createdAt appliedDate reason attachment approvalAttachments",
                 )
                 .sort({ createdAt: -1 })
                 .lean(),
             Reward.find({ employeeId, rewardStatus: { $ne: "Draft" } })
-                .select("rewardId rewardType rewardStatus approvalStatus amount title description awardedDate createdAt")
+                .select("rewardId rewardType rewardStatus approvalStatus amount title description awardedDate createdAt attachment certificateAttachment")
                 .sort({ createdAt: -1 })
                 .lean(),
             Fine.find({ "assignedEmployees.employeeId": employeeId, fineStatus: { $ne: "Draft" } })
                 .select(
-                    "fineId fineType fineStatus responsibleFor fineAmount totalFineAmount employeeAmount companyAmount serviceCharge assignedEmployees paidAmount isGroupView awardedDate createdAt payableDuration monthStart originalMonthStart originalPayableDuration",
+                    "fineId fineType fineStatus responsibleFor fineAmount totalFineAmount employeeAmount companyAmount serviceCharge assignedEmployees paidAmount isGroupView awardedDate createdAt payableDuration monthStart originalMonthStart originalPayableDuration sourceOfIncome description attachment attachments",
                 )
                 .sort({ createdAt: -1 })
                 .lean(),

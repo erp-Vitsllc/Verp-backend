@@ -36,6 +36,21 @@ function roundMoney(value) {
     return Math.round((Number(value) || 0) * 100) / 100;
 }
 
+function mapDocuments(item) {
+    return (item.documents || [])
+        .map((doc) => {
+            const url = String(doc?.attachment || '').trim();
+            const name = String(doc?.type || doc?.description || '').trim();
+            if (!url && !name) return null;
+            return {
+                name: name || 'Document',
+                url,
+                mimeType: '',
+            };
+        })
+        .filter(Boolean);
+}
+
 function mapToolItem(item) {
     const typeName = item.typeId?.name || item.type || 'Tool';
     return {
@@ -47,6 +62,7 @@ function mapToolItem(item) {
         type: typeName,
         title: item.name || typeName,
         status: item.status || 'Assigned',
+        documents: mapDocuments(item),
         date: item.assignedDate || item.updatedAt || item.createdAt || null,
         href: `/HRM/Asset/details/${item._id}`,
     };
@@ -63,7 +79,10 @@ function mapVehicleItem(item) {
         value: roundMoney(item.assetValue),
         type: typeName,
         title: [item.vehicleBrand, item.name].filter(Boolean).join(' · ') || item.assetId || '',
+        number: plate,
+        plateNumber: plate,
         status: item.status || 'Assigned',
+        documents: mapDocuments(item),
         date: item.assignedDate || item.updatedAt || item.createdAt || null,
         href: `/HRM/Asset/Vehicle/details/${item._id}`,
     };
@@ -79,6 +98,26 @@ function utilityAccount(entry) {
     return String(values.accountNumber || values.accountNo || '').trim();
 }
 
+function utilityDetails(entry) {
+    const values = entry?.values && typeof entry.values === 'object' ? entry.values : {};
+    const details = [];
+    for (const [key, value] of Object.entries(values)) {
+        if (value == null || typeof value === 'object') continue;
+        const text = String(value).trim();
+        if (!text || text.length > 160) continue;
+        const label = key
+            .replace(/([A-Z])/g, ' $1')
+            .replace(/[_-]+/g, ' ')
+            .replace(/\s+/g, ' ')
+            .trim();
+        details.push({
+            label: label.charAt(0).toUpperCase() + label.slice(1),
+            value: text,
+        });
+    }
+    return details.slice(0, 8);
+}
+
 function mapUtilityItem(entry) {
     const provider = utilityProvider(entry);
     const account = utilityAccount(entry);
@@ -90,6 +129,7 @@ function mapUtilityItem(entry) {
         title: entry.type || '',
         group: provider,
         status: entry.status || 'Active',
+        details: utilityDetails(entry),
         date: entry.assignedAt || entry.updatedAt || entry.createdAt || null,
         href: `/HRM/Asset/UtilityBills/details/${encodeURIComponent(String(entry._id))}`,
     };
@@ -126,7 +166,7 @@ export const getMyAssetDashboardCards = async (req, res) => {
                 status: { $nin: [...HIDDEN_ASSET_STATUSES] },
             })
                 .select(
-                    'assetId name assetValue status assignedDate plateNumber vehicleBrand vehicleCode plateEmirate typeId createdAt updatedAt',
+                    'assetId name assetValue status assignedDate plateNumber vehicleBrand vehicleCode plateEmirate typeId documents createdAt updatedAt',
                 )
                 .populate('typeId', 'name')
                 .sort({ assignedDate: -1, updatedAt: -1 })
