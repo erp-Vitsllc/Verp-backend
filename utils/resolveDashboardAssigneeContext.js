@@ -18,6 +18,31 @@ import { isJwtSystemSuperUser } from './systemSuperUser.js';
  *   isTargeted: boolean,
  * }}
  */
+const selfAssigneeCache = new Map();
+const selfAssigneeInflight = new Map();
+const SELF_ASSIGNEE_TTL_MS = 15 * 1000;
+
+async function resolveSelfAssigneeContext(currentUser) {
+    const employee = await EmployeeBasic.findOne({
+        $or: [
+            ...(currentUser.employeeObjectId ? [{ _id: currentUser.employeeObjectId }] : []),
+            ...(currentUser.employeeId ? [{ employeeId: currentUser.employeeId }] : []),
+        ],
+    })
+        .select('_id employeeId firstName lastName companyEmail')
+        .lean();
+
+    const relevantIds = [employee?._id, currentUser.employeeObjectId, currentUser?._id].filter(Boolean);
+    return {
+        ok: true,
+        employee,
+        portalUser: currentUser,
+        relevantIds,
+        employeeIdCode: currentUser.employeeId || employee?.employeeId || null,
+        isTargeted: false,
+    };
+}
+
 export async function resolveDashboardAssigneeContext(req) {
     const currentUser = req.user;
     if (!currentUser) {
@@ -37,24 +62,24 @@ export async function resolveDashboardAssigneeContext(req) {
     const isTargeted = Boolean(targetUserId);
 
     if (!isTargeted) {
-        const employee = await EmployeeBasic.findOne({
-            $or: [
-                ...(currentUser.employeeObjectId ? [{ _id: currentUser.employeeObjectId }] : []),
-                ...(currentUser.employeeId ? [{ employeeId: currentUser.employeeId }] : []),
-            ],
-        })
-            .select('_id employeeId firstName lastName companyEmail')
-            .lean();
+        const cacheKey = String(
+            currentUser.employeeObjectId || currentUser._id || currentUser.employeeId || '',
+        );
+        const hit = selfAssigneeCache.get(cacheKey);
+        if (hit && Date.now() - hit.at < SELF_ASSIGNEE_TTL_MS) return hit.value;
+        const pending = selfAssigneeInflight.get(cacheKey);
+        if (pending) return pending;
 
-        const relevantIds = [employee?._id, currentUser.employeeObjectId, currentUser?._id].filter(Boolean);
-        return {
-            ok: true,
-            employee,
-            portalUser: currentUser,
-            relevantIds,
-            employeeIdCode: currentUser.employeeId || employee?.employeeId || null,
-            isTargeted: false,
-        };
+        const job = resolveSelfAssigneeContext(currentUser)
+            .then((value) => {
+                if (value?.ok) selfAssigneeCache.set(cacheKey, { at: Date.now(), value });
+                return value;
+            })
+            .finally(() => {
+                selfAssigneeInflight.delete(cacheKey);
+            });
+        selfAssigneeInflight.set(cacheKey, job);
+        return job;
     }
 
     const targetEmployee = await EmployeeBasic.findById(targetUserId)

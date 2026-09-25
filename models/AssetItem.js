@@ -699,6 +699,11 @@ const assetItemSchema = new mongoose.Schema({
         attachment: { type: String },        // Primary quotation / combined attachment URL
         quotation2: { type: String },        // Optional 2nd quotation (Tire / Mechanical / Body / Accident)
         quotation3: { type: String },        // Optional 3rd quotation
+        /** Current-condition photos from the mobile service request (tyre / mechanical). */
+        photos: [{
+            url: { type: String, default: '' },
+            name: { type: String, default: '' },
+        }],
         requestedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'EmployeeBasic' },
         /** Asset status before this service period (e.g. On Leave) — used when marking Live/Return. */
         statusBeforeService: { type: String, default: null },

@@ -26,6 +26,8 @@ export function mapHubRequestToInboxItem(row) {
         subjectName: row.requesterName || 'Employee',
         extra1: String(row.description || '').slice(0, 180),
         extra2: label,
+        date: row.kind === 'salary' ? String(row.requestedDate || '') : '',
+        reason: row.reason || row.description || '',
         extra3: extra3For(row),
         status: row.status || 'Pending',
         requestObjectId: id,

@@ -19,6 +19,12 @@ const employeeHubRequestSchema = new mongoose.Schema(
             required: true,
             trim: true,
         },
+        reason: { type: String, default: '', trim: true },
+        requestedDate: { type: String, default: '', trim: true },
+        addressTo: { type: String, default: '', trim: true },
+        tools: { type: [String], default: [] },
+        simCard: { type: String, default: '', trim: true },
+        callsPerMonth: { type: String, default: '', trim: true },
         attachmentName: {
             type: String,
             default: '',

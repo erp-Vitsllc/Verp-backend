@@ -8,6 +8,40 @@ function isMissingObjectError(error) {
     return status === 404 || error?.name === 'NoSuchKey' || error?.name === 'NotFound';
 }
 
+function pushKey(list, value) {
+    const key = String(value || '').trim().replace(/^\/+/, '');
+    if (!key || list.includes(key)) return;
+    list.push(key);
+}
+
+/** Alternate keys for older registration cards saved without a folder or with a signed-link suffix. */
+function candidateStorageKeys(raw) {
+    const keys = [];
+    const normalized = normalizeS3Key(String(raw || '').trim());
+    pushKey(keys, normalized);
+    if (!normalized) return keys;
+
+    try {
+        pushKey(keys, decodeURIComponent(normalized));
+    } catch {
+        /* keep the original key */
+    }
+    pushKey(keys, normalized.replace(/\+/g, ' '));
+
+    const slash = normalized.indexOf('/');
+    if (slash > 0) {
+        const rest = normalized.slice(slash + 1);
+        pushKey(keys, rest);
+        if (!rest.startsWith('asset-documents/')) {
+            pushKey(keys, `asset-documents/${rest.split('/').pop()}`);
+        }
+    } else {
+        pushKey(keys, `asset-documents/${normalized}`);
+    }
+
+    return keys.slice(0, 8);
+}
+
 /**
  * Stream a private object from Wasabi through the API (auth required).
  * Avoids browser presigned-URL CORS/DNS issues. Tries primary + fallback buckets.
@@ -19,8 +53,8 @@ export const streamStorageFile = async (req, res) => {
             return res.status(400).json({ message: 'key is required' });
         }
 
-        const key = normalizeS3Key(raw.trim());
-        if (!key) {
+        const keys = candidateStorageKeys(raw.trim());
+        if (!keys.length) {
             return res.status(400).json({ message: 'Invalid storage key' });
         }
 
@@ -31,27 +65,32 @@ export const streamStorageFile = async (req, res) => {
 
         let response = null;
         let usedBucket = null;
+        let key = keys[0];
         let lastError = null;
 
-        for (const bucket of buckets) {
-            try {
-                response = await s3Client.send(
-                    new GetObjectCommand({
-                        Bucket: bucket,
-                        Key: key,
-                    }),
-                );
-                usedBucket = bucket;
-                break;
-            } catch (error) {
-                lastError = error;
-                if (isMissingObjectError(error)) continue;
-                console.error(
-                    `[streamStorageFile] bucket=${bucket} key=${key}`,
-                    error?.message || error,
-                );
-                return res.status(500).json({ message: 'Failed to load file from storage' });
+        for (const candidate of keys) {
+            for (const bucket of buckets) {
+                try {
+                    response = await s3Client.send(
+                        new GetObjectCommand({
+                            Bucket: bucket,
+                            Key: candidate,
+                        }),
+                    );
+                    usedBucket = bucket;
+                    key = candidate;
+                    break;
+                } catch (error) {
+                    lastError = error;
+                    if (isMissingObjectError(error)) continue;
+                    console.error(
+                        `[streamStorageFile] bucket=${bucket} key=${candidate}`,
+                        error?.message || error,
+                    );
+                    return res.status(500).json({ message: 'Failed to load file from storage' });
+                }
             }
+            if (response) break;
         }
 
         if (!response) {

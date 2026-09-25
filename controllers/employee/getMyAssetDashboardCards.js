@@ -32,6 +32,10 @@ function isVehicleAsset(item) {
     );
 }
 
+function roundMoney(value) {
+    return Math.round((Number(value) || 0) * 100) / 100;
+}
+
 function mapToolItem(item) {
     const typeName = item.typeId?.name || item.type || 'Tool';
     return {
@@ -39,6 +43,7 @@ function mapToolItem(item) {
         code: item.assetId || item.name || 'Tool',
         assetId: item.assetId || '',
         name: item.name || typeName,
+        value: roundMoney(item.assetValue),
         type: typeName,
         title: item.name || typeName,
         status: item.status || 'Assigned',
@@ -55,6 +60,7 @@ function mapVehicleItem(item) {
         code: plate || item.assetId || item.name || 'Vehicle',
         assetId: item.assetId || '',
         name: plate || item.name || item.assetId || 'Vehicle',
+        value: roundMoney(item.assetValue),
         type: typeName,
         title: [item.vehicleBrand, item.name].filter(Boolean).join(' · ') || item.assetId || '',
         status: item.status || 'Assigned',
@@ -120,7 +126,7 @@ export const getMyAssetDashboardCards = async (req, res) => {
                 status: { $nin: [...HIDDEN_ASSET_STATUSES] },
             })
                 .select(
-                    'assetId name status assignedDate plateNumber vehicleBrand vehicleCode plateEmirate typeId createdAt updatedAt',
+                    'assetId name assetValue status assignedDate plateNumber vehicleBrand vehicleCode plateEmirate typeId createdAt updatedAt',
                 )
                 .populate('typeId', 'name')
                 .sort({ assignedDate: -1, updatedAt: -1 })

@@ -89,10 +89,11 @@ import {
     getEmployeeHubRequest,
     decideEmployeeHubRequest,
 } from "../controllers/employee/employeeHubRequest.js";
+import { createEmployeeVehicleServiceRequest } from "../controllers/employee/employeeVehicleServiceRequest.js";
 import { getMyDashboardRequests } from "../controllers/employee/getMyDashboardRequests.js";
 import { getLoanPdf } from "../controllers/employee/getLoanPdf.js";
 import { downloadLoanAcknowledgmentPdf } from "../controllers/employee/downloadLoanAcknowledgmentPdf.js";
-import { downloadEmployeeAssetListPdf } from "../controllers/employee/downloadEmployeeAssetListPdf.js";
+import { downloadEmployeeAssetListPdf, downloadMyAssetListPdf } from "../controllers/employee/downloadEmployeeAssetListPdf.js";
 import { deleteLoan } from "../controllers/employee/deleteLoan.js";
 import {
     requestProbationChange,
@@ -145,9 +146,11 @@ router.get("/dashboard/my-hr-cards", getMyHrDashboardCards);
 router.get("/dashboard/my-requests", getMyDashboardRequests);
 router.get("/dashboard/my-task-cards", getMyTaskCards);
 router.get("/dashboard/my-asset-cards", getMyAssetDashboardCards);
+router.get("/dashboard/my-asset-list/pdf", downloadMyAssetListPdf);
 router.get("/dashboard/my-loan-profile", getMyLoanProfile);
 router.post("/dashboard/self-loan-request", createSelfLoanDraft);
 router.post("/dashboard/hub-request", createEmployeeHubRequest);
+router.post("/dashboard/vehicle-service-request", createEmployeeVehicleServiceRequest);
 router.get("/dashboard/hub-request/:id", getEmployeeHubRequest);
 router.post("/dashboard/hub-request/:id/decide", decideEmployeeHubRequest);
 

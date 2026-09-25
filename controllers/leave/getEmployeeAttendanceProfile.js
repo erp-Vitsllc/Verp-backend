@@ -66,6 +66,166 @@ const STATUS_LABELS = {
     work_from_home: 'Work from home',
 };
 
+const YEAR_CARD_LEAVE_STATUS = {
+    sick: 'sick_leave',
+    sick_leave: 'sick_leave',
+    authorized: 'authorized_leave',
+    authorized_leave: 'authorized_leave',
+    unauthorized: 'unauthorized_leave',
+    unauthorized_leave: 'unauthorized_leave',
+    annual: 'on_leave',
+    on_leave: 'on_leave',
+    compoff: 'compoff_leave',
+    compoff_leave: 'compoff_leave',
+};
+
+function emptyYearCardUsed() {
+    return {
+        on_leave: 0,
+        sick_leave: 0,
+        authorized_leave: 0,
+        unauthorized_leave: 0,
+        compoff_leave: 0,
+        late_early: 0,
+        mispunch: 0,
+    };
+}
+
+function leaveRecordDayCount(row) {
+    const actual = Number(row?.actualDays);
+    if (Number.isFinite(actual) && actual > 0) return actual;
+    const eligible = Number(row?.eligibleWorkingDays);
+    if (Number.isFinite(eligible) && eligible > 0) return eligible;
+    const calendar = Number(row?.calendarDays);
+    if (Number.isFinite(calendar) && calendar > 0) return calendar;
+    return 0;
+}
+
+function leaveRecordFromDate(row) {
+    return String(row?.fromDate || row?.startDate || '').trim();
+}
+
+function coverLeaveDates(covered, statusKey, from, to) {
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(from)) return;
+    const end = /^\d{4}-\d{2}-\d{2}$/.test(to) && to >= from ? to : from;
+    let cursor = from;
+    let guard = 0;
+    while (cursor && cursor <= end && guard < 400) {
+        covered[statusKey].add(cursor);
+        cursor = shiftDateKey(cursor, 1);
+        guard += 1;
+    }
+}
+
+/**
+ * Card totals for the dropdown year only.
+ * A leave row counts when its period start year is that year.
+ * Attendance days in that year are added once, and not again when the same
+ * date is already inside a counted leave period.
+ */
+export function buildAttendanceYearCard({
+    year,
+    profile,
+    attendanceRecords = [],
+    annualUnlocked = false,
+    annualGrant = 0,
+    sickAllowed = 0,
+    requestStats = {},
+} = {}) {
+    const selectedYear = Number(year) || 0;
+    const yearPrefix = `${selectedYear}-`;
+    const used = emptyYearCardUsed();
+    const covered = {
+        on_leave: new Set(),
+        sick_leave: new Set(),
+        authorized_leave: new Set(),
+        unauthorized_leave: new Set(),
+        compoff_leave: new Set(),
+    };
+    const seen = new Set();
+    const manualRows = [
+        ...(Array.isArray(profile?.leaveRecords) ? profile.leaveRecords : []),
+        ...(Array.isArray(profile?.annualLeaveRecords) ? profile.annualLeaveRecords : []).map((row) => ({
+            ...row,
+            leaveType: row?.leaveType || 'annual',
+            fromDate: row?.fromDate || row?.startDate,
+            toDate: row?.toDate || row?.endDate,
+        })),
+    ];
+
+    for (const row of manualRows) {
+        const statusName = String(row?.status || '').trim().toLowerCase();
+        if (statusName === 'cancelled' || statusName === 'rejected') continue;
+        const statusKey = YEAR_CARD_LEAVE_STATUS[String(row?.leaveType || '').trim().toLowerCase()];
+        if (!statusKey) continue;
+        const from = leaveRecordFromDate(row);
+        if (!from.startsWith(yearPrefix)) continue;
+        const days = leaveRecordDayCount(row);
+        if (days <= 0) continue;
+        const to = String(row?.toDate || row?.endDate || from).trim();
+        const identity = `${statusKey}|${from}|${to}|${days}`;
+        if (seen.has(identity)) continue;
+        seen.add(identity);
+        used[statusKey] += days;
+        coverLeaveDates(covered, statusKey, from, to);
+    }
+
+    let office = 0;
+    let wfh = 0;
+    for (const row of attendanceRecords || []) {
+        const date = String(row?.date || '').trim();
+        if (!date.startsWith(yearPrefix)) continue;
+        const statusKey = String(row?.statusKey || '').trim();
+        if (statusKey === 'on_office') {
+            office += 1;
+            continue;
+        }
+        if (statusKey === 'work_from_home') {
+            wfh += 1;
+            continue;
+        }
+        if (statusKey === 'late_arrived' || statusKey === 'early_go') {
+            used.late_early += 1;
+            continue;
+        }
+        if (statusKey === 'mispunch') {
+            used.mispunch += 1;
+            continue;
+        }
+        if (!covered[statusKey]) continue;
+        if (covered[statusKey].has(date)) continue;
+        covered[statusKey].add(date);
+        used[statusKey] += 1;
+    }
+
+    const pendingOf = (key) => Number(requestStats?.[key]?.request) || 0;
+    const absent =
+        used.on_leave +
+        used.sick_leave +
+        used.authorized_leave +
+        used.unauthorized_leave +
+        used.compoff_leave;
+
+    return {
+        year: selectedYear,
+        annualUnlocked: Boolean(annualUnlocked),
+        annualGrant: Math.max(0, Number(annualGrant) || 0),
+        sickAllowed: Math.max(0, Number(sickAllowed) || 0),
+        used,
+        office,
+        wfh,
+        absent,
+        pending: {
+            authorized_leave: pendingOf('authorized_leave'),
+            unauthorized_leave: pendingOf('unauthorized_leave'),
+            compoff_leave: pendingOf('compoff_leave'),
+            late_early: pendingOf('late_early'),
+            mispunch: pendingOf('mispunch'),
+        },
+        mispunchPresent: Number(requestStats?.mispunch?.present) || 0,
+    };
+}
+
 async function resolveViewerEmployee(req) {
     if (req.user?.employeeObjectId) {
         const byOid = await EmployeeBasic.findById(req.user.employeeObjectId)
@@ -938,6 +1098,18 @@ export async function getEmployeeAttendanceProfile(req, res) {
         const annualGrantUnlocked =
             cycleCompleted > 0 && !(cycleRequiredDays > 0 && cycleTowardDays > 0 && cycleTowardDays < cycleRequiredDays);
         const annualEligible = annualGrantUnlocked;
+        const yearCard = buildAttendanceYearCard({
+            year,
+            profile: historicalProfile,
+            attendanceRecords: records,
+            annualUnlocked: annualGrantUnlocked,
+            annualGrant: Number(entitlements.annualAllowedDays) || 0,
+            sickAllowed:
+                entitlements.sickAllowedDays != null && entitlements.sickAllowedDays !== ''
+                    ? Number(entitlements.sickAllowedDays) || 0
+                    : Number(entitlements.allowedSickLeaveDaysPerYear) || 0,
+            requestStats,
+        });
         for (const statusKey of [
             'on_leave',
             'sick_leave',
@@ -1100,6 +1272,7 @@ export async function getEmployeeAttendanceProfile(req, res) {
                 counts,
                 appliedCounts,
                 requestStats,
+                yearCard,
                 lastAnnualLeaveDate,
             },
             annualLeave: {

@@ -28,6 +28,7 @@ import {
     REAL_EMPLOYEE_MONGO_FILTER,
 } from '../utils/attendanceEmployeeFilters.js';
 import { listPendingHubInboxItems } from '../utils/employeeHubRequestInbox.js';
+import { resolveFlowchartHrEmployee } from '../utils/resolveFlowchartHrEmployee.js';
 import { resolveDashboardAssigneeContext } from '../utils/resolveDashboardAssigneeContext.js';
 import { isReqUserSystemSuperUser } from '../utils/systemSuperUser.js';
 import {
@@ -2019,12 +2020,9 @@ export async function getAttendancePendingInbox(req, res) {
             return res.status(503).json({ message: 'Database not connected.' });
         }
 
-        // Safety: remove any attendance rows for company shell accounts
-        try {
-            await Attendance.deleteMany({ employeeName: /\(company\)\s*$/i });
-        } catch {
-            /* ignore */
-        }
+        // Safety: remove any attendance rows for company shell accounts.
+        // Do not hold the Attendance bell on this cleanup.
+        void Attendance.deleteMany({ employeeName: /\(company\)\s*$/i }).catch(() => {});
 
         const ctx = await resolveDashboardAssigneeContext(req);
         if (!ctx.ok) {
@@ -2050,7 +2048,7 @@ export async function getAttendancePendingInbox(req, res) {
         const reporteeIds = (reportees || []).map((r) => String(r._id));
         const hubItems = await listPendingHubInboxItems({
             assigneeIds: [self._id],
-            kinds: [],
+            kinds: ['salary'],
         });
 
         if (!reporteeIds.length) {
@@ -2575,6 +2573,9 @@ export async function requestAttendanceFuture(req, res) {
         if (dayPart === 'half' && halfTimeOut <= halfTimeIn) {
             return res.status(400).json({ message: 'Time out must be after time in.' });
         }
+        if (kind === 'leave' && !reason) {
+            return res.status(400).json({ message: 'Reason is required for authorized leave.' });
+        }
 
         const todayKey = getDubaiDateKey();
         if (fromDate <= todayKey) {
@@ -2591,10 +2592,40 @@ export async function requestAttendanceFuture(req, res) {
             )
             .lean();
 
-        if (!employee?.primaryReportee?._id) {
+        const sendLeaveToHr = kind === 'annual_leave' || kind === 'leave';
+        let leaveApprover = employee?.primaryReportee || null;
+        if (sendLeaveToHr) {
+            const hr = await resolveFlowchartHrEmployee();
+            if (hr.error || !hr.employee?._id) {
+                return res.status(400).json({
+                    message: hr.message || 'HR is not configured in the Flowchart.',
+                });
+            }
+            leaveApprover = hr.employee;
+        } else if (!leaveApprover?._id) {
             return res.status(400).json({
                 message: 'Primary reportee is required before sending this request.',
             });
+        }
+
+        if (isAnnualLeave) {
+            const { loadAnnualLeaveEligibilityForEmployee } = await import('./leave/leaveDashboardData.js');
+            const eligibilityEmployee = await EmployeeBasic.findById(employee._id)
+                .select('_id employeeId firstName lastName staffType contractJoiningDate dateOfJoining')
+                .lean();
+            const eligibility = await loadAnnualLeaveEligibilityForEmployee(eligibilityEmployee, {
+                from: fromDate,
+                to: toDate,
+            });
+            if (eligibility?.notEligible) {
+                return res.status(400).json({
+                    message: eligibility.cycleNotEligible
+                        ? 'You cannot apply for annual leave until the 300-day cycle is finished.'
+                        : 'You cannot apply for annual leave for these dates.',
+                    notEligible: true,
+                    ...eligibility,
+                });
+            }
         }
 
         const staffType = normalizeStaffType(employee.staffType);
@@ -2607,6 +2638,13 @@ export async function requestAttendanceFuture(req, res) {
         if (!firstEligible || fromDate < firstEligible) {
             return res.status(400).json({
                 message: `Cannot request for tomorrow. The earliest date is ${firstEligible || 'the second working day'} (one working day ahead, holidays skipped).`,
+            });
+        }
+
+        const attendanceGate = await loadSalaryAttendanceGate(employee, { dateKey: fromDate });
+        if (attendanceGate.processingStartDate && fromDate < attendanceGate.processingStartDate) {
+            return res.status(400).json({
+                message: `Leave requests open from ${attendanceGate.processingStartDate}.`,
             });
         }
 
@@ -2721,7 +2759,7 @@ export async function requestAttendanceFuture(req, res) {
                 await syncDashboardAction({
                     requestId: record._id,
                     requestType: 'Attendance Leave Request',
-                    assignedTo: employee.primaryReportee._id,
+                    assignedTo: leaveApprover._id,
                     status: 'Pending',
                     subjectEmployee: employee,
                     requestedByName: empName,
@@ -2750,7 +2788,7 @@ export async function requestAttendanceFuture(req, res) {
             }, '');
             await notifyPrimaryReporteeOfLeaveRequest({
                 employee,
-                manager: employee.primaryReportee,
+                manager: leaveApprover,
                 from: fromDate,
                 to: toDate,
                 attendanceId: approvalAttendanceId || savedRecords[0]?._id,
@@ -2763,7 +2801,7 @@ export async function requestAttendanceFuture(req, res) {
             });
         } else {
             await sendAttendanceLeaveRequestEmail({
-                manager: employee.primaryReportee,
+                manager: leaveApprover,
                 employee,
                 date: requestDates[0],
                 dateLabel: rangeLabel,
@@ -2776,7 +2814,9 @@ export async function requestAttendanceFuture(req, res) {
         }
 
         return res.status(200).json({
-            message: 'Request sent to your primary reportee.',
+            message: sendLeaveToHr
+                ? 'Request sent to HR for approval.'
+                : 'Request sent to your primary reportee.',
             dates: requestDates,
             record: savedRecords[0],
             records: savedRecords,

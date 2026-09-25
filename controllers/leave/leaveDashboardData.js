@@ -336,7 +336,7 @@ function serializeAnnualLeaveEligibility(cycle = {}) {
     };
 }
 
-async function loadAnnualLeaveEligibilityForEmployee(employee, { from = '', to = '' } = {}) {
+export async function loadAnnualLeaveEligibilityForEmployee(employee, { from = '', to = '' } = {}) {
     if (!employee?._id) {
         return {
             ...serializeAnnualLeaveEligibility(),

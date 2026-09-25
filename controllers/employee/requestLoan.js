@@ -7,7 +7,11 @@ import User from "../../models/User.js";
 import { getCompleteEmployee } from "../../services/employeeService.js";
 import { getDepartmentHOD } from "../../utils/getDepartmentHOD.js";
 import { getManagementHOD } from "../../utils/getManagementHOD.js";
-import { assertLoanEmployeeEligibility } from "../../utils/loanEligibilityValidation.js";
+import {
+    assertLoanEmployeeEligibility,
+    collectLoanEligibilityBlocks,
+    primaryVisaFromDetails,
+} from "../../utils/loanEligibilityValidation.js";
 
 
 /**
@@ -95,6 +99,30 @@ export const requestLoan = async (req, res) => {
         }
 
         const targetStatus = status === 'Pending' ? 'Pending HR' : (status || 'Draft');
+        const visa = primaryVisaFromDetails(employeeBasic?.visaDetails);
+        const statusNorm = String(employeeBasic?.status || '').toLowerCase();
+        const loanChecks = {
+            visaType: visa.type || '',
+            visaExpiry: visa.expiry || null,
+            probation: statusNorm === 'probation',
+            noticePeriod: statusNorm === 'notice',
+            existingLoan: null,
+            issues: collectLoanEligibilityBlocks({
+                status: employeeBasic?.status,
+                visaType: visa.type,
+                visaExpiry: visa.expiry,
+                type,
+            }),
+        };
+        const withChecks = (body) => (
+            req.selfServiceLoan
+                ? {
+                    ...body,
+                    checks: loanChecks,
+                    notEligible: Boolean(loanChecks.existingLoan) || loanChecks.issues.length > 0,
+                }
+                : body
+        );
 
         // --- VALIDATION: Existing Loan Check ---
         // Block if employee already has an Approved or In-Progress loan/advance
@@ -105,17 +133,22 @@ export const requestLoan = async (req, res) => {
 
         if (existingLoan) {
             const isApproved = existingLoan.status === 'Approved';
-            return res.status(400).json({
+            loanChecks.existingLoan = {
+                type: existingLoan.type,
+                loanId: existingLoan.loanId,
+                status: existingLoan.status,
+            };
+            return res.status(400).json(withChecks({
                 message: isApproved
                     ? `This employee already has an Approved ${existingLoan.type} (${existingLoan.loanId}). A new request cannot be submitted while a loan is active.`
                     : `This employee already has a ${existingLoan.type} application in progress (${existingLoan.loanId} - ${existingLoan.status}).`
-            });
+            }));
         }
 
         // --- VALIDATION: Visa / status eligibility (flowchart HR may override after confirm) ---
         const eligibility = await assertLoanEmployeeEligibility(req, employeeBasic, type);
         if (!eligibility.ok) {
-            return res.status(eligibility.status || 400).json({ message: eligibility.message });
+            return res.status(eligibility.status || 400).json(withChecks({ message: eligibility.message }));
         }
 
         // --- VALIDATION: Salary Checks ---
@@ -124,14 +157,16 @@ export const requestLoan = async (req, res) => {
         if (type && type.includes('Advance')) {
             // Rule: Advance Amount <= Monthly Salary
             if (salaryRecord && Number(amount) > salaryRecord.totalSalary) {
-                return res.status(400).json({
+                return res.status(400).json(withChecks({
                     message: `Advance amount cannot exceed your monthly salary (AED ${salaryRecord.totalSalary}).`
-                });
+                }));
             }
 
             // Rule: Probation -> Max 1 Month Duration
             if (employeeBasic.status === 'Probation' && parseInt(duration) > 1) {
-                return res.status(400).json({ message: "Employees on probation can only apply for a 1-month salary advance." });
+                return res.status(400).json(withChecks({
+                    message: "Employees on probation can only apply for a 1-month salary advance.",
+                }));
             }
         }
         // ---------------------------------------------
@@ -328,7 +363,10 @@ export const requestLoan = async (req, res) => {
             }
         }
 
-        res.status(201).json({ message: `${type} application ${targetStatus === 'Draft' ? 'saved as draft' : 'submitted successfully'}.`, loan: savedLoan });
+        res.status(201).json(withChecks({
+            message: `${type} application ${targetStatus === 'Draft' ? 'saved as draft' : 'submitted for HR approval'}.`,
+            loan: savedLoan,
+        }));
 
     } catch (error) {
         console.error("Error requesting loan:", error);
@@ -353,7 +391,7 @@ async function resolveLinkedSelf(req) {
 
 /**
  * POST /api/Employee/dashboard/self-loan-request
- * Dashboard Request hub: always creates a Draft for the signed-in employee.
+ * App and dashboard: submit Loan or Advance straight to HR approval.
  */
 export const createSelfLoanDraft = async (req, res) => {
     try {
@@ -371,15 +409,39 @@ export const createSelfLoanDraft = async (req, res) => {
             return res.status(400).json({ message: 'Choose Loan or Advance.' });
         }
 
+        const amount = Number(req.body?.amount);
+        if (!Number.isFinite(amount) || amount <= 0) {
+            return res.status(400).json({ message: 'Amount must be greater than 0.' });
+        }
+
+        const duration = Number(req.body?.duration);
+        const maxMonths = isAdvance ? 3 : 6;
+        if (!Number.isInteger(duration) || duration < 1 || duration > maxMonths) {
+            return res.status(400).json({
+                message: isAdvance
+                    ? 'Deduction months must be from 1 to 3.'
+                    : 'Deduction months must be from 1 to 6.',
+            });
+        }
+
+        const monthStart = String(req.body?.monthStart || '').trim();
+        if (!/^\d{4}-(0[1-9]|1[0-2])$/.test(monthStart)) {
+            return res.status(400).json({ message: 'Start month must be YYYY-MM.' });
+        }
+
+        req.selfServiceLoan = true;
         req.body.employeeObjectId = self._id;
         req.body.employeeId = self.employeeId;
-        req.body.status = 'Draft';
+        req.body.status = 'Pending';
         req.body.type = isAdvance ? 'Advance' : 'Loan';
+        req.body.amount = amount;
+        req.body.duration = duration;
+        req.body.monthStart = monthStart;
         req.body.resubmit = false;
         delete req.body.hrEligibilityOverride;
         return requestLoan(req, res);
     } catch (error) {
-        console.error('Error creating self loan draft:', error);
-        return res.status(500).json({ message: 'Failed to save draft.' });
+        console.error('Error creating self loan request:', error);
+        return res.status(500).json({ message: 'Failed to submit loan request.' });
     }
 };

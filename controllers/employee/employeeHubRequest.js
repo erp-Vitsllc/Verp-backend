@@ -13,6 +13,9 @@ import {
     sendEmployeeHubDecisionEmails,
 } from '../../utils/sendEmployeeHubRequestEmails.js';
 import { resolveEmployeeEmail } from '../../utils/resolveEmployeeEmail.js';
+import { resolveFlowchartHrEmployee } from '../../utils/resolveFlowchartHrEmployee.js';
+
+const HR_HUB_KINDS = new Set(['salary', 'certificate', 'assets']);
 
 const SELECT_PERSON =
     '_id employeeId firstName lastName companyEmail workEmail email primaryReportee';
@@ -44,6 +47,12 @@ function serialize(row) {
         assetType: row.assetType || '',
         label: hubRequestLabel(row.kind, row.assetType),
         description: row.description || '',
+        reason: row.reason || '',
+        requestedDate: row.requestedDate || '',
+        addressTo: row.addressTo || '',
+        tools: Array.isArray(row.tools) ? row.tools : [],
+        simCard: row.simCard || '',
+        callsPerMonth: row.callsPerMonth || '',
         attachmentName: row.attachmentName || '',
         status: row.status,
         requesterName: row.requesterName,
@@ -71,9 +80,20 @@ export async function createEmployeeHubRequest(req, res) {
         }
 
         const kind = String(req.body?.kind || '').trim();
-        const description = String(req.body?.description || '').trim();
+        const reason = String(req.body?.reason || '').trim();
+        const wroteDescription = String(req.body?.description || '').trim();
+        const description = String(wroteDescription || reason).trim();
+        const fromAppFields = !wroteDescription;
         const attachmentName = String(req.body?.attachmentName || '').trim();
         const assetType = kind === 'assets' ? String(req.body?.assetType || '').trim() : '';
+        const requestedDate = String(req.body?.requestedDate || '').trim();
+        const addressTo = String(req.body?.addressTo || '').trim();
+        const tools = Array.isArray(req.body?.tools)
+            ? req.body.tools.map((line) => String(line || '').trim()).filter(Boolean)
+            : [];
+        const simCard = String(req.body?.simCard || '').trim();
+        const callsRaw = req.body?.callsPerMonth;
+        const callsPerMonth = callsRaw == null ? '' : String(callsRaw).trim();
 
         if (!HUB_MENU_KINDS.includes(kind)) {
             return res.status(400).json({ message: 'Select a valid request type.' });
@@ -81,8 +101,67 @@ export async function createEmployeeHubRequest(req, res) {
         if (kind === 'assets' && !HUB_ASSET_TYPES.includes(assetType)) {
             return res.status(400).json({ message: 'Choose which asset this request is about.' });
         }
-        if (!description) {
+        if (kind === 'salary') {
+            if (!description) {
+                return res.status(400).json({ message: 'Reason is required.' });
+            }
+            if (requestedDate && !/^\d{4}-\d{2}-\d{2}$/.test(requestedDate)) {
+                return res.status(400).json({ message: 'Requested date must be yyyy-MM-dd.' });
+            }
+            if (fromAppFields && !/^\d{4}-\d{2}-\d{2}$/.test(requestedDate)) {
+                return res.status(400).json({ message: 'Requested date (yyyy-MM-dd) is required.' });
+            }
+        } else if (kind === 'certificate') {
+            if (!description) {
+                return res.status(400).json({ message: 'Reason is required.' });
+            }
+            if (fromAppFields && !addressTo) {
+                return res.status(400).json({ message: 'Addressed to is required.' });
+            }
+        } else if (kind === 'assets' && assetType === 'Vehicle') {
+            if (!description) {
+                return res.status(400).json({ message: 'Reason is required.' });
+            }
+        } else if (kind === 'assets' && assetType === 'Tools') {
+            if (fromAppFields && !tools.length) {
+                return res.status(400).json({ message: 'Add at least one tool line.' });
+            }
+            if (!tools.length && !description) {
+                return res.status(400).json({ message: 'Add at least one tool line.' });
+            }
+        } else if (kind === 'assets' && assetType === 'Utility Bill') {
+            if (fromAppFields && (!simCard || !description || !callsPerMonth)) {
+                return res.status(400).json({
+                    message: 'SIM, description, and calls per month are required.',
+                });
+            }
+            if (!description) {
+                return res.status(400).json({ message: 'Description is required.' });
+            }
+        } else if (!description) {
             return res.status(400).json({ message: 'Description is required.' });
+        }
+
+        let storedDescription = description
+            || (assetType === 'Tools' ? tools.join('\n') : reason);
+        if (kind === 'salary' && requestedDate) {
+            storedDescription = [`Requested date: ${requestedDate}`, storedDescription].filter(Boolean).join('\n');
+        }
+        if (kind === 'certificate' && addressTo) {
+            storedDescription = [`Addressed to: ${addressTo}`, storedDescription].filter(Boolean).join('\n');
+        }
+        if (assetType === 'Tools' && tools.length) {
+            const listed = tools.join('\n');
+            if (!storedDescription.includes(listed)) {
+                storedDescription = [storedDescription, listed].filter(Boolean).join('\n');
+            }
+        }
+        if (assetType === 'Utility Bill' && (simCard || callsPerMonth)) {
+            storedDescription = [
+                storedDescription,
+                simCard ? `SIM: ${simCard}` : '',
+                callsPerMonth ? `Calls per month: ${callsPerMonth}` : '',
+            ].filter(Boolean).join('\n');
         }
 
         const employee = await EmployeeBasic.findById(self._id)
@@ -90,8 +169,16 @@ export async function createEmployeeHubRequest(req, res) {
             .populate('primaryReportee', SELECT_PERSON)
             .lean();
 
-        const manager = employee?.primaryReportee;
-        if (!manager?._id) {
+        let assignee = employee?.primaryReportee || null;
+        if (HR_HUB_KINDS.has(kind)) {
+            const hr = await resolveFlowchartHrEmployee();
+            if (hr.error || !hr.employee?._id) {
+                return res.status(400).json({
+                    message: hr.message || 'HR is not configured in the Flowchart.',
+                });
+            }
+            assignee = hr.employee;
+        } else if (!assignee?._id) {
             return res.status(400).json({
                 message: 'Primary reportee is required before sending a request.',
             });
@@ -100,13 +187,19 @@ export async function createEmployeeHubRequest(req, res) {
         const row = await EmployeeHubRequest.create({
             kind,
             assetType,
-            description,
+            description: storedDescription,
+            reason,
+            requestedDate,
+            addressTo,
+            tools,
+            simCard,
+            callsPerMonth,
             attachmentName,
             requester: employee._id,
             requesterEmpId: employee.employeeId || '',
             requesterName: personName(employee),
-            assignedTo: manager._id,
-            assignedToEmpId: manager.employeeId || '',
+            assignedTo: assignee._id,
+            assignedToEmpId: assignee.employeeId || '',
             status: 'Pending',
         });
 
@@ -114,11 +207,11 @@ export async function createEmployeeHubRequest(req, res) {
         await syncDashboardAction({
             requestId: row._id,
             requestType,
-            assignedTo: manager._id,
+            assignedTo: assignee._id,
             status: 'Pending',
             subjectEmployee: employee,
             requestedByName: personName(employee),
-            extra1: description.slice(0, 180),
+            extra1: storedDescription.slice(0, 180),
             extra2: hubRequestLabel(kind, assetType),
             extra3: JSON.stringify({
                 hubRequest: true,
@@ -129,18 +222,22 @@ export async function createEmployeeHubRequest(req, res) {
             }),
         });
 
-        sendEmployeeHubRequestEmails({
-            manager,
-            employee,
-            kind,
-            assetType,
-            description,
-            attachmentName,
-            requestId: row._id,
-        }).catch(() => null);
+        if (kind !== 'salary') {
+            sendEmployeeHubRequestEmails({
+                manager: assignee,
+                employee,
+                kind,
+                assetType,
+                description: storedDescription,
+                attachmentName,
+                requestId: row._id,
+            }).catch(() => null);
+        }
 
         return res.status(201).json({
-            message: `${hubRequestLabel(kind, assetType)} request sent to ${personName(manager)}.`,
+            message: HR_HUB_KINDS.has(kind)
+                ? `${hubRequestLabel(kind, assetType)} request sent to HR.`
+                : `${hubRequestLabel(kind, assetType)} request sent to ${personName(assignee)}.`,
             request: serialize(row),
         });
     } catch (error) {
@@ -192,7 +289,7 @@ export async function decideEmployeeHubRequest(req, res) {
         const row = await EmployeeHubRequest.findById(req.params.id);
         if (!row) return res.status(404).json({ message: 'Request not found.' });
         if (String(row.assignedTo) !== String(self._id)) {
-            return res.status(403).json({ message: 'Only the primary reportee can decide this request.' });
+            return res.status(403).json({ message: 'Only the assigned reviewer can decide this request.' });
         }
         if (row.status !== 'Pending') {
             return res.status(400).json({ message: 'This request has already been actioned.' });

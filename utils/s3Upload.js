@@ -15,6 +15,10 @@ const S3_STORAGE_FOLDER_PREFIXES = [
     'asset-services',
     'asset-history',
     'asset-accessories',
+    'asset-service-workflow-completion',
+    'asset-negotiation',
+    'asset-ld-company-approved-handover',
+    'asset-accessory-request-handover',
     'employee-documents',
     'employee-profiles',
     'employee-signatures',
@@ -46,6 +50,11 @@ export function normalizeS3Key(keyOrUrl) {
     if (!keyOrUrl || typeof keyOrUrl !== 'string') return null;
     let key = keyOrUrl.trim();
     if (!key || key.startsWith('data:')) return null;
+
+    const queryCut = key.indexOf('?');
+    if (queryCut !== -1) key = key.slice(0, queryCut);
+    const hashCut = key.indexOf('#');
+    if (hashCut !== -1) key = key.slice(0, hashCut);
 
     if (key.startsWith('http')) {
         for (const folder of S3_STORAGE_FOLDER_PREFIXES) {

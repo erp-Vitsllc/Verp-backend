@@ -30,6 +30,8 @@ export const getPendingFineDashboardInbox = async (req, res) => {
 
         const assigneeClauses = buildAssigneeClauses(ctx.relevantIds, ctx.employeeIdCode);
 
+        // Repairs stay. They must not hold the Fine bell — the saved inbox is returned first.
+        void (async () => {
         const skippedAccounts = await Fine.find({
             fineStatus: { $in: ['Pending Authorization', 'Pending Management'] },
         })
@@ -115,6 +117,9 @@ export const getPendingFineDashboardInbox = async (req, res) => {
                 payBackfillErr?.message || payBackfillErr,
             );
         }
+        })().catch((err) => {
+            console.error('[getPendingFineDashboardInbox] background repair:', err?.message || err);
+        });
 
         if (assigneeClauses.length === 0) {
             const hubItems = await listPendingHubInboxItems({

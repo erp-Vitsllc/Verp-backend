@@ -2,6 +2,7 @@ import mongoose from 'mongoose';
 import AssetItem from '../../models/AssetItem.js';
 import { getCompleteEmployee } from '../../services/employeeService.js';
 import { generateEmployeeAssetListFromTemplatePdf, resolveAssetListPrintMeta } from '../../utils/generateEmployeeAssetListFromTemplatePdf.js';
+import { FLEET_VEHICLE_ASSET_ID_PREFIX, TOOLS_ASSET_ID_PREFIX } from '../../utils/fleetVehicleAssetId.js';
 
 const HELD_STATUSES = ['Assigned', 'Pending', 'On Leave', 'Out of Service', 'Returned', 'Service'];
 
@@ -108,6 +109,96 @@ export const downloadEmployeeAssetListPdf = async (req, res) => {
         res.send(pdfBuffer);
     } catch (error) {
         console.error('[downloadEmployeeAssetListPdf]', error);
+        res.status(500).json({ message: 'Failed to generate asset list PDF', error: error.message });
+    }
+};
+
+function isToolsAsset(asset) {
+    const assetNo = String(asset?.assetId || '').trim().toUpperCase();
+    if (assetNo.startsWith(FLEET_VEHICLE_ASSET_ID_PREFIX.toUpperCase())) return false;
+    if (assetNo.startsWith(TOOLS_ASSET_ID_PREFIX.toUpperCase())) return true;
+    const typeName = String(asset?.typeId?.name || asset?.type || '').toLowerCase();
+    if (
+        typeName.includes('vehicle') ||
+        typeName.includes('car') ||
+        typeName.includes('van') ||
+        typeName.includes('fleet')
+    ) {
+        return false;
+    }
+    const plate = String(asset?.plateNumber || '').trim();
+    return !plate;
+}
+
+function belongsToEmployee(asset, employeeObjectId) {
+    const assigned = asset?.assignedTo;
+    const assignedId = assigned && typeof assigned === 'object' ? assigned._id : assigned;
+    return Boolean(assignedId) && String(assignedId) === String(employeeObjectId);
+}
+
+/**
+ * Same Tools Asset PDF as Salary → Tools Asset → Your Assets.
+ * Assigned-to and the file name use the logged-in employee.
+ */
+export const downloadMyAssetListPdf = async (req, res) => {
+    try {
+        const id = req.user?.employeeObjectId || req.user?.employeeId;
+        if (!id) {
+            return res.status(400).json({ message: 'No linked employee record found' });
+        }
+
+        const employee = await getCompleteEmployee(id);
+        if (!employee?._id) {
+            return res.status(404).json({ message: 'Employee not found' });
+        }
+
+        const requestedIds = parseAssetIdsFromQuery(req.query);
+        let assets = requestedIds.length
+            ? await loadAssetsByIds(requestedIds)
+            : await loadAssetsByIds((await loadEmployeeHeldAssets(employee._id)).map((item) => item._id));
+
+        assets = (assets || []).filter(
+            (asset) => belongsToEmployee(asset, employee._id) && isToolsAsset(asset),
+        );
+
+        if (!assets.length) {
+            return res.status(404).json({ message: 'There are no tools in this list to download.' });
+        }
+
+        const namedAssets = assets.map((asset) => {
+            const assigned = asset.assignedTo;
+            const hasName =
+                assigned &&
+                typeof assigned === 'object' &&
+                (`${assigned.firstName || ''} ${assigned.lastName || ''}`.trim() || assigned.employeeId);
+            if (hasName) return asset;
+            return { ...asset, assignedTo: employee };
+        });
+
+        const pdfBuffer = await generateEmployeeAssetListFromTemplatePdf({
+            employee,
+            assets: namedAssets,
+            ...resolveAssetListPrintMeta({
+                ...req.user,
+                name:
+                    `${employee.firstName || ''} ${employee.lastName || ''}`.trim() ||
+                    req.user?.name ||
+                    employee.employeeId,
+            }),
+        });
+
+        if (!pdfBuffer || pdfBuffer.length < 500) {
+            return res.status(500).json({ message: 'Failed to generate asset list PDF' });
+        }
+
+        const safeId = String(employee.employeeId || employee._id).replace(/[^\w.-]+/g, '_');
+        const fileLabel = `AssetList-${safeId}`;
+        res.setHeader('Content-Type', 'application/pdf');
+        res.setHeader('Content-Disposition', `attachment; filename="${fileLabel}.pdf"`);
+        res.setHeader('Content-Length', pdfBuffer.length);
+        res.send(pdfBuffer);
+    } catch (error) {
+        console.error('[downloadMyAssetListPdf]', error);
         res.status(500).json({ message: 'Failed to generate asset list PDF', error: error.message });
     }
 };

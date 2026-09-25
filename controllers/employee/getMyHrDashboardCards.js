@@ -126,6 +126,7 @@ function mapRewardItem(item) {
         code,
         type: item.rewardType || "Reward",
         title: item.title || item.description || item.rewardType || "Reward",
+        description: String(item.description || "").trim(),
         amount: roundMoney(item.amount),
         status,
         date: item.awardedDate || item.createdAt || null,

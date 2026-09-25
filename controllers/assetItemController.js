@@ -6303,11 +6303,18 @@ export const getAssetItemDetail = async (req, res) => {
                         if (Array.isArray(remarkObj.newConditionImages)) {
                             remarkObj.newConditionImages = await signRemarkImages(remarkObj.newConditionImages);
                         }
+                        if (Array.isArray(remarkObj.photos)) {
+                            remarkObj.photos = await signRemarkImages(remarkObj.photos);
+                        }
                         service.remark = JSON.stringify(remarkObj);
                     }
                 } catch (_e) {
                     /* keep original remark */
                 }
+            }
+
+            if (Array.isArray(service.photos)) {
+                service.photos = await signRemarkImages(service.photos);
             }
 
             if (Array.isArray(service?.workflowSnapshot?.history)) {
@@ -19859,6 +19866,32 @@ export const deleteAssetItem = async (req, res) => {
     }
 };
 
+const inboxFlowchartRoleCache = new Map();
+const inboxFlowchartRoleInflight = new Map();
+const INBOX_FLOWCHART_ROLE_TTL_MS = 20 * 1000;
+
+/** Sidebar loads tools and vehicle bells together — share one flowchart lookup per role. */
+async function inboxFlowchartRole(user, category, { activeOnly = true } = {}) {
+    const key = `${String(user?.employeeObjectId || user?._id || user?.employeeId || '')}:${category}:${activeOnly ? 'active' : 'any'}`;
+    const hit = inboxFlowchartRoleCache.get(key);
+    if (hit && Date.now() - hit.at < INBOX_FLOWCHART_ROLE_TTL_MS) return hit.value;
+    if (inboxFlowchartRoleInflight.has(key)) return inboxFlowchartRoleInflight.get(key);
+    const job = (activeOnly
+        ? isUserActiveInFlowchart(user, category)
+        : isUserInFlowchart(user, category).catch(() => false)
+    )
+        .then((value) => {
+            const allowed = !!value;
+            inboxFlowchartRoleCache.set(key, { at: Date.now(), value: allowed });
+            return allowed;
+        })
+        .finally(() => {
+            inboxFlowchartRoleInflight.delete(key);
+        });
+    inboxFlowchartRoleInflight.set(key, job);
+    return job;
+}
+
 /**
  * @desc    Pending asset dashboard actions assigned to the logged-in user (by EmployeeBasic id or employee code). Not a global queue.
  * @route   GET /api/AssetItem/dashboard/pending-inbox
@@ -19891,10 +19924,33 @@ export const getPendingAssetDashboardInbox = async (req, res) => {
             requestTypeFilter = { $in: ASSET_DASHBOARD_INBOX_TYPES };
         }
 
+        // Badge reads (sidebar + dashboard) pass skipSync. Keep the same maintenance,
+        // but do not hold the bell response on fleet scans and inbox heals.
+        const wantSync = ['1', 'true', 'yes'].includes(String(req.query.sync || '').trim().toLowerCase());
+        const skipSync =
+            !wantSync &&
+            (ctx.isTargeted ||
+                scope === 'vehicle' ||
+                ['1', 'true', 'yes'].includes(String(req.query.skipSync || '').trim().toLowerCase()));
+        const scheduleInboxMaintenance = (work) => {
+            const job = Promise.resolve()
+                .then(work)
+                .catch((err) => {
+                    console.error(
+                        '[getPendingAssetDashboardInbox] maintenance:',
+                        err?.message || err,
+                    );
+                });
+            if (skipSync) return undefined;
+            return job;
+        };
+
         // Tools / all: move stuck Accept tasks off employees with no ERP User onto primary reportee.
         if (scope !== 'vehicle') {
-            await healMisroutedAssignmentInboxTasks();
-            await healMisroutedOwnerTransferApprovals();
+            await scheduleInboxMaintenance(async () => {
+                await healMisroutedAssignmentInboxTasks();
+                await healMisroutedOwnerTransferApprovals();
+            });
         }
 
         const match = {
@@ -19910,11 +19966,11 @@ export const getPendingAssetDashboardInbox = async (req, res) => {
         // re-route runs). Match by role + fleet flag stored on extra3 (set at creation time).
         const [isHrRoleHolder, isAcRoleHolder, isAccountsRoleHolder, isManagementRoleHolder, isAdminOfficerInFlowchart] =
             await Promise.all([
-                isUserActiveInFlowchart(roleUser, 'hr'),
-                isUserActiveInFlowchart(roleUser, 'assetcontroller'),
-                isUserActiveInFlowchart(roleUser, 'accounts'),
-                isUserInFlowchart(roleUser, 'management').catch(() => false),
-                isUserActiveInFlowchart(roleUser, 'admincontroller'),
+                inboxFlowchartRole(roleUser, 'hr'),
+                inboxFlowchartRole(roleUser, 'assetcontroller'),
+                inboxFlowchartRole(roleUser, 'accounts'),
+                inboxFlowchartRole(roleUser, 'management', { activeOnly: false }),
+                inboxFlowchartRole(roleUser, 'admincontroller'),
             ]);
         // Also treat the current getDepartmentHOD Admin as Admin Officer even if flowchart
         // category naming differs slightly from the session role check.
@@ -19949,7 +20005,7 @@ export const getPendingAssetDashboardInbox = async (req, res) => {
             }
         }
         if (scope === 'vehicle' && isAdminOfficerHolder) {
-            await healDuplicateAdminVehicleServiceInboxRows().catch(() => {});
+            await scheduleInboxMaintenance(() => healDuplicateAdminVehicleServiceInboxRows());
         }
         if (isHrRoleHolder) {
             // Fleet / vehicle HR tasks — only for vehicle/all scopes (fleet Approvals flood tools limit(200)).
@@ -20045,11 +20101,11 @@ export const getPendingAssetDashboardInbox = async (req, res) => {
             });
             if (scope !== 'tools') {
                 assigneeClauses.push({ requestType: 'Vehicle Value Missing' });
-                await syncAllZeroAssetValueVehicleNotifications().catch(() => {});
+                await scheduleInboxMaintenance(() => syncAllZeroAssetValueVehicleNotifications());
             }
             if (scope !== 'vehicle') {
                 assigneeClauses.push({ requestType: 'Asset Value Missing' });
-                await syncAllZeroAssetValueToolsNotifications().catch(() => {});
+                await scheduleInboxMaintenance(() => syncAllZeroAssetValueToolsNotifications());
             }
         }
 
@@ -20088,25 +20144,17 @@ export const getPendingAssetDashboardInbox = async (req, res) => {
         else match.$and = [hideAcceptedOutcomeNor];
 
         // Default: skip expensive sync/heal on read. Pass sync=1 only when a background job wants it.
-        await closeAcceptedAssignmentOutcomeInboxRows(relevantIds).catch(() => 0);
-        const wantSync = ['1', 'true', 'yes'].includes(String(req.query.sync || '').trim().toLowerCase());
-        const skipSync =
-            !wantSync &&
-            (ctx.isTargeted ||
-                scope === 'vehicle' ||
-                ['1', 'true', 'yes'].includes(String(req.query.skipSync || '').trim().toLowerCase()));
+        await scheduleInboxMaintenance(() => closeAcceptedAssignmentOutcomeInboxRows(relevantIds));
         if (!skipSync) {
             await syncPendingAssignmentDashboardRowsForUser(relevantIds, targetEmployeeId);
             await healStaleOilServicePendingDashboardActions();
         }
         if (scope !== 'tools') {
-            await syncVehicleAccessFuelReminder().catch((err) => {
-                console.error('[getPendingAssetDashboardInbox] access fuel reminder sync failed:', err?.message || err);
-            });
+            await scheduleInboxMaintenance(() => syncVehicleAccessFuelReminder());
         }
         // Accounts inbox: restore Make Payment bells wiped by the old "live = done" heal bug.
         if (isAccountsRoleHolder) {
-            await restoreMissingOilAccountsMakePaymentNotifications();
+            await scheduleInboxMaintenance(() => restoreMissingOilAccountsMakePaymentNotifications());
         }
 
         const parseExtra3 = (raw) => {
