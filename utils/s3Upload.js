@@ -51,10 +51,17 @@ export function normalizeS3Key(keyOrUrl) {
     let key = keyOrUrl.trim();
     if (!key || key.startsWith('data:')) return null;
 
-    const queryCut = key.indexOf('?');
+    const encodedQuery = key.search(/%3[fF]/);
+    if (encodedQuery !== -1) key = key.slice(0, encodedQuery);
+    const queryCut = key.search(/[?#]|X-Amz-|AWSAccessKeyId=|Signature=/i);
     if (queryCut !== -1) key = key.slice(0, queryCut);
-    const hashCut = key.indexOf('#');
-    if (hashCut !== -1) key = key.slice(0, hashCut);
+    try {
+        if (key.includes('%')) key = decodeURIComponent(key);
+    } catch {
+        /* keep the cut key */
+    }
+    const queryAgain = key.search(/[?#]|X-Amz-|AWSAccessKeyId=|Signature=/i);
+    if (queryAgain !== -1) key = key.slice(0, queryAgain);
 
     if (key.startsWith('http')) {
         for (const folder of S3_STORAGE_FOLDER_PREFIXES) {
