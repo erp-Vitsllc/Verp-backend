@@ -159,6 +159,8 @@ app.use(
     compression({
         filter: (req, res) => {
             if (req.headers["x-no-compression"]) return false;
+            const pathOnly = String(req.originalUrl || req.url || "").split("?")[0];
+            if (pathOnly === "/api/storage/file") return false;
             return compression.filter(req, res);
         },
     }),
@@ -193,7 +195,8 @@ app.use((req, res, next) => {
         path.split('?')[0],
     );
     const isWhatsAppBroadcastRoute = /^\/api\/whatsapp\/test-employees/i.test(path.split('?')[0]);
-    const timeoutMs = isZohoSyncRoute || isWhatsAppBroadcastRoute ? 300000 : 60000;
+    const isStorageFileRoute = /^\/api\/storage\/file$/i.test(path.split('?')[0]);
+    const timeoutMs = isZohoSyncRoute || isWhatsAppBroadcastRoute ? 300000 : isStorageFileRoute ? 180000 : 60000;
 
     req.setTimeout(timeoutMs, () => {
         if (!res.headersSent) {

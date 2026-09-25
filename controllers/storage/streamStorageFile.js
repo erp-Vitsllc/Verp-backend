@@ -48,7 +48,7 @@ function candidateStorageKeys(raw) {
  */
 export const streamStorageFile = async (req, res) => {
     try {
-        const raw = req.query?.key ?? req.query?.url ?? req.query?.publicId;
+        const raw = req.body?.key ?? req.query?.key ?? req.query?.url ?? req.query?.publicId;
         if (!raw || typeof raw !== 'string') {
             return res.status(400).json({ message: 'key is required' });
         }
@@ -111,7 +111,12 @@ export const streamStorageFile = async (req, res) => {
         res.setHeader('Content-Type', contentType);
         res.setHeader('Content-Disposition', `inline; filename="${fileName}"`);
         res.setHeader('Cache-Control', 'private, max-age=120');
+        res.setHeader('X-Accel-Buffering', 'no');
+        if (response.ContentLength != null) {
+            res.setHeader('Content-Length', String(response.ContentLength));
+        }
         if (usedBucket) res.setHeader('X-Storage-Bucket', usedBucket);
+        if (typeof res.flushHeaders === 'function') res.flushHeaders();
 
         const body = response.Body;
         if (body && typeof body.pipe === 'function') {
@@ -126,7 +131,7 @@ export const streamStorageFile = async (req, res) => {
 
         return res.status(500).json({ message: 'Empty file in storage' });
     } catch (error) {
-        const raw = req.query?.key ?? req.query?.url ?? req.query?.publicId;
+        const raw = req.body?.key ?? req.query?.key ?? req.query?.url ?? req.query?.publicId;
         const key = typeof raw === 'string' ? normalizeS3Key(raw.trim()) : null;
         console.error(
             `[streamStorageFile] bucket=${bucketName || '(unset)'} key=${key || raw || '(none)'}`,
