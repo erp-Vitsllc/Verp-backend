@@ -34,6 +34,13 @@ function hasVisaSlot(slot) {
     return Boolean(slot.expiryDate || slot.number || slot.issueDate);
 }
 
+/** Loan repayment months allowed before the visa expiry, keeping a 2-month buffer. Advance stays 1 month. */
+export function loanRepaymentMonthCap(visaExpiry) {
+    if (!visaExpiry || Number.isNaN(new Date(visaExpiry).getTime())) return 6;
+    const adjusted = monthsUntil(visaExpiry) - 2;
+    return Math.min(6, Math.max(1, adjusted));
+}
+
 export function primaryVisaFromDetails(visaDetails) {
     if (hasVisaSlot(visaDetails?.employment)) {
         return { type: "Employment", expiry: visaDetails.employment.expiryDate || null };

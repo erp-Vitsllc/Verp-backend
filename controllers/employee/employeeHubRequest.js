@@ -32,6 +32,24 @@ async function resolveSelf(req) {
     return null;
 }
 
+function normalizeToolLines(value) {
+    if (!Array.isArray(value)) return [];
+    const lines = [];
+    for (const line of value) {
+        if (line && typeof line === 'object') {
+            const name = String(line.name || '').trim();
+            const qty = String(line.qty ?? line.quantity ?? '').trim();
+            if (!name && !qty) continue;
+            if (!name || !/^[1-9]\d*$/.test(qty)) return null;
+            lines.push(`${name} × ${qty}`);
+            continue;
+        }
+        const text = String(line || '').trim();
+        if (text) lines.push(text);
+    }
+    return lines;
+}
+
 function personName(emp) {
     return `${emp?.firstName || ''} ${emp?.lastName || ''}`.trim() || 'Employee';
 }
@@ -89,9 +107,8 @@ export async function createEmployeeHubRequest(req, res) {
         const assetType = kind === 'assets' ? String(req.body?.assetType || '').trim() : '';
         const requestedDate = String(req.body?.requestedDate || '').trim();
         const addressTo = String(req.body?.addressTo || '').trim();
-        const tools = Array.isArray(req.body?.tools)
-            ? req.body.tools.map((line) => String(line || '').trim()).filter(Boolean)
-            : [];
+        const parsedTools = normalizeToolLines(req.body?.tools);
+        const tools = parsedTools || [];
         const simCard = String(req.body?.simCard || '').trim();
         const callsRaw = req.body?.callsPerMonth;
         const callsPerMonth = callsRaw == null ? '' : String(callsRaw).trim();
@@ -124,6 +141,9 @@ export async function createEmployeeHubRequest(req, res) {
                 return res.status(400).json({ message: 'Reason is required.' });
             }
         } else if (kind === 'assets' && assetType === 'Tools') {
+            if (parsedTools === null) {
+                return res.status(400).json({ message: 'Each tool needs a name and a quantity.' });
+            }
             if (fromAppFields && !tools.length) {
                 return res.status(400).json({ message: 'Add at least one tool line.' });
             }

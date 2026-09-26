@@ -10,6 +10,7 @@ import { getManagementHOD } from "../../utils/getManagementHOD.js";
 import {
     assertLoanEmployeeEligibility,
     collectLoanEligibilityBlocks,
+    loanRepaymentMonthCap,
     primaryVisaFromDetails,
 } from "../../utils/loanEligibilityValidation.js";
 
@@ -458,6 +459,29 @@ export const createSelfLoanDraft = async (req, res) => {
         const monthStart = String(req.body?.monthStart || '').trim();
         if (!/^\d{4}-(0[1-9]|1[0-2])$/.test(monthStart)) {
             return res.status(400).json(validationBlock({ message: 'Start month must be YYYY-MM.' }));
+        }
+        const dubaiParts = new Intl.DateTimeFormat('en-CA', {
+            timeZone: 'Asia/Dubai',
+            year: 'numeric',
+            month: '2-digit',
+        }).formatToParts(new Date());
+        const dubaiYear = dubaiParts.find((part) => part.type === 'year')?.value;
+        const dubaiMonth = dubaiParts.find((part) => part.type === 'month')?.value;
+        const thisMonth = `${dubaiYear}-${dubaiMonth}`;
+        if (monthStart < thisMonth) {
+            return res.status(400).json(validationBlock({
+                message: 'Deduction start can be this month or a later month.',
+            }));
+        }
+        if (!isAdvance) {
+            const employeeBasic = await getCompleteEmployee(self._id);
+            const visa = primaryVisaFromDetails(employeeBasic?.visaDetails);
+            const monthCap = loanRepaymentMonthCap(visa.expiry);
+            if (duration > monthCap) {
+                return res.status(400).json(validationBlock({
+                    message: `Deduction months after ${monthCap} are unavailable because the visa expires within the allowed period.`,
+                }));
+            }
         }
 
         req.selfServiceLoan = true;
