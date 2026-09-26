@@ -7605,17 +7605,21 @@ export const assignAssetItem = async (req, res) => {
                     assignedToType === 'Employee' && item.acceptanceStatus === 'Accepted';
 
                 if (isDirectEmployeeAssign) {
+                    let toolsHandoverDelivered = false;
                     if (!fleetVehicle && isToolsAssetItem(item) && assignAttachments[0]?.content) {
-                        void sendToolsHandoverReportWhatsApp({
-                            employee: employeeToAssign,
-                            pdfBuffer: assignAttachments[0].content,
-                            filename: `tools-handover-${item.assetId || item._id}.pdf`,
-                            caption: `Tools handover report — ${item.assetId || ''} ${item.name || ''}`.trim(),
-                        }).catch((err) =>
-                            console.error('[ToolsHandoverWhatsApp] assign failed:', err?.message || err),
-                        );
+                        try {
+                            const toolsResult = await sendToolsHandoverReportWhatsApp({
+                                employee: employeeToAssign,
+                                pdfBuffer: assignAttachments[0].content,
+                                filename: `tools-handover-${item.assetId || item._id}.pdf`,
+                                caption: `Tools handover report — ${item.assetId || ''} ${item.name || ''}`.trim(),
+                            });
+                            toolsHandoverDelivered = toolsResult?.sent === true;
+                        } catch (err) {
+                            console.error('[ToolsHandoverWhatsApp] assign failed:', err?.message || err);
+                        }
                     }
-                    await sendAssetAssignmentEmail({
+                    if (!toolsHandoverDelivered) await sendAssetAssignmentEmail({
                         asset: itemForEmail || item,
                         employee: employeeToAssign,
                         recipient: employeeToAssign,
@@ -8040,17 +8044,21 @@ export const bulkAssignAssetItems = async (req, res) => {
             if (employeeToAssign && firstAsset) {
                 if (autoAcceptOnAssign) {
                     const toolsInBulk = assetsForEmail.filter((row) => isToolsAssetItem(row));
+                    let toolsHandoverDelivered = false;
                     if (toolsInBulk.length && bulkAssignmentAttachments[0]?.content) {
-                        void sendToolsHandoverReportWhatsApp({
-                            employee: employeeToAssign,
-                            pdfBuffer: bulkAssignmentAttachments[0].content,
-                            filename: `tools-handover-bulk-${employeeToAssign.employeeId || 'employee'}.pdf`,
-                            caption: `Tools handover report — ${toolsInBulk.length} asset${toolsInBulk.length === 1 ? '' : 's'}`,
-                        }).catch((err) =>
-                            console.error('[ToolsHandoverWhatsApp] bulk assign failed:', err?.message || err),
-                        );
+                        try {
+                            const toolsResult = await sendToolsHandoverReportWhatsApp({
+                                employee: employeeToAssign,
+                                pdfBuffer: bulkAssignmentAttachments[0].content,
+                                filename: `tools-handover-bulk-${employeeToAssign.employeeId || 'employee'}.pdf`,
+                                caption: `Tools handover report — ${toolsInBulk.length} asset${toolsInBulk.length === 1 ? '' : 's'}`,
+                            });
+                            toolsHandoverDelivered = toolsResult?.sent === true;
+                        } catch (err) {
+                            console.error('[ToolsHandoverWhatsApp] bulk assign failed:', err?.message || err);
+                        }
                     }
-                    await sendAssetAssignmentEmail({
+                    if (!toolsHandoverDelivered) await sendAssetAssignmentEmail({
                         asset: firstAsset,
                         assets: assetsForEmail,
                         employee: employeeToAssign,
@@ -9574,6 +9582,7 @@ export const respondToAssignment = async (req, res) => {
                     ];
                 }
 
+                let toolsDeliveredEmployeeId = '';
                 if (
                     !fleetVehicleRespond &&
                     isToolsAssetItem(item) &&
@@ -9587,14 +9596,19 @@ export const respondToAssignment = async (req, res) => {
                             .lean()
                             .catch(() => null));
                     if (assigneeForWp) {
-                        void sendToolsHandoverReportWhatsApp({
-                            employee: assigneeForWp,
-                            pdfBuffer: pdfBuf,
-                            filename: `tools-handover-${item.assetId || item._id}.pdf`,
-                            caption: `Tools handover report — ${item.assetId || ''} ${item.name || ''}`.trim(),
-                        }).catch((err) =>
-                            console.error('[ToolsHandoverWhatsApp] accept failed:', err?.message || err),
-                        );
+                        try {
+                            const toolsResult = await sendToolsHandoverReportWhatsApp({
+                                employee: assigneeForWp,
+                                pdfBuffer: pdfBuf,
+                                filename: `tools-handover-${item.assetId || item._id}.pdf`,
+                                caption: `Tools handover report — ${item.assetId || ''} ${item.name || ''}`.trim(),
+                            });
+                            if (toolsResult?.sent === true) {
+                                toolsDeliveredEmployeeId = String(assigneeForWp.employeeId || '');
+                            }
+                        } catch (err) {
+                            console.error('[ToolsHandoverWhatsApp] accept failed:', err?.message || err);
+                        }
                     }
                 }
 
@@ -9622,7 +9636,10 @@ export const respondToAssignment = async (req, res) => {
                         .lean()
                         .catch(() => item.assignedTo);
 
-                    if (!isSelfAccept) {
+                    const toolsAlreadySent =
+                        toolsDeliveredEmployeeId
+                        && toolsDeliveredEmployeeId === String(assigneeRecipient?.employeeId || '');
+                    if (!isSelfAccept && !toolsAlreadySent) {
                         pushUniqueRecipient(assigneeRecipient);
                     }
 

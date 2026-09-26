@@ -174,11 +174,12 @@ function drawAssetNameInCell(page, font, row, colStart, colEnd, rowTop, rowHeigh
     }
 }
 
-function drawPrintMeta(page, font, { printedOn, printedBy } = {}) {
+function drawPrintMeta(page, font, { printedOn, printedBy, reportedBy } = {}) {
     const toPdfText = (value) => String(value ?? '').replace(/[^\u0000-\u00ff]/g, '?').trim();
     const onText = toPdfText(printedOn);
     const byText = toPdfText(printedBy);
-    if (!onText && !byText) return;
+    const reportedText = toPdfText(reportedBy);
+    if (!onText && !byText && !reportedText) return;
 
     const size = 9;
     const right = LAYOUT.table.x + LAYOUT.table.width;
@@ -186,6 +187,7 @@ function drawPrintMeta(page, font, { printedOn, printedBy } = {}) {
     const lines = [];
     if (onText) lines.push(`Printed on: ${onText}`);
     if (byText) lines.push(`Printed by: ${byText}`);
+    if (reportedText) lines.push(`Reported by: ${reportedText}`);
 
     for (const line of lines) {
         const textWidth = font.widthOfTextAtSize(line, size);
@@ -575,11 +577,11 @@ function buildAssetListPdfRows(assets, { fallbackAssignee = null, singleOwnerLat
     });
 }
 
-function renderAssetListPdf({ outputDoc, font, fontBold, bgImage, listRows, columnDefs, printedOn, printedBy }) {
+function renderAssetListPdf({ outputDoc, font, fontBold, bgImage, listRows, columnDefs, printedOn, printedBy, reportedBy }) {
     const colX = buildColX(columnDefs);
     const total = listRows.reduce((sum, row) => sum + (Number(row.totalValue) || 0), 0);
     const pages = paginateRows(listRows, font, columnDefs, colX);
-    const printMeta = { printedOn, printedBy };
+    const printMeta = { printedOn, printedBy, reportedBy };
 
     pages.forEach((pageRows, pageIndex) => {
         const page = outputDoc.addPage([PAGE_WIDTH, PAGE_HEIGHT]);
@@ -644,6 +646,7 @@ export async function generateEmployeeAssetListFromTemplatePdf({
     columns = null,
     printedOn = '',
     printedBy = '',
+    reportedBy = '',
 }) {
     try {
         const outputDoc = await PDFDocument.create();
@@ -671,6 +674,7 @@ export async function generateEmployeeAssetListFromTemplatePdf({
             columnDefs,
             printedOn,
             printedBy,
+            reportedBy,
         });
 
         const pdfBytes = await outputDoc.save();

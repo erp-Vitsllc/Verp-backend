@@ -6,7 +6,10 @@ import {
     syncVehicleDocumentStatusFromDescription,
     syncVehicleExpiryFieldsFromLiveDocuments,
 } from './vehicleDocumentRenewal.js';
-import { clearVehicleExpiryNotificationsForSection } from './vehicleExpiryNotificationHelpers.js';
+import {
+    clearStaleVehicleWarrantyExpiryNotifications,
+    clearVehicleExpiryNotificationsForSection,
+} from './vehicleExpiryNotificationHelpers.js';
 
 const normType = (t) => String(t || '').toLowerCase().trim();
 
@@ -144,6 +147,9 @@ export async function applyVehiclePendingProfileEditEntry(asset, pendingEntry) {
     const sectionId = String(pendingEntry?.sectionId || '').trim();
     if (sectionId === 'registration' || sectionId === 'insurance') {
         await clearVehicleExpiryNotificationsForSection(asset, sectionId);
+    }
+    if (sectionId === 'warranty' && action === 'not_renew') {
+        await clearStaleVehicleWarrantyExpiryNotifications(asset);
     }
 }
 

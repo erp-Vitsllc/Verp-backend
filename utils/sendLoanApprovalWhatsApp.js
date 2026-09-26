@@ -26,8 +26,8 @@ export function buildLoanApprovalWhatsAppCaption(loan) {
 }
 
 /**
- * Sends the approved loan/advance acknowledgment PDF on WhatsApp when
- * Settings → WhatsApp Permission is on and the employee has a WhatsApp number.
+ * Company email gets the PDF from the approval email. WhatsApp is used only when
+ * this permission is on, the employee has no company email, and they have a WhatsApp number.
  */
 export async function sendLoanApprovalWhatsApp({
     loan,
@@ -44,6 +44,16 @@ export async function sendLoanApprovalWhatsApp({
     const channels = await getEventChannels(eventKey);
     if (!channels.whatsapp) {
         return { sent: false, reason: 'permission_off' };
+    }
+
+    let companyEmail = String(emp.companyEmail || '').trim();
+    if (!companyEmail) {
+        const EmployeeBasic = (await import('../models/EmployeeBasic.js')).default;
+        const fresh = await EmployeeBasic.findOne({ employeeId: emp.employeeId }).select('companyEmail').lean();
+        companyEmail = String(fresh?.companyEmail || '').trim();
+    }
+    if (companyEmail) {
+        return { sent: false, reason: 'has_company_email' };
     }
 
     const phone = await resolveEmployeeWhatsAppPhone(emp.employeeId);

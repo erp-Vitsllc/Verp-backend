@@ -2,6 +2,8 @@ import AssetItem from '../models/AssetItem.js';
 import EmployeeBasic from '../models/EmployeeBasic.js';
 import ToolsMonthlyReportLog from '../models/ToolsMonthlyReportLog.js';
 import { getCalendarPartsInTz } from './scheduleDailyAtMidnight.js';
+import { getDepartmentHOD } from './getDepartmentHOD.js';
+import { isEmployeeActiveForNotifications } from './applyEmployeeLeftUserStatus.js';
 import { getEventChannels } from './notificationEmailPermission.js';
 import {
     generateEmployeeAssetListFromTemplatePdf,
@@ -60,7 +62,11 @@ export async function processToolsMonthlyAssetReports(now = new Date()) {
 
     const monthKey = monthKeyFromParts(parts);
     const byEmployee = await loadAssignedToolsByEmployee();
-    const printMeta = resolveAssetListPrintMeta({ name: 'VERP' }, now);
+    const assetController = await getDepartmentHOD('assetcontroller').catch(() => null);
+    const reportedBy = [assetController?.firstName, assetController?.lastName].filter(Boolean).join(' ').trim()
+        || assetController?.employeeId
+        || 'Asset Controller';
+    const printMeta = resolveAssetListPrintMeta({ name: reportedBy }, now);
     const monthLabel = `${String(parts.month).padStart(2, '0')}/${parts.year}`;
 
     let sent = 0;
@@ -70,9 +76,9 @@ export async function processToolsMonthlyAssetReports(now = new Date()) {
         if (!assets.length) continue;
 
         const employee = await EmployeeBasic.findById(employeeMongoId)
-            .select('firstName lastName employeeId')
+            .select('firstName lastName employeeId status profileStatus')
             .lean();
-        if (!employee?.employeeId) {
+        if (!employee?.employeeId || !isEmployeeActiveForNotifications(employee)) {
             skipped += 1;
             continue;
         }
@@ -91,6 +97,8 @@ export async function processToolsMonthlyAssetReports(now = new Date()) {
             assets,
             listTitle: `Tools monthly report ${monthLabel}`,
             ...printMeta,
+            printedBy: '',
+            reportedBy,
         });
         if (!pdfBuffer?.length) {
             skipped += 1;
@@ -101,7 +109,7 @@ export async function processToolsMonthlyAssetReports(now = new Date()) {
             employee,
             pdfBuffer,
             filename: `tools-monthly-report-${employee.employeeId}-${monthKey}.pdf`,
-            caption: `Tools monthly report (${monthLabel}) — ${assets.length} assigned asset${assets.length === 1 ? '' : 's'}`,
+            caption: `Tools monthly report (${monthLabel}) — ${assets.length} assigned asset${assets.length === 1 ? '' : 's'}. Reported by: ${reportedBy}`,
         });
 
         if (!result.sent) {

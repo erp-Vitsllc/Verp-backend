@@ -267,6 +267,27 @@ export const sendFineConfirmedEmail = async (fine, assignedEmployees, req = null
             const empDetails = fullEmployees.find((e) => e.employeeId === assigned.employeeId);
             if (!empDetails) continue;
 
+            const companyEmail = String(empDetails.companyEmail || '').trim();
+            if (!companyEmail) {
+                let finePdf = await generateFineApprovedReportPdfBuffer(fine, {
+                    employeeId: assigned.employeeId,
+                });
+                if (!finePdf) finePdf = await buildFallbackPrintPdf();
+                if (finePdf?.length > 500) {
+                    const { sendFineApprovedWhatsApp } = await import('./sendFineApprovedWhatsApp.js');
+                    const waResult = await sendFineApprovedWhatsApp({
+                        fine,
+                        employee: empDetails,
+                        pdfBuffer: finePdf,
+                        filename: reportPdfFileName(fine, assigned.employeeId),
+                    });
+                    if (waResult?.sent) {
+                        console.log(`[FineConfirmedEmail] PDF sent on WhatsApp to ${empDetails.employeeId}`);
+                        continue;
+                    }
+                }
+            }
+
             const { email: toMail, isFallbackToReportee, employeeName, reporteeName } = resolveEmployeeEmail(empDetails);
             if (!toMail) continue;
 
