@@ -179,10 +179,22 @@ const isExpiryExtra1StillInWindow = (extra1 = "", { isCertificate = false } = {}
 
 const filterStaleExpiryDashboardRows = async (items = []) => {
     if (!Array.isArray(items) || items.length === 0) return items;
+    let source = items;
+    try {
+        const { dropStaleVehicleWarrantyExpiryInboxRows } = await import(
+            "../../utils/vehicleExpiryNotificationHelpers.js"
+        );
+        source = await dropStaleVehicleWarrantyExpiryInboxRows(items);
+    } catch (err) {
+        console.warn(
+            "[getUserActivityStats] warranty expiry cleanup skipped:",
+            err?.message || err,
+        );
+    }
     try {
         const candidateCompanyIds = new Set();
         const candidateEmployeeIds = new Set();
-        items.forEach((it) => {
+        source.forEach((it) => {
             if (it?.requestType === "Document Expiry Reminder" && it?.requestId) {
                 candidateCompanyIds.add(String(it.requestId));
             } else if (it?.requestType === "Employee Document Expiry Reminder" && it?.requestId) {
@@ -221,7 +233,7 @@ const filterStaleExpiryDashboardRows = async (items = []) => {
             ]),
         );
 
-        return items.filter((it) => {
+        return source.filter((it) => {
             const extra1 = String(it?.extra1 || "").trim();
             if (!extra1.toLowerCase().startsWith("expiry follow-up required:")) return true;
 

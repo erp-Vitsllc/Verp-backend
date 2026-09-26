@@ -20185,7 +20185,20 @@ export const getPendingAssetDashboardInbox = async (req, res) => {
             }
         };
 
-        const dashboardPendingItems = await DashboardAction.find(match).sort({ requestedDate: -1 }).limit(200).lean();
+        let dashboardPendingItems = await DashboardAction.find(match).sort({ requestedDate: -1 }).limit(200).lean();
+        if (scope !== 'tools') {
+            try {
+                const { dropStaleVehicleWarrantyExpiryInboxRows } = await import(
+                    '../utils/vehicleExpiryNotificationHelpers.js'
+                );
+                dashboardPendingItems = await dropStaleVehicleWarrantyExpiryInboxRows(dashboardPendingItems);
+            } catch (warrantyInboxErr) {
+                console.error(
+                    '[getPendingAssetDashboardInbox] warranty expiry cleanup:',
+                    warrantyInboxErr?.message || warrantyInboxErr,
+                );
+            }
+        }
 
         let creatorOutcomeItems = [];
         if (assigneeClauses.length) {
