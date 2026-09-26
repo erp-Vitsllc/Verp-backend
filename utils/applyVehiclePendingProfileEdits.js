@@ -8,6 +8,7 @@ import {
 } from './vehicleDocumentRenewal.js';
 import {
     clearStaleVehicleWarrantyExpiryNotifications,
+    clearVehicleExpiryNotificationsForRemovedDocuments,
     clearVehicleExpiryNotificationsForSection,
 } from './vehicleExpiryNotificationHelpers.js';
 
@@ -117,12 +118,17 @@ export async function applyVehiclePendingProfileEditEntry(asset, pendingEntry) {
     const action = String(pendingEntry?.action || 'edit').trim();
     const renewFromDocumentId = pendingEntry?.documentId || null;
     let newRenewPrimaryDocId = null;
+    const removedDocs = [];
 
     for (const step of steps) {
         if (!step || typeof step !== 'object') continue;
         if (step.op === 'put_asset_type') {
             await applyPutAssetType(asset, step.body || {});
             continue;
+        }
+        if (step.op === 'delete_document') {
+            const existing = asset.documents.id(step.docId);
+            if (existing) removedDocs.push(existing.toObject ? existing.toObject() : { ...existing });
         }
         if (['delete_document', 'post_document', 'put_document'].includes(step.op)) {
             const createdId = await applyDocumentStep(asset, step);
@@ -148,8 +154,11 @@ export async function applyVehiclePendingProfileEditEntry(asset, pendingEntry) {
     if (sectionId === 'registration' || sectionId === 'insurance') {
         await clearVehicleExpiryNotificationsForSection(asset, sectionId);
     }
-    if (sectionId === 'warranty' && action === 'not_renew') {
+    if (action === 'renew' || action === 'not_renew') {
         await clearStaleVehicleWarrantyExpiryNotifications(asset);
+    }
+    if (removedDocs.length) {
+        await clearVehicleExpiryNotificationsForRemovedDocuments(asset, removedDocs);
     }
 }
 

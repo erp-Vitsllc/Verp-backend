@@ -1187,6 +1187,12 @@ export async function applyLeaveRange(req, res) {
         const spec = resolveLeaveApplySpec(req.body?.leaveType || req.body?.leaveMode, dayCount, {
             restrictToApplyTypes: !attendanceId,
         });
+        if (!hrOverride && spec?.leaveType === 'authorized' && dayCount > 3) {
+            return res.status(400).json({
+                message:
+                    'Maximum 3 days of authorized leave are allowed. For more information, please contact your HOD.',
+            });
+        }
         if (!spec) {
             return res.status(400).json({
                 message: 'Leave type must be Annual Leave or Authorized Leave.',
@@ -1196,6 +1202,25 @@ export async function applyLeaveRange(req, res) {
             spec.requestedStatusKey === 'on_leave'
                 ? await loadAnnualLeaveEligibilityForEmployee(employee, { from, to })
                 : null;
+        if (!hrOverride && annualEligibility?.groupCap?.over) {
+            const lines = [];
+            if (annualEligibility.cycleNotEligible) {
+                const required = annualEligibility.requiredDays || 300;
+                const done = annualEligibility.eligibleDays || 0;
+                lines.push(
+                    `You cannot apply for annual leave. You are not eligible. ${done} of ${required} days are completed from the previous annual leave or joining date to this leave start.`,
+                );
+            }
+            if (annualEligibility.groupCap.message) lines.push(annualEligibility.groupCap.message);
+            const blockMessage = lines.join(' ') || annualEligibility.groupCap.message;
+            return res.status(400).json({
+                message: String(blockMessage).includes('contact your HOD')
+                    ? blockMessage
+                    : `${blockMessage} For more information, please contact your HOD.`,
+                notEligible: true,
+                ...annualEligibility,
+            });
+        }
         const escalateIneligibleAnnual = Boolean(
             spec.requestedStatusKey === 'on_leave' &&
                 sendToHr &&

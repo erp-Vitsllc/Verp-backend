@@ -1,6 +1,7 @@
 import mongoose from 'mongoose';
 import EmployeeBasic from '../../models/EmployeeBasic.js';
 import EmployeeHubRequest from '../../models/EmployeeHubRequest.js';
+import DashboardAction from '../../models/DashboardAction.js';
 import { syncDashboardAction } from '../../utils/syncDashboard.js';
 import {
     HUB_MENU_KINDS,
@@ -336,5 +337,117 @@ export async function decideEmployeeHubRequest(req, res) {
     } catch (error) {
         console.error('[decideEmployeeHubRequest]', error);
         return res.status(500).json({ message: error.message || 'Failed to decide request.' });
+    }
+}
+
+const RESEND_WAIT_MS = 24 * 60 * 60 * 1000;
+
+function ownsPendingAction(action, self) {
+    const empId = String(self?.employeeId || '').trim().toLowerCase();
+    const subject = String(action?.subjectEmployeeId || '').trim().toLowerCase();
+    if (empId && subject && empId === subject) return true;
+    const name = personName(self).toLowerCase();
+    const by = String(action?.requestedByName || '').trim().toLowerCase();
+    return Boolean(name && by && name === by);
+}
+
+function resendGate(action) {
+    const requested = new Date(action?.requestedDate || action?.createdAt || 0).getTime();
+    const resent = action?.lastResentAt ? new Date(action.lastResentAt).getTime() : 0;
+    const base = Math.max(Number.isFinite(requested) ? requested : 0, Number.isFinite(resent) ? resent : 0);
+    return base + RESEND_WAIT_MS;
+}
+
+/**
+ * POST /api/Employee/dashboard/request-resend
+ * Body: { actionId?, requestId?, description }
+ * Notifies Flowchart HR again after 24 hours, with the employee's description.
+ */
+export async function resendEmployeeRequest(req, res) {
+    try {
+        if (mongoose.connection.readyState !== 1) {
+            return res.status(503).json({ message: 'Database not connected.' });
+        }
+        const self = await resolveSelf(req);
+        if (!self) {
+            return res.status(404).json({ message: 'No linked employee profile found for this user.' });
+        }
+
+        const description = String(req.body?.description || '').trim();
+        if (!description) {
+            return res.status(400).json({ message: 'Description is required.' });
+        }
+
+        const actionId = String(req.body?.actionId || '').trim();
+        const requestId = String(req.body?.requestId || req.body?.id || '').trim();
+        let action = null;
+        if (mongoose.isValidObjectId(actionId)) {
+            action = await DashboardAction.findById(actionId);
+        }
+        if (!action && mongoose.isValidObjectId(requestId)) {
+            action = await DashboardAction.findOne({
+                requestId,
+                status: 'Pending',
+                subjectEmployeeId: self.employeeId,
+            }).sort({ requestedDate: -1 });
+        }
+        if (!action || action.status !== 'Pending') {
+            return res.status(404).json({ message: 'Pending request not found.' });
+        }
+        if (!ownsPendingAction(action, self)) {
+            return res.status(403).json({ message: 'You can only resend your own request.' });
+        }
+
+        const readyAt = resendGate(action);
+        if (Date.now() < readyAt) {
+            return res.status(400).json({
+                message: 'Resend is available 24 hours after this request.',
+                retryAt: new Date(readyAt).toISOString(),
+            });
+        }
+
+        const hr = await resolveFlowchartHrEmployee();
+        if (hr.error || !hr.employee?._id) {
+            return res.status(400).json({
+                message: hr.message || 'HR is not configured in the Flowchart.',
+            });
+        }
+
+        const name = personName(self);
+        const notice = `${name} resent this request. Please verify on ERP web.`;
+        if (mongoose.isValidObjectId(action.requestId)) {
+            const hub = await EmployeeHubRequest.findById(action.requestId);
+            if (hub && String(hub.requester) === String(self._id) && hub.status === 'Pending') {
+                hub.description = [hub.description, `Resent: ${description}`].filter(Boolean).join('\n');
+                await hub.save();
+            }
+        }
+
+        await syncDashboardAction({
+            requestId: action.requestId,
+            requestType: 'Employee Request Resend',
+            assignedTo: hr.employee._id,
+            status: 'Pending',
+            subjectEmployee: self,
+            requestedByName: name,
+            extra1: notice,
+            extra2: description.slice(0, 180),
+            extra3: JSON.stringify({
+                resend: true,
+                sourceType: action.requestType,
+                sourceActionId: String(action._id),
+            }),
+        });
+
+        action.lastResentAt = new Date();
+        await action.save();
+
+        return res.status(200).json({
+            message: 'HR has been notified to verify this request on ERP web.',
+            lastResentAt: action.lastResentAt,
+        });
+    } catch (error) {
+        console.error('[resendEmployeeRequest]', error);
+        return res.status(500).json({ message: error.message || 'Failed to resend request.' });
     }
 }

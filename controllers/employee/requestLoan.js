@@ -19,6 +19,17 @@ import {
  * Loan -> loan001, loan002...
  * Advance -> adv001, adv002...
  */
+function withHodContact(message) {
+    const text = String(message || '').trim();
+    if (!text || text.includes('contact your HOD')) return text;
+    return `${text} For more information, please contact your HOD.`;
+}
+
+function validationBlock(body) {
+    if (!body || typeof body !== 'object' || !body.message) return body;
+    return { ...body, message: withHodContact(body.message) };
+}
+
 const generateLoanId = async (type) => {
     try {
         const isAdvance = (type && type.toLowerCase().includes('advance'));
@@ -64,10 +75,10 @@ export const requestLoan = async (req, res) => {
     try {
         const reasonText = String(reason || '').trim();
         if (!reasonText) {
-            return res.status(400).json({ message: 'Reason is mandatory.' });
+            return res.status(400).json(validationBlock({ message: 'Reason is mandatory.' }));
         }
         if (reasonText.length > 50) {
-            return res.status(400).json({ message: 'Reason must be 50 characters or less.' });
+            return res.status(400).json(validationBlock({ message: 'Reason must be 50 characters or less.' }));
         }
 
         // 1. Fetch Employee Info FIRST to identify Manager
@@ -78,7 +89,7 @@ export const requestLoan = async (req, res) => {
         }
 
         if (!employeeBasic.company) {
-            return res.status(400).json({ message: "Employee is not linked to any company. Cannot proceed." });
+            return res.status(400).json(validationBlock({ message: "Employee is not linked to any company. Cannot proceed." }));
         }
 
         // VALIDATION: Check if required designations are assigned in Flowchart
@@ -93,9 +104,9 @@ export const requestLoan = async (req, res) => {
         if (!managementHOD) missingDesignations.push('Management/CEO');
 
         if (missingDesignations.length > 0) {
-            return res.status(400).json({
+            return res.status(400).json(validationBlock({
                 message: `Cannot proceed. The following designations are not assigned in Flowchart: ${missingDesignations.join(', ')}. Please assign these designations in Settings > FlowChart before creating a ${type || 'loan/advance'} request.`
-            });
+            }));
         }
 
         const targetStatus = status === 'Pending' ? 'Pending HR' : (status || 'Draft');
@@ -145,7 +156,7 @@ export const requestLoan = async (req, res) => {
                 ? `This employee already has an Approved ${existingLoan.type} (${existingLoan.loanId}). A new request cannot be submitted while a loan is active.`
                 : `This employee already has a ${existingLoan.type} application in progress (${existingLoan.loanId} - ${existingLoan.status}).`;
             if (!confirmContinue) {
-                return res.status(400).json(withChecks({ message: existingMessage, canContinue: true }));
+                return res.status(400).json(validationBlock(withChecks({ message: existingMessage, canContinue: true })));
             }
             continuedNotes.push(existingMessage);
         }
@@ -153,10 +164,10 @@ export const requestLoan = async (req, res) => {
         // --- VALIDATION: Visa / status eligibility (employee may continue; HR still receives the warning) ---
         const eligibility = await assertLoanEmployeeEligibility(req, employeeBasic, type);
         if (!eligibility.ok) {
-            return res.status(eligibility.status || 400).json(withChecks({
+            return res.status(eligibility.status || 400).json(validationBlock(withChecks({
                 message: eligibility.message,
                 canContinue: Boolean(eligibility.canContinue),
-            }));
+            })));
         }
         if (eligibility.overridden && eligibility.issues?.length) {
             continuedNotes.push(...eligibility.issues);
@@ -170,7 +181,7 @@ export const requestLoan = async (req, res) => {
             if (salaryRecord && Number(amount) > salaryRecord.totalSalary) {
                 const salaryMessage = `Advance amount cannot exceed your monthly salary (AED ${salaryRecord.totalSalary}).`;
                 if (!confirmContinue) {
-                    return res.status(400).json(withChecks({ message: salaryMessage, canContinue: true }));
+                    return res.status(400).json(validationBlock(withChecks({ message: salaryMessage, canContinue: true })));
                 }
                 continuedNotes.push(salaryMessage);
             }
@@ -179,7 +190,7 @@ export const requestLoan = async (req, res) => {
             if (employeeBasic.status === 'Probation' && parseInt(duration) > 1) {
                 const probationMessage = "Employees on probation can only apply for a 1-month salary advance.";
                 if (!confirmContinue) {
-                    return res.status(400).json(withChecks({ message: probationMessage, canContinue: true }));
+                    return res.status(400).json(validationBlock(withChecks({ message: probationMessage, canContinue: true })));
                 }
                 continuedNotes.push(probationMessage);
             }
@@ -426,27 +437,27 @@ export const createSelfLoanDraft = async (req, res) => {
         const isAdvance = typeRaw.toLowerCase().includes('advance');
         const isLoan = typeRaw.toLowerCase() === 'loan' || typeRaw.toLowerCase().includes('loan');
         if (!isAdvance && !isLoan) {
-            return res.status(400).json({ message: 'Choose Loan or Advance.' });
+            return res.status(400).json(validationBlock({ message: 'Choose Loan or Advance.' }));
         }
 
         const amount = Number(req.body?.amount);
         if (!Number.isFinite(amount) || amount <= 0) {
-            return res.status(400).json({ message: 'Amount must be greater than 0.' });
+            return res.status(400).json(validationBlock({ message: 'Amount must be greater than 0.' }));
         }
 
         const duration = Number(req.body?.duration);
         const maxMonths = isAdvance ? 3 : 6;
         if (!Number.isInteger(duration) || duration < 1 || duration > maxMonths) {
-            return res.status(400).json({
+            return res.status(400).json(validationBlock({
                 message: isAdvance
                     ? 'Deduction months must be from 1 to 3.'
                     : 'Deduction months must be from 1 to 6.',
-            });
+            }));
         }
 
         const monthStart = String(req.body?.monthStart || '').trim();
         if (!/^\d{4}-(0[1-9]|1[0-2])$/.test(monthStart)) {
-            return res.status(400).json({ message: 'Start month must be YYYY-MM.' });
+            return res.status(400).json(validationBlock({ message: 'Start month must be YYYY-MM.' }));
         }
 
         req.selfServiceLoan = true;

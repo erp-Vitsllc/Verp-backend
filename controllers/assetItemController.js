@@ -13683,6 +13683,15 @@ export const deleteAssetDocument = async (req, res) => {
         syncVehicleExpiryFieldsFromLiveDocuments(asset);
         await asset.save();
 
+        try {
+            const { clearVehicleExpiryNotificationsForRemovedDocuments } = await import(
+                '../utils/vehicleExpiryNotificationHelpers.js'
+            );
+            await clearVehicleExpiryNotificationsForRemovedDocuments(asset, removedSnapshots);
+        } catch (expiryErr) {
+            console.warn('[deleteAssetDocument] expiry reminder clear failed:', expiryErr?.message || expiryErr);
+        }
+
         // Log to history
         try {
             const AssetHistory = (await import('../models/AssetHistory.js')).default;

@@ -1821,13 +1821,6 @@ export const updateAssetItem = async (req, res) => {
                 if (key === 'status' && creatorDraftOrRejected) {
                     continue;
                 }
-                // Asset value: admin always; creator may set while Draft / Rejected (vehicle draft flow)
-                if (key === 'assetValue' && !isAdmin) {
-                    const creatorMaySetValue =
-                        isCreator && (initialAssetStatus === 'Draft' || initialAssetStatus === 'Rejected');
-                    const fleetCollaboratorMaySetValue = isFleetVehicleAssetForCollaborativeEdit;
-                    if (!creatorMaySetValue && !fleetCollaboratorMaySetValue) continue;
-                }
                 if (key === 'onServiceActive' || key === 'onLeaveActive') {
                     if (!isAdmin && !isAssetControllerEffective) continue;
                     asset[key] = updates[key] === true || updates[key] === 'yes';
@@ -1934,14 +1927,18 @@ export const updateAssetItem = async (req, res) => {
                                     });
                                 }
                             }
-                            // Keep existing accessory
-                            const nextAmount = isAdmin
+                            // Keep existing accessory. Amount follows the edit form for admin,
+                            // Asset Controller, and the creator while the asset is still draft/rejected.
+                            const mayEditAccessoryAmount =
+                                isAdmin || isAssetControllerEffective || creatorDraftOrRejected;
+                            const nextAmount = mayEditAccessoryAmount
                                 ? (acc.amount !== undefined ? acc.amount : existing.amount)
-                                : existing.amount; // Accessory amount is admin-editable only
+                                : existing.amount;
+                            const parsedAmount = Number(nextAmount);
                             newAccessoriesList.push({
                                 ...existing.toObject(),
                                 ...acc,
-                                amount: nextAmount,
+                                amount: Number.isFinite(parsedAmount) ? parsedAmount : existing.amount,
                                 accessoryId:
                                     existing.accessoryId ||
                                     acc.accessoryId ||
@@ -2216,6 +2213,36 @@ export const updateAssetItem = async (req, res) => {
                     }
                 }
             }
+        }
+
+        // Tools Edit Asset sends these as form strings. Apply them after the generic
+        // loop so name, value, date, quantity, and warranty always persist for anyone
+        // who already passed the edit permission check.
+        if (Object.prototype.hasOwnProperty.call(updates, 'name') && String(updates.name || '').trim()) {
+            asset.name = String(updates.name).trim();
+        }
+        if (
+            Object.prototype.hasOwnProperty.call(updates, 'assetValue') &&
+            updates.assetValue !== '' &&
+            updates.assetValue != null
+        ) {
+            const nextValue = Number(updates.assetValue);
+            if (Number.isFinite(nextValue) && nextValue >= 0) asset.assetValue = nextValue;
+        }
+        if (Object.prototype.hasOwnProperty.call(updates, 'purchaseDate') && updates.purchaseDate) {
+            asset.purchaseDate = updates.purchaseDate;
+        }
+        if (Object.prototype.hasOwnProperty.call(updates, 'quantity')) {
+            asset.quantity = Math.max(1, Number(updates.quantity) || 1);
+        }
+        if (Object.prototype.hasOwnProperty.call(updates, 'warrantyYears')) {
+            asset.warrantyYears = Math.max(0, Number(updates.warrantyYears) || 0);
+        }
+        if (Object.prototype.hasOwnProperty.call(updates, 'warranty')) {
+            asset.warranty = updates.warranty == null ? '' : String(updates.warranty);
+        }
+        if (Object.prototype.hasOwnProperty.call(updates, 'invoiceNumber')) {
+            asset.invoiceNumber = updates.invoiceNumber == null ? '' : String(updates.invoiceNumber);
         }
 
         // Keep warranty fields consistent on every update.

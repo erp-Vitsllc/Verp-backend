@@ -88,6 +88,7 @@ import {
     createEmployeeHubRequest,
     getEmployeeHubRequest,
     decideEmployeeHubRequest,
+    resendEmployeeRequest,
 } from "../controllers/employee/employeeHubRequest.js";
 import { createEmployeeVehicleServiceRequest } from "../controllers/employee/employeeVehicleServiceRequest.js";
 import { getMyDashboardRequests } from "../controllers/employee/getMyDashboardRequests.js";
@@ -150,6 +151,7 @@ router.get("/dashboard/my-asset-list/pdf", downloadMyAssetListPdf);
 router.get("/dashboard/my-loan-profile", getMyLoanProfile);
 router.post("/dashboard/self-loan-request", createSelfLoanDraft);
 router.post("/dashboard/hub-request", createEmployeeHubRequest);
+router.post("/dashboard/request-resend", resendEmployeeRequest);
 router.post("/dashboard/vehicle-service-request", createEmployeeVehicleServiceRequest);
 router.get("/dashboard/hub-request/:id", getEmployeeHubRequest);
 router.post("/dashboard/hub-request/:id/decide", decideEmployeeHubRequest);

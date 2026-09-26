@@ -1102,6 +1102,7 @@ export const getUserActivityStats = async (req, res) => {
                 extra1: item.extra1,
                 extra2: item.extra2,
                 extra3: item.extra3,
+                lastResentAt: item.lastResentAt || null,
                 subjectName: item.subjectName || '',
                 targetEmployeeId: item.subjectEmployeeId?.toString(),
                 scope,

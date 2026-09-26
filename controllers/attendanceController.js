@@ -169,6 +169,17 @@ function getDubaiDateKey(date = new Date()) {
     return formatDateKeyFromParts(p);
 }
 
+function inclusiveDateCount(fromDate, toDate) {
+    if (!isValidDateKey(fromDate) || !isValidDateKey(toDate) || toDate < fromDate) return 0;
+    const [fromYear, fromMonth, fromDay] = fromDate.split('-').map(Number);
+    const [toYear, toMonth, toDay] = toDate.split('-').map(Number);
+    return (
+        Math.round(
+            (Date.UTC(toYear, toMonth - 1, toDay) - Date.UTC(fromYear, fromMonth - 1, fromDay)) / 86400000,
+        ) + 1
+    );
+}
+
 function nextDateKey(dateKey) {
     const [year, month, day] = String(dateKey).split('-').map(Number);
     const dt = new Date(Date.UTC(year, month - 1, day + 1, 12, 0, 0));
@@ -2564,6 +2575,12 @@ export async function requestAttendanceFuture(req, res) {
         if (toDate < fromDate) {
             return res.status(400).json({ message: 'To date cannot be before the from date.' });
         }
+        if (kind === 'leave' && inclusiveDateCount(fromDate, toDate) > 3) {
+            return res.status(400).json({
+                message:
+                    'Maximum 3 days of authorized leave are allowed. For more information, please contact your HOD.',
+            });
+        }
         if (!spec) {
             return res.status(400).json({ message: 'Choose Leave, Late arrival, or Early go.' });
         }
@@ -2618,10 +2635,22 @@ export async function requestAttendanceFuture(req, res) {
                 to: toDate,
             });
             if (eligibility?.notEligible) {
+                const lines = [];
+                if (eligibility.cycleNotEligible) {
+                    const required = eligibility.requiredDays || 300;
+                    const done = eligibility.eligibleDays || 0;
+                    lines.push(
+                        `You cannot apply for annual leave. You are not eligible. ${done} of ${required} days are completed from the previous annual leave or joining date to this leave start.`,
+                    );
+                }
+                if (eligibility.groupCap?.over && eligibility.groupCap.message) {
+                    lines.push(eligibility.groupCap.message);
+                }
+                const blockMessage = lines.join(' ') || 'You cannot apply for annual leave for these dates.';
                 return res.status(400).json({
-                    message: eligibility.cycleNotEligible
-                        ? 'You cannot apply for annual leave until the 300-day cycle is finished.'
-                        : 'You cannot apply for annual leave for these dates.',
+                    message: blockMessage.includes('contact your HOD')
+                        ? blockMessage
+                        : `${blockMessage} For more information, please contact your HOD.`,
                     notEligible: true,
                     ...eligibility,
                 });
