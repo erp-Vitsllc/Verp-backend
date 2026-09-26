@@ -2,6 +2,8 @@ import mongoose from 'mongoose';
 import EmployeeBasic from '../../models/EmployeeBasic.js';
 import AssetItem from '../../models/AssetItem.js';
 import UtilityEntry from '../../models/UtilityEntry.js';
+import VehicleFuelBill from '../../models/VehicleFuelBill.js';
+import UtilityBillPayment from '../../models/UtilityBillPayment.js';
 import {
     FLEET_VEHICLE_ASSET_ID_PREFIX,
     TOOLS_ASSET_ID_PREFIX,
@@ -68,9 +70,15 @@ function mapToolItem(item) {
     };
 }
 
-function mapVehicleItem(item) {
+function currentMonthKey() {
+    const now = new Date();
+    return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
+}
+
+function mapVehicleItem(item, fuel) {
     const plate = String(item.plateNumber || '').trim();
     const typeName = item.typeId?.name || 'Vehicle';
+    const limit = roundMoney(fuel?.monthlyLimit || item.fuelMonthlyLimit);
     return {
         id: String(item._id),
         code: plate || item.assetId || item.name || 'Vehicle',
@@ -81,6 +89,9 @@ function mapVehicleItem(item) {
         title: [item.vehicleBrand, item.name].filter(Boolean).join(' · ') || item.assetId || '',
         number: plate,
         plateNumber: plate,
+        currentKm: Number(item.currentKilometer) || 0,
+        petrolUsage: roundMoney(fuel?.amountUsed),
+        fuelLimit: limit,
         status: item.status || 'Assigned',
         documents: mapDocuments(item),
         date: item.assignedDate || item.updatedAt || item.createdAt || null,
@@ -118,9 +129,17 @@ function utilityDetails(entry) {
     return details.slice(0, 8);
 }
 
-function mapUtilityItem(entry) {
+function utilityContract(entry) {
+    const values = entry?.values && typeof entry.values === 'object' ? entry.values : {};
+    const raw = values.monthlyRental ?? values.contractAmount ?? values.contract;
+    const amount = Number(raw);
+    return Number.isFinite(amount) ? roundMoney(amount) : 0;
+}
+
+function mapUtilityItem(entry, bill) {
     const provider = utilityProvider(entry);
     const account = utilityAccount(entry);
+    const contract = utilityContract(entry) || roundMoney(bill?.monthlyRental);
     return {
         id: String(entry._id),
         code: account || entry.type || 'Utility',
@@ -128,6 +147,8 @@ function mapUtilityItem(entry) {
         type: entry.type || 'Utility',
         title: entry.type || '',
         group: provider,
+        contractAmount: contract,
+        actualAmount: bill ? roundMoney(bill.amount) : null,
         status: entry.status || 'Active',
         details: utilityDetails(entry),
         date: entry.assignedAt || entry.updatedAt || entry.createdAt || null,
@@ -166,7 +187,7 @@ export const getMyAssetDashboardCards = async (req, res) => {
                 status: { $nin: [...HIDDEN_ASSET_STATUSES] },
             })
                 .select(
-                    'assetId name assetValue status assignedDate plateNumber vehicleBrand vehicleCode plateEmirate typeId documents createdAt updatedAt',
+                    'assetId name assetValue status assignedDate plateNumber vehicleBrand vehicleCode plateEmirate currentKilometer fuelMonthlyLimit typeId documents createdAt updatedAt',
                 )
                 .populate('typeId', 'name')
                 .sort({ assignedDate: -1, updatedAt: -1 })
@@ -181,19 +202,44 @@ export const getMyAssetDashboardCards = async (req, res) => {
                 .lean(),
         ]);
 
+        const vehicleAssets = (assets || []).filter(isVehicleAsset);
+        const activeUtilities = (utilities || []).filter((entry) => !entry?.pendingStatusChange);
+        const [fuelBills, utilityBills] = await Promise.all([
+            vehicleAssets.length
+                ? VehicleFuelBill.find({
+                      vehicleId: { $in: vehicleAssets.map((item) => item._id) },
+                      monthKey: currentMonthKey(),
+                  })
+                      .select('vehicleId amountUsed monthlyLimit')
+                      .lean()
+                : [],
+            activeUtilities.length
+                ? UtilityBillPayment.find({
+                      entryId: { $in: activeUtilities.map((entry) => String(entry._id)) },
+                  })
+                      .select('entryId amount monthlyRental createdAt')
+                      .sort({ createdAt: -1 })
+                      .lean()
+                : [],
+        ]);
+        const fuelByVehicle = new Map((fuelBills || []).map((bill) => [String(bill.vehicleId), bill]));
+        const billByUtility = new Map();
+        (utilityBills || []).forEach((bill) => {
+            const key = String(bill.entryId);
+            if (!billByUtility.has(key)) billByUtility.set(key, bill);
+        });
+
         const tools = [];
         const vehicles = [];
         (assets || []).forEach((item) => {
-            if (isVehicleAsset(item)) vehicles.push(mapVehicleItem(item));
+            if (isVehicleAsset(item)) vehicles.push(mapVehicleItem(item, fuelByVehicle.get(String(item._id))));
             else tools.push(mapToolItem(item));
         });
 
         return res.status(200).json({
             tools,
             vehicles,
-            utilities: (utilities || [])
-                .filter((entry) => !entry?.pendingStatusChange)
-                .map(mapUtilityItem),
+            utilities: activeUtilities.map((entry) => mapUtilityItem(entry, billByUtility.get(String(entry._id)))),
         });
     } catch (error) {
         console.error('[getMyAssetDashboardCards]', error);

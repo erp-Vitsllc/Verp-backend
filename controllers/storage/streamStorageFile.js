@@ -82,12 +82,13 @@ export const streamStorageFile = async (req, res) => {
                     break;
                 } catch (error) {
                     lastError = error;
-                    if (isMissingObjectError(error)) continue;
+                    const status = error?.$metadata?.httpStatusCode;
+                    // A miss or a deny on one bucket must not hide the same file in the next bucket.
+                    if (isMissingObjectError(error) || status === 403) continue;
                     console.error(
                         `[streamStorageFile] bucket=${bucket} key=${candidate}`,
                         error?.message || error,
                     );
-                    return res.status(500).json({ message: 'Failed to load file from storage' });
                 }
             }
             if (response) break;

@@ -131,6 +131,9 @@ export const requestLoan = async (req, res) => {
             status: { $in: ['Approved', 'Pending', 'Pending HR', 'Pending Accounts', 'Pending Authorization'] }
         }).lean();
 
+        const confirmContinue = Boolean(req.selfServiceLoan && req.body?.hrEligibilityOverride === true);
+        const continuedNotes = [];
+
         if (existingLoan) {
             const isApproved = existingLoan.status === 'Approved';
             loanChecks.existingLoan = {
@@ -138,17 +141,25 @@ export const requestLoan = async (req, res) => {
                 loanId: existingLoan.loanId,
                 status: existingLoan.status,
             };
-            return res.status(400).json(withChecks({
-                message: isApproved
-                    ? `This employee already has an Approved ${existingLoan.type} (${existingLoan.loanId}). A new request cannot be submitted while a loan is active.`
-                    : `This employee already has a ${existingLoan.type} application in progress (${existingLoan.loanId} - ${existingLoan.status}).`
-            }));
+            const existingMessage = isApproved
+                ? `This employee already has an Approved ${existingLoan.type} (${existingLoan.loanId}). A new request cannot be submitted while a loan is active.`
+                : `This employee already has a ${existingLoan.type} application in progress (${existingLoan.loanId} - ${existingLoan.status}).`;
+            if (!confirmContinue) {
+                return res.status(400).json(withChecks({ message: existingMessage, canContinue: true }));
+            }
+            continuedNotes.push(existingMessage);
         }
 
-        // --- VALIDATION: Visa / status eligibility (flowchart HR may override after confirm) ---
+        // --- VALIDATION: Visa / status eligibility (employee may continue; HR still receives the warning) ---
         const eligibility = await assertLoanEmployeeEligibility(req, employeeBasic, type);
         if (!eligibility.ok) {
-            return res.status(eligibility.status || 400).json(withChecks({ message: eligibility.message }));
+            return res.status(eligibility.status || 400).json(withChecks({
+                message: eligibility.message,
+                canContinue: Boolean(eligibility.canContinue),
+            }));
+        }
+        if (eligibility.overridden && eligibility.issues?.length) {
+            continuedNotes.push(...eligibility.issues);
         }
 
         // --- VALIDATION: Salary Checks ---
@@ -157,16 +168,20 @@ export const requestLoan = async (req, res) => {
         if (type && type.includes('Advance')) {
             // Rule: Advance Amount <= Monthly Salary
             if (salaryRecord && Number(amount) > salaryRecord.totalSalary) {
-                return res.status(400).json(withChecks({
-                    message: `Advance amount cannot exceed your monthly salary (AED ${salaryRecord.totalSalary}).`
-                }));
+                const salaryMessage = `Advance amount cannot exceed your monthly salary (AED ${salaryRecord.totalSalary}).`;
+                if (!confirmContinue) {
+                    return res.status(400).json(withChecks({ message: salaryMessage, canContinue: true }));
+                }
+                continuedNotes.push(salaryMessage);
             }
 
             // Rule: Probation -> Max 1 Month Duration
             if (employeeBasic.status === 'Probation' && parseInt(duration) > 1) {
-                return res.status(400).json(withChecks({
-                    message: "Employees on probation can only apply for a 1-month salary advance.",
-                }));
+                const probationMessage = "Employees on probation can only apply for a 1-month salary advance.";
+                if (!confirmContinue) {
+                    return res.status(400).json(withChecks({ message: probationMessage, canContinue: true }));
+                }
+                continuedNotes.push(probationMessage);
             }
         }
         // ---------------------------------------------
@@ -183,6 +198,8 @@ export const requestLoan = async (req, res) => {
             duration,
             monthStart: monthStart || '',
             reason: reasonText,
+            eligibilityOverride: continuedNotes.length > 0,
+            eligibilityNotes: continuedNotes.join('\n'),
             status: targetStatus,
             approvalStatus: targetStatus,
             createdBy: req.user ? req.user.id : null,
@@ -230,7 +247,10 @@ export const requestLoan = async (req, res) => {
                     role: 'HR Admin',
                     assignedTo: assignmentId,
                     status: 'Pending',
-                    assignedAt: new Date()
+                    assignedAt: new Date(),
+                    comment: continuedNotes.length
+                        ? `Employee continued. ${continuedNotes.join(' ')}`
+                        : '',
                 }];
 
                 console.log(`[RequestLoan] Loan Pushed for HR: ${hrHOD.employeeId} (Account: ${hrUser ? 'Found' : 'Missing'})`);
@@ -438,7 +458,7 @@ export const createSelfLoanDraft = async (req, res) => {
         req.body.duration = duration;
         req.body.monthStart = monthStart;
         req.body.resubmit = false;
-        delete req.body.hrEligibilityOverride;
+        req.body.hrEligibilityOverride = req.body?.hrEligibilityOverride === true;
         return requestLoan(req, res);
     } catch (error) {
         console.error('Error creating self loan request:', error);

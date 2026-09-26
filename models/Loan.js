@@ -55,6 +55,9 @@ const loanSchema = new mongoose.Schema({
         type: String,
         required: true
     },
+    /** Set when the employee continues past an eligibility block. HR still receives the request. */
+    eligibilityOverride: { type: Boolean, default: false },
+    eligibilityNotes: { type: String, default: '' },
     status: {
         type: String,
         enum: [

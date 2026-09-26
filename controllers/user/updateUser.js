@@ -3,6 +3,9 @@ import { resolveFrontendBaseUrl, emailFrontendUrl } from '../../utils/resolveFro
 import Group from "../../models/Group.js";
 import EmployeeBasic from "../../models/EmployeeBasic.js";
 import { assertLoginThroughCompanyEmail, assertLoginThroughWhatsApp, loginThroughFromBody } from "../../utils/loginThrough.js";
+import { isWhatsAppEnabled } from "../../config/whatsapp.js";
+import { resolveEmployeeWhatsAppPhone } from "../../utils/sendToolsAssetWhatsAppReport.js";
+import { sendPortalCredentialsWhatsApp } from "../../utils/sendPortalCredentialsWhatsApp.js";
 import bcrypt from "bcryptjs";
 import nodemailer from "nodemailer";
 import jwt from "jsonwebtoken";
@@ -91,7 +94,10 @@ const updateUserHandler = async (req, res) => {
             enablePortalAccess,
             isAdmin,
             loginThrough,
+            sendCredentialsViaWhatsApp = false,
         } = req.body;
+
+        const shouldSendWhatsApp = sendCredentialsViaWhatsApp === true;
 
         // Type validation
         if (typeof id !== 'string') {
@@ -137,6 +143,30 @@ const updateUserHandler = async (req, res) => {
         // Check if this is the system admin user
         const adminUsername = process.env.ADMIN_USERNAME || 'admin';
         const isSystemAdmin = user.username?.toLowerCase() === adminUsername.toLowerCase();
+
+        if (shouldSendWhatsApp) {
+            if (!willResetPassword) {
+                return res.status(400).json({
+                    message: "Enter a new password to send it on WhatsApp.",
+                });
+            }
+            if (isSystemAdmin || !user.employeeId) {
+                return res.status(400).json({
+                    message: "Link this user to an employee with a WhatsApp number before sending the login details.",
+                });
+            }
+            if (!isWhatsAppEnabled()) {
+                return res.status(400).json({
+                    message: "WhatsApp is turned off, so the login details cannot be sent. Save the password without that option, or turn WhatsApp on first.",
+                });
+            }
+            const whatsappPhone = await resolveEmployeeWhatsAppPhone(user.employeeId);
+            if (!whatsappPhone) {
+                return res.status(400).json({
+                    message: "This employee has no WhatsApp number. Add one on their profile, or save the password without sending WhatsApp.",
+                });
+            }
+        }
 
         // For system admin, password is stored ONLY in .env file, not in MongoDB
         if (isSystemAdmin) {
@@ -414,9 +444,37 @@ const updateUserHandler = async (req, res) => {
             userPayload.loginThrough = syncedLoginThrough;
         }
 
+        const whatsapp = { requested: shouldSendWhatsApp && willResetPassword, sent: false };
+        if (whatsapp.requested) {
+            try {
+                const delivery = await sendPortalCredentialsWhatsApp({
+                    employeeId: updatedUser.employeeId,
+                    name: updatedUser.name,
+                    username: updatedUser.username,
+                    password,
+                    actor: req.user,
+                    req,
+                    kind: "reset",
+                });
+                whatsapp.sent = delivery.sent === true;
+                if (!whatsapp.sent) {
+                    whatsapp.error = delivery.error || "WhatsApp could not send the login details. The password was still updated.";
+                }
+            } catch (whatsappError) {
+                console.error("[updateUser] WhatsApp credentials send failed:", whatsappError?.message || whatsappError);
+                whatsapp.sent = false;
+                whatsapp.error = "WhatsApp could not send the login details. The password was still updated.";
+            }
+        }
+
         return res.status(200).json({
-            message: "User updated successfully",
+            message: whatsapp.requested
+                ? (whatsapp.sent
+                    ? "Password updated and login details sent on WhatsApp"
+                    : "Password updated, but WhatsApp could not send the login details")
+                : "User updated successfully",
             user: userPayload,
+            whatsapp,
         });
     } catch (error) {
         console.error('Error updating user:', error);

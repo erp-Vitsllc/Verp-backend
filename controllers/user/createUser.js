@@ -2,6 +2,9 @@ import User from "../../models/User.js";
 import EmployeeBasic from "../../models/EmployeeBasic.js";
 import Group from "../../models/Group.js";
 import bcrypt from "bcryptjs";
+import { isWhatsAppEnabled } from "../../config/whatsapp.js";
+import { resolveEmployeeWhatsAppPhone } from "../../utils/sendToolsAssetWhatsAppReport.js";
+import { sendPortalCredentialsWhatsApp } from "../../utils/sendPortalCredentialsWhatsApp.js";
 
 // Create new user
 export const createUser = async (req, res) => {
@@ -16,8 +19,11 @@ export const createUser = async (req, res) => {
             group,
             status = 'Active',
             enablePortalAccess = true,
-            isAdmin = false
+            isAdmin = false,
+            sendCredentialsViaWhatsApp = false,
         } = req.body;
+
+        const shouldSendWhatsApp = sendCredentialsViaWhatsApp === true;
 
         // Validate required fields and types
         if (typeof username !== 'string' || !username.trim() ||
@@ -79,9 +85,23 @@ export const createUser = async (req, res) => {
             if (existingUser) {
                 return res.status(400).json({ message: "This employee is already a user" });
             }
-            if (!String(employee.companyEmail || companyEmail || "").trim()) {
+        }
+
+        if (shouldSendWhatsApp) {
+            if (!employeeId) {
                 return res.status(400).json({
-                    message: "Add a company email address on the employee profile before creating portal access.",
+                    message: "Select an existing employee to send the username and password on WhatsApp.",
+                });
+            }
+            if (!isWhatsAppEnabled()) {
+                return res.status(400).json({
+                    message: "WhatsApp is turned off, so the login details cannot be sent. Create the user without that option, or turn WhatsApp on first.",
+                });
+            }
+            const whatsappPhone = await resolveEmployeeWhatsAppPhone(employeeId);
+            if (!whatsappPhone) {
+                return res.status(400).json({
+                    message: "This employee has no WhatsApp number. Add one on their profile, or create the user without sending WhatsApp.",
                 });
             }
         }
@@ -142,9 +162,36 @@ export const createUser = async (req, res) => {
         const userResponse = savedUser.toObject();
         delete userResponse.password;
 
+        const whatsapp = { requested: shouldSendWhatsApp, sent: false };
+        if (shouldSendWhatsApp) {
+            try {
+                const delivery = await sendPortalCredentialsWhatsApp({
+                    employeeId,
+                    name: name.trim(),
+                    username: username.trim(),
+                    password,
+                    actor: req.user,
+                    req,
+                });
+                whatsapp.sent = delivery.sent === true;
+                if (!whatsapp.sent) {
+                    whatsapp.error = delivery.error || "WhatsApp could not send the login details. The user was still created.";
+                }
+            } catch (whatsappError) {
+                console.error("[createUser] WhatsApp credentials send failed:", whatsappError?.message || whatsappError);
+                whatsapp.sent = false;
+                whatsapp.error = "WhatsApp could not send the login details. The user was still created.";
+            }
+        }
+
         return res.status(201).json({
-            message: "User created successfully",
+            message: whatsapp.requested
+                ? (whatsapp.sent
+                    ? "User created and login details sent on WhatsApp"
+                    : "User created, but WhatsApp could not send the login details")
+                : "User created successfully",
             user: userResponse,
+            whatsapp,
         });
     } catch (error) {
         console.error('Error creating user:', error);

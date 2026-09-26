@@ -5,6 +5,7 @@ import { signOrKeepAttachmentUrl } from "../../utils/s3Upload.js";
 import { serializeMobileDevice, serializeWebLogin } from "../../utils/userMobileDevice.js";
 import { listUserDevices } from "./userMobileDeviceController.js";
 import { normalizeLoginThrough } from "../../utils/loginThrough.js";
+import EmployeeContact from "../../models/EmployeeContact.js";
 
 const USER_DETAIL_SELECT =
     "username name email companyEmail employeeId group groupName status enablePortalAccess isAdmin lastLogin lastLoginIp profilePicture createdAt mobileDevice webLogin webLoginDevices";
@@ -53,10 +54,18 @@ export const getUserById = async (req, res) => {
         const isSystemAdmin = user.username?.toLowerCase() === adminUsername.toLowerCase();
 
         let employee = null;
+        let whatsappNumber = "";
         if (user.employeeId) {
-            employee = await EmployeeBasic.findOne({ employeeId: user.employeeId })
-                .select("_id employeeId firstName lastName email companyEmail designation profilePicture loginThrough")
-                .lean();
+            const [employeeRow, contact] = await Promise.all([
+                EmployeeBasic.findOne({ employeeId: user.employeeId })
+                    .select("_id employeeId firstName lastName email companyEmail designation profilePicture loginThrough")
+                    .lean(),
+                EmployeeContact.findOne({ employeeId: user.employeeId })
+                    .select("whatsappNumber")
+                    .lean(),
+            ]);
+            employee = employeeRow;
+            whatsappNumber = String(contact?.whatsappNumber || "").trim();
         }
 
         let todayAttendance = null;
@@ -93,6 +102,7 @@ export const getUserById = async (req, res) => {
                       lastName: employee.lastName,
                       email: employee.email,
                       companyEmail: employee.companyEmail || '',
+                      whatsappNumber,
                       designation: employee.designation,
                       loginThrough: normalizeLoginThrough(employee),
                   }

@@ -97,6 +97,9 @@ export async function assertLoanEmployeeEligibility(req, employee, type) {
 
     const wantsOverride = req.body?.hrEligibilityOverride === true;
     if (wantsOverride) {
+        if (req.selfServiceLoan) {
+            return { ok: true, issues, overridden: true };
+        }
         const allowed = await requesterCanOverrideLoanEligibility(req);
         if (!allowed) {
             return {
@@ -108,5 +111,5 @@ export async function assertLoanEmployeeEligibility(req, employee, type) {
         return { ok: true, issues, overridden: true };
     }
 
-    return { ok: false, status: 400, message: issues[0] };
+    return { ok: false, status: 400, message: issues[0], canContinue: true };
 }

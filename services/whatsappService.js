@@ -588,7 +588,8 @@ export async function sendTextMessage(to, message, extras = {}) {
         const { logOutboundWhatsAppMessage } = await import('../utils/whatsappMessageLog.js');
         await logOutboundWhatsAppMessage({
             phone,
-            body: text,
+            // Callers that include a secret (portal password) pass a redacted log line.
+            body: extras.logBody != null ? String(extras.logBody) : text,
             messageType: 'text',
             source: extras.source || 'manual',
             result,
