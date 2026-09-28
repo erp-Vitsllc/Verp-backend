@@ -92,6 +92,7 @@ import {
 } from "../controllers/employee/employeeHubRequest.js";
 import { createEmployeeVehicleServiceRequest } from "../controllers/employee/employeeVehicleServiceRequest.js";
 import { getMyDashboardRequests } from "../controllers/employee/getMyDashboardRequests.js";
+import { getMyRequestBox } from "../controllers/employee/getMyRequestBox.js";
 import { getLoanPdf } from "../controllers/employee/getLoanPdf.js";
 import { downloadLoanAcknowledgmentPdf } from "../controllers/employee/downloadLoanAcknowledgmentPdf.js";
 import { downloadEmployeeAssetListPdf, downloadMyAssetListPdf } from "../controllers/employee/downloadEmployeeAssetListPdf.js";
@@ -145,6 +146,7 @@ router.get("/me", async (req, res) => {
 // Logged-in employee's own loan / advance / reward / fine totals (home dashboard)
 router.get("/dashboard/my-hr-cards", getMyHrDashboardCards);
 router.get("/dashboard/my-requests", getMyDashboardRequests);
+router.get("/dashboard/my-request-box", getMyRequestBox);
 router.get("/dashboard/my-task-cards", getMyTaskCards);
 router.get("/dashboard/my-asset-cards", getMyAssetDashboardCards);
 router.get("/dashboard/my-asset-list/pdf", downloadMyAssetListPdf);

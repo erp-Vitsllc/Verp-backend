@@ -469,8 +469,8 @@ function toLeaveRows(value, policyMultipliers) {
 function toAnnualRows(value) {
     const rows = Array.isArray(value) ? value : [];
     return rows.slice(0, 80).map((row) => {
-        const startDate = toDateKey(row?.startDate || row?.fromDate);
-        const endDate = toDateKey(row?.endDate || row?.toDate);
+        const startDate = toDateKey(row?.fromDate) || toDateKey(row?.startDate);
+        const endDate = toDateKey(row?.toDate) || toDateKey(row?.endDate);
         const eligible = Math.max(0, Number(row?.eligibleWorkingDays ?? row?.actualDays) || 0);
         const calendarDays = Number(row?.calendarDays) || inclusiveCalendarDays(startDate, endDate);
         return {
@@ -480,7 +480,7 @@ function toAnnualRows(value) {
             endDate,
             fromDate: startDate,
             toDate: endDate,
-            returnToWorkDate: toDateKey(row?.returnToWorkDate),
+            returnToWorkDate: endDate ? addDays(endDate, 1) : toDateKey(row?.returnToWorkDate),
             calendarDays,
             eligibleWorkingDays: eligible,
             actualDays: eligible,
