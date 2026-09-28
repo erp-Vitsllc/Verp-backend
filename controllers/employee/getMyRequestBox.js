@@ -10,6 +10,8 @@ const SERVICE_BOXES = {
     oil: 'Oil Service',
     tyre: 'Tire Change',
     mechanical: 'Mechanical Work',
+    body: 'Body Work',
+    accident: 'Accident Repair',
     carwash: 'Car Wash',
 };
 
@@ -127,6 +129,8 @@ function serviceMatches(box, service) {
     if (box === 'tyre') return type.includes('tyre') || type.includes('tire');
     if (box === 'mechanical') return type.includes('mechanical');
     if (box === 'carwash') return type.includes('wash');
+    if (box === 'accident') return type.includes('accident');
+    if (box === 'body') return type.includes('body') && !type.includes('wash');
     return false;
 }
 
@@ -372,7 +376,7 @@ export async function getMyRequestBox(req, res) {
             return res.status(503).json({ message: 'Database not connected.' });
         }
         const box = text(req.query?.box).toLowerCase();
-        const allowed = new Set(['all', 'oil', 'tyre', 'mechanical', 'carwash', 'leave', 'advance', 'loan', 'salary', 'certificate', 'assets']);
+        const allowed = new Set(['all', 'oil', 'tyre', 'mechanical', 'body', 'accident', 'carwash', 'leave', 'advance', 'loan', 'salary', 'certificate', 'assets']);
         if (!allowed.has(box)) {
             return res.status(400).json({ message: 'Choose a request box.' });
         }

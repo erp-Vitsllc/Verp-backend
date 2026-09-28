@@ -8,10 +8,8 @@ const ANDROID_APP_URL = String(
     process.env.PORTAL_ANDROID_APP_URL || 'https://play.google.com/store/apps/details?id=com.vegadigital.verp',
 ).trim();
 
-// Free text is not delivered unless that person messaged the company number in the last 24 hours.
-// This utility template is what WhatsApp will actually hand to the phone.
-const PORTAL_ACCOUNT_TEMPLATE = 'vega_digital_it_solution';
-
+// WhatsApp rejected this wording as a saved template (it treats password text as the wrong category).
+// The checkbox sends this message directly. Delivery needs a chat opened in the last 24 hours.
 function whatsAppTemplateParam(value, fallback) {
     const text = String(value || '')
         .replace(/[\r\n\t]+/g, ' ')
@@ -31,19 +29,18 @@ export function credentialLinkLines(loginThrough) {
     return lines;
 }
 
-export function buildPortalCredentialsWhatsAppText({ username, password, linkLines = [] } = {}) {
-    const lines = [
+export function buildPortalCredentialsWhatsAppText({ username, password } = {}) {
+    const user = String(username || '').trim();
+    const pass = String(password || '');
+    return [
         'Hi,',
-        'Please find your ERP login details below:',
-        ...linkLines,
-        `Username: ${String(username || '').trim()}`,
-        `Password: ${String(password || '')}`,
-        'Important Security Note:',
-        'This account cannot be used on more than one device at the same time.',
-        'Please keep this message private and do not share it with anyone.',
-        'If you need help, please contact Raseel directly.',
-    ];
-    return lines.join('\n');
+        'Please find your ERP details below:',
+        `${user}       ${pass}`,
+        '⚠️ Important Security Note:',
+        '• This account/password cannot be used to log in on multiple devices at the same time.',
+        '• Please keep your login credentials confidential and do not share them with anyone.',
+        '• If you face any login issues, please contact Raseel directly for assistance.',
+    ].join('\n');
 }
 
 function credentialsSendError(result, keptNote) {
@@ -100,28 +97,18 @@ export async function sendPortalCredentialsWhatsApp({
         : 'The user was still created.';
     const safeUsername = whatsAppTemplateParam(username, 'user');
     const safePassword = whatsAppTemplateParam(password, '-');
-    const accountLine = `${safeUsername}. Password: ${safePassword}`;
-    const { sendTemplateMessage } = await import('../services/whatsappService.js');
-    const result = await sendTemplateMessage(
-        phone,
-        PORTAL_ACCOUNT_TEMPLATE,
-        'en',
-        [
-            {
-                type: 'body',
-                parameters: [
-                    { type: 'text', text: whatsAppTemplateParam(name, 'there') },
-                    { type: 'text', text: accountLine },
-                ],
-            },
-        ],
-        {
-            source: 'auto',
-            actor,
-            employeeId,
-            contactName: String(name || '').trim(),
-        },
-    );
+    const text = buildPortalCredentialsWhatsAppText({
+        username: safeUsername,
+        password: safePassword,
+    });
+    const { sendTextMessage } = await import('../services/whatsappService.js');
+    const result = await sendTextMessage(phone, text, {
+        source: 'auto',
+        actor,
+        employeeId,
+        contactName: String(name || '').trim(),
+        logBody: `ERP login details for ${safeUsername}`,
+    });
 
     if (!result?.success) {
         console.warn('[PortalCredentialsWhatsApp] send failed', employeeId, result?.error || '');

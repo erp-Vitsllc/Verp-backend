@@ -80,8 +80,8 @@ const LEAVE_REQUEST_STATUS_KEYS = new Set([
     'on_leave',
 ]);
 
-/** Employee red-day request: sick or other leave — not auth / unauth. */
-const EMPLOYEE_LEAVE_REQUEST_KEYS = new Set(['sick_leave', 'on_leave']);
+/** Employee red-day request: authorized, sick, other leave, or late arrival. */
+const EMPLOYEE_LEAVE_REQUEST_KEYS = new Set(['sick_leave', 'on_leave', 'authorized_leave', 'late_arrived']);
 
 /** Reportee sets the final day status on approve. */
 const REPORTEE_APPROVE_LEAVE_KEYS = new Set([
@@ -2215,20 +2215,30 @@ export async function requestAttendanceLeave(req, res) {
         const requestedStatusKey = String(req.body?.requestedStatusKey || '').trim();
         const reason = String(req.body?.reason || '').trim();
         const attachmentName = String(req.body?.attachmentName || '').trim();
+        const isLateArrival = requestedStatusKey === 'late_arrived';
+        const needsAttachment = requestedStatusKey === 'sick_leave' || requestedStatusKey === 'on_leave';
+        const requestTimeIn = isLateArrival ? normalizeClockHHmm(req.body?.timeIn) : '';
+        const requestTimeOut = isLateArrival ? normalizeClockHHmm(req.body?.timeOut) : '';
 
         if (!isValidDateKey(date)) {
             return res.status(400).json({ message: 'A valid date (yyyy-MM-dd) is required.' });
         }
         if (!EMPLOYEE_LEAVE_REQUEST_KEYS.has(requestedStatusKey)) {
             return res.status(400).json({
-                message: 'requestedStatusKey must be sick_leave or on_leave.',
+                message: 'Choose authorized leave, sick leave, or late arrival.',
             });
         }
         if (!reason) {
-            return res.status(400).json({ message: 'Description is required for leave requests.' });
+            return res.status(400).json({ message: 'Reason is required.' });
         }
-        if (!attachmentName) {
-            return res.status(400).json({ message: 'Attachment is required for leave requests.' });
+        if (needsAttachment && !attachmentName) {
+            return res.status(400).json({ message: 'A document is required.' });
+        }
+        if (isLateArrival && (!requestTimeIn || !requestTimeOut)) {
+            return res.status(400).json({ message: 'Check-in time and check-out time are required.' });
+        }
+        if (isLateArrival && requestTimeOut <= requestTimeIn) {
+            return res.status(400).json({ message: 'Check-out time must be after check-in time.' });
         }
 
         const todayKey = getDubaiDateKey();
@@ -2276,12 +2286,14 @@ export async function requestAttendanceLeave(req, res) {
             });
         }
 
-        const allowanceError = await checkEmployeeLeaveAllowance(employee, {
-            statusKey: requestedStatusKey,
-            extraDates: [date],
-        });
-        if (allowanceError) {
-            return res.status(400).json({ message: allowanceError });
+        if (!isLateArrival) {
+            const allowanceError = await checkEmployeeLeaveAllowance(employee, {
+                statusKey: requestedStatusKey,
+                extraDates: [date],
+            });
+            if (allowanceError) {
+                return res.status(400).json({ message: allowanceError });
+            }
         }
 
         let resolvedStatusKey = requestedStatusKey;
@@ -2309,8 +2321,11 @@ export async function requestAttendanceLeave(req, res) {
                     ? `${reason} · Sick allowance used`
                     : 'Converted from sick leave after the allowance from last annual leave was used'
                 : reason;
-        record.leaveRequestKind = 'leave';
-        record.attachmentName = attachmentName || record.attachmentName || '';
+        record.leaveRequestKind = isLateArrival ? 'past_late' : 'leave';
+        record.leaveRequestDayPart = '';
+        record.leaveRequestTimeIn = requestTimeIn;
+        record.leaveRequestTimeOut = requestTimeOut;
+        record.attachmentName = attachmentName || (needsAttachment ? '' : record.attachmentName || '');
         record.leaveRequestStatus = 'pending';
         record.leaveRequestedAt = new Date();
         record.leaveDecidedAt = null;
@@ -3058,7 +3073,7 @@ async function syncLeaveDecisionDashboardActions({
         requestType: 'Attendance Leave Request',
     });
 
-    if (isLeaveDashboardAttendanceRow(record)) {
+    if (isLeaveDashboardAttendanceRow(record) || String(record.leaveRequestKind || '') === 'past_late') {
         await syncDashboardAction({
             ...payload,
             requestId: leaveDashboardRequestObjectId(record.leaveRequestGroupId, record._id),
@@ -3124,11 +3139,21 @@ async function applyLeaveDecisionToRecord({
             record.leavePayType = '';
             record.approvalStatus = 'approved';
             if (record.leaveRequestReason) record.reason = record.leaveRequestReason;
-        } else if (kind === 'future_late') {
+        } else if (kind === 'future_late' || kind === 'past_late') {
             record.statusKey = 'late_arrived';
-            record.statusLabel = `Late arrival approved${halfDaySuffix}`;
+            record.statusLabel = kind === 'past_late' ? 'Late Arrival' : `Late arrival approved${halfDaySuffix}`;
             record.leavePayType = '';
             record.approvalStatus = 'approved';
+            if (kind === 'past_late') {
+                const clock = (value) => {
+                    const hhmm = normalizeClockHHmm(value);
+                    return hhmm ? `${hhmm}:00` : '';
+                };
+                const arrived = clock(record.leaveRequestTimeIn);
+                const left = clock(record.leaveRequestTimeOut);
+                if (arrived) record.timeIn = arrived;
+                if (left) record.timeOut = left;
+            }
             if (record.leaveRequestReason) record.reason = record.leaveRequestReason;
         } else if (kind === 'future_early') {
             record.statusKey = 'early_go';
