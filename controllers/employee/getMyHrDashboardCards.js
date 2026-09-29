@@ -2,6 +2,7 @@ import EmployeeBasic from "../../models/EmployeeBasic.js";
 import Loan from "../../models/Loan.js";
 import Reward from "../../models/Reward.js";
 import Fine from "../../models/Fine.js";
+import Payment from "../../models/Payment.js";
 import { resolveEmployeeFinePayableAmount } from "../../utils/finePayableAmount.js";
 import {
     fineIsVisibleToEmployee,
@@ -116,6 +117,67 @@ function collectDocuments(files, fallbackName) {
     return (Array.isArray(files) ? files : [files])
         .map((file) => mapDocument(file, fallbackName))
         .filter(Boolean);
+}
+
+const PAID_PAYMENT_STATUSES = new Set(["Completed", "Paid", "Success", "Approved", "Active"]);
+
+function invoiceDate(value) {
+    const date = new Date(value);
+    if (Number.isNaN(date.getTime())) return "";
+    return date.toLocaleDateString("en-GB", { day: "numeric", month: "short", year: "numeric" });
+}
+
+function paymentFile(attachment) {
+    if (!attachment || typeof attachment !== "object") return { url: "", mimeType: "", name: "" };
+    return {
+        url: String(attachment.url || attachment.data || "").trim(),
+        mimeType: String(attachment.mimeType || "").trim(),
+        name: String(attachment.name || attachment.filename || "").trim(),
+    };
+}
+
+function invoiceDocument(payment) {
+    const status = String(payment?.status || "").trim();
+    if (!PAID_PAYMENT_STATUSES.has(status)) return null;
+    const amount = roundMoney(payment.amount);
+    const when = invoiceDate(payment.paymentDate || payment.createdAt);
+    const code = String(payment.paymentId || "").trim();
+    const file = paymentFile(payment.attachment);
+    if (!file.url) return null;
+    const name = ["Invoice", code || "Payment", when, `AED ${amount.toFixed(2)}`].filter(Boolean).join(" · ");
+    return {
+        name,
+        url: file.url,
+        mimeType: file.mimeType,
+        invoice: {
+            paymentId: code,
+            amount,
+            date: when,
+            status: "Paid",
+            source: String(payment.paymentSource || payment.paymentMode || "").trim(),
+            note: String(payment.description || payment.remarks || "").trim(),
+            fileName: file.name,
+        },
+    };
+}
+
+function paymentsForRecord(payments, { id, code, types, employeeId }) {
+    return (payments || []).filter((payment) => {
+        const type = String(payment.relatedEntityType || "").trim();
+        if (type && !types.includes(type)) return false;
+        const settle = String(payment.settleEmployeeId || "").trim();
+        if (settle && employeeId && settle !== employeeId) return false;
+        const idOk = id && String(payment.relatedEntityId || "") === String(id);
+        const codeOk = code && String(payment.referenceId || "") === String(code);
+        return Boolean(idOk || codeOk);
+    });
+}
+
+function withPaymentInvoices(documents, payments, match) {
+    const invoices = paymentsForRecord(payments, match)
+        .map(invoiceDocument)
+        .filter(Boolean);
+    return [...(documents || []), ...invoices];
 }
 
 function mapLoanItem(item) {
@@ -300,22 +362,87 @@ export const getMyHrDashboardCards = async (req, res) => {
                 .lean(),
         ]);
 
+        const entityIds = [...(loans || []), ...(fines || []), ...(rewards || [])]
+            .map((item) => item._id)
+            .filter(Boolean);
+        const referenceIds = [...(loans || []), ...(fines || []), ...(rewards || [])]
+            .flatMap((item) => [item.loanId, item.fineId, item.rewardId])
+            .map((value) => String(value || "").trim())
+            .filter(Boolean);
+        const paymentQuery = [];
+        if (entityIds.length) paymentQuery.push({ relatedEntityId: { $in: entityIds } });
+        if (referenceIds.length) paymentQuery.push({ referenceId: { $in: referenceIds } });
+        const payments = paymentQuery.length
+            ? await Payment.find({
+                  status: { $in: [...PAID_PAYMENT_STATUSES] },
+                  $or: paymentQuery,
+              })
+                  .select(
+                      "paymentId amount status paymentDate description remarks paymentSource paymentMode relatedEntityType relatedEntityId referenceId settleEmployeeId attachment createdAt",
+                  )
+                  .sort({ paymentDate: 1, createdAt: 1 })
+                  .lean()
+            : [];
+
+        const loanCards = (loans || [])
+            .filter((item) => item.type === "Loan" && loanIsVisibleToEmployee(item))
+            .map((item) => {
+                const card = mapLoanItem(item);
+                card.documents = withPaymentInvoices(card.documents, payments, {
+                    id: item._id,
+                    code: item.loanId,
+                    types: ["Loan", "LoanRepayment"],
+                    employeeId,
+                });
+                return card;
+            });
+        const advanceCards = (loans || [])
+            .filter((item) => item.type === "Advance" && loanIsVisibleToEmployee(item))
+            .map((item) => {
+                const card = mapLoanItem(item);
+                card.documents = withPaymentInvoices(card.documents, payments, {
+                    id: item._id,
+                    code: item.loanId,
+                    types: ["Advance", "AdvanceRepayment"],
+                    employeeId,
+                });
+                return card;
+            });
+        const rewardCards = (rewards || [])
+            .filter((item) => rewardIsVisibleToEmployee(item))
+            .map((item) => {
+                const card = mapRewardItem(item);
+                if (!card) return null;
+                card.documents = withPaymentInvoices(card.documents, payments, {
+                    id: item._id,
+                    code: item.rewardId,
+                    types: ["Reward"],
+                    employeeId,
+                });
+                return card;
+            })
+            .filter(Boolean);
+        const fineCards = (fines || [])
+            .filter((item) => fineIsVisibleToEmployee(item, employeeId))
+            .map((item) => {
+                const card = mapFineItem(item, employeeId);
+                if (!card) return null;
+                card.documents = withPaymentInvoices(card.documents, payments, {
+                    id: item._id,
+                    code: item.fineId,
+                    types: ["Fine"],
+                    employeeId,
+                });
+                return card;
+            })
+            .filter(Boolean);
+
         return res.status(200).json({
             employeeId,
-            loans: (loans || [])
-                .filter((item) => item.type === "Loan" && loanIsVisibleToEmployee(item))
-                .map(mapLoanItem),
-            advances: (loans || [])
-                .filter((item) => item.type === "Advance" && loanIsVisibleToEmployee(item))
-                .map(mapLoanItem),
-            rewards: (rewards || [])
-                .filter((item) => rewardIsVisibleToEmployee(item))
-                .map(mapRewardItem)
-                .filter(Boolean),
-            fines: (fines || [])
-                .filter((item) => fineIsVisibleToEmployee(item, employeeId))
-                .map((item) => mapFineItem(item, employeeId))
-                .filter(Boolean),
+            loans: loanCards,
+            advances: advanceCards,
+            rewards: rewardCards,
+            fines: fineCards,
         });
     } catch (error) {
         console.error("[getMyHrDashboardCards]", error);

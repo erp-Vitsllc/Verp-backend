@@ -8,8 +8,11 @@ const ANDROID_APP_URL = String(
     process.env.PORTAL_ANDROID_APP_URL || 'https://play.google.com/store/apps/details?id=com.vegadigital.verp',
 ).trim();
 
-// WhatsApp rejected this wording as a saved template (it treats password text as the wrong category).
-// The checkbox sends this message directly. Delivery needs a chat opened in the last 24 hours.
+// Newer password templates were rejected (INCORRECT_CATEGORY).
+// Create user and password update use this approved template:
+// Hello {{1}} … existing ERP account {{2}} … If you face any login issues, please contact Raseel directly for assistance.
+const PORTAL_ACCOUNT_TEMPLATE = 'verp_account_notice';
+
 function whatsAppTemplateParam(value, fallback) {
     const text = String(value || '')
         .replace(/[\r\n\t]+/g, ' ')
@@ -95,20 +98,35 @@ export async function sendPortalCredentialsWhatsApp({
     const keptNote = kind === 'reset'
         ? 'The password was still updated.'
         : 'The user was still created.';
+    const safeName = whatsAppTemplateParam(name, 'there');
     const safeUsername = whatsAppTemplateParam(username, 'user');
     const safePassword = whatsAppTemplateParam(password, '-');
-    const text = buildPortalCredentialsWhatsAppText({
-        username: safeUsername,
-        password: safePassword,
-    });
-    const { sendTextMessage } = await import('../services/whatsappService.js');
-    const result = await sendTextMessage(phone, text, {
-        source: 'auto',
-        actor,
-        employeeId,
-        contactName: String(name || '').trim(),
-        logBody: `ERP login details for ${safeUsername}`,
-    });
+    const accountLine = whatsAppTemplateParam(
+        `${safeUsername}. Password: ${safePassword}`,
+        'user',
+    );
+    const { sendTemplateMessage } = await import('../services/whatsappService.js');
+    const result = await sendTemplateMessage(
+        phone,
+        PORTAL_ACCOUNT_TEMPLATE,
+        'en',
+        [
+            {
+                type: 'body',
+                parameters: [
+                    { type: 'text', text: safeName },
+                    { type: 'text', text: accountLine },
+                ],
+            },
+        ],
+        {
+            source: 'auto',
+            actor,
+            employeeId,
+            contactName: String(name || '').trim(),
+            logBody: `ERP login details for ${safeUsername}`,
+        },
+    );
 
     if (!result?.success) {
         console.warn('[PortalCredentialsWhatsApp] send failed', employeeId, result?.error || '');

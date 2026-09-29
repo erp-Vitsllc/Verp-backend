@@ -723,7 +723,9 @@ export async function sendTemplateMessage(to, templateName, languageCode, compon
         const templateText = await fetchTemplateBodyText(name);
         await logOutboundWhatsAppMessage({
             phone,
-            body: templateMessagePreview(name, components, templateText),
+            body: extras.logBody != null
+                ? String(extras.logBody)
+                : templateMessagePreview(name, components, templateText),
             messageType: 'template',
             source: extras.source || 'template',
             templateName: name,

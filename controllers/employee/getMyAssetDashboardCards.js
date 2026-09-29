@@ -1,6 +1,7 @@
 import mongoose from 'mongoose';
 import EmployeeBasic from '../../models/EmployeeBasic.js';
 import AssetItem from '../../models/AssetItem.js';
+import AssetHistory from '../../models/AssetHistory.js';
 import UtilityEntry from '../../models/UtilityEntry.js';
 import VehicleFuelBill from '../../models/VehicleFuelBill.js';
 import UtilityBillPayment from '../../models/UtilityBillPayment.js';
@@ -93,10 +94,39 @@ function mapVehicleItem(item, fuel) {
         petrolUsage: roundMoney(fuel?.amountUsed),
         fuelLimit: limit,
         status: item.status || 'Assigned',
-        documents: mapDocuments(item),
+        documents: [],
         date: item.assignedDate || item.updatedAt || item.createdAt || null,
         href: `/HRM/Asset/Vehicle/details/${item._id}`,
     };
+}
+
+async function attachVehicleHandoverDocuments(vehicles) {
+    const ids = vehicles.map((item) => item.id).filter((id) => mongoose.Types.ObjectId.isValid(id));
+    if (!ids.length) return;
+    const rows = await AssetHistory.find({
+        assetId: { $in: ids },
+        action: { $in: ['Assigned', 'Accepted', 'Transfer', 'Returned', 'Unassigned', 'ControllerHandover'] },
+        'details._id': { $exists: true },
+    })
+        .select('_id assetId date')
+        .sort({ date: -1 })
+        .lean();
+    const latest = new Map();
+    rows.forEach((row) => {
+        const key = String(row.assetId);
+        if (!latest.has(key)) latest.set(key, row);
+    });
+    vehicles.forEach((vehicle) => {
+        const row = latest.get(String(vehicle.id));
+        if (!row?._id) return;
+        vehicle.documents = [
+            {
+                name: 'Vehicle handover',
+                url: `/api/AssetItem/vehicle-handover-pdf/${vehicle.id}?historyId=${row._id}`,
+                mimeType: 'application/pdf',
+            },
+        ];
+    });
 }
 
 function utilityProvider(entry) {
@@ -235,6 +265,7 @@ export const getMyAssetDashboardCards = async (req, res) => {
             if (isVehicleAsset(item)) vehicles.push(mapVehicleItem(item, fuelByVehicle.get(String(item._id))));
             else tools.push(mapToolItem(item));
         });
+        await attachVehicleHandoverDocuments(vehicles);
 
         return res.status(200).json({
             tools,

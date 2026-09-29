@@ -867,7 +867,18 @@ export const getUserActivityStats = async (req, res) => {
             // Pending Loans
             Loan.find({
                 $or: [
-                    { submittedTo: { $in: relevantIds }, status: 'Pending' },
+                    {
+                        submittedTo: { $in: relevantIds },
+                        status: {
+                            $in: [
+                                'Pending',
+                                'Pending HR',
+                                'Pending Accounts',
+                                'Pending Authorization',
+                                'Pending Payment to Employee',
+                            ],
+                        },
+                    },
                     // Accounts assignee after Management — status is no longer plain "Pending"
                     {
                         submittedTo: { $in: relevantIds },
@@ -878,7 +889,14 @@ export const getUserActivityStats = async (req, res) => {
                         ],
                     },
                     { submittedTo: null, employeeObjectId: { $in: relevantIds }, status: 'Pending' },
-                    ...(isHR ? [{ approvalStatus: 'Pending HR', status: 'Pending' }] : []),
+                    ...(isHR
+                        ? [
+                              {
+                                  approvalStatus: { $in: ['Pending HR', 'Pending'] },
+                                  status: { $in: ['Pending HR', 'Pending'] },
+                              },
+                          ]
+                        : []),
                     ...(isAccounts
                         ? [
                               { approvalStatus: 'Pending Accounts', status: 'Pending' },
