@@ -584,10 +584,14 @@ export async function createTireChangeEmployeeFines(asset, service, reqUser) {
         if (pendingStep?.assignedTo) {
             await syncDashboardAction({
                 requestId: first._id,
-                requestType: 'Group Fine Request',
+                requestType: fineParties.filter((party) => !party.isCompany).length > 1
+                    ? 'Group Fine Request'
+                    : 'Fine',
                 assignedTo: pendingStep.assignedTo,
                 status: 'Pending',
-                subjectName: `Group Fine - ${created.length} ${created.length === 1 ? 'party' : 'parties'}`,
+                subjectName: fineParties.filter((party) => !party.isCompany).length > 1
+                    ? `Group Fine - ${fineParties.filter((party) => !party.isCompany).length} parties`
+                    : (first.assignedEmployees?.[0]?.employeeName || 'Fine'),
                 requestedByName: reqUser?.name || 'System',
                 extra1: 'Vehicle Fine',
                 extra2: `Tire change liability — AED ${created.reduce((s, f) => s + Number(f.fineAmount || 0), 0)}`,

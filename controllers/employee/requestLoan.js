@@ -156,8 +156,11 @@ export const requestLoan = async (req, res) => {
             const existingMessage = isApproved
                 ? `This employee already has an Approved ${existingLoan.type} (${existingLoan.loanId}). A new request cannot be submitted while a loan is active.`
                 : `This employee already has a ${existingLoan.type} application in progress (${existingLoan.loanId} - ${existingLoan.status}).`;
-            if (!confirmContinue) {
-                return res.status(400).json(validationBlock(withChecks({ message: existingMessage, canContinue: true })));
+            if (req.selfServiceLoan || !confirmContinue) {
+                return res.status(400).json(validationBlock(withChecks({
+                    message: existingMessage,
+                    canContinue: !req.selfServiceLoan,
+                })));
             }
             continuedNotes.push(existingMessage);
         }
@@ -176,6 +179,20 @@ export const requestLoan = async (req, res) => {
 
         // --- VALIDATION: Salary Checks ---
         const salaryRecord = await EmployeeSalary.findOne({ employeeId: employeeBasic.employeeId });
+
+        if (req.selfServiceLoan) {
+            const salary = Number(salaryRecord?.monthlySalary) || Number(salaryRecord?.totalSalary) || 0;
+            const advanceRequest = Boolean(type && type.includes('Advance'));
+            const maxAmount = advanceRequest ? salary / 2 : salary * 3;
+            if (Number(amount) > maxAmount) {
+                const formatted = Number(maxAmount).toLocaleString(undefined, { maximumFractionDigits: 2 });
+                const label = advanceRequest ? '50% of Salary' : '3x Salary';
+                return res.status(400).json(validationBlock(withChecks({
+                    message: `Maximum allowed amount is ${formatted} (${label})`,
+                    canContinue: false,
+                })));
+            }
+        }
 
         if (type && type.includes('Advance')) {
             // Rule: Advance Amount <= Monthly Salary
@@ -447,11 +464,11 @@ export const createSelfLoanDraft = async (req, res) => {
         }
 
         const duration = Number(req.body?.duration);
-        const maxMonths = isAdvance ? 3 : 6;
+        const maxMonths = isAdvance ? 1 : 6;
         if (!Number.isInteger(duration) || duration < 1 || duration > maxMonths) {
             return res.status(400).json(validationBlock({
                 message: isAdvance
-                    ? 'Deduction months must be from 1 to 3.'
+                    ? 'Advance deduction is 1 month.'
                     : 'Deduction months must be from 1 to 6.',
             }));
         }

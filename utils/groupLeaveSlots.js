@@ -7,8 +7,8 @@ export function readGroupLeavePercent(value) {
 
 /**
  * People allowed on annual leave in a group.
- * floor(headcount × % / 100), except a positive fraction below 1 still allows 1.
- * 10 staff × 1% → 1; 1.5 / 1.6 → 1; 2.0 or more → 2.
+ * ceil(headcount × % / 100). A positive fraction below 1 still allows 1.
+ * 12 staff × 20% → 3. 10 staff × 20% → 2. 10 staff × 1% → 1.
  */
 export function floorGroupLeaveSlots(employeeCount, percent) {
     const count = Math.max(0, Number(employeeCount) || 0);
@@ -17,5 +17,5 @@ export function floorGroupLeaveSlots(employeeCount, percent) {
     const raw = (count * pct) / 100;
     if (raw <= 0) return 0;
     if (raw < 1) return 1;
-    return Math.floor(raw);
+    return Math.ceil(raw);
 }

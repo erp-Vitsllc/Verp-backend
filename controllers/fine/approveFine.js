@@ -4,7 +4,12 @@ import { dispatchFineApprovedNotification } from "../../utils/dispatchFineApprov
 import { getManagementHOD } from "../../utils/getManagementHOD.js";
 import { sendHODAuthorizationEmail } from "../../utils/sendHODAuthorizationEmail.js";
 import { isValidStorageUrl } from "../../utils/validationHelper.js";
-import { canUserActOnFineStageAsync, fineStillNeedsApprovalInbox } from "../../utils/fineStageAuth.js";
+import {
+    canUserActOnFineStageAsync,
+    closePendingFineDashboardRows,
+    fineInboxIsGroup,
+    fineStillNeedsApprovalInbox,
+} from "../../utils/fineStageAuth.js";
 import { runAfterResponse } from "../../utils/runAfterResponse.js";
 import {
     emailAccountsPaymentRequest,
@@ -398,11 +403,12 @@ export const approveFine = async (req, res) => {
             const targetEmpId = fine.assignedEmployees?.[0]?.employeeId || null;
             const subjectEmp = targetEmpId ? await EmployeeBasic.findOne({ employeeId: targetEmpId }) : null;
             
-            const isGroup = fines.length > 1;
+            const isGroup = fineInboxIsGroup(fines);
             const reqType = isGroup ? 'Group Fine Request' : 'Fine';
             const subjectName = isGroup ? `Group Fine - ${fines.length} Employees` : undefined;
 
             const isFinalStatus = fine.fineStatus === 'Approved' || fine.fineStatus === 'Rejected';
+            await closePendingFineDashboardRows(fine._id);
             // Clear current stage Pending immediately (HR/Accounts), not only on final Management.
             await syncDashboardAction({
                 requestId: fine._id,

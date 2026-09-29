@@ -7,6 +7,32 @@ function employeeDisplayName(employee) {
     return [employee?.firstName, employee?.lastName].filter(Boolean).join(' ').trim();
 }
 
+function approvalPdfUrl(fine) {
+    const rows = Array.isArray(fine?.approvalAttachments) ? fine.approvalAttachments : [];
+    const match = [...rows].reverse().find((row) => {
+        const url = String(row?.url || '').trim();
+        if (!url) return false;
+        const source = String(row?.source || '');
+        const mime = String(row?.mimeType || '');
+        return source === 'approved-form' || source === 'asset-loss-report' || mime.includes('pdf');
+    });
+    return String(match?.url || '').trim();
+}
+
+async function finePdfAlreadySent(employeeId, caption) {
+    const WhatsAppMessage = (await import('../models/WhatsAppMessage.js')).default;
+    const existing = await WhatsAppMessage.findOne({
+        employeeId: String(employeeId || '').trim(),
+        direction: 'out',
+        messageType: 'document',
+        body: caption,
+        status: { $in: ['queued', 'sent', 'delivered', 'read'] },
+    })
+        .select('_id')
+        .lean();
+    return Boolean(existing);
+}
+
 /**
  * WhatsApp only when Fine approved is checked, the employee has no company email,
  * and they have a WhatsApp number. Company-email delivery stays on the email path.
@@ -16,6 +42,7 @@ export async function sendFineApprovedWhatsApp({
     employee,
     pdfBuffer,
     filename = '',
+    allowResend = false,
 } = {}) {
     if (!employee?.employeeId) return { sent: false, reason: 'no_employee' };
     const channels = await getEventChannels(FINE_APPROVED_EVENT);
@@ -30,6 +57,9 @@ export async function sendFineApprovedWhatsApp({
     const safeName = String(filename || '').trim()
         || `Fine_Approved_${fine?.fineId || fine?._id || 'approved'}.pdf`;
     const caption = `Your fine ${fine?.fineId || ''} has been approved. Please find the PDF attached.`.trim();
+    if (!allowResend && await finePdfAlreadySent(employee.employeeId, caption)) {
+        return { sent: false, reason: 'already_sent' };
+    }
     const { sendDocumentMessage } = await import('../services/whatsappService.js');
     const result = await sendDocumentMessage(
         phone,
@@ -40,6 +70,7 @@ export async function sendFineApprovedWhatsApp({
             skipPaidChannelCheck: true,
             employeeId: employee.employeeId,
             contactName: employeeDisplayName(employee),
+            mediaUrl: approvalPdfUrl(fine),
         },
     );
     if (!result?.success) {

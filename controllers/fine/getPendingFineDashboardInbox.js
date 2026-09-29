@@ -3,9 +3,14 @@ import Fine from '../../models/Fine.js';
 import { purgeOrphanDashboardActionRows } from '../../utils/clearDashboardActionsForRequest.js';
 import {
     backfillFineApprovalInboxForViewer,
+    fineInboxIsGroup,
+    fineNeedsAccountsPaymentInbox,
+    fineStillNeedsApprovalInbox,
     fineStillNeedsInbox,
     identitiesMatch,
+    realFineEmployeeIds,
     repairSkippedFineAccountsStage,
+    resolveCurrentStageAssignee,
 } from '../../utils/fineStageAuth.js';
 import { openAccountsPaymentInbox } from '../../utils/fineAccountsPaymentFlow.js';
 import { getDepartmentHOD } from '../../utils/getDepartmentHOD.js';
@@ -16,6 +21,78 @@ import {
 import { listPendingHubInboxItems } from '../../utils/employeeHubRequestInbox.js';
 
 const FINE_INBOX_TYPES = ['Fine', 'Group Fine Request'];
+
+function viewerIdentity(ctx) {
+    return {
+        _id: ctx.employee?._id || ctx.portalUser?._id,
+        employeeId: ctx.employeeIdCode || ctx.portalUser?.employeeId,
+        employeeObjectId: ctx.employee?._id || ctx.portalUser?.employeeObjectId,
+    };
+}
+
+function idInViewer(ctx, value) {
+    const id = value?._id || value;
+    if (!id) return false;
+    const key = String(id);
+    if ((ctx.relevantIds || []).some((item) => String(item) === key)) return true;
+    return identitiesMatch(viewerIdentity(ctx), { _id: id, employeeId: value?.employeeId });
+}
+
+function fineBaseId(fineId = '') {
+    const parts = String(fineId).split('-');
+    if (parts.length > 3) return parts.slice(0, 3).join('-');
+    return String(fineId || '');
+}
+
+/** Letter suffix marks sibling rows (-A/-B). Company on its own row is not a second person. */
+async function groupBasesWithMultiplePeople(fines = []) {
+    const bases = new Set();
+    for (const fine of fines) {
+        const fineId = String(fine?.fineId || '');
+        if (/-[A-Z]$/.test(fineId)) bases.add(fineBaseId(fineId));
+    }
+    const grouped = new Set();
+    for (const base of bases) {
+        const escaped = base.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        const rows = await Fine.find({ fineId: new RegExp(`^${escaped}-[A-Z]$`) })
+            .select('assignedEmployees')
+            .lean();
+        if (realFineEmployeeIds(rows).length > 1) grouped.add(base);
+    }
+    return grouped;
+}
+
+async function viewerCanActOnFineNotification(ctx, fine, accountsHod) {
+    if (!fine) return false;
+    const viewer = viewerIdentity(ctx);
+
+    if (fineNeedsAccountsPaymentInbox(fine)) {
+        return identitiesMatch(viewer, {
+            _id: accountsHod?._id,
+            employeeId: accountsHod?.employeeId,
+        });
+    }
+
+    if (!fineStillNeedsApprovalInbox(fine)) return false;
+
+    const pending = (fine.workflow || []).find((step) => step?.status === 'Pending');
+    if (pending?.assignedTo && idInViewer(ctx, pending.assignedTo)) return true;
+
+    const assignee = await resolveCurrentStageAssignee(fine);
+    if (!assignee) return false;
+    if (ctx.employeeIdCode && assignee.employeeId && String(assignee.employeeId) === String(ctx.employeeIdCode)) {
+        return true;
+    }
+    return (
+        idInViewer(ctx, assignee.userId) ||
+        idInViewer(ctx, assignee.employeeObjectId) ||
+        identitiesMatch(viewer, {
+            _id: assignee.userId || assignee.employeeObjectId,
+            employeeId: assignee.employeeId,
+            employeeObjectId: assignee.employeeObjectId,
+        })
+    );
+}
 
 /**
  * Pending fine dashboard actions for the logged-in user, or for ?targetUserId= (team view).
@@ -141,18 +218,20 @@ export const getPendingFineDashboardInbox = async (req, res) => {
         const fineIds = [...new Set(rows.map((r) => String(r.requestId)).filter(Boolean))];
         const fines = fineIds.length
             ? await Fine.find({ _id: { $in: fineIds } })
-                  .select('_id fineId fineType fineStatus assignedEmployees category workflow accountsPaymentPath zohoBillId zohoBillNumber vendorBillStatus')
+                  .select('_id fineId fineType fineStatus assignedEmployees category workflow submittedTo accountsPaymentPath zohoBillId zohoBillNumber vendorBillStatus')
                   .lean()
             : [];
         const fineById = Object.fromEntries(fines.map((f) => [String(f._id), f]));
         const liveRows = await purgeOrphanDashboardActionRows(rows, fineById);
 
+        const accountsHod = await getDepartmentHOD('finance');
         const idsToDismiss = [];
         const seenRequestIds = new Set();
         const actionableRows = [];
         for (const da of liveRows) {
             const fine = fineById[String(da.requestId)];
-            if (!fineStillNeedsInbox(fine)) {
+            const viewerCanAct = await viewerCanActOnFineNotification(ctx, fine, accountsHod);
+            if (!fineStillNeedsInbox(fine) || !viewerCanAct) {
                 if (da._id) idsToDismiss.push(da._id);
                 continue;
             }
@@ -184,17 +263,27 @@ export const getPendingFineDashboardInbox = async (req, res) => {
             return fid;
         };
 
+        const groupedBases = await groupBasesWithMultiplePeople(
+            actionableRows.map((da) => fineById[String(da.requestId)]).filter(Boolean),
+        );
+
         const items = actionableRows.map((da) => {
             const fine = fineById[String(da.requestId)];
-            const isGroup = da.requestType === 'Group Fine Request';
+            const isGroup =
+                fineInboxIsGroup(fine) || groupedBases.has(fineBaseId(fine?.fineId));
+            const employeeName = (fine?.assignedEmployees || []).find((row) => {
+                const id = String(row?.employeeId || '').trim();
+                return id && id !== 'VEGA-HR-0000' && id !== 'VEGA_INTERNAL';
+            })?.employeeName;
+            const storedName = String(da.subjectName || '').trim();
             const subjectLabel =
-                da.subjectName ||
-                fine?.assignedEmployees?.[0]?.employeeName ||
+                (!isGroup && /^Group Fine/i.test(storedName) ? employeeName : storedName) ||
+                employeeName ||
                 'Fine request';
 
             return {
                 dashboardActionId: da._id,
-                requestType: da.requestType,
+                requestType: isGroup ? 'Group Fine Request' : 'Fine',
                 requestedDate: da.requestedDate,
                 requestedByName: da.requestedByName,
                 subjectName: subjectLabel,

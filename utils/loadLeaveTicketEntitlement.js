@@ -14,6 +14,7 @@ import {
     calculateHistoricalEligibility,
     consolidateCountOnlyLeaveRecords,
     historicalPeriod,
+    addDays,
     inclusiveCalendarDays,
     isDateKey,
     isSalaryProcessingMonthReached,
@@ -225,6 +226,36 @@ async function calcWorkingDays({ from, to, staffType }) {
         cursor.setDate(cursor.getDate() + 1);
     }
     return { workingDays, weeklyOffs, holidays: holidayHits, calendarDays, workingDateKeys };
+}
+
+/** Calendar date when `workingDaysNeeded` more working days have been completed, starting at `from`. */
+export async function projectEligibleWorkingDate({ from, workingDaysNeeded, staffType }) {
+    const need = Math.max(0, Math.ceil(Number(workingDaysNeeded) || 0));
+    if (!isDateKey(from) || need <= 0) return '';
+    let cursor = from;
+    let left = need;
+    for (let guard = 0; guard < 24 && left > 0; guard += 1) {
+        const span = Math.min(400, Math.max(left * 2 + 14, 45));
+        const end = addDays(cursor, span - 1);
+        if (!isDateKey(end)) break;
+        const result = await calcWorkingDays({ from: cursor, to: end, staffType });
+        const keys = result.workingDateKeys || [];
+        if (keys.length >= left) return keys[left - 1];
+        left -= keys.length;
+        const next = addDays(end, 1);
+        if (!isDateKey(next) || next <= cursor) break;
+        cursor = next;
+    }
+    return '';
+}
+
+export async function dateEmployeeReachesWorkingDays({ workingDaysNeeded, staffType }) {
+    const tomorrow = addDays(dubaiDateKey(), 1);
+    return projectEligibleWorkingDate({
+        from: tomorrow,
+        workingDaysNeeded,
+        staffType,
+    });
 }
 
 /**

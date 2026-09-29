@@ -67,6 +67,48 @@ export function fineStillNeedsInbox(fine) {
     return fineStillNeedsApprovalInbox(fine) || fineNeedsAccountsPaymentInbox(fine);
 }
 
+const COMPANY_FINE_EMPLOYEE_IDS = new Set(['VEGA-HR-0000', 'VEGA_INTERNAL']);
+
+export function realFineEmployeeIds(fines = []) {
+    const ids = new Set();
+    const list = Array.isArray(fines) ? fines : [fines];
+    for (const fine of list) {
+        for (const row of fine?.assignedEmployees || []) {
+            const id = String(row?.employeeId || '').trim();
+            if (id && !COMPANY_FINE_EMPLOYEE_IDS.has(id)) ids.add(id);
+        }
+    }
+    return [...ids];
+}
+
+/** One employee is a Fine. Company share does not make it a group. */
+export function fineInboxIsGroup(fines = []) {
+    return realFineEmployeeIds(fines).length > 1;
+}
+
+/**
+ * Stage changes used to clear only requestType Fine.
+ * Vehicle fines are stored as Group Fine Request even for one person, so that row never moved.
+ */
+export async function closePendingFineDashboardRows(requestId) {
+    if (!requestId) return;
+    const DashboardAction = (await import('../models/DashboardAction.js')).default;
+    await DashboardAction.updateMany(
+        {
+            requestId,
+            status: 'Pending',
+            requestType: { $in: ['Fine', 'Group Fine Request'] },
+        },
+        {
+            $set: {
+                status: 'Approved',
+                actionedDate: new Date(),
+                comment: 'Moved to the next fine stage',
+            },
+        },
+    );
+}
+
 export function getPendingWorkflowStep(workflow = [], expectedRole = null) {
     const list = Array.isArray(workflow) ? workflow : [];
     if (expectedRole) {

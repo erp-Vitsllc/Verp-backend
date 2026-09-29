@@ -4,7 +4,11 @@ import { getManagementHOD } from './getManagementHOD.js';
 import { syncDashboardAction } from './syncDashboard.js';
 import { sendFineAccountsActionEmail } from './sendFineAccountsActionEmail.js';
 import { addEmployeeEmailToSet } from './resolveEmployeeEmail.js';
-import { fineAccountsSettlementDone } from './fineStageAuth.js';
+import {
+    closePendingFineDashboardRows,
+    fineAccountsSettlementDone,
+    fineInboxIsGroup,
+} from './fineStageAuth.js';
 
 function applicantEmployeeId(fine) {
     const real = (fine.assignedEmployees || []).find(
@@ -30,7 +34,7 @@ export async function resolveFineManagementActor(fine) {
 }
 
 function inboxMeta(fine, fines = []) {
-    const group = (fines || []).length > 1;
+    const group = fineInboxIsGroup(fines?.length ? fines : [fine]);
     return {
         requestId: fine._id,
         requestType: group ? 'Group Fine Request' : 'Fine',
@@ -50,8 +54,11 @@ export async function openAccountsPaymentInbox(fine, fines = []) {
         return { accountsHOD, accountsUser };
     }
     if (fineAccountsSettlementDone(fine)) {
+        await closePendingFineDashboardRows(fine._id);
         return { accountsHOD, accountsUser };
     }
+
+    await closePendingFineDashboardRows(fine._id);
 
     const EmployeeBasic = (await import('../models/EmployeeBasic.js')).default;
     const realEmp = (fine.assignedEmployees || []).find(
@@ -72,6 +79,7 @@ export async function openAccountsPaymentInbox(fine, fines = []) {
 }
 
 export async function closeAccountsPaymentInbox(fine, fines = []) {
+    await closePendingFineDashboardRows(fine?._id);
     await syncDashboardAction({
         ...inboxMeta(fine, fines),
         assignedTo: null,

@@ -36,7 +36,7 @@ import {
     notifyFlowchartHrOfIneligibleAnnualLeave,
 } from '../../utils/notifyLeaveDashboardRequest.js';
 import { isRequestUserDesignatedFlowchartHr } from '../../utils/isDesignatedFlowchartHr.js';
-import { loadCurrentLeaveCycleEligibility } from '../../utils/loadLeaveTicketEntitlement.js';
+import { dateEmployeeReachesWorkingDays, loadCurrentLeaveCycleEligibility } from '../../utils/loadLeaveTicketEntitlement.js';
 import { loadGroupAnnualLeaveCap } from '../../utils/groupAnnualLeaveCap.js';
 
 const LEAVE_TRACK_KEYS = [
@@ -314,6 +314,12 @@ async function resolveActorEmployee(req) {
     return null;
 }
 
+function slashDate(value) {
+    const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(value || '').trim());
+    if (!match) return '';
+    return `${match[2]}/${match[3]}/${match[1]}`;
+}
+
 function serializeAnnualLeaveEligibility(cycle = {}) {
     const requiredDays = Math.max(
         0,
@@ -363,8 +369,22 @@ export async function loadAnnualLeaveEligibilityForEmployee(employee, { from = '
         attendanceRecords,
     });
     const serialized = serializeAnnualLeaveEligibility(cycle);
+    let eligibleOn = '';
+    if (serialized.notEligible) {
+        const need = Math.max(0, Math.ceil(serialized.requiredDays - serialized.eligibleDays));
+        try {
+            eligibleOn = await dateEmployeeReachesWorkingDays({
+                workingDaysNeeded: need,
+                staffType: employee.staffType,
+            });
+        } catch (error) {
+            console.error('[annual eligibility date]', error);
+            eligibleOn = '';
+        }
+    }
     return {
         ...serialized,
+        eligibleOn,
         cycleNotEligible: serialized.notEligible,
         groupCap,
         notEligible: serialized.notEligible || Boolean(groupCap?.over),
@@ -1210,6 +1230,10 @@ export async function applyLeaveRange(req, res) {
                 lines.push(
                     `You cannot apply for annual leave. You are not eligible. ${done} of ${required} days are completed from the previous annual leave or joining date to this leave start.`,
                 );
+                const eligibleOn = slashDate(annualEligibility.eligibleOn);
+                if (eligibleOn) {
+                    lines.push(`${eligibleOn} you will be ${required}. Look for that date or contact your HOD.`);
+                }
             }
             if (annualEligibility.groupCap.message) lines.push(annualEligibility.groupCap.message);
             const blockMessage = lines.join(' ') || annualEligibility.groupCap.message;

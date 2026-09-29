@@ -7,14 +7,15 @@ describe('floorGroupLeaveSlots', () => {
         assert.equal(floorGroupLeaveSlots(10, 1), 1);
     });
 
-    it('keeps 1.5 and 1.6 as 1', () => {
-        assert.equal(floorGroupLeaveSlots(10, 15), 1);
-        assert.equal(floorGroupLeaveSlots(10, 16), 1);
+    it('rounds a fraction up', () => {
+        assert.equal(floorGroupLeaveSlots(10, 15), 2);
+        assert.equal(floorGroupLeaveSlots(10, 16), 2);
+        assert.equal(floorGroupLeaveSlots(12, 20), 3);
     });
 
-    it('uses 2 once the raw count reaches or crosses 2', () => {
+    it('keeps a whole number as that number', () => {
         assert.equal(floorGroupLeaveSlots(10, 20), 2);
-        assert.equal(floorGroupLeaveSlots(10, 29), 2);
+        assert.equal(floorGroupLeaveSlots(10, 29), 3);
         assert.equal(floorGroupLeaveSlots(10, 30), 3);
     });
 

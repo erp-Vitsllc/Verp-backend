@@ -919,7 +919,10 @@ export const updateFine = async (req, res) => {
                     '../../utils/dispatchFineApprovedNotification.js'
                 );
                 const allAssigned = siblings.flatMap((f) => f.assignedEmployees);
-                await dispatchFineApprovedNotification(primary, allAssigned, reqSnapshot);
+                const pdfChanged = scheduleChanges.some(Boolean) || regenTrigger === 'accessory-edit';
+                await dispatchFineApprovedNotification(primary, allAssigned, reqSnapshot, {
+                    resendWhatsApp: pdfChanged,
+                });
                 console.log(`[UpdateFine] Updated confirmed email sent for fine ${primary.fineId}`);
             });
         }

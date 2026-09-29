@@ -104,11 +104,12 @@ function withHodNote(message) {
     return `${text} For more information, please contact your HOD.`;
 }
 
-function groupCapMessage(suggestedStart) {
+function groupCapMessage({ suggestedStart, employeeCount, maxPercent, maxAllowed }) {
     const available = formatLeaveDate(suggestedStart);
-    const body = available
-        ? `Other employees in your department also requested this leave, so you cannot take this date. ${available} is available now.`
+    const limit = maxPercent != null
+        ? `Your group has ${employeeCount} employees. ${maxPercent}% allows a maximum of ${maxAllowed}. That maximum is already requested, so you cannot take this date.`
         : 'Other employees in your department also requested this leave, so you cannot take this date.';
+    const body = available ? `${limit} ${available} is available now.` : limit;
     return withHodNote(body);
 }
 
@@ -259,6 +260,8 @@ export async function loadGroupAnnualLeaveCap({
         maxAllowed,
         taken,
         suggestedStart,
-        message: over ? groupCapMessage(suggestedStart) : '',
+        message: over
+            ? groupCapMessage({ suggestedStart, employeeCount, maxPercent, maxAllowed })
+            : '',
     };
 }

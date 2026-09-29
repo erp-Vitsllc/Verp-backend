@@ -548,6 +548,8 @@ function publicMessage(doc) {
         status: row.status || '',
         messageType: row.messageType || 'text',
         body,
+        mediaFileName: row.mediaFileName || '',
+        mediaUrl: row.mediaUrl || '',
         templateName: row.templateName || '',
         fromPhone: row.fromPhone || '',
         toPhone: row.toPhone || '',

@@ -24,6 +24,8 @@ const whatsAppMessageSchema = new mongoose.Schema(
         },
         messageType: { type: String, default: 'text', trim: true },
         body: { type: String, default: '' },
+        mediaFileName: { type: String, default: '', trim: true },
+        mediaUrl: { type: String, default: '', trim: true },
         templateName: { type: String, default: '', trim: true },
         fromPhone: { type: String, default: '', trim: true },
         toPhone: { type: String, default: '', trim: true },

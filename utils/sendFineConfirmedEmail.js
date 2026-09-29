@@ -1,7 +1,6 @@
 import nodemailer from 'nodemailer';
-import { resolveFrontendBaseUrl } from './resolveFrontendBaseUrl.js';
 import EmployeeBasic from '../models/EmployeeBasic.js';
-import axios from 'axios';
+import { resolveFrontendBaseUrl } from './resolveFrontendBaseUrl.js';
 import { resolveEmployeeEmail, addEmployeeEmailToSet, getFallbackEmailNote } from './resolveEmployeeEmail.js';
 import { buildFineFormSummary } from './buildFineFormSummary.js';
 import { buildFineConfirmedEmailHtml } from './buildFineConfirmedEmailHtml.js';
@@ -9,50 +8,35 @@ import { generateFineApprovedReportPdfBuffer } from './generateFineApprovedRepor
 import { buildAssetLossFineEmailFields, reportPdfFileName, reportTitleForFine } from './buildAssetLossFineEmailFields.js';
 import { isCompanyFineParty } from './fineGroupClassification.js';
 import { resolveCompanyFineAdminRecipient } from './resolveCompanyFineAdminRecipient.js';
+import { downloadS3ObjectBytes } from './s3Upload.js';
 
-/**
- * Sends a confirmation email to assigned employees when a fine is fully approved.
- * TO: each assigned employee; CC: all other assigned employees + HR + Admin (+ stakeholders).
- * Email body is the fine report (type title, deduction details, discount as amount).
- *
- * @param {object} [options]
- * @param {Array} [options.ccAssignedEmployees] Extra assignees to CC (e.g. garage bill group parties).
- */
-async function pushStoredFileAttachment(sharedAttachments, seen, stored) {
-    if (!stored || !(stored.url || stored.data || stored.base64)) return;
-    const key = String(stored.publicId || stored.url || stored.name || '').trim();
-    if (!key || seen.has(key)) return;
-    seen.add(key);
+async function pushStoredFileAttachment(attachments, seen, stored) {
+    if (!stored || typeof stored !== 'object') return;
+    const dedupeKey = String(stored.publicId || stored.url || stored.name || '').trim();
+    if (!dedupeKey || seen.has(dedupeKey)) return;
+    seen.add(dedupeKey);
 
-    try {
-        let buffer = null;
-        const filename = stored.name || `Attachment-${key}`;
-        const contentType = stored.mimeType || 'application/octet-stream';
-
-        if (stored.url) {
-            const response = await axios.get(stored.url, { responseType: 'arraybuffer' });
-            buffer = Buffer.from(response.data);
-        } else {
-            let base64Data = stored.data || stored.base64 || '';
-            if (base64Data.includes(',')) base64Data = base64Data.split(',')[1];
-            if (base64Data) buffer = Buffer.from(base64Data, 'base64');
-        }
-
-        if (buffer?.length > 0) {
-            sharedAttachments.push({ filename, content: buffer, contentType });
-        }
-    } catch (attachErr) {
-        console.warn('[FineConfirmedEmail] Could not attach file:', attachErr.message);
+    let content = null;
+    const inline = stored.data || stored.base64;
+    if (inline) {
+        const raw = String(inline);
+        const base64 = raw.includes(',') ? raw.split(',')[1] : raw;
+        content = Buffer.from(base64, 'base64');
+    } else if (stored.publicId || stored.url) {
+        content = await downloadS3ObjectBytes(stored.publicId || stored.url);
     }
+    if (!content?.length) return;
+
+    attachments.push({
+        filename: stored.name || stored.label || 'attachment.pdf',
+        content,
+        contentType: stored.mimeType || 'application/pdf',
+    });
 }
 
 /**
- * Sends a confirmation email to assigned employees when a fine is fully approved.
- * TO: each assigned employee; CC: all other assigned employees + HR + Admin (+ stakeholders).
- * Email body is the fine report (type title, deduction details, discount as amount).
- *
- * @param {object} [options]
- * @param {Array} [options.ccAssignedEmployees] Extra assignees to CC (e.g. garage bill group parties).
+ * Sends the approved-fine PDF. Employees with a company email get email.
+ * Employees without a company email get one WhatsApp document when that permission is on.
  */
 export const sendFineConfirmedEmail = async (fine, assignedEmployees, req = null, options = {}) => {
     try {
@@ -202,6 +186,8 @@ export const sendFineConfirmedEmail = async (fine, assignedEmployees, req = null
             }
         }
 
+        const whatsAppSentEmployees = new Set();
+
         for (const assigned of assignedEmployees) {
             if (isCompanyFineParty(assigned)) {
                 const adminRecipient = await resolveCompanyFineAdminRecipient();
@@ -269,6 +255,7 @@ export const sendFineConfirmedEmail = async (fine, assignedEmployees, req = null
 
             const companyEmail = String(empDetails.companyEmail || '').trim();
             if (!companyEmail) {
+                if (whatsAppSentEmployees.has(assigned.employeeId)) continue;
                 let finePdf = await generateFineApprovedReportPdfBuffer(fine, {
                     employeeId: assigned.employeeId,
                 });
@@ -280,9 +267,13 @@ export const sendFineConfirmedEmail = async (fine, assignedEmployees, req = null
                         employee: empDetails,
                         pdfBuffer: finePdf,
                         filename: reportPdfFileName(fine, assigned.employeeId),
+                        allowResend: options?.resendWhatsApp === true,
                     });
-                    if (waResult?.sent) {
-                        console.log(`[FineConfirmedEmail] PDF sent on WhatsApp to ${empDetails.employeeId}`);
+                    if (waResult?.sent || waResult?.reason === 'already_sent') {
+                        whatsAppSentEmployees.add(assigned.employeeId);
+                        if (waResult?.sent) {
+                            console.log(`[FineConfirmedEmail] PDF sent on WhatsApp to ${empDetails.employeeId}`);
+                        }
                         continue;
                     }
                 }
@@ -350,11 +341,9 @@ export const sendFineConfirmedEmail = async (fine, assignedEmployees, req = null
                 html,
                 attachments: emailAttachments,
             });
-            console.log(`[FineConfirmedEmail] Sent to ${toMail}`);
+            console.log(`[FineConfirmedEmail] Sent to ${toMail} for fine ${fine.fineId}`);
         }
-
-        console.log('[FineConfirmedEmail] All individual emails sent successfully.');
     } catch (error) {
-        console.error('[FineConfirmedEmail] Error sending email:', error);
+        console.error('[FineConfirmedEmail] Error sending confirmation email:', error?.message || error);
     }
 };
