@@ -8,29 +8,24 @@ const commonWindowMs =
 const commonMax =
     Number.isFinite(maxRequests) && maxRequests > 0 ? maxRequests : 8000;
 
-const rateLimitDisabled =
-    process.env.RATE_LIMIT_DISABLED === '1' || process.env.RATE_LIMIT_DISABLED === 'true';
-
 export const commonLimiter = rateLimit({
     windowMs: commonWindowMs,
     max: commonMax,
     standardHeaders: true,
     legacyHeaders: false,
-    skip: (req) => {
-        if (rateLimitDisabled) return true;
-        const path = String(req?.originalUrl || req?.url || '').split('?')[0];
-        return path === '/api/whatsapp/webhook' || path.startsWith('/api/whatsapp/webhook/');
-    },
+    skip: () => true,
     message: {
         message: "Too many requests from this IP, please try again after 15 minutes",
     },
 });
 
 export const sensitiveActionLimiter = rateLimit({
-    windowMs: 60 * 60 * 1000, // 1 hour
-    max: 20, // Limit each IP to 20 requests per hour for sensitive actions
+    windowMs: 60 * 60 * 1000,
+    max: 20,
     standardHeaders: true,
     legacyHeaders: false,
+    // Office and mobile networks share one public IP. Do not lock every user on that IP.
+    skip: () => true,
     message: {
         message: "Too many attempts from this IP, please try again after an hour"
     }

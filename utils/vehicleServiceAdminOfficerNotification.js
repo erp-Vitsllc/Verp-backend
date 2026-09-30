@@ -22,13 +22,14 @@ export function isVehicleServiceAccountsBillingNotification(row = {}) {
     const meta = parseDashboardMeta(row.extra3);
     if (meta?.adminOfficerServiceTrack) return false;
     const stage = String(meta?.oilStage || meta?.accountsStage || '').toLowerCase();
-    if (['accounts_payment', 'accounts_quote', 'pending_accounts', 'pending_billing'].includes(stage)) {
+    if (['accounts_payment', 'accounts_quote', 'pending_accounts', 'pending_billing', 'zoho_expense'].includes(stage)) {
         return true;
     }
     const blob = `${row.extra1 || ''} ${row.extra2 || ''}`.toLowerCase();
     return (
         /\bmake payment\b/.test(blob) ||
         /accounts billing/.test(blob) ||
+        /zoho expense/.test(blob) ||
         /zoho bill/.test(blob) ||
         /submit to zoho/.test(blob)
     );

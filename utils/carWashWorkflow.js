@@ -110,6 +110,7 @@ export function carWashDashboardMeta(asset, serviceRecordId) {
         serviceRecordId: serviceRecordId ? String(serviceRecordId) : '',
         detailsPath: carWashDetailsPath(asset?._id, serviceRecordId) || '',
         serviceType: 'Car Wash',
+        accountsStage: 'zoho_expense',
     });
 }
 

@@ -20104,14 +20104,17 @@ export const getPendingAssetDashboardInbox = async (req, res) => {
                 requestType: 'Vehicle Service Request',
                 extra3: { $regex: '"oilStage"\\s*:\\s*"accounts_quote"', $options: 'i' },
             });
-            // Mechanical / Body / Accident / Car Wash / Tire — Accounts stages when assignedTo is stale.
+            // Shop / car wash Make Payment and Zoho Expense, including rows tagged only by accountsStage.
             assigneeClauses.push({
                 requestType: 'Vehicle Service Request',
                 extra3: {
-                    $regex:
-                        '"serviceType"\\s*:\\s*"(Mechanical Work|Body Work|Accident Repair|Car Wash|Tire Change)"[\\s\\S]{0,800}"(pending_accounts|accounts_payment|accounts_quote|accountsStage)"',
+                    $regex: '"accountsStage"\\s*:\\s*"(accounts_payment|pending_billing|zoho_expense|accounts_quote)"',
                     $options: 'i',
                 },
+            });
+            assigneeClauses.push({
+                requestType: 'Vehicle Service Request',
+                extra1: { $regex: '—\\s*Make Payment\\b|—\\s*Zoho Expense\\b', $options: 'i' },
             });
             // Utility Bills — Accounts review + pay (not HR-only stages).
             assigneeClauses.push({
@@ -20178,9 +20181,14 @@ export const getPendingAssetDashboardInbox = async (req, res) => {
         if (scope !== 'tools') {
             await scheduleInboxMaintenance(() => syncVehicleAccessFuelReminder());
         }
-        // Accounts inbox: restore Make Payment bells wiped by the old "live = done" heal bug.
-        if (isAccountsRoleHolder) {
-            await scheduleInboxMaintenance(() => restoreMissingOilAccountsMakePaymentNotifications());
+        // Accounts bell (including skipSync sidebar loads): put Make Payment tasks back
+        // before the inbox query, so open Make Payment cards show for the current Accounts person.
+        if (isAccountsRoleHolder && scope !== 'tools') {
+            await restoreMissingOilAccountsMakePaymentNotifications();
+            const { restoreMissingShopMakePaymentNotifications } = await import(
+                '../utils/vehicleShopServiceScheduled.js'
+            );
+            await restoreMissingShopMakePaymentNotifications();
         }
 
         const parseExtra3 = (raw) => {

@@ -1,4 +1,5 @@
 import AssetItem from '../models/AssetItem.js';
+import DashboardAction from '../models/DashboardAction.js';
 import { getDepartmentHOD } from './getDepartmentHOD.js';
 import { resolveEmployeeEmail } from './resolveEmployeeEmail.js';
 import { sendVehicleServiceWorkflowEmail } from './sendVehicleServiceWorkflowEmail.js';
@@ -1287,4 +1288,144 @@ export async function advanceShopBillingAfterAccountsApprove(
     }
 
     return { asset, zohoBillSync };
+}
+
+const SHOP_MAKE_PAYMENT_TYPES = ['Tire Change', 'Mechanical Work', 'Body Work', 'Accident Repair', 'Car Wash'];
+
+function shopMakePaymentPath(serviceType, assetId, serviceId) {
+    const id = encodeURIComponent(String(assetId));
+    const sid = encodeURIComponent(String(serviceId));
+    if (serviceType === 'Car Wash') {
+        return `/HRM/Asset/Vehicle/details/${id}?tab=service&carWashServiceId=${sid}`;
+    }
+    const slug = {
+        'Tire Change': 'tire-change',
+        'Mechanical Work': 'mechanical-work',
+        'Body Work': 'body-work',
+        'Accident Repair': 'accident-repair',
+    }[serviceType];
+    if (!slug) return '';
+    return `/HRM/Asset/Vehicle/details/${id}/${slug}/${sid}`;
+}
+
+function serviceNeedsAccountsMakePayment(service, wf) {
+    if (!service?._id) return false;
+    const remark = parseRemark(service);
+    const type = String(service.serviceType || wf?.serviceTypeLabel || '').trim();
+    if (!SHOP_MAKE_PAYMENT_TYPES.includes(type)) return false;
+    const activeMatch = wf?.serviceRecordId && String(wf.serviceRecordId) === String(service._id);
+    const stage = String(
+        (activeMatch ? wf.stage : '') ||
+            service?.workflowSnapshot?.stage ||
+            remark.workflowStage ||
+            '',
+    ).toLowerCase();
+    // pending_accounts is Accounts Approve. Make Payment / Zoho Expense is pending_billing.
+    if (stage !== 'pending_billing') return false;
+    if (String(remark.billingStatus || '').toLowerCase() === 'billed') return false;
+    if (String(remark.zohoBillId || remark.zohoExpenseId || '').trim()) return false;
+    return true;
+}
+
+/**
+ * Recreate the Accounts bell for shop / car-wash services already sitting on Make Payment
+ * when the dashboard row was never saved or was assigned to a previous Accounts person.
+ * Inbox only — does not send another email.
+ */
+export async function restoreMissingShopMakePaymentNotifications({ assetIds = null } = {}) {
+    try {
+        const accounts = await getDepartmentHOD('accounts');
+        if (!accounts?._id) return 0;
+        const { isVehicleServiceAccountsBillingNotification } = await import(
+            './vehicleServiceAdminOfficerNotification.js'
+        );
+        const query = {
+            $or: [
+                { 'activeServiceWorkflow.stage': 'pending_billing' },
+                { 'services.workflowSnapshot.stage': 'pending_billing' },
+            ],
+        };
+        if (Array.isArray(assetIds) && assetIds.length) query._id = { $in: assetIds };
+        const assets = await AssetItem.find(query)
+            .select('assetId plateEmirate plateNumber assignedTo services activeServiceWorkflow')
+            .populate('assignedTo', 'firstName lastName employeeId');
+        let restored = 0;
+        for (const asset of assets) {
+            const wf = asset.activeServiceWorkflow || {};
+            for (const service of asset.services || []) {
+                if (!serviceNeedsAccountsMakePayment(service, wf)) continue;
+                const serviceId = String(service._id);
+                const serviceType = String(service.serviceType || '').trim();
+                const existing = await DashboardAction.find({
+                    requestId: asset._id,
+                    requestType: 'Vehicle Service Request',
+                    status: 'Pending',
+                })
+                    .select('_id extra1 extra2 extra3 assignedTo')
+                    .lean();
+                const billingRows = existing.filter((row) => {
+                    let meta = null;
+                    try {
+                        meta = row.extra3 ? JSON.parse(String(row.extra3)) : null;
+                    } catch {
+                        meta = null;
+                    }
+                    if (String(meta?.serviceRecordId || '') !== serviceId) return false;
+                    return isVehicleServiceAccountsBillingNotification(row);
+                });
+                if (billingRows.length) {
+                    const staleIds = billingRows
+                        .filter((row) => String(row.assignedTo || '') !== String(accounts._id))
+                        .map((row) => row._id);
+                    if (staleIds.length) {
+                        await DashboardAction.updateMany(
+                            { _id: { $in: staleIds } },
+                            {
+                                $set: {
+                                    assignedTo: accounts._id,
+                                    assignedToEmpId: accounts.employeeId || '',
+                                },
+                            },
+                        );
+                        restored += 1;
+                    }
+                    continue;
+                }
+
+                const pendingStage = serviceType === 'Car Wash' ? 'Zoho Expense' : 'Make Payment';
+                const copy = await applyVehicleServiceNotificationCopy({
+                    recipient: accounts,
+                    serviceType,
+                    pendingStage,
+                });
+                const detailsPath = shopMakePaymentPath(serviceType, asset._id, serviceId);
+                const meta = {
+                    vehicleId: String(asset._id),
+                    serviceRecordId: serviceId,
+                    serviceType,
+                    detailsPath,
+                    accountsStage: serviceType === 'Car Wash' ? 'zoho_expense' : 'accounts_payment',
+                };
+                await syncDashboardAction({
+                    requestId: asset._id,
+                    requestType: 'Vehicle Service Request',
+                    status: 'Pending',
+                    assignedTo: accounts._id,
+                    subjectEmployee: asset.assignedTo,
+                    requestedByName: copy.actionLabel,
+                    extra1: copy.extra1,
+                    extra2: copy.extra2,
+                    extra3: JSON.stringify(meta),
+                });
+                restored += 1;
+                console.log(
+                    `[ShopService] Restored Accounts ${pendingStage} bell for ${asset.assetId || asset._id} (${serviceType})`,
+                );
+            }
+        }
+        return restored;
+    } catch (err) {
+        console.error('[restoreMissingShopMakePaymentNotifications]', err?.message || err);
+        return 0;
+    }
 }
