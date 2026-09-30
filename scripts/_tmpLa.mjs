@@ -1,0 +1,12 @@
+import fs from 'fs';
+const s = fs.readFileSync(process.env.TEMP + '/locator-39.js', 'utf8');
+const marker = s.indexOf('SET_EXCESSIVE_IDLING_REPORT');
+const start = s.lastIndexOf(':function(A,a,i)', marker);
+const next = s.indexOf(':function(', marker + 50);
+const chunk = s.slice(start, next);
+const i = chunk.indexOf('la=');
+console.log('la idx', i);
+fs.writeFileSync(process.env.TEMP + '/locator-la.txt', chunk.slice(Math.max(0, i - 200), i + 2500));
+const j = chunk.indexOf('ha=');
+console.log('ha idx', j);
+fs.writeFileSync(process.env.TEMP + '/locator-ha.txt', chunk.slice(Math.max(0, j - 100), j + 800));

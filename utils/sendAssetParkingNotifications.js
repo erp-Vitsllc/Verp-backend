@@ -1,6 +1,7 @@
 import nodemailer from 'nodemailer';
 import { resolveEmployeeEmail } from './resolveEmployeeEmail.js';
 import { emailFrontendUrl } from './resolveFrontendBaseUrl.js';
+import { isEmployeeActiveForNotifications } from './applyEmployeeLeftUserStatus.js';
 
 const getTransporter = () => {
     const emailUser = process.env.EMAIL_USER || process.env.VERP_EMAIL || process.env.GMAIL_USER;
@@ -20,16 +21,39 @@ const getTransporter = () => {
 
 const assetDetailUrl = (asset) => `${emailFrontendUrl()}/HRM/Asset/details/${asset._id}?focusCard=operationalExpiry`;
 
-const sendOperationalExpiryMail = async ({ to, subject, html }) => {
+const sendOperationalExpiryMail = async ({ to, cc, subject, html }) => {
     const transporter = getTransporter();
     if (!transporter || !to) return false;
-    await transporter.sendMail({
+    const mail = {
         fromName: 'Asset Management',
         to,
         subject,
         html,
-    });
+    };
+    if (cc) mail.cc = cc;
+    await transporter.sendMail(mail);
     return true;
+};
+
+const escapeHtml = (value) =>
+    String(value ?? '')
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;');
+
+/** Employee company mailbox, otherwise the employee's HOD. Never the same address as To. */
+const resolveLeaveReminderCc = (assignedEmployee, hodEmployee, toEmail) => {
+    const companyEmail = String(assignedEmployee?.companyEmail || '').trim();
+    let cc = null;
+    if (companyEmail && isEmployeeActiveForNotifications(assignedEmployee)) {
+        cc = companyEmail;
+    } else if (hodEmployee) {
+        cc = resolveEmployeeEmail(hodEmployee).email;
+    }
+    if (!cc) return null;
+    if (toEmail && cc.toLowerCase() === String(toEmail).toLowerCase()) return null;
+    return cc;
 };
 
 const buildLeaveExpiryHtml = ({ asset, recipient, expiresToday }) => {
@@ -54,29 +78,46 @@ const buildLeaveExpiryHtml = ({ asset, recipient, expiresToday }) => {
     `;
 };
 
+/**
+ * One email for every on-leave asset of one employee that is 5 days from expiry.
+ * To: Asset Controller. Cc: employee company email, or that employee's HOD when company email is missing.
+ */
 export const sendParkingReminderEmail = async ({
-    asset,
+    assets,
     assignedEmployee,
     assetController,
     hodEmployee,
-    packedCustodian,
     daysLeft,
 }) => {
     try {
-        const recipients = [assignedEmployee, hodEmployee, packedCustodian, assetController].filter(Boolean);
-        const seen = new Set();
-        for (const emp of recipients) {
-            const { email } = resolveEmployeeEmail(emp);
-            if (!email || seen.has(email)) continue;
-            seen.add(email);
-            await sendOperationalExpiryMail({
-                to: email,
-                subject: `Reminder: On Leave ends in ${daysLeft} day(s) for ${asset.assetId}`,
-                html: `<p>Asset <strong>${asset.assetId} - ${asset.name}</strong> is On Leave and will expire in <strong>${daysLeft} day(s)</strong> (${asset.onLeaveEndDate ? new Date(asset.onLeaveEndDate).toLocaleDateString('en-GB') : '—'}).</p>
-                       <p>Please extend the duration or mark the asset On Duty before expiry. Maximum total leave duration is 40 days.</p>
-                       <p><a href="${assetDetailUrl(asset)}">Open asset in VeRP</a></p>`,
-            });
-        }
+        const list = (Array.isArray(assets) ? assets : [assets]).filter(Boolean);
+        if (!list.length || !assetController) return;
+
+        const { email: toEmail } = resolveEmployeeEmail(assetController);
+        if (!toEmail) return;
+
+        const cc = resolveLeaveReminderCc(assignedEmployee, hodEmployee, toEmail);
+        const ownerName = `${assignedEmployee?.firstName || ''} ${assignedEmployee?.lastName || ''}`.trim();
+        const rows = list
+            .map((asset) => {
+                const endLabel = asset.onLeaveEndDate
+                    ? new Date(asset.onLeaveEndDate).toLocaleDateString('en-GB')
+                    : '—';
+                return `<li><strong>${escapeHtml(asset.assetId)}</strong> — ${escapeHtml(asset.name)} — ends ${escapeHtml(endLabel)}. <a href="${assetDetailUrl(asset)}">Open asset</a></li>`;
+            })
+            .join('');
+
+        await sendOperationalExpiryMail({
+            to: toEmail,
+            cc,
+            subject: ownerName
+                ? `Reminder: On Leave ends in ${daysLeft} day(s) — ${ownerName}`
+                : `Reminder: On Leave ends in ${daysLeft} day(s)`,
+            html: `<p>Hello <strong>${escapeHtml(assetController.firstName || 'there')}</strong>,</p>
+                   <p>The following asset(s)${ownerName ? ` assigned to <strong>${escapeHtml(ownerName)}</strong>` : ''} are On Leave and end in <strong>${daysLeft} day(s)</strong>.</p>
+                   <ul>${rows}</ul>
+                   <p>Please extend the duration or mark the asset On Duty before expiry. Maximum total leave duration is 40 days.</p>`,
+        });
     } catch (e) {
         console.error('[sendParkingReminderEmail] Non-fatal error:', e?.message || e);
     }

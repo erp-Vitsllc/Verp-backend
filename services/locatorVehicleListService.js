@@ -420,32 +420,34 @@ function extractPlateCandidatesFromLocatorName(name) {
     return matches ? [...new Set(matches.map((m) => normalizePlateDigits(m)).filter(Boolean))] : [];
 }
 
-function toOdometerKm(position = null) {
-    const attrs = position?.attributes || {};
-
+function gpsTotalDistanceKm(position = null, attrs = {}) {
     if (attrs.totalDistanceKm != null && attrs.totalDistanceKm !== '') {
         const parsed = Number(String(attrs.totalDistanceKm).replace(/,/g, ''));
-        if (Number.isFinite(parsed)) return Math.round(parsed);
+        if (Number.isFinite(parsed) && parsed > 0) return Math.round(parsed);
     }
 
     if (position?.totalDistanceKm != null && position.totalDistanceKm !== '') {
         const parsed = Number(String(position.totalDistanceKm).replace(/,/g, ''));
-        if (Number.isFinite(parsed)) return Math.round(parsed);
+        if (Number.isFinite(parsed) && parsed > 0) return Math.round(parsed);
     }
 
-    if (Number.isFinite(Number(attrs.totalDistance))) {
+    if (Number.isFinite(Number(attrs.totalDistance)) && Number(attrs.totalDistance) > 0) {
         return Math.round(Number(attrs.totalDistance) / 1000);
     }
 
-    if (Number.isFinite(Number(position?.totalDistance))) {
+    if (Number.isFinite(Number(position?.totalDistance)) && Number(position.totalDistance) > 0) {
         return Math.round(Number(position.totalDistance) / 1000);
     }
 
-    if (Number.isFinite(Number(attrs.odometer))) {
-        return Math.round(Number(attrs.odometer) / 1000);
-    }
-
     return null;
+}
+
+/** Device odometer in km. GPS totalDistance is not the dashboard odometer. */
+function toOdometerKm(position = null) {
+    const attrs = position?.attributes || {};
+    const odometerM = Number(attrs.odometer ?? position?.odometer);
+    if (Number.isFinite(odometerM) && odometerM > 0) return Math.round(odometerM / 1000);
+    return gpsTotalDistanceKm(position, attrs);
 }
 
 function formatLocatorGpsStatus(position, registryVehicle) {

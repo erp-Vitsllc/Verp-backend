@@ -72,6 +72,8 @@ export const processParkingAssets = async () => {
             onLeaveEndDate: { $ne: null },
         }).populate('assignedTo');
 
+        const dueLeaveReminders = [];
+
         for (const asset of parkedAssets) {
             if (!asset.onLeaveEndDate) continue;
 
@@ -104,31 +106,9 @@ export const processParkingAssets = async () => {
                 }
             };
 
-            // 5 days before end: email + taskbar (not on the expiry day).
+            // 5 days before end: collect, then one email per employee (not on the expiry day).
             if (diffDays === ON_LEAVE_ADVANCE_NOTICE_DAYS && !asset.parkingReminderSentAt) {
-                await sendParkingReminderEmail({
-                    asset,
-                    assignedEmployee,
-                    assetController,
-                    hodEmployee: assignedEmployee?.primaryReportee || null,
-                    packedCustodian: asset.onLeavePackedTo
-                        ? await loadEmployeeLean(asset.onLeavePackedTo)
-                        : null,
-                    daysLeft: ON_LEAVE_ADVANCE_NOTICE_DAYS,
-                });
-                await ensureLeaveDashboardTasks(ON_LEAVE_ADVANCE_NOTICE_DAYS);
-
-                await AssetHistory.create({
-                    assetId: asset._id,
-                    action: 'Comment',
-                    performedBy: null,
-                    comments: `On Leave duration reminder: ${ON_LEAVE_ADVANCE_NOTICE_DAYS} days remaining. Notification sent to owner, custodian, and Asset Controller.`,
-                    date: new Date(),
-                    details: { auto: true, reason: 'LeaveAdvanceNotice', daysLeft: ON_LEAVE_ADVANCE_NOTICE_DAYS },
-                }).catch(() => null);
-
-                asset.parkingReminderSentAt = new Date();
-                await asset.save();
+                dueLeaveReminders.push({ asset, assignedEmployee, expiryDate });
                 continue;
             }
 
@@ -170,6 +150,55 @@ export const processParkingAssets = async () => {
             // Keep overdue taskbar rows updated without sending expiry-day alerts.
             if (diffDays < 0) {
                 await ensureLeaveDashboardTasks(diffDays);
+            }
+        }
+
+        const remindersByEmployee = new Map();
+        for (const row of dueLeaveReminders) {
+            const key = row.assignedEmployee?._id ? String(row.assignedEmployee._id) : 'unassigned';
+            if (!remindersByEmployee.has(key)) remindersByEmployee.set(key, []);
+            remindersByEmployee.get(key).push(row);
+        }
+
+        for (const rows of remindersByEmployee.values()) {
+            const assignedEmployee = rows[0].assignedEmployee || null;
+            await sendParkingReminderEmail({
+                assets: rows.map((row) => row.asset),
+                assignedEmployee,
+                assetController,
+                hodEmployee: assignedEmployee?.primaryReportee || null,
+                daysLeft: ON_LEAVE_ADVANCE_NOTICE_DAYS,
+            });
+
+            const taskRecipients = [assignedEmployee, assetController].filter((person) => person?._id);
+            const seenTaskRecipients = new Set();
+
+            for (const row of rows) {
+                for (const recipient of taskRecipients) {
+                    const recipientKey = String(recipient._id);
+                    if (seenTaskRecipients.has(`${row.asset._id}:${recipientKey}`)) continue;
+                    seenTaskRecipients.add(`${row.asset._id}:${recipientKey}`);
+                    await upsertOperationalExpiryDashboardTask({
+                        asset: row.asset,
+                        recipient,
+                        requestType: 'Asset Leave',
+                        kind: 'leave',
+                        expiryDate: row.expiryDate,
+                        daysLeft: ON_LEAVE_ADVANCE_NOTICE_DAYS,
+                    });
+                }
+
+                await AssetHistory.create({
+                    assetId: row.asset._id,
+                    action: 'Comment',
+                    performedBy: null,
+                    comments: `On Leave duration reminder: ${ON_LEAVE_ADVANCE_NOTICE_DAYS} days remaining. One email to Asset Controller (Cc employee company email, or HOD). Task for assigned employee and Asset Controller.`,
+                    date: new Date(),
+                    details: { auto: true, reason: 'LeaveAdvanceNotice', daysLeft: ON_LEAVE_ADVANCE_NOTICE_DAYS },
+                }).catch(() => null);
+
+                row.asset.parkingReminderSentAt = new Date();
+                await row.asset.save();
             }
         }
 

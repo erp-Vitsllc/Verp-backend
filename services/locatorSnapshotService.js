@@ -21,8 +21,8 @@ const MAX_RUNNING_KM_ANCHOR_GAP_MS = 18 * 60 * 60 * 1000;
 const MAX_LIVE_TRIP_KM = 1500;
 /** Locator Idling Report: only count idle events that stay idling between GPS samples. */
 const MAX_IDLE_SAMPLE_GAP_MS = 90 * 60 * 1000;
-/** Locator Excessive Idling Report: ignore events shorter than 10 minutes. */
-const MIN_IDLE_EVENT_MS = 10 * 60 * 1000;
+/** Count each idling session only when it lasts more than 5 minutes. */
+const MIN_IDLE_EVENT_MS = 5 * 60 * 1000;
 /** GPS status_duration is the current session, not the period total — cap fallback. */
 const MAX_IDLE_GPS_FALLBACK_MS = 24 * 60 * 60 * 1000;
 const DAY_KEY_RE = /^\d{4}-\d{2}-\d{2}$/;
@@ -57,18 +57,24 @@ const MONTH_SHORT = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Se
 /** Standard Dubai Salik gate charge used when Locator reports crossing counts only. */
 const SALIK_GATE_FEE_AED = 4;
 
-function toOdometerKm(attrs = {}) {
+function gpsTotalDistanceKm(attrs = {}) {
     if (attrs.totalDistanceKm != null && attrs.totalDistanceKm !== '') {
         const parsed = Number(String(attrs.totalDistanceKm).replace(/,/g, ''));
-        if (Number.isFinite(parsed)) return Number(parsed.toFixed(2));
+        if (Number.isFinite(parsed) && parsed > 0) return Number(parsed.toFixed(2));
     }
-    if (Number.isFinite(Number(attrs.totalDistance))) {
+    if (Number.isFinite(Number(attrs.totalDistance)) && Number(attrs.totalDistance) > 0) {
         return Number((Number(attrs.totalDistance) / 1000).toFixed(2));
     }
-    if (Number.isFinite(Number(attrs.odometer))) {
-        return Number((Number(attrs.odometer) / 1000).toFixed(2));
-    }
     return 0;
+}
+
+/** Device odometer (meters). GPS totalDistance is a separate counter and drifts from the dashboard. */
+function toOdometerKm(attrs = {}) {
+    const odometerM = Number(attrs.odometer);
+    if (Number.isFinite(odometerM) && odometerM > 0) {
+        return Number((odometerM / 1000).toFixed(2));
+    }
+    return gpsTotalDistanceKm(attrs);
 }
 
 /** Resolve Salik toll price (AED) from Locator position / attributes — not distance. */
@@ -544,11 +550,11 @@ function isEmirateOnlyLabel(value) {
 }
 
 function snapshotDistanceM(row) {
+    const odo = Number(row?.odometer);
+    if (Number.isFinite(odo) && odo > 0) return odo;
     const total = Number(row?.totalDistanceM);
     if (Number.isFinite(total) && total > 0) return total;
-    const odo = Number(row?.odometer);
-    if (!Number.isFinite(odo) || odo <= 0) return 0;
-    return odo >= 10_000 ? odo : odo * 1000;
+    return 0;
 }
 
 function capTripKm(km) {
@@ -631,22 +637,22 @@ function idleMinutesFromLivePosition(position, { capMinutes = null } = {}) {
 
     const attrs = snapshotAttrs(position);
     const idleStart = idleStartMsFromSource(position);
-    let minutes = 0;
+    let durationMs = 0;
     if (idleStart > 0) {
-        minutes = Math.round((Date.now() - idleStart) / 60000);
+        durationMs = Date.now() - idleStart;
     }
-    if (minutes <= 0) {
-        minutes = parseStatusDurationToMinutes(position?.status_duration);
+    if (durationMs <= 0) {
+        durationMs = parseStatusDurationToMs(position?.status_duration);
     }
-    if (minutes <= 0 && Number(attrs.ifstopped) > 0) {
-        minutes = Math.round(Number(attrs.ifstopped) / 60);
+    if (durationMs <= 0 && Number(attrs.ifstopped) > 0) {
+        durationMs = Number(attrs.ifstopped) * 1000;
     }
-    if (minutes <= 0) return 0;
+    if (durationMs <= MIN_IDLE_EVENT_MS) return 0;
+    let minutes = Math.round(durationMs / 60000);
     if (capMinutes != null && Number.isFinite(Number(capMinutes))) {
         minutes = Math.min(minutes, Math.max(0, Number(capMinutes)));
     }
-    if (minutes * 60000 < MIN_IDLE_EVENT_MS) return 0;
-    return minutes;
+    return minutes > 0 ? minutes : 0;
 }
 
 function buildLivePositionMap(positions) {
@@ -814,16 +820,16 @@ function measureIdleEvent(first, last, next) {
     if (idleStart > 0 && idleStart <= lastAt + 1000) {
         startMs = idleStart;
         endMs = lastAt;
-    } else if (gpsMs >= MIN_IDLE_EVENT_MS) {
+    } else if (gpsMs > MIN_IDLE_EVENT_MS) {
         startMs = lastAt - gpsMs;
         endMs = lastAt;
     } else {
         startMs = firstAt;
         endMs = lastAt > firstAt ? lastAt : firstAt;
-        // Isolated pings and short streaks have no idleStart — extend to the next GPS state
-        // so a 7–9 min sample gap is not dropped when Locator's event was ≥ 10 min.
+        // Isolated pings have no idleStart — extend to the next GPS state so a session
+        // that is more than 5 minutes is not dropped because the samples are short.
         if (
-            endMs - startMs < MIN_IDLE_EVENT_MS &&
+            endMs - startMs <= MIN_IDLE_EVENT_MS &&
             nextAt > endMs &&
             nextAt - startMs <= MAX_IDLE_SAMPLE_GAP_MS
         ) {
@@ -878,7 +884,7 @@ function idleMsBetweenSnapshots(rows, livePosition = null, { includeLiveSession 
     const events = collectIdleEvents(rowsWithLiveIdle(rows, livePosition, includeLiveSession));
     let totalMs = 0;
     for (const event of events) {
-        if (event.durationMs >= MIN_IDLE_EVENT_MS) totalMs += event.durationMs;
+        if (idleEventIsLongEnough(event.durationMs)) totalMs += event.durationMs;
     }
     return totalMs;
 }
@@ -899,10 +905,17 @@ function idleMsForDeviceInRange(deviceRows, start, end, livePosition = null, opt
     );
     let totalMs = 0;
     for (const event of events) {
-        if (event.durationMs < MIN_IDLE_EVENT_MS) continue;
+        if (!idleEventIsLongEnough(event.durationMs, options)) continue;
         totalMs += idleOverlapMs(event.startMs, event.endMs, start, end);
     }
     return totalMs;
+}
+
+/** Each idling session longer than 5 minutes. `idleGreaterThanMs` can raise that floor. */
+function idleEventIsLongEnough(durationMs, options = {}) {
+    const greaterThan = Number(options.idleGreaterThanMs);
+    if (Number.isFinite(greaterThan) && greaterThan > 0) return durationMs > greaterThan;
+    return durationMs > MIN_IDLE_EVENT_MS;
 }
 
 function groupSnapshotsByDevice(snapshots) {
@@ -924,16 +937,12 @@ function buildOdometerChart(positions) {
         (positions || []).map((position) => {
             const attrs = position?.attributes || {};
             const currentKm = toOdometerKm(attrs);
-            const rawOdometerM = Number(attrs.odometer);
             return {
                 name: position?.deviceName || `Device ${position?.deviceId}`,
                 value: currentKm,
                 currentKm,
-                // Device odometer from Locator (meters → km when value looks like meters)
-                odometerKm: Number.isFinite(rawOdometerM)
-                    ? Number((rawOdometerM >= 1000 ? rawOdometerM / 1000 : rawOdometerM).toFixed(2))
-                    : currentKm,
-                totalDistanceKm: currentKm,
+                odometerKm: currentKm,
+                totalDistanceKm: gpsTotalDistanceKm(attrs),
                 deviceId: position?.deviceId,
             };
         }),
@@ -1774,7 +1783,7 @@ async function lastOdometerRowsBefore(deviceIds, before) {
 
 /**
  * Monthly running km + idle for one GPS device — snapshots in that calendar month only.
- * KM is first-to-last odometer in the month; idle matches Locator Excessive Idling (10 min minimum).
+ * KM is first-to-last odometer in the month; each idling session longer than 5 minutes is included.
  */
 export async function getLocatorMonthStatsMap(deviceId, monthKeys = []) {
     const keys = [...new Set((monthKeys || []).map((key) => String(key || '').trim()))].filter((key) =>
@@ -1859,9 +1868,9 @@ export async function getLocatorMonthStatsByDevices(deviceIds = [], monthKey) {
 /**
  * Custom-day GPS stats for fuel: current odometer, running KM, and idle time.
  * Window is From date 12:00 AM through the end of the To date (not the next calendar day).
- * Idle ignores events shorter than 10 minutes (Excessive Idling Report).
+ * Idle includes each idling session longer than 5 minutes.
  */
-export async function getLocatorRangeStatsByDevices(deviceIds = [], fromKey, toKey, liveByDevice = null) {
+export async function getLocatorRangeStatsByDevices(deviceIds = [], fromKey, toKey, liveByDevice = null, options = {}) {
     const now = new Date();
     const defaults = defaultRangeDayKeys(now);
     const from = DAY_KEY_RE.test(String(fromKey || '').trim()) ? String(fromKey).trim() : defaults.from;
@@ -1910,6 +1919,7 @@ export async function getLocatorRangeStatsByDevices(deviceIds = [], fromKey, toK
         const livePosition = includeLive ? liveByDevice?.get?.(String(id)) || null : null;
         const idleMs = idleMsForDeviceInRange(deviceRows, start, end, livePosition, {
             includeLiveSession: includeLive,
+            idleGreaterThanMs: options.idleGreaterThanMs,
         });
         const runningKm = runningKmSumForDeviceInRange(deviceRows, start, end);
         const latest = latestByDevice.get(String(id));
@@ -2033,6 +2043,26 @@ export async function buildFuelGpsPageStats({ fromKey, toKey, erpVehicles = [] }
         configured,
         rows,
     };
+}
+
+/** Current calendar month idle from Locator. Only engine-on idle longer than 5 minutes. */
+export async function getCurrentMonthIdleByDevices(deviceIds = []) {
+    const now = new Date();
+    const from = localDateKey(new Date(now.getFullYear(), now.getMonth(), 1));
+    const to = localDateKey(now);
+    let liveByDevice = null;
+    if (isLocatorConfigured()) {
+        try {
+            const latest = await fetchLatestPositions({ allowStale: true });
+            liveByDevice = buildLivePositionMap(latest?.positions || []);
+        } catch (error) {
+            console.error('[current month idle] live positions', error?.message || error);
+        }
+    }
+    const gps = await getLocatorRangeStatsByDevices(deviceIds, from, to, liveByDevice, {
+        idleGreaterThanMs: 5 * 60 * 1000,
+    });
+    return gps?.byDevice || {};
 }
 
 export async function buildLocatorFleetDashboard({ year } = {}) {

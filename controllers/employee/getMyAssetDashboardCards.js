@@ -9,6 +9,7 @@ import {
     FLEET_VEHICLE_ASSET_ID_PREFIX,
     TOOLS_ASSET_ID_PREFIX,
 } from '../../utils/fleetVehicleAssetId.js';
+import { getCurrentMonthIdleByDevices } from '../../services/locatorSnapshotService.js';
 
 const HIDDEN_ASSET_STATUSES = new Set([
     'Draft',
@@ -76,10 +77,12 @@ function currentMonthKey() {
     return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
 }
 
-function mapVehicleItem(item, fuel) {
+function mapVehicleItem(item, fuel, idle) {
     const plate = String(item.plateNumber || '').trim();
     const typeName = item.typeId?.name || 'Vehicle';
     const limit = roundMoney(fuel?.monthlyLimit || item.fuelMonthlyLimit);
+    const deviceId = Number(item.locatorDeviceId);
+    const hasLocator = Number.isFinite(deviceId) && deviceId > 0;
     return {
         id: String(item._id),
         code: plate || item.assetId || item.name || 'Vehicle',
@@ -93,6 +96,8 @@ function mapVehicleItem(item, fuel) {
         currentKm: Number(item.currentKilometer) || 0,
         petrolUsage: roundMoney(fuel?.amountUsed),
         fuelLimit: limit,
+        idleTimeMinutes: hasLocator ? Number(idle?.idleTimeMinutes) || 0 : null,
+        idleTimeLabel: hasLocator ? idle?.idleTimeLabel || '00:00:00 Hrs' : '',
         status: item.status || 'Assigned',
         documents: [],
         date: item.assignedDate || item.updatedAt || item.createdAt || null,
@@ -217,7 +222,7 @@ export const getMyAssetDashboardCards = async (req, res) => {
                 status: { $nin: [...HIDDEN_ASSET_STATUSES] },
             })
                 .select(
-                    'assetId name assetValue status assignedDate plateNumber vehicleBrand vehicleCode plateEmirate currentKilometer fuelMonthlyLimit typeId documents createdAt updatedAt',
+                    'assetId name assetValue status assignedDate plateNumber vehicleBrand vehicleCode plateEmirate currentKilometer fuelMonthlyLimit locatorDeviceId typeId documents createdAt updatedAt',
                 )
                 .populate('typeId', 'name')
                 .sort({ assignedDate: -1, updatedAt: -1 })
@@ -253,6 +258,14 @@ export const getMyAssetDashboardCards = async (req, res) => {
                 : [],
         ]);
         const fuelByVehicle = new Map((fuelBills || []).map((bill) => [String(bill.vehicleId), bill]));
+        let idleByDevice = {};
+        try {
+            idleByDevice = await getCurrentMonthIdleByDevices(
+                vehicleAssets.map((item) => item.locatorDeviceId),
+            );
+        } catch (error) {
+            console.error('[getMyAssetDashboardCards] month idle', error?.message || error);
+        }
         const billByUtility = new Map();
         (utilityBills || []).forEach((bill) => {
             const key = String(bill.entryId);
@@ -262,7 +275,15 @@ export const getMyAssetDashboardCards = async (req, res) => {
         const tools = [];
         const vehicles = [];
         (assets || []).forEach((item) => {
-            if (isVehicleAsset(item)) vehicles.push(mapVehicleItem(item, fuelByVehicle.get(String(item._id))));
+            if (isVehicleAsset(item)) {
+                vehicles.push(
+                    mapVehicleItem(
+                        item,
+                        fuelByVehicle.get(String(item._id)),
+                        idleByDevice[String(item.locatorDeviceId || '')],
+                    ),
+                );
+            }
             else tools.push(mapToolItem(item));
         });
         await attachVehicleHandoverDocuments(vehicles);
