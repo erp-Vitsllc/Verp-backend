@@ -154,6 +154,7 @@ export async function applyWhatsAppDeliveryStatus({
     status = '',
     recipientPhone = '',
     occurredAt = null,
+    errorMessage = '',
 } = {}) {
     try {
         const id = String(waMessageId || '').trim();
@@ -165,7 +166,9 @@ export async function applyWhatsAppDeliveryStatus({
                 ? occurredAt
                 : new Date();
         const update = { status: mapped };
-        if (mapped === 'failed') update.error = update.error || 'Delivery failed';
+        if (mapped === 'failed') {
+            update.error = String(errorMessage || '').trim() || 'Delivery failed. The attachment did not reach the phone.';
+        }
 
         const doc = await WhatsAppMessage.findOneAndUpdate(
             { waMessageId: id },

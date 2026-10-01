@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 import {
+    addOverlayCountsForEmployees,
     applyOverlayCounts,
     applyOverlayCountsToBalances,
     isHistoricalLeaveEntry,
@@ -71,6 +72,31 @@ describe('historical leave attendance overlay', () => {
             overlay.entries.find((row) => row.statusKey === 'sick_leave')?.source,
             'Salary enrollment',
         );
+    });
+
+    it('keeps undated totals on a full year and drops them for a month', () => {
+        const profilesByCode = new Map([['E1', profile]]);
+        const employees = [{ _id: 'mongo-1', employeeId: 'E1' }];
+        const yearCounts = addOverlayCountsForEmployees({
+            profilesByCode,
+            employees,
+            from: '2026-01-01',
+            to: '2026-12-31',
+            countsByEmp: {},
+        });
+        assert.equal(yearCounts['mongo-1'].authorized_leave, 5);
+        assert.equal(yearCounts['mongo-1'].sick_leave, 3);
+
+        const monthCounts = addOverlayCountsForEmployees({
+            profilesByCode,
+            employees,
+            from: '2026-08-01',
+            to: '2026-08-31',
+            countsByEmp: {},
+        });
+        assert.equal(monthCounts['mongo-1'].sick_leave, 3);
+        assert.equal(monthCounts['mongo-1'].authorized_leave || 0, 0);
+        assert.equal(monthCounts['mongo-1'].on_leave || 0, 0);
     });
 
     it('clips dated leave to the requested period', () => {

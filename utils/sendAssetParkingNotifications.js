@@ -42,20 +42,6 @@ const escapeHtml = (value) =>
         .replace(/>/g, '&gt;')
         .replace(/"/g, '&quot;');
 
-/** Employee company mailbox, otherwise the employee's HOD. Never the same address as To. */
-const resolveLeaveReminderCc = (assignedEmployee, hodEmployee, toEmail) => {
-    const companyEmail = String(assignedEmployee?.companyEmail || '').trim();
-    let cc = null;
-    if (companyEmail && isEmployeeActiveForNotifications(assignedEmployee)) {
-        cc = companyEmail;
-    } else if (hodEmployee) {
-        cc = resolveEmployeeEmail(hodEmployee).email;
-    }
-    if (!cc) return null;
-    if (toEmail && cc.toLowerCase() === String(toEmail).toLowerCase()) return null;
-    return cc;
-};
-
 const buildLeaveExpiryHtml = ({ asset, recipient, expiresToday }) => {
     const endLabel = asset.onLeaveEndDate
         ? new Date(asset.onLeaveEndDate).toLocaleDateString('en-GB')
@@ -78,9 +64,34 @@ const buildLeaveExpiryHtml = ({ asset, recipient, expiresToday }) => {
     `;
 };
 
+/** Company email, then work email. Does not fall back to another person. */
+const ownBusinessEmail = (person) => {
+    if (!person || !isEmployeeActiveForNotifications(person)) return null;
+    const company = String(person.companyEmail || '').trim();
+    if (company) return company;
+    const work = String(person.workEmail || '').trim();
+    if (work) return work;
+    return null;
+};
+
+const uniqueEmails = (people) => {
+    const emails = [];
+    const seen = new Set();
+    for (const person of people) {
+        const email = ownBusinessEmail(person);
+        if (!email) continue;
+        const key = email.toLowerCase();
+        if (seen.has(key)) continue;
+        seen.add(key);
+        emails.push(email);
+    }
+    return emails;
+};
+
 /**
  * One email for every on-leave asset of one employee that is 5 days from expiry.
- * To: Asset Controller. Cc: employee company email, or that employee's HOD when company email is missing.
+ * To: Asset Controller, the assigned employee, and that employee's primary reportee.
+ * Eleven assets produce one email, not eleven.
  */
 export const sendParkingReminderEmail = async ({
     assets,
@@ -91,13 +102,14 @@ export const sendParkingReminderEmail = async ({
 }) => {
     try {
         const list = (Array.isArray(assets) ? assets : [assets]).filter(Boolean);
-        if (!list.length || !assetController) return;
+        if (!list.length) return;
 
-        const { email: toEmail } = resolveEmployeeEmail(assetController);
-        if (!toEmail) return;
+        const to = uniqueEmails([assetController, assignedEmployee, hodEmployee]).join(', ');
+        if (!to) return;
 
-        const cc = resolveLeaveReminderCc(assignedEmployee, hodEmployee, toEmail);
         const ownerName = `${assignedEmployee?.firstName || ''} ${assignedEmployee?.lastName || ''}`.trim();
+        const count = list.length;
+        const assetWord = count === 1 ? 'asset is' : 'assets are';
         const rows = list
             .map((asset) => {
                 const endLabel = asset.onLeaveEndDate
@@ -108,13 +120,12 @@ export const sendParkingReminderEmail = async ({
             .join('');
 
         await sendOperationalExpiryMail({
-            to: toEmail,
-            cc,
+            to,
             subject: ownerName
-                ? `Reminder: On Leave ends in ${daysLeft} day(s) — ${ownerName}`
-                : `Reminder: On Leave ends in ${daysLeft} day(s)`,
-            html: `<p>Hello <strong>${escapeHtml(assetController.firstName || 'there')}</strong>,</p>
-                   <p>The following asset(s)${ownerName ? ` assigned to <strong>${escapeHtml(ownerName)}</strong>` : ''} are On Leave and end in <strong>${daysLeft} day(s)</strong>.</p>
+                ? `On Leave: ${count} asset(s), ${daysLeft} days remaining — ${ownerName}`
+                : `On Leave: ${count} asset(s), ${daysLeft} days remaining`,
+            html: `<p>Hello,</p>
+                   <p><strong>${count}</strong> ${assetWord} On Leave${ownerName ? ` for <strong>${escapeHtml(ownerName)}</strong>` : ''} and <strong>${daysLeft} days</strong> remain.</p>
                    <ul>${rows}</ul>
                    <p>Please extend the duration or mark the asset On Duty before expiry. Maximum total leave duration is 40 days.</p>`,
         });

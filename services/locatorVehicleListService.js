@@ -5,6 +5,7 @@ import EmployeeBasic from '../models/EmployeeBasic.js';
 import { generateNextFleetVehicleAssetId, buildFleetVehicleMongoScope } from '../utils/fleetVehicleAssetId.js';
 import { isFleetVehicleAssetFields } from '../utils/assetApprovalHelpers.js';
 import { fetchLatestPositions, isLocatorConfigured, locatorLogin } from './locatorService.js';
+import { currentDistanceKm, formatDuration, locatorSampleTime, locatorTemperatureC } from './locatorUnits.js';
 import { getCachedLocatorPositions } from './locatorWebSocketService.js';
 import { readLocatorTokens } from '../utils/locatorTokenStore.js';
 import { resolveRegistrationExpiryDate } from '../utils/vehicleDocumentRenewal.js';
@@ -420,49 +421,44 @@ function extractPlateCandidatesFromLocatorName(name) {
     return matches ? [...new Set(matches.map((m) => normalizePlateDigits(m)).filter(Boolean))] : [];
 }
 
-function gpsTotalDistanceKm(position = null, attrs = {}) {
-    if (attrs.totalDistanceKm != null && attrs.totalDistanceKm !== '') {
-        const parsed = Number(String(attrs.totalDistanceKm).replace(/,/g, ''));
-        if (Number.isFinite(parsed) && parsed > 0) return Math.round(parsed);
-    }
-
-    if (position?.totalDistanceKm != null && position.totalDistanceKm !== '') {
-        const parsed = Number(String(position.totalDistanceKm).replace(/,/g, ''));
-        if (Number.isFinite(parsed) && parsed > 0) return Math.round(parsed);
-    }
-
-    if (Number.isFinite(Number(attrs.totalDistance)) && Number(attrs.totalDistance) > 0) {
-        return Math.round(Number(attrs.totalDistance) / 1000);
-    }
-
-    if (Number.isFinite(Number(position?.totalDistance)) && Number(position.totalDistance) > 0) {
-        return Math.round(Number(position.totalDistance) / 1000);
-    }
-
-    return null;
+/** Current Locator kilometer from totalDistanceKm. Null when that reading is absent. */
+function toOdometerKm(position = null) {
+    const km = currentDistanceKm(position);
+    if (km == null) return null;
+    return Number(km.toFixed(2));
 }
 
-/** Device odometer in km. GPS totalDistance is not the dashboard odometer. */
-function toOdometerKm(position = null) {
+function currentIdleLabel(position) {
     const attrs = position?.attributes || {};
-    const odometerM = Number(attrs.odometer ?? position?.odometer);
-    if (Number.isFinite(odometerM) && odometerM > 0) return Math.round(odometerM / 1000);
-    return gpsTotalDistanceKm(position, attrs);
+    const state = String(attrs.state || '').toLowerCase();
+    if (state !== 'idling' || attrs.ignition !== true) return '';
+    const start = Number(attrs.idleStart);
+    if (!Number.isFinite(start) || start <= 0) return '';
+    const startMs = start > 1e12 ? start : start * 1000;
+    const elapsed = Date.now() - startMs;
+    if (!Number.isFinite(elapsed) || elapsed <= 0) return '';
+    return formatDuration(elapsed);
 }
 
 function formatLocatorGpsStatus(position, registryVehicle) {
     const attrs = position?.attributes || {};
     const state = String(attrs.state || '').trim();
     const live = String(position?.livestatus || registryVehicle?.status || '').trim();
+    let label = '';
 
     if (state) {
-        const label = state.charAt(0).toUpperCase() + state.slice(1);
-        if (live) return `${label} · ${live}`;
-        return label;
+        const stateLabel = state.charAt(0).toUpperCase() + state.slice(1);
+        label = live ? `${stateLabel} · ${live}` : stateLabel;
+    } else if (live) {
+        label = live;
+    } else {
+        label = registryVehicle?.status || 'Unknown';
     }
 
-    if (live) return live;
-    return registryVehicle?.status || 'Unknown';
+    if (position?.outdated === true || position?.valid === false) {
+        return `${label} · Stale GPS`;
+    }
+    return label;
 }
 
 function buildPositionMap(positions) {
@@ -604,9 +600,19 @@ function mapLocatorOnlyRow(deviceId, registryVehicle, position) {
             address: position?.address || '',
             speedKmh: position?.speedKmh ?? null,
             ignition: attrs.ignition === true,
+            motion: attrs.motion ?? null,
+            latitude: position?.latitude ?? null,
+            longitude: position?.longitude ?? null,
+            battery: attrs.battery ?? null,
+            power: attrs.power ?? null,
+            temperature: locatorTemperatureC(position),
             currentKilometer: toOdometerKm(position),
+            currentIdleLabel: currentIdleLabel(position),
+            outdated: position?.outdated === true,
+            valid: position?.valid !== false,
             driverName: driver?.driver_name || '',
-            lastUpdate: position?.deviceTime || registryVehicle?.lastUpdate || null,
+            driverPhone: driver?.driver_phone || '',
+            lastUpdate: locatorSampleTime(position) || registryVehicle?.lastUpdate || null,
         },
         isLocatorOnly: true,
     };
@@ -691,9 +697,19 @@ export async function buildLocatorVehicleList() {
             address: position?.address || '',
             speedKmh: position?.speedKmh ?? null,
             ignition: attrs.ignition === true,
+            motion: attrs.motion ?? null,
+            latitude: position?.latitude ?? null,
+            longitude: position?.longitude ?? null,
+            battery: attrs.battery ?? null,
+            power: attrs.power ?? null,
+            temperature: locatorTemperatureC(position),
             currentKilometer: toOdometerKm(position),
+            currentIdleLabel: currentIdleLabel(position),
+            outdated: position?.outdated === true,
+            valid: position?.valid !== false,
             driverName: driver?.driver_name || '',
-            lastUpdate: position?.deviceTime || registryVehicle?.lastUpdate || null,
+            driverPhone: driver?.driver_phone || '',
+            lastUpdate: locatorSampleTime(position) || registryVehicle?.lastUpdate || null,
         };
 
         if (erpMatch) {
@@ -759,9 +775,19 @@ function buildLocatorOverlay(deviceId, registryVehicle, position) {
         address: position?.address || '',
         speedKmh: position?.speedKmh ?? null,
         ignition: attrs.ignition === true,
+        motion: attrs.motion ?? null,
+        latitude: position?.latitude ?? null,
+        longitude: position?.longitude ?? null,
+        battery: attrs.battery ?? null,
+        power: attrs.power ?? null,
+        temperature: locatorTemperatureC(position),
         currentKilometer: toOdometerKm(position),
+        currentIdleLabel: currentIdleLabel(position),
+        outdated: position?.outdated === true,
+        valid: position?.valid !== false,
         driverName: driver?.driver_name || '',
-        lastUpdate: position?.deviceTime || registryVehicle?.lastUpdate || null,
+        driverPhone: driver?.driver_phone || '',
+        lastUpdate: locatorSampleTime(position) || registryVehicle?.lastUpdate || null,
     };
 }
 
@@ -986,7 +1012,7 @@ export async function reconcileLocatorPositionsToErp(positions = [], { createdBy
                     speedRaw != null && Number.isFinite(Number(speedRaw)) ? Number(speedRaw) : null;
                 const ignition =
                     attrs.ignition === true ? true : attrs.ignition === false ? false : null;
-                const lastUpdate = position?.deviceTime ? new Date(position.deviceTime) : new Date();
+                const lastUpdate = locatorSampleTime(position);
 
                 if (gpsStatus && asset.locatorGpsStatus !== gpsStatus) {
                     asset.locatorGpsStatus = gpsStatus;
@@ -1004,7 +1030,10 @@ export async function reconcileLocatorPositionsToErp(positions = [], { createdBy
                     asset.locatorIgnition = ignition;
                     dirty = true;
                 }
-                asset.locatorLastUpdate = lastUpdate;
+                if (lastUpdate && String(asset.locatorLastUpdate || '') !== String(lastUpdate)) {
+                    asset.locatorLastUpdate = lastUpdate;
+                    dirty = true;
+                }
                 asset.locatorSyncedAt = new Date();
                 dirty = true;
 

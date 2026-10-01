@@ -33,9 +33,17 @@ async function finePdfAlreadySent(employeeId, caption) {
     return Boolean(existing);
 }
 
+async function employeeCompanyEmail(employee) {
+    const direct = String(employee?.companyEmail || '').trim();
+    if (direct) return direct;
+    if (!employee?.employeeId || employee?.companyEmail === '') return '';
+    const EmployeeBasic = (await import('../models/EmployeeBasic.js')).default;
+    const row = await EmployeeBasic.findOne({ employeeId: employee.employeeId }).select('companyEmail').lean();
+    return String(row?.companyEmail || '').trim();
+}
+
 /**
- * WhatsApp only when Fine approved is checked, the employee has no company email,
- * and they have a WhatsApp number. Company-email delivery stays on the email path.
+ * WhatsApp when Fine approved is checked and the employee has no company email.
  */
 export async function sendFineApprovedWhatsApp({
     fine,
@@ -45,11 +53,11 @@ export async function sendFineApprovedWhatsApp({
     allowResend = false,
 } = {}) {
     if (!employee?.employeeId) return { sent: false, reason: 'no_employee' };
+    if (await employeeCompanyEmail(employee)) {
+        return { sent: false, reason: 'has_company_email', channel: 'email' };
+    }
     const channels = await getEventChannels(FINE_APPROVED_EVENT);
     if (!channels.whatsapp) return { sent: false, reason: 'permission_off' };
-    if (String(employee.companyEmail || '').trim()) {
-        return { sent: false, reason: 'has_company_email' };
-    }
     const phone = await resolveEmployeeWhatsAppPhone(employee.employeeId);
     if (!phone) return { sent: false, reason: 'no_whatsapp' };
     if (!pdfBuffer?.length) return { sent: false, reason: 'no_pdf' };

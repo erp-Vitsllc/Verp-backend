@@ -648,6 +648,13 @@ export async function sendDocumentMessage(to, { buffer, filename, caption = '', 
         if (!buffer?.length) {
             return fail('Document file is required.');
         }
+        if (String(mimeType || '').toLowerCase() === 'application/pdf') {
+            const bytes = Buffer.isBuffer(buffer) ? buffer : Buffer.from(buffer);
+            const head = bytes.subarray(0, 5).toString('latin1');
+            if (head !== '%PDF-') {
+                return fail('Attachment is not a valid PDF, so it was not sent.');
+            }
+        }
 
         if (extras.eventKey && extras.skipPaidChannelCheck !== true) {
             const { getEventChannels } = await import('../utils/notificationEmailPermission.js');
@@ -658,13 +665,25 @@ export async function sendDocumentMessage(to, { buffer, filename, caption = '', 
         }
 
         const safeName = String(filename || 'document.pdf').replace(/[^\w.\-]+/g, '_') || 'document.pdf';
+        const note = String(caption || '').trim();
         const uploaded = await uploadWhatsAppMedia(buffer, { mimeType, filename: safeName });
         if (!uploaded.success || !uploaded.mediaId) {
+            const { logOutboundWhatsAppMessage } = await import('../utils/whatsappMessageLog.js');
+            await logOutboundWhatsAppMessage({
+                phone,
+                body: note || `Document: ${safeName}`,
+                messageType: 'document',
+                mediaFileName: safeName,
+                source: extras.source || 'auto',
+                result: uploaded,
+                actor: extras.actor || null,
+                employeeId: extras.employeeId || '',
+                contactName: extras.contactName || '',
+            });
             return uploaded;
         }
 
         const document = { id: uploaded.mediaId, filename: safeName };
-        const note = String(caption || '').trim();
         if (note) document.caption = note.slice(0, 1024);
 
         const result = await postWhatsAppMessage({

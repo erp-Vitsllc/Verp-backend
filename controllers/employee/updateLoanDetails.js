@@ -9,6 +9,10 @@ import {
     restrictApprovedLoanUpdates,
 } from "../../utils/loanApprovedEditAuth.js";
 import { assertLoanEmployeeEligibility } from "../../utils/loanEligibilityValidation.js";
+import {
+    blockingLoanMessage,
+    findBlockingLoanObligation,
+} from "../../utils/loanRepaymentGate.js";
 
 export const updateLoanDetails = async (req, res) => {
     const { id } = req.params;
@@ -244,20 +248,11 @@ export const updateLoanDetails = async (req, res) => {
         let employeeBasic = null;
 
         if (oldStatus === 'Draft' && newStatus === 'Pending') {
-            // --- VALIDATION: Existing Loan Check ---
-            // Block if employee already has an Approved or In-Progress loan/advance (excluding this one)
-            const activeLoan = await Loan.findOne({
-                _id: { $ne: id },
-                employeeId: loan.employeeId,
-                status: { $in: ['Approved', 'Pending', 'Pending HR', 'Pending Accounts', 'Pending Authorization'] }
-            }).lean();
+            const activeLoan = await findBlockingLoanObligation(loan.employeeId, id);
 
             if (activeLoan) {
-                const isApproved = activeLoan.status === 'Approved';
                 return res.status(400).json({
-                    message: isApproved
-                        ? `This employee already has an Approved loan (${activeLoan.loanId}). A new request cannot be submitted while a loan is active.`
-                        : `This employee already has another loan application in progress (${activeLoan.loanId} - ${activeLoan.status}).`
+                    message: blockingLoanMessage(activeLoan),
                 });
             }
 
@@ -276,16 +271,11 @@ export const updateLoanDetails = async (req, res) => {
                 }
             }
         } else if (req.body.resubmit && oldStatus === 'Rejected') {
-            // --- VALIDATION: Existing Loan Check for Resubmit ---
-            const activeLoan = await Loan.findOne({
-                _id: { $ne: id },
-                employeeId: loan.employeeId,
-                status: { $in: ['Approved', 'Pending', 'Pending HR', 'Pending Accounts', 'Pending Authorization'] }
-            }).lean();
+            const activeLoan = await findBlockingLoanObligation(loan.employeeId, id);
 
             if (activeLoan) {
                 return res.status(400).json({
-                    message: `Cannot resubmit this application. The employee already has another ${activeLoan.status === 'Approved' ? 'active Approved loan' : 'application in progress'} (${activeLoan.loanId}).`
+                    message: blockingLoanMessage(activeLoan, { resubmit: true }),
                 });
             }
 

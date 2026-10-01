@@ -41,7 +41,8 @@ export const getLoans = async (req, res) => {
             amount: loan.amount,
             duration: loan.duration, // Include duration for payment modal
             monthStart: loan.monthStart, // Include monthStart for payment modal
-            paidAmount: loan.paidAmount || 0, // Include paidAmount for payment tracking
+            paidAmount: loan.paidAmount || 0, // Company disbursement to the employee
+            repaidAmount: loan.repaidAmount || 0, // Amount the employee has returned
             status: loan.status, // Using 'status' field from model but user distincts 'advance Status' vs 'Application Status'.
             // Based on model 'status' and 'approvalStatus' are both Pending/Approved/Rejected.
             // I'll return both.

@@ -603,7 +603,7 @@ export async function decideLeavePendingRequest(req, res) {
         const attendanceId = String(req.body?.attendanceId || '').trim();
         const decision = String(req.body?.decision || '').trim().toLowerCase();
         const approvedStatusKey = String(req.body?.approvedStatusKey || '').trim();
-        const leavePayType = String(req.body?.leavePayType || 'paid').trim();
+        const leavePayType = '';
 
         if (!attendanceId) {
             return res.status(400).json({ message: 'attendanceId is required.' });
@@ -1084,10 +1084,7 @@ export async function applyLeaveRange(req, res) {
         const employeeMongoId = String(req.body?.employeeId || req.body?.employeeMongoId || '').trim();
         const from = String(req.body?.from || req.body?.fromDate || '').trim();
         const to = String(req.body?.to || req.body?.toDate || '').trim();
-        const leavePayType =
-            String(req.body?.leavePayType || 'paid').trim().toLowerCase() === 'unpaid'
-                ? 'unpaid'
-                : 'paid';
+        const leavePayType = '';
         const attendanceId = String(req.body?.attendanceId || req.body?.approvalId || '').trim();
         const shouldApprove =
             req.body?.approve === true ||

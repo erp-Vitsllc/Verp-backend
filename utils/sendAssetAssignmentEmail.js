@@ -8,6 +8,7 @@ import {
     buildEmailDedupeKey,
     sendErpEmail,
 } from "./emailDispatch.js";
+import { normalizePdfAttachments } from "./normalizeEmailAttachments.js";
 import { skipVehicleHandoverEmail } from "./vehicleHandoverEmailGate.js";
 
 export const sendAssetAssignmentEmail = async ({
@@ -65,6 +66,7 @@ export const sendAssetAssignmentEmail = async ({
         const assetName = isBulk ? `${assetCount} Assets` : asset.name;
         const assetIdDisplay = isBulk ? "Multiple Assets" : asset.assetId;
         const recordId = asset._id?.toString() || asset.id?.toString() || '';
+        const att = normalizePdfAttachments(attachments);
 
         const recipientRecord = resolvedRecipient || recipient;
         const isSelfAssignment =
@@ -182,7 +184,9 @@ export const sendAssetAssignmentEmail = async ({
                     </div>
 
                     <p style="font-size: 13px; color: #64748b; margin-bottom: 12px;">
-                        The handover form (if applicable) is available on the asset page in ERP — it is not attached to this email.
+                        ${att.length
+                            ? 'The handover form PDF is attached to this email.'
+                            : 'The handover form (if applicable) is available on the asset page in ERP.'}
                     </p>
 
                     <p style="font-size: 14px; color: #64748b; margin-bottom: 30px;">
@@ -222,6 +226,7 @@ export const sendAssetAssignmentEmail = async ({
             to: recipientEmail,
             subject,
             html,
+            ...(att.length ? { attachments: att } : {}),
             dedupeKey,
             module: 'Asset',
             emailType: pendingAssignment ? 'assignment_pending' : 'assignment_notice',

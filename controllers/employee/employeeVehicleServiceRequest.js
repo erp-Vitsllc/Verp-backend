@@ -84,16 +84,31 @@ async function resolveSelf(req) {
 }
 
 function filePayload(file) {
+    if (typeof file === 'string') {
+        const data = file.trim();
+        if (!data) return null;
+        if (data.length > MAX_FILE_CHARS) {
+            throw new Error('Each photo must be smaller than 6 MB.');
+        }
+        return { data, name: `photo-${Date.now()}.jpg` };
+    }
     if (!file || typeof file !== 'object') return null;
-    const data = String(file.data || '').trim();
+    const data = String(file.data || file.base64 || file.content || '').trim();
     if (!data) return null;
     if (data.length > MAX_FILE_CHARS) {
         throw new Error('Each photo must be smaller than 6 MB.');
     }
     return {
         data,
-        name: String(file.name || '').trim() || `photo-${Date.now()}.jpg`,
+        name: String(file.name || file.fileName || file.filename || '').trim() || `photo-${Date.now()}.jpg`,
     };
+}
+
+function incomingPhotoList(body) {
+    if (Array.isArray(body?.photos) && body.photos.length) return body.photos;
+    if (Array.isArray(body?.images) && body.images.length) return body.images;
+    if (Array.isArray(body?.bodyWorkImages) && body.bodyWorkImages.length) return body.bodyWorkImages;
+    return [];
 }
 
 async function storeFiles(files, folder) {
@@ -187,7 +202,7 @@ export async function createEmployeeVehicleServiceRequest(req, res) {
             }
             description = `Tyres to change: ${tyreCount}`;
             remark.tireNumber = tyreCount;
-            const incoming = Array.isArray(req.body?.photos) ? req.body.photos : [];
+            const incoming = incomingPhotoList(req.body);
             if (!incoming.length) {
                 return res.status(400).json({ message: 'Add a photo of the current tyre.' });
             }
@@ -200,7 +215,7 @@ export async function createEmployeeVehicleServiceRequest(req, res) {
             }
         } else if (kind === 'mechanical') {
             if (!description) return res.status(400).json({ message: 'Describe the mechanical work.' });
-            const incoming = Array.isArray(req.body?.photos) ? req.body.photos : [];
+            const incoming = incomingPhotoList(req.body);
             if (incoming.length > MAX_PHOTOS) {
                 return res.status(400).json({ message: `You can add up to ${MAX_PHOTOS} photos.` });
             }
@@ -233,6 +248,8 @@ export async function createEmployeeVehicleServiceRequest(req, res) {
 
         if (photos.length) {
             remark.photos = photos;
+            // Detail screens render rectification photos from this field.
+            remark.bodyWorkImages = photos;
         }
 
         const creatorName = await getRequesterName(req.user);

@@ -27,6 +27,9 @@ const daysUntilLeaveEnd = (endDate, today = new Date()) => {
     return Math.ceil((end.getTime() - start.getTime()) / (1000 * 60 * 60 * 24));
 };
 
+const personName = (person) =>
+    `${person?.firstName || ''} ${person?.lastName || ''}`.trim();
+
 const loadEmployeeLean = async (id) => {
     if (!id) return null;
     return EmployeeBasic.findById(id)
@@ -73,6 +76,8 @@ export const processParkingAssets = async () => {
         }).populate('assignedTo');
 
         const dueLeaveReminders = [];
+        const advanceTaskRows = [];
+        const taskHoldersByAsset = new Map();
 
         for (const asset of parkedAssets) {
             if (!asset.onLeaveEndDate) continue;
@@ -92,9 +97,17 @@ export const processParkingAssets = async () => {
                 assetController,
                 assignedEmployee,
             );
+            const taskRecipients = [assignedEmployee, assetController].filter((person) => person?._id);
+            const holderIds = new Set(taskRecipients.map((person) => String(person._id)));
+            taskHoldersByAsset.set(String(asset._id), holderIds);
+            const ownerLabel = personName(assignedEmployee);
 
             const ensureLeaveDashboardTasks = async (daysLeft) => {
-                for (const recipient of notifyRecipients) {
+                const seen = new Set();
+                for (const recipient of taskRecipients) {
+                    const recipientKey = String(recipient._id);
+                    if (seen.has(recipientKey)) continue;
+                    seen.add(recipientKey);
                     await upsertOperationalExpiryDashboardTask({
                         asset,
                         recipient,
@@ -102,9 +115,17 @@ export const processParkingAssets = async () => {
                         kind: 'leave',
                         expiryDate,
                         daysLeft,
+                        subjectName: ownerLabel,
                     });
                 }
             };
+
+            const holdAdvanceTask =
+                diffDays >= 0 &&
+                (diffDays === ON_LEAVE_ADVANCE_NOTICE_DAYS || !!asset.parkingReminderSentAt);
+            if (holdAdvanceTask) {
+                advanceTaskRows.push({ asset, assignedEmployee, expiryDate, taskRecipients, ownerLabel });
+            }
 
             // 5 days before end: collect, then one email per employee (not on the expiry day).
             if (diffDays === ON_LEAVE_ADVANCE_NOTICE_DAYS && !asset.parkingReminderSentAt) {
@@ -118,6 +139,7 @@ export const processParkingAssets = async () => {
                 const packedRole = asset.onLeavePackedToRole;
 
                 applyLeaveExpiredAutoUnassign(asset);
+                taskHoldersByAsset.delete(String(asset._id));
 
                 await sendLeaveAutoUnassignedEmail({
                     asset,
@@ -170,29 +192,12 @@ export const processParkingAssets = async () => {
                 daysLeft: ON_LEAVE_ADVANCE_NOTICE_DAYS,
             });
 
-            const taskRecipients = [assignedEmployee, assetController].filter((person) => person?._id);
-            const seenTaskRecipients = new Set();
-
             for (const row of rows) {
-                for (const recipient of taskRecipients) {
-                    const recipientKey = String(recipient._id);
-                    if (seenTaskRecipients.has(`${row.asset._id}:${recipientKey}`)) continue;
-                    seenTaskRecipients.add(`${row.asset._id}:${recipientKey}`);
-                    await upsertOperationalExpiryDashboardTask({
-                        asset: row.asset,
-                        recipient,
-                        requestType: 'Asset Leave',
-                        kind: 'leave',
-                        expiryDate: row.expiryDate,
-                        daysLeft: ON_LEAVE_ADVANCE_NOTICE_DAYS,
-                    });
-                }
-
                 await AssetHistory.create({
                     assetId: row.asset._id,
                     action: 'Comment',
                     performedBy: null,
-                    comments: `On Leave duration reminder: ${ON_LEAVE_ADVANCE_NOTICE_DAYS} days remaining. One email to Asset Controller (Cc employee company email, or HOD). Task for assigned employee and Asset Controller.`,
+                    comments: `On Leave duration reminder: ${ON_LEAVE_ADVANCE_NOTICE_DAYS} days remaining. One email to Asset Controller, assigned employee, and primary reportee. Task for assigned employee and Asset Controller only.`,
                     date: new Date(),
                     details: { auto: true, reason: 'LeaveAdvanceNotice', daysLeft: ON_LEAVE_ADVANCE_NOTICE_DAYS },
                 }).catch(() => null);
@@ -202,28 +207,57 @@ export const processParkingAssets = async () => {
             }
         }
 
+        const seenAdvanceTasks = new Set();
+        for (const row of advanceTaskRows) {
+            for (const recipient of row.taskRecipients) {
+                const recipientKey = `${row.asset._id}:${recipient._id}`;
+                if (seenAdvanceTasks.has(recipientKey)) continue;
+                seenAdvanceTasks.add(recipientKey);
+                await upsertOperationalExpiryDashboardTask({
+                    asset: row.asset,
+                    recipient,
+                    requestType: 'Asset Leave',
+                    kind: 'leave',
+                    expiryDate: row.expiryDate,
+                    daysLeft: ON_LEAVE_ADVANCE_NOTICE_DAYS,
+                    subjectName: row.ownerLabel,
+                });
+            }
+        }
+
         const staleLeaveTasks = await DashboardAction.find({
             requestType: 'Asset Leave',
             status: 'Pending',
             extra3: { $regex: '"focusCard"\\s*:\\s*"operationalExpiry"', $options: 'i' },
         })
-            .select('requestId')
+            .select('requestId assignedTo')
             .lean();
 
         for (const row of staleLeaveTasks) {
-            const asset = await AssetItem.findById(row.requestId).select('onLeaveActive status').lean();
-            if (!asset || asset.onLeaveActive !== true) {
-                await DashboardAction.updateOne(
-                    { _id: row._id },
-                    {
-                        $set: {
-                            status: 'Approved',
-                            actionedDate: new Date(),
-                            comment: 'Asset no longer on leave.',
-                        },
+            const assetId = String(row.requestId || '');
+            const holders = taskHoldersByAsset.get(assetId);
+            const assigneeId = String(row.assignedTo || '');
+            if (holders && holders.has(assigneeId)) continue;
+
+            const asset = holders
+                ? { onLeaveActive: true }
+                : await AssetItem.findById(row.requestId).select('onLeaveActive status').lean();
+            const wrongHolder = holders && !holders.has(assigneeId);
+            const noLongerOnLeave = !asset || asset.onLeaveActive !== true;
+            if (!wrongHolder && !noLongerOnLeave) continue;
+
+            await DashboardAction.updateOne(
+                { _id: row._id },
+                {
+                    $set: {
+                        status: 'Approved',
+                        actionedDate: new Date(),
+                        comment: wrongHolder
+                            ? 'On Leave task is only for the assigned employee and Asset Controller.'
+                            : 'Asset no longer on leave.',
                     },
-                );
-            }
+                },
+            );
         }
     } catch (e) {
         console.error('[processParkingAssets] Non-fatal error:', e?.message || e);

@@ -1,7 +1,15 @@
 import axios from 'axios';
 import { clearLocatorTokens, readLocatorTokens, writeLocatorTokens } from '../utils/locatorTokenStore.js';
+import {
+    convertKnotsToKmh,
+    currentDistanceKm,
+    formatDuration,
+    locatorSampleTime,
+    locatorTemperatureC,
+    metersToKm,
+    rawOdometerMeters,
+} from './locatorUnits.js';
 
-const KNOTS_TO_KMH = 1.852;
 const DEFAULT_API_BASE = 'https://pro.mylocatorplus.com/locator-clients/api';
 const DEFAULT_WS_BASE = 'wss://pro.mylocatorplus.com/locator-clients/api/socket';
 
@@ -65,9 +73,9 @@ function assertRateLimit(key, maxRequests, windowMs) {
 }
 
 function normalizeSpeedKmh(speedKnots) {
-    const knots = Number(speedKnots);
-    if (!Number.isFinite(knots)) return null;
-    return Number((knots * KNOTS_TO_KMH).toFixed(2));
+    const kmh = convertKnotsToKmh(speedKnots);
+    if (kmh == null) return null;
+    return Number(kmh.toFixed(2));
 }
 
 function normalizeDistanceKm(distanceMeters) {
@@ -76,10 +84,9 @@ function normalizeDistanceKm(distanceMeters) {
     return Number((meters / 1000).toFixed(2));
 }
 
-function normalizeTemperatureC(temp1) {
-    const raw = Number(temp1);
-    if (!Number.isFinite(raw)) return null;
-    return Number((raw / 10).toFixed(2));
+function normalizeTemperatureC(source) {
+    const value = locatorTemperatureC(source);
+    return value == null ? null : Number(value.toFixed(2));
 }
 
 export function normalizeWebSocketPosition(position) {
@@ -89,7 +96,7 @@ export function normalizeWebSocketPosition(position) {
         ...position,
         speedKmh: normalizeSpeedKmh(position.speed),
         totalDistanceKm: normalizeDistanceKm(position.totalDistance),
-        temperatureC: normalizeTemperatureC(position.temp1),
+        temperatureC: normalizeTemperatureC(position),
     };
 }
 
@@ -108,7 +115,7 @@ export function normalizeRestPosition(position) {
                 (attributes.totalDistance != null
                     ? String(normalizeDistanceKm(attributes.totalDistance))
                     : attributes.totalDistanceKm),
-            temperatureC: normalizeTemperatureC(attributes.temp1),
+            temperatureC: normalizeTemperatureC(position),
         },
     };
 }
@@ -160,12 +167,17 @@ export async function locatorLogin({ force = false } = {}) {
     });
 
     const payload = response?.data;
-    if (!payload?.success || !payload?.data?.token) {
+    const liveToken = payload?.data?.live_token || payload?.data?.liveToken || payload?.data?.token;
+    if (!payload?.success || !liveToken) {
         throw new Error(payload?.message || 'Locator login failed');
     }
 
+    const previous = await readLocatorTokens();
+    const reportToken = payload.data.report_token || payload.data.reportToken || previous?.reportToken || null;
     const stored = {
-        token: payload.data.token,
+        token: liveToken,
+        liveToken,
+        reportToken,
         user: payload.data.user || null,
         vehicles: payload.data.vehicles || [],
         groups: payload.data.groups || [],
@@ -252,7 +264,380 @@ export async function fetchLatestPositions({ allowStale = false, force = false }
     };
 
     latestPositionsCache = { at: Date.now(), data: result };
+    for (const position of positions) logLocatorPositionComparison(position);
     return result;
+}
+
+async function getReportToken({ force = false } = {}) {
+    const session = await locatorLogin({ force });
+    return session?.reportToken || null;
+}
+
+function finiteOrNull(value) {
+    const number = Number(value);
+    return Number.isFinite(number) ? number : null;
+}
+
+function summaryRowsFromPayload(payload) {
+    const data = payload?.data ?? payload;
+    if (Array.isArray(data)) return data;
+    if (!data || typeof data !== 'object') return [];
+    for (const key of ['summary', 'vehicles', 'rows', 'list', 'vehicleSummary', 'trips']) {
+        if (Array.isArray(data[key])) return data[key];
+    }
+    if (data.distanceTravelled != null || data.vehicleId != null || data.deviceId != null) return [data];
+    return [];
+}
+
+function summaryDeviceId(row) {
+    const id = Number(row?.vehicleId ?? row?.deviceId ?? row?.id);
+    return Number.isFinite(id) && id > 0 ? id : null;
+}
+
+export function normalizeVehicleSummaryRow(row) {
+    const distanceKm = metersToKm(row?.distanceTravelled);
+    const drivingTimeMs = finiteOrNull(row?.drivingTime);
+    const idleTimeMs = finiteOrNull(row?.idleTime);
+    const startOdometerKm = metersToKm(row?.startOdometer);
+    const endOdometerKm = metersToKm(row?.endOdometer);
+    return {
+        deviceId: summaryDeviceId(row),
+        raw: {
+            distanceTravelled: row?.distanceTravelled ?? null,
+            drivingTime: row?.drivingTime ?? null,
+            idleTime: row?.idleTime ?? null,
+            averageSpeed: row?.averageSpeed ?? null,
+            maxSpeed: row?.maxSpeed ?? null,
+            currentBattery: row?.currentBattery ?? null,
+            totalTrips: row?.totalTrips ?? null,
+            startOdometer: row?.startOdometer ?? null,
+            endOdometer: row?.endOdometer ?? null,
+        },
+        distanceKm: distanceKm == null ? null : Number(distanceKm.toFixed(3)),
+        drivingTimeMs,
+        idleTimeMs,
+        drivingTimeLabel: drivingTimeMs == null ? '' : formatDuration(drivingTimeMs),
+        idleTimeLabel: idleTimeMs == null ? '' : formatDuration(idleTimeMs),
+        averageSpeedKmh: finiteOrNull(row?.averageSpeed),
+        maxSpeedKmh: finiteOrNull(row?.maxSpeed),
+        totalTrips: finiteOrNull(row?.totalTrips),
+        startOdometerKm: startOdometerKm == null ? null : Number(startOdometerKm.toFixed(2)),
+        endOdometerKm: endOdometerKm == null ? null : Number(endOdometerKm.toFixed(2)),
+        currentBattery: row?.currentBattery ?? null,
+    };
+}
+
+export function normalizeTripSummaryRow(row) {
+    const distanceKm = metersToKm(row?.distance);
+    const drivingTimeMs = finiteOrNull(row?.drivingTime);
+    const idleTimeMs = finiteOrNull(row?.idleTime);
+    return {
+        ...row,
+        distanceKm: distanceKm == null ? null : Number(distanceKm.toFixed(3)),
+        drivingTimeMs,
+        idleTimeMs,
+        drivingTimeLabel: drivingTimeMs == null ? '' : formatDuration(drivingTimeMs),
+        idleTimeLabel: idleTimeMs == null ? '' : formatDuration(idleTimeMs),
+        averageSpeedKmh: finiteOrNull(row?.averageSpeed),
+        maxSpeedKmh: finiteOrNull(row?.maxSpeed),
+    };
+}
+
+async function postLocatorReport(path, body) {
+    const client = buildApiClient();
+    let token = await getReportToken();
+    if (!token) {
+        const error = new Error('Locator report token is missing. Summary was not requested with the live token.');
+        error.code = 'LOCATOR_REPORT_TOKEN_MISSING';
+        throw error;
+    }
+
+    const send = (authToken) =>
+        client.post(path, body, {
+            headers: { Authorization: authToken },
+        });
+
+    let response;
+    try {
+        response = await send(token);
+    } catch (error) {
+        const status = error?.response?.status;
+        if (status === 401 || status === 403) {
+            token = await getReportToken({ force: true });
+            if (!token) throw error;
+            response = await send(token);
+        } else {
+            throw error;
+        }
+    }
+
+    const payload = response?.data;
+    if (payload?.success === false) {
+        throw new Error(payload?.message || 'Locator report request failed');
+    }
+    return payload;
+}
+
+export async function fetchVehicleWiseSummary({ vehicleIds, from, to } = {}) {
+    assertRateLimit('vehicle-wise-summary', 6, 60 * 1000);
+    const ids = [...new Set((vehicleIds || []).map((id) => Number(id)).filter((id) => Number.isFinite(id) && id > 0))];
+    if (!ids.length || !from || !to) return [];
+    const payload = await postLocatorReport('/v1/summary/vehicle-wise', {
+        vehicleIds: ids,
+        from,
+        to,
+    });
+    const rows = summaryRowsFromPayload(payload).map(normalizeVehicleSummaryRow).filter((row) => row.deviceId);
+    logLocatorSummaryComparison(rows[0], { from, to });
+    return rows;
+}
+
+const EXCESSIVE_IDLING_REPORT_ID = 62;
+/** Portal Excessive Idling Report option labeled "5 Minutes". Value is seconds. */
+const EXCESSIVE_IDLING_MIN_SECONDS = 350;
+const excessiveIdleCache = new Map();
+let gatewaySession = null;
+
+function gatewayBaseUrl() {
+    const { apiBaseUrl } = getLocatorConfig();
+    const origin = new URL(apiBaseUrl).origin;
+    return `${origin}/gateway/index.php`;
+}
+
+function cleanLocatorError(error, fallback) {
+    const message = error?.response?.data?.message;
+    const text = typeof message === 'string' && message.trim() ? message.trim().slice(0, 180) : fallback;
+    const wrapped = new Error(text || fallback);
+    wrapped.statusCode = error?.response?.status;
+    return wrapped;
+}
+
+async function gatewayLogin({ force = false } = {}) {
+    assertLocatorConfig();
+    if (!force && gatewaySession?.token && Date.now() - gatewaySession.at < 20 * 60 * 1000) {
+        return gatewaySession;
+    }
+
+    const { username, password, isAdmin } = getLocatorConfig();
+    let response;
+    try {
+        response = await axios.post(
+            `${gatewayBaseUrl()}/api-v1/user/postlogin`,
+            {
+                user_name: username,
+                user_password: password,
+                isAdmin,
+            },
+            { timeout: 30000 },
+        );
+    } catch (error) {
+        throw cleanLocatorError(error, 'Locator gateway login failed');
+    }
+
+    const token = response?.data?.token;
+    if (!token) {
+        throw new Error('Locator gateway login failed');
+    }
+
+    gatewaySession = {
+        token,
+        vehicles: Array.isArray(response.data?.vehicles) ? response.data.vehicles : [],
+        at: Date.now(),
+    };
+    return gatewaySession;
+}
+
+function excessiveIdleCacheKey(vehicleIds, from, to) {
+    return `${from}|${to}|${[...vehicleIds].sort((a, b) => a - b).join(',')}`;
+}
+
+function excessiveBlocks(payload) {
+    if (Array.isArray(payload)) return payload;
+    if (payload && typeof payload === 'object' && payload.vehicles) return [payload];
+    return [];
+}
+
+function excessiveEvents(vehicles) {
+    const data = vehicles?.data;
+    if (Array.isArray(data)) return data;
+    if (data && typeof data === 'object') return Object.values(data);
+    return [];
+}
+
+/**
+ * Official Excessive Idling Report (portal report 62).
+ * Durations are milliseconds. Vehicles with no sessions are returned as 0.
+ * Does not use the live position token.
+ */
+export async function fetchExcessiveIdlingReport({ vehicleIds, from, to } = {}) {
+    const ids = [...new Set((vehicleIds || []).map((id) => Number(id)).filter((id) => Number.isFinite(id) && id > 0))];
+    if (!ids.length || !from || !to) return new Map();
+
+    const cacheKey = excessiveIdleCacheKey(ids, from, to);
+    const cached = excessiveIdleCache.get(cacheKey);
+    if (cached && Date.now() - cached.at < 60 * 1000) return cached.map;
+
+    assertRateLimit('excessive-idling', 6, 60 * 1000);
+
+    const session = await gatewayLogin();
+    const vehiclesById = new Map(
+        (session.vehicles || [])
+            .map((vehicle) => [Number(vehicle?.id), vehicle])
+            .filter(([id]) => Number.isFinite(id) && id > 0),
+    );
+    const vehIDs = [];
+    const idByUniqueId = new Map();
+    for (const id of ids) {
+        const vehicle = vehiclesById.get(id);
+        if (!vehicle?.name) continue;
+        const uniqueId = String(vehicle.uniqueId || '');
+        vehIDs.push([vehicle.name, uniqueId, vehicle.id, vehicle.category || '']);
+        if (uniqueId) idByUniqueId.set(uniqueId, id);
+    }
+    if (!vehIDs.length) return new Map();
+
+    const body = {
+        reportID: EXCESSIVE_IDLING_REPORT_ID,
+        vehIDs,
+        fromDate: from,
+        toDate: to,
+        fromTime: '19:00',
+        toTime: '23:00',
+        selectedIdlingDuration: EXCESSIVE_IDLING_MIN_SECONDS,
+        rptDriverIDs: [],
+        rptGzIDs: {},
+    };
+
+    const postReport = (token) =>
+        axios.post(`${gatewayBaseUrl()}/ReportCreator`, JSON.stringify(body), {
+            headers: {
+                Xtoken: token,
+                'X-XSRF-TOKEN': token,
+                'Content-Type': 'application/json',
+            },
+            timeout: 60000,
+            validateStatus: () => true,
+        });
+
+    const postWithRetry = async (token) => {
+        let lastError = null;
+        for (let attempt = 0; attempt < 3; attempt += 1) {
+            try {
+                return await postReport(token);
+            } catch (error) {
+                lastError = error;
+                if (error?.response) throw cleanLocatorError(error, 'Excessive idling report failed');
+                await new Promise((resolve) => setTimeout(resolve, 500 * (attempt + 1)));
+            }
+        }
+        throw cleanLocatorError(lastError, 'Excessive idling report failed');
+    };
+
+    let response = await postWithRetry(session.token);
+    const unauthorized =
+        response.status === 401 ||
+        response.status === 403 ||
+        response.data?.message === 'The payload is invalid.';
+    if (unauthorized) {
+        const refreshed = await gatewayLogin({ force: true });
+        response = await postWithRetry(refreshed.token);
+    }
+    if (response.status >= 400 || response.data?.exception) {
+        const message =
+            typeof response.data?.message === 'string' ? response.data.message.slice(0, 180) : 'Excessive idling report failed';
+        throw new Error(message);
+    }
+
+    const totals = new Map();
+    for (const block of excessiveBlocks(response.data)) {
+        const fallbackId = idByUniqueId.get(String(block?.deviceid || '')) || null;
+        const events = excessiveEvents(block?.vehicles);
+        if (!events.length) {
+            if (fallbackId && !totals.has(fallbackId)) totals.set(fallbackId, 0);
+            continue;
+        }
+        for (const event of events) {
+            const deviceId = Number(event?.deviceId) || fallbackId;
+            const duration = Number(event?.duration);
+            if (!deviceId || !Number.isFinite(duration) || duration < 0) continue;
+            totals.set(deviceId, (totals.get(deviceId) || 0) + duration);
+        }
+    }
+    for (const id of ids) {
+        if (vehiclesById.has(id) && !totals.has(id)) totals.set(id, 0);
+    }
+
+    const map = new Map(
+        [...totals.entries()].map(([deviceId, idleTimeMs]) => [
+            String(deviceId),
+            { deviceId, idleTimeMs },
+        ]),
+    );
+    excessiveIdleCache.set(cacheKey, { at: Date.now(), map });
+    return map;
+}
+
+export async function fetchTripWiseSummary({ vehicleIds, from, to } = {}) {
+    assertRateLimit('trip-wise-summary', 6, 60 * 1000);
+    const ids = [...new Set((vehicleIds || []).map((id) => Number(id)).filter((id) => Number.isFinite(id) && id > 0))];
+    if (!ids.length || !from || !to) return [];
+    const payload = await postLocatorReport('/v1/summary/trip-wise', {
+        vehicleIds: ids,
+        from,
+        to,
+    });
+    return summaryRowsFromPayload(payload).map(normalizeTripSummaryRow);
+}
+
+let locatorCompareLogged = false;
+
+export function logLocatorPositionComparison(position) {
+    if (process.env.LOCATOR_DEBUG_COMPARE !== 'true' || !position) return;
+    const wanted = String(process.env.LOCATOR_DEBUG_DEVICE_ID || '').trim();
+    if (wanted && String(position.deviceId) !== wanted) return;
+    if (!wanted && locatorCompareLogged) return;
+    locatorCompareLogged = true;
+    const attrs = position.attributes || {};
+    console.info('[LocatorCompare][latest]', {
+        deviceId: position.deviceId,
+        imei: attrs.uniqueId || position.uniqueId || '',
+        rawSpeedKnots: position.speed ?? null,
+        speedKmh: position.speedKmh ?? null,
+        latitude: position.latitude ?? null,
+        longitude: position.longitude ?? null,
+        ignition: attrs.ignition ?? null,
+        motion: attrs.motion ?? null,
+        state: attrs.state ?? null,
+        livestatus: position.livestatus ?? null,
+        deviceTime: position.deviceTime ?? null,
+        serverTime: position.serverTime ?? null,
+        fixTime: position.fixTime ?? null,
+        outdated: position.outdated ?? null,
+        valid: position.valid ?? null,
+        rawOdometerMeters: rawOdometerMeters(position),
+        totalDistanceKm: currentDistanceKm(position),
+        sampleTime: locatorSampleTime(position)?.toISOString() || null,
+    });
+}
+
+function logLocatorSummaryComparison(row, range) {
+    if (process.env.LOCATOR_DEBUG_COMPARE !== 'true' || !row) return;
+    console.info('[LocatorCompare][summary]', {
+        deviceId: row.deviceId,
+        from: range?.from || '',
+        to: range?.to || '',
+        rawDistanceTravelled: row.raw?.distanceTravelled ?? null,
+        distanceKm: row.distanceKm,
+        rawDrivingTimeMs: row.raw?.drivingTime ?? null,
+        drivingTime: row.drivingTimeLabel,
+        rawIdleTimeMs: row.raw?.idleTime ?? null,
+        idleTime: row.idleTimeLabel,
+        rawStartOdometer: row.raw?.startOdometer ?? null,
+        startOdometerKm: row.startOdometerKm,
+        rawEndOdometer: row.raw?.endOdometer ?? null,
+        endOdometerKm: row.endOdometerKm,
+        totalTrips: row.totalTrips,
+    });
 }
 
 export async function fetchLiveByImei(imei) {
@@ -289,15 +674,19 @@ export async function getLocatorStatus() {
     let loggedIn = false;
     let tokenUpdatedAt = null;
 
+    let reportTokenConfigured = false;
+
     if (configured) {
         const stored = await readLocatorTokens();
         loggedIn = Boolean(stored?.token);
         tokenUpdatedAt = stored?.updated_at || null;
+        reportTokenConfigured = Boolean(stored?.reportToken);
     }
 
     return {
         configured,
         loggedIn,
+        reportTokenConfigured,
         tokenUpdatedAt,
         apiBaseUrl: getLocatorConfig().apiBaseUrl,
         websocketEnabled: process.env.LOCATOR_WS_ENABLED === 'true',

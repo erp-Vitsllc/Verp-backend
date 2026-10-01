@@ -6,6 +6,7 @@ import {
     getAttendanceCalendarSummary,
     getAttendanceMarkRoster,
     markAttendance,
+    mapAttendanceFromEmployee,
     getMyAttendanceMonth,
     getMyAttendanceYearSummary,
     checkInMyAttendance,
@@ -55,6 +56,11 @@ router.post(
     '/mark',
     checkPermissionAny('hrm_attendance', ['create', 'edit', 'view']),
     markAttendance,
+);
+router.post(
+    '/map-punch',
+    checkPermissionAny('hrm_attendance', ['create', 'edit', 'view']),
+    mapAttendanceFromEmployee,
 );
 
 export default router;

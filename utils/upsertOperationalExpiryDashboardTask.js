@@ -43,6 +43,7 @@ export async function upsertOperationalExpiryDashboardTask({
     kind,
     expiryDate,
     daysLeft,
+    subjectName = '',
 }) {
     const assigneeId = recipient?._id;
     if (!assigneeId || !asset?._id) return false;
@@ -77,12 +78,13 @@ export async function upsertOperationalExpiryDashboardTask({
               ? `On Leave ends in ${ON_LEAVE_ADVANCE_NOTICE_DAYS} days — ${asset.assetId} - ${asset.name}`
               : `${asset.assetId} - ${asset.name}`;
 
+    const holderName = `${recipient.firstName || ''} ${recipient.lastName || ''}`.trim() || 'Asset Holder';
     const payload = {
         extra1,
         extra2,
         extra3,
         subjectEmployeeId: recipient.employeeId || asset.assetId,
-        subjectName: `${recipient.firstName || ''} ${recipient.lastName || ''}`.trim() || 'Asset Holder',
+        subjectName: String(subjectName || '').trim() || holderName,
         requestedByName: 'System Monitor',
     };
 

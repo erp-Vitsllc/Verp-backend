@@ -25,9 +25,17 @@ export function buildLoanApprovalWhatsAppCaption(loan) {
     return `Your ${typeSlug} has been approved.${amountLine} Please find the acknowledgment document attached.`;
 }
 
+async function employeeCompanyEmail(employee) {
+    const direct = String(employee?.companyEmail || '').trim();
+    if (direct) return direct;
+    if (!employee?.employeeId || employee?.companyEmail === '') return '';
+    const EmployeeBasic = (await import('../models/EmployeeBasic.js')).default;
+    const row = await EmployeeBasic.findOne({ employeeId: employee.employeeId }).select('companyEmail').lean();
+    return String(row?.companyEmail || '').trim();
+}
+
 /**
- * Company email gets the PDF from the approval email. WhatsApp is used only when
- * this permission is on, the employee has no company email, and they have a WhatsApp number.
+ * WhatsApp gets the acknowledgment PDF only when the employee has no company email.
  */
 export async function sendLoanApprovalWhatsApp({
     loan,
@@ -40,20 +48,14 @@ export async function sendLoanApprovalWhatsApp({
         return { sent: false, reason: 'no_employee' };
     }
 
+    if (await employeeCompanyEmail(emp)) {
+        return { sent: false, reason: 'has_company_email', channel: 'email' };
+    }
+
     const eventKey = loanApprovalWhatsAppEventKey(loan);
     const channels = await getEventChannels(eventKey);
     if (!channels.whatsapp) {
-        return { sent: false, reason: 'permission_off' };
-    }
-
-    let companyEmail = String(emp.companyEmail || '').trim();
-    if (!companyEmail) {
-        const EmployeeBasic = (await import('../models/EmployeeBasic.js')).default;
-        const fresh = await EmployeeBasic.findOne({ employeeId: emp.employeeId }).select('companyEmail').lean();
-        companyEmail = String(fresh?.companyEmail || '').trim();
-    }
-    if (companyEmail) {
-        return { sent: false, reason: 'has_company_email' };
+        return { sent: false, reason: 'permission_off', channel: 'whatsapp' };
     }
 
     const phone = await resolveEmployeeWhatsAppPhone(emp.employeeId);

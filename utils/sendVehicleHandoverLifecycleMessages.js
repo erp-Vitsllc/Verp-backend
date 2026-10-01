@@ -52,19 +52,19 @@ async function resolveWhatsAppNumber(employeeId) {
 
 export async function resolveVehicleHandoverChannel(employee) {
     if (!employee) return { channel: 'none', reason: 'no_employee' };
+    const email = companyEmailOf(employee);
+    if (email) {
+        return { channel: 'email', phone: '', companyEmail: email };
+    }
     const channels = await getEventChannels(VEHICLE_HANDOVER_EVENT);
     const phone = await resolveWhatsAppNumber(employee.employeeId);
     if (channels.whatsapp !== false && phone) {
         return { channel: 'whatsapp', phone, companyEmail: '' };
     }
-    const email = companyEmailOf(employee);
-    if (email) {
-        return { channel: 'email', phone: '', companyEmail: email };
+    if (channels.whatsapp === false) {
+        return { channel: 'none', reason: 'permission_off' };
     }
-    if (channels.whatsapp !== false && !phone) {
-        return { channel: 'none', reason: 'no_whatsapp_number' };
-    }
-    return { channel: 'none', reason: 'no_company_email' };
+    return { channel: 'none', reason: 'no_whatsapp_number' };
 }
 
 async function loadEmployee(ref) {
@@ -138,6 +138,17 @@ async function deliverVehicleHandoverMessage({
     if (!employee) {
         const result = { sent: false, step, reason: 'no_employee' };
         logFail(step, result.reason);
+        return result;
+    }
+
+    if (attachDocument && !pdfBuffer?.length) {
+        const result = {
+            sent: false,
+            step,
+            employeeId: employee.employeeId || '',
+            reason: 'no_pdf',
+        };
+        logFail(step, `${result.employeeId} attachment missing, nothing sent`);
         return result;
     }
 

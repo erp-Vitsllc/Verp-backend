@@ -300,13 +300,22 @@ export function overlayAttendanceRowsForEmployee({
         }));
 }
 
+function periodIncludesUndatedCounts(from, to) {
+    if (!isDateKey(from) || !isDateKey(to)) return true;
+    const year = from.slice(0, 4);
+    return from === `${year}-01-01` && to === `${year}-12-31`;
+}
+
 export function addOverlayCountsForEmployees({ profilesByCode, employees, from, to, countsByEmp }) {
     const next = countsByEmp || {};
+    // Undated enrollment totals have no day to place inside a month. A full
+    // year (or an open range) still includes them; a month does not.
+    const includeCountOnly = periodIncludesUndatedCounts(from, to);
     for (const employee of employees || []) {
         const code = String(employee?.employeeId || '').trim();
         const profile = profilesByCode?.get(code);
         if (!profile) continue;
-        const overlay = overlayHistoricalLeave(profile, { from, to, includeCountOnly: true });
+        const overlay = overlayHistoricalLeave(profile, { from, to, includeCountOnly });
         const id = String(employee._id);
         if (!next[id]) next[id] = {};
         for (const [statusKey, days] of Object.entries(overlay.extraCounts)) {

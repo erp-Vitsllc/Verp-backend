@@ -4,7 +4,6 @@ import ToolsMonthlyReportLog from '../models/ToolsMonthlyReportLog.js';
 import { getCalendarPartsInTz } from './scheduleDailyAtMidnight.js';
 import { getDepartmentHOD } from './getDepartmentHOD.js';
 import { isEmployeeActiveForNotifications } from './applyEmployeeLeftUserStatus.js';
-import { getEventChannels } from './notificationEmailPermission.js';
 import {
     generateEmployeeAssetListFromTemplatePdf,
     resolveAssetListPrintMeta,
@@ -12,7 +11,6 @@ import {
 import {
     isToolsAssetItem,
     sendToolsMonthlyReportWhatsApp,
-    TOOLS_MONTHLY_REPORT_EVENT,
 } from './sendToolsAssetWhatsAppReport.js';
 
 function monthKeyFromParts(parts) {
@@ -53,11 +51,6 @@ export async function processToolsMonthlyAssetReports(now = new Date()) {
     const parts = getCalendarPartsInTz(now);
     if (parts.day !== 1) {
         return { skipped: true, reason: 'not_first_of_month' };
-    }
-
-    const channels = await getEventChannels(TOOLS_MONTHLY_REPORT_EVENT);
-    if (!channels.whatsapp) {
-        return { skipped: true, reason: 'permission_off' };
     }
 
     const monthKey = monthKeyFromParts(parts);

@@ -395,9 +395,10 @@ async function startServer() {
 
     const startBackgroundJobs = () => {
         startLocatorWebSocket();
-        // Locator → ERP Mongo sync every 10 minutes (snapshots + AssetItem GPS cache).
+        // Locator → ERP Mongo sync every 1 hour (snapshots + AssetItem GPS cache).
         // Vehicle list/details must NOT call live Locator — they read ERP DB only.
-        const LOCATOR_ERP_SYNC_MS = 10 * 60 * 1000;
+        // The vehicle list Refresh GPS button calls the same sync on demand.
+        const LOCATOR_ERP_SYNC_MS = 60 * 60 * 1000;
         setTimeout(() => {
             syncLocatorToErpDatabase().catch((e) =>
                 console.error('[LocatorSync] startup sync failed:', e?.message || e),

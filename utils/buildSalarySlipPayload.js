@@ -815,7 +815,6 @@ export async function buildSalarySlipPayload({
         if (key === 'unauthorized_leave') unauthorizedDays += 1;
         if (key === 'sick_leave') {
             sickDays += 1;
-            if (String(row.leavePayType || '').toLowerCase() === 'unpaid') unpaidSickDays += 1;
         }
         if (key === 'on_leave') annualDays += 1;
 

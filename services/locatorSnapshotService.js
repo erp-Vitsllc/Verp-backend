@@ -1,7 +1,9 @@
 import LocatorGpsSnapshot from '../models/LocatorGpsSnapshot.js';
+import LocatorDailySummary from '../models/LocatorDailySummary.js';
 import AssetItem from '../models/AssetItem.js';
-import { fetchLatestPositions, isLocatorConfigured } from './locatorService.js';
+import { fetchExcessiveIdlingReport, fetchLatestPositions, fetchVehicleWiseSummary, isLocatorConfigured } from './locatorService.js';
 import { reconcileLocatorPositionsToErp } from './locatorVehicleListService.js';
+import { currentDistanceKm, dubaiDateKey, dubaiReportRange, dubaiReportStamp, formatDuration, locatorSampleTime } from './locatorUnits.js';
 
 const SNAPSHOT_MIN_INTERVAL_MS = 30 * 60 * 1000;
 /** While a vehicle is idling, keep samples so Locator idleStart sessions are not missed. */
@@ -68,13 +70,10 @@ function gpsTotalDistanceKm(attrs = {}) {
     return 0;
 }
 
-/** Device odometer (meters). GPS totalDistance is a separate counter and drifts from the dashboard. */
+/** Current Locator kilometer. Uses totalDistanceKm, not attributes.odometer or attributes.distance. */
 function toOdometerKm(attrs = {}) {
-    const odometerM = Number(attrs.odometer);
-    if (Number.isFinite(odometerM) && odometerM > 0) {
-        return Number((odometerM / 1000).toFixed(2));
-    }
-    return gpsTotalDistanceKm(attrs);
+    const km = currentDistanceKm(attrs);
+    return km == null ? 0 : km;
 }
 
 /** Resolve Salik toll price (AED) from Locator position / attributes — not distance. */
@@ -130,8 +129,8 @@ function idleStartMsFromSource(source) {
 }
 
 function snapshotTiming(position, state) {
-    const capturedAt = position?.deviceTime ? new Date(position.deviceTime) : new Date();
-    const capturedMs = capturedAt.getTime();
+    const capturedAt = locatorSampleTime(position);
+    const capturedMs = capturedAt ? capturedAt.getTime() : NaN;
     const idleStart = String(state || '').toLowerCase() === 'idling' ? idleStartMsFromSource(position) : 0;
     let statusDurationSec = statusDurationSecFromPosition(position);
     if (idleStart > 0 && Number.isFinite(capturedMs) && capturedMs >= idleStart) {
@@ -202,7 +201,7 @@ export async function recordLocatorSnapshot(rawPosition, source = 'rest') {
     const snapshot =
         source === 'ws' ? normalizeWsSnapshot(rawPosition) : normalizeRestSnapshot(rawPosition);
 
-    if (!snapshot.deviceId) return null;
+    if (!snapshot.deviceId || !snapshot.capturedAt) return null;
     if (!shouldCapture(snapshot.deviceId, snapshot)) return null;
 
     lastSnapshotAtByDevice.set(String(snapshot.deviceId), Date.now());
@@ -226,9 +225,20 @@ export async function recordLocatorSnapshotsFromLatest() {
 
 /**
  * Background Locator → ERP DB sync (snapshots + odometer/GPS cache on AssetItem).
- * Runs on a timer — never from vehicle list/detail HTTP handlers.
+ * Runs once an hour, and when the vehicle list Refresh GPS button is used.
+ * Vehicle list/detail reads must still use ERP DB, not live Locator.
  */
-export async function syncLocatorToErpDatabase() {
+let locatorErpSyncInFlight = null;
+
+export function syncLocatorToErpDatabase() {
+    if (locatorErpSyncInFlight) return locatorErpSyncInFlight;
+    locatorErpSyncInFlight = runLocatorErpSync().finally(() => {
+        locatorErpSyncInFlight = null;
+    });
+    return locatorErpSyncInFlight;
+}
+
+async function runLocatorErpSync() {
     if (!isLocatorConfigured()) {
         return { configured: false, saved: 0, reconcile: null };
     }
@@ -245,11 +255,17 @@ export async function syncLocatorToErpDatabase() {
     }
 
     const reconcile = await reconcileLocatorPositionsToErp(positions || [], { force: true });
+    const todayKey = dubaiDateKey();
+    const todaySummary = await officialSummaryMap(
+        (positions || []).map((position) => position?.deviceId),
+        todayKey,
+        todayKey,
+    );
     console.log(
-        `[LocatorSync] ERP DB updated in ${Date.now() - startedAt}ms — snapshots=${saved} reconcile=${JSON.stringify(reconcile)}`,
+        `[LocatorSync] ERP DB updated in ${Date.now() - startedAt}ms — snapshots=${saved} todaySummary=${todaySummary.size} reconcile=${JSON.stringify(reconcile)}`,
     );
 
-    return { configured: true, saved, reconcile };
+    return { configured: true, saved, reconcile, todaySummary: todaySummary.size };
 }
 
 function startOfDay(date) {
@@ -538,11 +554,9 @@ function statusDurationSecFromPosition(position) {
 
 export function formatLocatorIdleLabel(msOrMinutes, { fromMinutes = false } = {}) {
     const ms = fromMinutes ? (Number(msOrMinutes) || 0) * 60000 : Number(msOrMinutes) || 0;
-    const totalSec = Math.max(0, Math.round(ms / 1000));
-    const hours = Math.floor(totalSec / 3600);
-    const mins = Math.floor((totalSec % 3600) / 60);
-    const secs = totalSec % 60;
-    return `${String(hours).padStart(2, '0')}:${String(mins).padStart(2, '0')}:${String(secs).padStart(2, '0')} Hrs`;
+    const label = formatDuration(ms);
+    if (ms >= 24 * 60 * 60 * 1000) return label;
+    return `${label} Hrs`;
 }
 
 function isEmirateOnlyLabel(value) {
@@ -580,28 +594,8 @@ function runningKmFromPair(first, last) {
     return Number(km.toFixed(2));
 }
 
-function liveDistanceKm(position) {
-    const attrs = position?.attributes || {};
-    const lifetimeKm = toOdometerKm(attrs);
-
-    const distanceKm = Number(String(attrs.distanceKm ?? '').replace(/,/g, ''));
-    if (
-        Number.isFinite(distanceKm) &&
-        distanceKm > 0 &&
-        distanceKm <= MAX_LIVE_TRIP_KM &&
-        Math.abs(distanceKm - lifetimeKm) > 1
-    ) {
-        return Number(distanceKm.toFixed(2));
-    }
-
-    const distanceM = Number(attrs.distance);
-    if (Number.isFinite(distanceM) && distanceM > 0) {
-        const km = distanceM / 1000;
-        if (km <= MAX_LIVE_TRIP_KM && Math.abs(km - lifetimeKm) > 1) {
-            return Number(km.toFixed(2));
-        }
-    }
-
+function liveDistanceKm() {
+    // attributes.distance is the latest update only. Today's distance comes from Vehicle Wise Summary.
     return 0;
 }
 
@@ -717,6 +711,8 @@ function runningKmForDeviceInRange(deviceRows, start, end, livePosition = null, 
 }
 
 function currentKmFromSnapshot(row) {
+    const total = Number(row?.totalDistanceM);
+    if (total > 0) return Number((total / 1000).toFixed(1));
     const meters = snapshotDistanceM(row);
     if (!(meters > 0)) return 0;
     return Number((meters / 1000).toFixed(1));
@@ -1201,7 +1197,7 @@ function buildIdleByVehicle(snapshots, positions, start, end) {
         seen.add(String(deviceId));
         const liveForRange = includeLive ? liveMap.get(deviceId) || null : null;
         const idleMs = idleMsForDeviceInRange(deviceRows, start, end, liveForRange, {
-            includeLiveSession: includeLive,
+            includeLiveSession: false,
         });
         rows.push({
             name,
@@ -1704,10 +1700,11 @@ async function buildLocatorFleetDashboardUncached(selectedYear) {
         ),
         snapshotCount: snapshots.length,
         distanceSnapshotCount: distanceSnapshots.length,
-        // Locator client API (per docs) only exposes latest + live WS — daily history is from our snapshots
         historySource: 'local_snapshots',
-        locatorApiSupportsHistory: false,
+        locatorApiSupportsHistory: true,
     };
+
+    await overlayOfficialDashboardSummaries(payload, positions);
 
     console.log(
         `[LocatorFleetDashboard] positions=${positions.length} hourly=${snapshots.length} daily=${distanceSnapshots.length} total=${Date.now() - startedAt}ms`,
@@ -1815,7 +1812,10 @@ export async function getLocatorMonthStatsMap(deviceId, monthKeys = []) {
 
     for (const { key, start, end } of bounds) {
         const inMonth = allRows.filter((row) => isCapturedInRange(row.capturedAt, start, end));
-        result[key] = monthIdleKmPayload(allRows, inMonth, start, end);
+        const stats = monthIdleKmPayload(allRows, inMonth, start, end);
+        const holder = { [String(id)]: stats };
+        await overlayMonthExcessiveIdle(holder, [id], key);
+        result[key] = holder[String(id)];
     }
     return result;
 }
@@ -1862,6 +1862,7 @@ export async function getLocatorMonthStatsByDevices(deviceIds = [], monthKey) {
         result[String(id)] = monthIdleKmPayload(deviceRows, inMonth, start, end);
     }
 
+    await overlayMonthExcessiveIdle(result, ids, key);
     return result;
 }
 
@@ -1918,7 +1919,7 @@ export async function getLocatorRangeStatsByDevices(deviceIds = [], fromKey, toK
         );
         const livePosition = includeLive ? liveByDevice?.get?.(String(id)) || null : null;
         const idleMs = idleMsForDeviceInRange(deviceRows, start, end, livePosition, {
-            includeLiveSession: includeLive,
+            includeLiveSession: false,
             idleGreaterThanMs: options.idleGreaterThanMs,
         });
         const runningKm = runningKmSumForDeviceInRange(deviceRows, start, end);
@@ -1934,10 +1935,237 @@ export async function getLocatorRangeStatsByDevices(deviceIds = [], fromKey, toK
             idleTimeLabel: formatLocatorIdleLabel(idleMs),
             rangeStart: start.toISOString(),
             rangeEnd: displayRangeEnd,
+            summarySource: 'snapshots',
         };
     }
 
+    const official = await officialSummaryMap(ids, displayFrom, displayTo);
+    for (const id of ids) {
+        const summary = official.get(String(id));
+        if (!summary) continue;
+        result[String(id)] = applyOfficialSummary(result[String(id)], summary);
+    }
+
+    const excessive = await excessiveIdleMap(ids, displayFrom, displayTo);
+    for (const id of ids) {
+        const idle = excessive.get(String(id));
+        if (!idle) continue;
+        result[String(id)] = applyExcessiveIdle(result[String(id)], idle.idleTimeMs);
+    }
+
     return { from: displayFrom, to: displayTo, start, end, byDevice: result };
+}
+
+let locatorSummaryBlocked = false;
+
+async function officialSummaryMap(deviceIds, fromKey, toKey) {
+    const ids = [...new Set((deviceIds || []).map((id) => Number(id)).filter((id) => Number.isFinite(id) && id > 0))];
+    const range = dubaiReportRange(fromKey, toKey);
+    if (!ids.length || !range.from || !range.to) return new Map();
+
+    const readStored = async () => {
+        const docs = await LocatorDailySummary.find({
+            deviceId: { $in: ids },
+            rangeFrom: range.from,
+            rangeTo: range.to,
+            syncStatus: 'ok',
+        }).lean();
+        return new Map(docs.map((doc) => [String(doc.deviceId), doc]));
+    };
+
+    if (locatorSummaryBlocked) return readStored();
+
+    try {
+        const rows = await fetchVehicleWiseSummary({
+            vehicleIds: ids,
+            from: range.from,
+            to: range.to,
+        });
+        if (rows.length) {
+            await LocatorDailySummary.bulkWrite(
+                rows.map((row) => ({
+                    updateOne: {
+                        filter: { deviceId: row.deviceId, rangeFrom: range.from, rangeTo: range.to },
+                        update: {
+                            $set: {
+                                deviceId: row.deviceId,
+                                rangeFrom: range.from,
+                                rangeTo: range.to,
+                                reportDate: fromKey === toKey ? fromKey : `${fromKey}_${toKey}`,
+                                raw: row.raw,
+                                distanceKm: row.distanceKm,
+                                drivingTimeMs: row.drivingTimeMs,
+                                idleTimeMs: row.idleTimeMs,
+                                drivingTimeLabel: row.drivingTimeLabel,
+                                idleTimeLabel: row.idleTimeLabel,
+                                averageSpeedKmh: row.averageSpeedKmh,
+                                maxSpeedKmh: row.maxSpeedKmh,
+                                totalTrips: row.totalTrips,
+                                startOdometerKm: row.startOdometerKm,
+                                endOdometerKm: row.endOdometerKm,
+                                currentBattery: row.currentBattery,
+                                syncedAt: new Date(),
+                                syncStatus: 'ok',
+                                errorMessage: '',
+                            },
+                        },
+                        upsert: true,
+                    },
+                })),
+            );
+        }
+        return new Map(rows.map((row) => [String(row.deviceId), row]));
+    } catch (error) {
+        if (error?.code === 'LOCATOR_REPORT_TOKEN_MISSING') locatorSummaryBlocked = true;
+        console.warn('[LocatorSummary]', error?.message || error);
+        return readStored();
+    }
+}
+
+function nextCalendarKey(dateKey) {
+    const [year, month, day] = String(dateKey || '').split('-').map(Number);
+    if (!year || !month || !day) return '';
+    const date = new Date(Date.UTC(year, month - 1, day));
+    date.setUTCDate(date.getUTCDate() + 1);
+    return date.toISOString().slice(0, 10);
+}
+
+function excessiveReportBounds(fromKey, toKey) {
+    return {
+        from: dubaiReportStamp(fromKey, '00:00:00'),
+        to: dubaiReportStamp(nextCalendarKey(toKey), '00:00:00'),
+    };
+}
+
+async function excessiveIdleMap(deviceIds, fromKey, toKey) {
+    const range = excessiveReportBounds(fromKey, toKey);
+    if (!range.from || !range.to || !isLocatorConfigured()) return new Map();
+    try {
+        return await fetchExcessiveIdlingReport({
+            vehicleIds: deviceIds,
+            from: range.from,
+            to: range.to,
+        });
+    } catch (error) {
+        console.warn('[LocatorIdling]', error?.message || error);
+        return new Map();
+    }
+}
+
+function monthKeyEndDate(monthKey) {
+    const [year, month] = String(monthKey || '').split('-').map(Number);
+    if (!year || !month) return '';
+    const now = new Date();
+    const lastDay = new Date(year, month, 0).getDate();
+    const day = now.getFullYear() === year && now.getMonth() + 1 === month ? now.getDate() : lastDay;
+    return `${year}-${String(month).padStart(2, '0')}-${String(Math.min(day, lastDay)).padStart(2, '0')}`;
+}
+
+async function overlayMonthExcessiveIdle(result, deviceIds, monthKey) {
+    const ids = [...new Set((deviceIds || []).map((id) => Number(id)).filter((id) => Number.isFinite(id) && id > 0))];
+    const toKey = monthKeyEndDate(monthKey);
+    if (!ids.length || !toKey) return;
+    const idleMap = await excessiveIdleMap(ids, `${String(monthKey).slice(0, 7)}-01`, toKey);
+    for (const id of ids) {
+        const idle = idleMap.get(String(id));
+        if (!idle || !result[String(id)]) continue;
+        result[String(id)] = applyExcessiveIdle(result[String(id)], idle.idleTimeMs);
+    }
+}
+
+function applyExcessiveIdle(stats, idleTimeMs) {
+    const idleMs = Number(idleTimeMs);
+    if (!Number.isFinite(idleMs) || idleMs < 0) return stats;
+    return {
+        ...stats,
+        idleTimeMinutes: Math.round(idleMs / 60000),
+        idleTimeSeconds: Math.round(idleMs / 1000),
+        idleTimeLabel: formatLocatorIdleLabel(idleMs),
+        summarySource: 'excessive-idling',
+    };
+}
+
+function applyOfficialSummary(stats, summary) {
+    const idleMs = Number(summary?.idleTimeMs);
+    const hasIdle = Number.isFinite(idleMs);
+    const hasDistance = summary?.distanceKm != null && Number.isFinite(Number(summary.distanceKm));
+    return {
+        ...stats,
+        runningKm: hasDistance ? Number(summary.distanceKm) : stats.runningKm,
+        kmRun: hasDistance ? Number(summary.distanceKm) : stats.kmRun,
+        idleTimeMinutes: hasIdle ? Math.round(idleMs / 60000) : stats.idleTimeMinutes,
+        idleTimeSeconds: hasIdle ? Math.round(idleMs / 1000) : stats.idleTimeSeconds,
+        idleTimeLabel: hasIdle ? formatLocatorIdleLabel(idleMs) : stats.idleTimeLabel,
+        drivingTimeMs: summary?.drivingTimeMs ?? null,
+        drivingTimeLabel: summary?.drivingTimeLabel || '',
+        totalTrips: summary?.totalTrips ?? null,
+        startOdometerKm: summary?.startOdometerKm ?? null,
+        endOdometerKm: summary?.endOdometerKm ?? null,
+        averageSpeedKmh: summary?.averageSpeedKmh ?? null,
+        maxSpeedKmh: summary?.maxSpeedKmh ?? null,
+        summarySource: 'vehicle-wise',
+    };
+}
+
+function mergeSummaryBars(rows, summaryMap, field) {
+    if (!summaryMap?.size) return rows;
+    const next = new Map((rows || []).map((row) => [String(row.deviceId), { ...row }]));
+    for (const [deviceId, summary] of summaryMap.entries()) {
+        const idleMs = Number(summary.idleTimeMs) || 0;
+        const value = field === 'idle' ? Math.round(idleMs / 60000) : Number(summary.distanceKm) || 0;
+        const existing = next.get(deviceId);
+        if (!existing && value <= 0) continue;
+        next.set(deviceId, {
+            ...(existing || { name: `Device ${deviceId}`, deviceId: Number(deviceId) }),
+            value,
+            ...(field === 'idle' ? { idleTimeLabel: formatLocatorIdleLabel(idleMs) } : {}),
+        });
+    }
+    return sortVehicleBars([...next.values()].filter((row) => Number(row.value) > 0));
+}
+
+function replaceSummaryBucket(bucket, key, summaryMap, field) {
+    if (!bucket?.byKey || !key || !summaryMap?.size) return;
+    bucket.byKey[key] = mergeSummaryBars(bucket.byKey[key] || [], summaryMap, field);
+    bucket.defaultKey = key;
+}
+
+async function overlayOfficialDashboardSummaries(payload, positions) {
+    const ids = (positions || []).map((position) => position?.deviceId);
+    const today = dubaiDateKey();
+    const monthKey = today.slice(0, 7);
+    const yearKey = today.slice(0, 4);
+    const [dayMap, monthMap, yearMap] = await Promise.all([
+        officialSummaryMap(ids, today, today),
+        officialSummaryMap(ids, `${monthKey}-01`, today),
+        officialSummaryMap(ids, `${yearKey}-01-01`, today),
+    ]);
+    replaceSummaryBucket(payload.idleTimeByVehicle?.day, today, dayMap, 'idle');
+    replaceSummaryBucket(payload.idleTimeByVehicle?.month, monthKey, monthMap, 'idle');
+    replaceSummaryBucket(payload.idleTimeByVehicle?.year, yearKey, yearMap, 'idle');
+    replaceSummaryBucket(payload.runningKmByVehicle?.day, today, dayMap, 'distance');
+    replaceSummaryBucket(payload.runningKmByVehicle?.month, monthKey, monthMap, 'distance');
+    replaceSummaryBucket(payload.runningKmByVehicle?.year, yearKey, yearMap, 'distance');
+    payload.todayByVehicle = [...dayMap.values()];
+    if (dayMap.size || monthMap.size || yearMap.size) {
+        payload.historySource = 'locator_vehicle_wise_summary';
+    }
+
+    const [dayIdle, monthIdle, yearIdle] = await Promise.all([
+        excessiveIdleMap(ids, today, today),
+        excessiveIdleMap(ids, `${monthKey}-01`, today),
+        excessiveIdleMap(ids, `${yearKey}-01-01`, today),
+    ]);
+    const asIdleSummary = (idleMap) =>
+        new Map(
+            [...(idleMap || new Map()).entries()].map(([deviceId, row]) => [
+                deviceId,
+                { idleTimeMs: row.idleTimeMs },
+            ]),
+        );
+    replaceSummaryBucket(payload.idleTimeByVehicle?.day, today, asIdleSummary(dayIdle), 'idle');
+    replaceSummaryBucket(payload.idleTimeByVehicle?.month, monthKey, asIdleSummary(monthIdle), 'idle');
+    replaceSummaryBucket(payload.idleTimeByVehicle?.year, yearKey, asIdleSummary(yearIdle), 'idle');
 }
 
 function gpsVehicleNumberFromPosition(position, fallback = '') {
@@ -2008,8 +2236,8 @@ export async function buildFuelGpsPageStats({ fromKey, toKey, erpVehicles = [] }
             gpsVehicleNumberFromPosition(position, stats.deviceName) ||
             String(stats.deviceName || '').trim() ||
             (id ? `GPS ${id}` : '—');
-        const liveKm = position ? toOdometerKm(position.attributes || position) : 0;
-        const currentKm = Number(stats.currentKm) > 0 ? Number(stats.currentKm) : Number(liveKm) || 0;
+        const liveKm = position ? currentDistanceKm(position) : null;
+        const currentKm = liveKm != null ? liveKm : Number(stats.currentKm) || 0;
 
         return {
             deviceId: id,
@@ -2025,6 +2253,13 @@ export async function buildFuelGpsPageStats({ fromKey, toKey, erpVehicles = [] }
             idleTimeMinutes: Number(stats.idleTimeMinutes) || 0,
             idleTimeSeconds: Number(stats.idleTimeSeconds) || 0,
             idleTimeLabel: stats.idleTimeLabel || formatLocatorIdleLabel(0),
+            drivingTimeLabel: stats.drivingTimeLabel || '',
+            totalTrips: stats.totalTrips ?? null,
+            startOdometerKm: stats.startOdometerKm ?? null,
+            endOdometerKm: stats.endOdometerKm ?? null,
+            averageSpeedKmh: stats.averageSpeedKmh ?? null,
+            maxSpeedKmh: stats.maxSpeedKmh ?? null,
+            summarySource: stats.summarySource || 'snapshots',
         };
     });
 

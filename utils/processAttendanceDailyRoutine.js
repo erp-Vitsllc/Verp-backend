@@ -50,6 +50,7 @@ const PROTECTED_NO_PUNCH_KEYS = new Set([
  * 1) Punch-In YES + Punch-Out YES → finalize normally (keep Late / Early Go).
  * 2) Punch-In YES + Punch-Out NO → MISPUNCHED (timer ends with the day).
  * 3) Punch-In NO + Punch-Out NO → UNAUTHORIZED LEAVE (red).
+ *    The current day shows Absent until this midnight close.
  * 4) Open new day empty; apply weekly offs for today.
  */
 export async function processAttendanceDailyRoutine() {

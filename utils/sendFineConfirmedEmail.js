@@ -1,7 +1,7 @@
 import nodemailer from 'nodemailer';
 import EmployeeBasic from '../models/EmployeeBasic.js';
 import { resolveFrontendBaseUrl } from './resolveFrontendBaseUrl.js';
-import { resolveEmployeeEmail, addEmployeeEmailToSet, getFallbackEmailNote } from './resolveEmployeeEmail.js';
+import { addEmployeeEmailToSet, getFallbackEmailNote } from './resolveEmployeeEmail.js';
 import { buildFineFormSummary } from './buildFineFormSummary.js';
 import { buildFineConfirmedEmailHtml } from './buildFineConfirmedEmailHtml.js';
 import { generateFineApprovedReportPdfBuffer } from './generateFineApprovedReportPdfBuffer.js';
@@ -35,8 +35,8 @@ async function pushStoredFileAttachment(attachments, seen, stored) {
 }
 
 /**
- * Sends the approved-fine PDF. Employees with a company email get email.
- * Employees without a company email get one WhatsApp document when that permission is on.
+ * Approved-fine PDF goes to the employee company email.
+ * WhatsApp is used only when that employee has no company email.
  */
 export const sendFineConfirmedEmail = async (fine, assignedEmployees, req = null, options = {}) => {
     try {
@@ -255,32 +255,35 @@ export const sendFineConfirmedEmail = async (fine, assignedEmployees, req = null
 
             const companyEmail = String(empDetails.companyEmail || '').trim();
             if (!companyEmail) {
-                if (whatsAppSentEmployees.has(assigned.employeeId)) continue;
-                let finePdf = await generateFineApprovedReportPdfBuffer(fine, {
-                    employeeId: assigned.employeeId,
-                });
-                if (!finePdf) finePdf = await buildFallbackPrintPdf();
-                if (finePdf?.length > 500) {
-                    const { sendFineApprovedWhatsApp } = await import('./sendFineApprovedWhatsApp.js');
-                    const waResult = await sendFineApprovedWhatsApp({
-                        fine,
-                        employee: empDetails,
-                        pdfBuffer: finePdf,
-                        filename: reportPdfFileName(fine, assigned.employeeId),
-                        allowResend: options?.resendWhatsApp === true,
+                if (!whatsAppSentEmployees.has(assigned.employeeId)) {
+                    let finePdf = await generateFineApprovedReportPdfBuffer(fine, {
+                        employeeId: assigned.employeeId,
                     });
-                    if (waResult?.sent || waResult?.reason === 'already_sent') {
-                        whatsAppSentEmployees.add(assigned.employeeId);
-                        if (waResult?.sent) {
-                            console.log(`[FineConfirmedEmail] PDF sent on WhatsApp to ${empDetails.employeeId}`);
+                    if (!finePdf) finePdf = await buildFallbackPrintPdf();
+                    if (finePdf?.length > 500) {
+                        const { sendFineApprovedWhatsApp } = await import('./sendFineApprovedWhatsApp.js');
+                        const waResult = await sendFineApprovedWhatsApp({
+                            fine,
+                            employee: empDetails,
+                            pdfBuffer: finePdf,
+                            filename: reportPdfFileName(fine, assigned.employeeId),
+                            allowResend: options?.resendWhatsApp === true,
+                        });
+                        if (waResult?.sent || waResult?.reason === 'already_sent') {
+                            whatsAppSentEmployees.add(assigned.employeeId);
+                            if (waResult?.sent) {
+                                console.log(`[FineConfirmedEmail] PDF sent on WhatsApp to ${empDetails.employeeId}`);
+                            }
                         }
-                        continue;
                     }
                 }
+                continue;
             }
 
-            const { email: toMail, isFallbackToReportee, employeeName, reporteeName } = resolveEmployeeEmail(empDetails);
-            if (!toMail) continue;
+            const toMail = companyEmail;
+            const isFallbackToReportee = false;
+            const employeeName = `${empDetails.firstName || ''} ${empDetails.lastName || ''}`.trim();
+            const reporteeName = '';
 
             const greetingName = isFallbackToReportee ? reporteeName : (assigned.employeeName || empDetails.firstName);
             const fallbackNote = isFallbackToReportee ? getFallbackEmailNote(employeeName, reporteeName) : '';

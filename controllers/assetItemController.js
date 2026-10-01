@@ -45,6 +45,8 @@ import {
     markHandoverLifecycleOnHistory,
     HANDOVER_LIFECYCLE,
     buildFleetHandoverDisplayLabels,
+    buildReturnHandoverWorkflowMeta,
+    clearFleetVehicleAssignmentForReturn,
     formatEmployeeDisplayName,
 } from '../utils/vehicleHandoverApprovalFlow.js';
 import {
@@ -1663,7 +1665,8 @@ export const getVehicleFleetDashboard = async (req, res) => {
             ? String(req.user?._id || req.user?.id || req.user?.employeeId || 'anon')
             : '';
 
-        if (listOnly && listCacheKey) {
+        const skipListCache = String(req.query.fresh || '') === '1';
+        if (listOnly && listCacheKey && !skipListCache) {
             const cached = vehicleListFleetCache.get(listCacheKey);
             if (cached && Date.now() - cached.at < VEHICLE_LIST_FLEET_CACHE_TTL_MS) {
                 console.log(
@@ -1878,7 +1881,7 @@ export const getVehicleFleetDashboard = async (req, res) => {
                 warrantyExpiryDate: v.warrantyExpiryDate || null,
                 warrantyYears: v.warrantyYears || null,
                 locatorDeviceId: v.locatorDeviceId ?? null,
-                // GPS fields from 30-min Locator→ERP sync (no live Locator call on list).
+                // GPS fields from the hourly Locator→ERP sync (no live Locator call on list).
                 locator:
                     v.locatorDeviceId != null
                         ? {
@@ -6831,6 +6834,12 @@ export const assignAssetItem = async (req, res) => {
             });
         }
 
+        if (fleetVehicle && item.pendingActionDetails?.vehicleHandoverFlow?.isReturn) {
+            return res.status(400).json({
+                message: 'Finish or reject the pending vehicle return handover before assigning.',
+            });
+        }
+
         const valueBlock = assertAssetHasPositiveValueForTransfer(item);
         if (!valueBlock.ok) {
             return res.status(400).json({ message: valueBlock.message });
@@ -7614,7 +7623,7 @@ export const assignAssetItem = async (req, res) => {
                                 filename: `tools-handover-${item.assetId || item._id}.pdf`,
                                 caption: `Tools handover report — ${item.assetId || ''} ${item.name || ''}`.trim(),
                             });
-                            toolsHandoverDelivered = toolsResult?.sent === true;
+                            toolsHandoverDelivered = toolsResult?.sent === true || toolsResult?.channel === 'whatsapp';
                         } catch (err) {
                             console.error('[ToolsHandoverWhatsApp] assign failed:', err?.message || err);
                         }
@@ -8053,7 +8062,7 @@ export const bulkAssignAssetItems = async (req, res) => {
                                 filename: `tools-handover-bulk-${employeeToAssign.employeeId || 'employee'}.pdf`,
                                 caption: `Tools handover report — ${toolsInBulk.length} asset${toolsInBulk.length === 1 ? '' : 's'}`,
                             });
-                            toolsHandoverDelivered = toolsResult?.sent === true;
+                            toolsHandoverDelivered = toolsResult?.sent === true || toolsResult?.channel === 'whatsapp';
                         } catch (err) {
                             console.error('[ToolsHandoverWhatsApp] bulk assign failed:', err?.message || err);
                         }
@@ -9019,6 +9028,31 @@ export const respondToAssignment = async (req, res) => {
                 if (item.pendingActionDetails?.serviceReassignContext) {
                     delete item.pendingActionDetails.serviceReassignContext;
                 }
+            } else if (handoverFlow?.isReturn) {
+                const ctx = item.pendingActionDetails?.returnHandoverContext || {};
+                item.status = ctx.previousStatus || 'Assigned';
+                item.acceptanceStatus = ctx.previousAcceptanceStatus || 'Accepted';
+                item.assignedTo = ctx.previousAssignedTo ?? item.assignedTo;
+                item.assignedToType = ctx.previousAssignedToType ?? item.assignedToType;
+                item.assignedCompany = ctx.previousAssignedCompany ?? item.assignedCompany;
+                item.assignedBy = ctx.previousAssignedBy ?? item.assignedBy;
+                item.assignmentType = ctx.previousAssignmentType ?? item.assignmentType;
+                item.assignedDays = ctx.previousAssignedDays ?? item.assignedDays;
+                item.assignedDate = ctx.previousAssignedDate ?? item.assignedDate;
+                item.temporaryEndDate = ctx.previousTemporaryEndDate ?? item.temporaryEndDate;
+                item.temporaryReminderSentAt = ctx.previousTemporaryReminderSentAt ?? item.temporaryReminderSentAt;
+                item.temporaryExpiredSentAt = ctx.previousTemporaryExpiredSentAt ?? item.temporaryExpiredSentAt;
+                item.ownership = ctx.previousOwnership ?? item.ownership;
+                item.acceptedBy = ctx.previousAcceptedBy ?? item.acceptedBy;
+                item.actionRequiredBy = null;
+                item.pendingAction = null;
+                if (item.pendingActionDetails?.vehicleHandoverFlow) {
+                    delete item.pendingActionDetails.vehicleHandoverFlow;
+                }
+                if (item.pendingActionDetails?.returnHandoverContext) {
+                    delete item.pendingActionDetails.returnHandoverContext;
+                }
+                item.markModified('pendingActionDetails');
             } else {
                 item.status = 'Unassigned';
                 item.assignedTo = null;
@@ -9124,7 +9158,10 @@ export const respondToAssignment = async (req, res) => {
 
             if (action === 'Accept') {
                 // Parking reassignment stays On Leave; service reassignment keeps service status.
-                if (parkingCtx?.isParkingReassign) {
+                // A finished vehicle return leaves the pool instead of staying assigned.
+                if (handoverFlow?.isReturn) {
+                    clearFleetVehicleAssignmentForReturn(item);
+                } else if (parkingCtx?.isParkingReassign) {
                     item.onLeaveActive = true;
                     item.status = 'Assigned';
                     restoreParkingFields(item, parkingCtx.parkingSnapshot);
@@ -9143,7 +9180,7 @@ export const respondToAssignment = async (req, res) => {
 
                 // Stamp assignment start (and temporary end) for normal Assigned assets —
                 // not parking or service reassignment (those restore prior dates below).
-                if (!parkingCtx?.isParkingReassign && !serviceCtx?.isServiceReassign) {
+                if (!handoverFlow?.isReturn && !parkingCtx?.isParkingReassign && !serviceCtx?.isServiceReassign) {
                     stampAssignmentDatesOnAccept(item);
                 } else if (parkingCtx?.isParkingReassign) {
                     item.assignmentType = parkingCtx.oldAssignmentType ?? item.assignmentType;
@@ -9603,7 +9640,7 @@ export const respondToAssignment = async (req, res) => {
                                 filename: `tools-handover-${item.assetId || item._id}.pdf`,
                                 caption: `Tools handover report — ${item.assetId || ''} ${item.name || ''}`.trim(),
                             });
-                            if (toolsResult?.sent === true) {
+                            if (toolsResult?.sent === true || toolsResult?.channel === 'whatsapp') {
                                 toolsDeliveredEmployeeId = String(assigneeForWp.employeeId || '');
                             }
                         } catch (err) {
@@ -11244,6 +11281,163 @@ export const returnAssetItem = async (req, res) => {
                         : 'Only Asset Controller or an administrator can return an asset that is not assigned to an employee.'
                 });
             }
+        }
+
+        // Fleet return uses the same handover as assign: pending row, photos, then approval.
+        // The vehicle stays with the current holder until that handover is approved.
+        if (fleetVehicle && !req.body?.reassignTo) {
+            if (item.pendingAction || item.pendingActionDetails?.vehicleHandoverFlow?.historyId) {
+                return res.status(400).json({
+                    message: 'This vehicle already has a pending request. Finish or reject it before returning.',
+                });
+            }
+
+            const adminOfficer = await resolveAdminOfficerEmployee();
+            if (!adminOfficer?._id) {
+                return res.status(400).json({
+                    message: 'Admin Officer is not configured in the flowchart for vehicle return handover.',
+                });
+            }
+
+            const prevAssigneeEmp = item.assignedTo
+                ? await EmployeeBasic.findById(item.assignedTo)
+                    .select('firstName lastName employeeId')
+                    .lean()
+                    .catch(() => null)
+                : null;
+            const requester = req.user?.employeeObjectId
+                ? await EmployeeBasic.findById(req.user.employeeObjectId)
+                    .select('firstName lastName employeeId')
+                    .lean()
+                    .catch(() => null)
+                : null;
+
+            const returnHandoverContext = {
+                previousStatus: item.status,
+                previousAcceptanceStatus: item.acceptanceStatus,
+                previousAssignedTo: item.assignedTo || null,
+                previousAssignedToType: item.assignedToType || null,
+                previousAssignedCompany: item.assignedCompany || null,
+                previousAssignedBy: item.assignedBy || null,
+                previousAssignmentType: item.assignmentType || null,
+                previousAssignedDays: item.assignedDays ?? null,
+                previousAssignedDate: item.assignedDate || null,
+                previousTemporaryEndDate: item.temporaryEndDate || null,
+                previousTemporaryReminderSentAt: item.temporaryReminderSentAt || null,
+                previousTemporaryExpiredSentAt: item.temporaryExpiredSentAt || null,
+                previousOwnership: item.ownership || null,
+                previousAcceptedBy: item.acceptedBy || null,
+            };
+
+            const workflowMeta = buildReturnHandoverWorkflowMeta({
+                adminOfficer,
+                requester,
+                prevAssignee: prevAssigneeEmp,
+                assignDate: new Date(),
+            });
+            const { handoverByDisplay, handoverToDisplay } = buildFleetHandoverDisplayLabels({
+                workflowMeta,
+                assignee: prevAssigneeEmp,
+                previousAssignee: prevAssigneeEmp,
+                adminOfficer,
+                isReturn: true,
+            });
+
+            // Created as Assigned so the same previous-photo seed used by assign can run, then marked Returned.
+            const historyRecord = await AssetHistory.create({
+                assetId: item._id,
+                action: 'Assigned',
+                assignedToType: item.assignedToType,
+                assignedTo: item.assignedTo,
+                assignedCompany: item.assignedCompany,
+                performedBy: req.user.employeeObjectId || req.user._id,
+                comments: 'Vehicle return',
+                details: {
+                    assignmentReason: 'Vehicle return',
+                    handoverKind: 'vehicle_return',
+                },
+            });
+
+            try {
+                await seedPreviousHandoverReportsOnHistory({
+                    historyId: historyRecord._id,
+                    assetId: item._id,
+                });
+            } catch {
+                /* non-fatal — photos can still be added on the pending row */
+            }
+
+            const seeded = await AssetHistory.findById(historyRecord._id).select('details').lean();
+            const seededWorkflow =
+                seeded?.details?.vehicleHandoverWorkflow &&
+                typeof seeded.details.vehicleHandoverWorkflow === 'object'
+                    ? seeded.details.vehicleHandoverWorkflow
+                    : {};
+            await AssetHistory.findByIdAndUpdate(historyRecord._id, {
+                action: 'Returned',
+                details: {
+                    ...(seeded?.details || {}),
+                    assignmentReason: 'Vehicle return',
+                    handoverKind: 'vehicle_return',
+                    vehicleHandoverWorkflow: {
+                        ...seededWorkflow,
+                        ...workflowMeta,
+                        stages: {
+                            ...(seededWorkflow.stages || {}),
+                            ...(workflowMeta.stages || {}),
+                        },
+                    },
+                    handoverLifecycleStatus: HANDOVER_LIFECYCLE.PENDING,
+                    handoverByDisplay,
+                    handoverToDisplay,
+                },
+            });
+
+            item.status = 'Pending';
+            item.acceptanceStatus = 'Pending';
+            item.actionRequiredBy = adminOfficer._id;
+            item.pendingActionDetails = {
+                ...(item.pendingActionDetails || {}),
+                assignmentReason: 'Vehicle return',
+                returnHandoverContext,
+                vehicleHandoverFlow: {
+                    stage: 'target',
+                    historyId: historyRecord._id.toString(),
+                    isReturn: true,
+                    assigneeCanSelfAcknowledge: false,
+                    pendingActorName: formatEmployeeDisplayName(adminOfficer) || 'Admin Officer',
+                    escalation: buildInitialHandoverEscalationMeta(),
+                },
+            };
+            await item.save();
+
+            const subjectName = prevAssigneeEmp
+                ? `${prevAssigneeEmp.firstName || ''} ${prevAssigneeEmp.lastName || ''}`.trim()
+                : '';
+            const subjectEmpId = prevAssigneeEmp?.employeeId || '';
+            await upsertHandoverDashboardAction({
+                asset: item,
+                actor: adminOfficer,
+                assigner: requester,
+                historyId: historyRecord._id.toString(),
+                stageLabel: 'Vehicle Return',
+                subjectName,
+                subjectEmpId,
+            }).catch(() => null);
+            await upsertHandoverAdminOfficerDashboardAction({
+                asset: item,
+                adminOfficer,
+                historyId: historyRecord._id.toString(),
+                subjectName,
+                subjectEmpId,
+                stageLabel: 'Vehicle Return — add photos and approve',
+            }).catch(() => null);
+
+            return res.status(200).json({
+                message:
+                    'Return handover started. The row stays Pending until photos are added and the handover is approved. The vehicle stays assigned until then.',
+                asset: item,
+            });
         }
 
         const fleetReturnApprover = fleetVehicle
@@ -20525,7 +20719,7 @@ export const getPendingAssetDashboardInbox = async (req, res) => {
                 inboxAfterExpiryMerge.push(row);
                 continue;
             }
-            const groupKey = String(row.extra2 || '').trim();
+            const groupKey = `${String(row.subjectName || '').trim()}|${String(row.extra2 || '').trim()}`;
             if (!groupKey) {
                 inboxAfterExpiryMerge.push(row);
                 continue;

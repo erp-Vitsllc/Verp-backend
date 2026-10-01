@@ -70,18 +70,21 @@ async function sendPdfToCompanyEmail({ eventKey, employee, companyEmail, pdfBuff
 async function sendToolsWhatsAppPdf({ eventKey, employee, pdfBuffer, filename, caption }) {
     const emp = await resolveEmployeeRecord(employee);
     if (!emp?.employeeId) {
-        return { sent: false, reason: 'no_employee' };
+        return { sent: false, reason: 'no_employee', channel: 'whatsapp' };
+    }
+    if (String(emp.companyEmail || '').trim()) {
+        return { sent: false, reason: 'has_company_email', channel: 'email' };
     }
     const channels = await getEventChannels(eventKey);
     if (!channels.whatsapp) {
-        return { sent: false, reason: 'permission_off' };
+        return { sent: false, reason: 'permission_off', channel: 'whatsapp' };
     }
     const phone = await resolveEmployeeWhatsAppPhone(emp.employeeId);
     if (!phone) {
-        return { sent: false, reason: 'no_whatsapp' };
+        return { sent: false, reason: 'no_whatsapp', channel: 'whatsapp' };
     }
     if (!pdfBuffer?.length) {
-        return { sent: false, reason: 'no_pdf' };
+        return { sent: false, reason: 'no_pdf', channel: 'whatsapp' };
     }
 
     const name = [emp.firstName, emp.lastName].filter(Boolean).join(' ').trim();
@@ -99,9 +102,38 @@ async function sendToolsWhatsAppPdf({ eventKey, employee, pdfBuffer, filename, c
     );
     if (!result?.success) {
         console.warn('[ToolsWhatsApp] send failed', emp.employeeId, result?.error || '');
-        return { sent: false, reason: result?.error || 'send_failed' };
+        return { sent: false, reason: result?.error || 'send_failed', channel: 'whatsapp' };
     }
-    return { sent: true, reason: 'whatsapp', messageId: result.messageId || '' };
+    return { sent: true, reason: 'whatsapp', channel: 'whatsapp', messageId: result.messageId || '' };
+}
+
+/**
+ * Company email gets the PDF. WhatsApp is used only when there is no company email.
+ */
+async function deliverToolsPdf({ eventKey, employee, pdfBuffer, filename, caption, subject, html }) {
+    const emp = await resolveEmployeeRecord(employee);
+    if (!emp?.employeeId) return { sent: false, reason: 'no_employee', channel: 'none' };
+    if (!pdfBuffer?.length) return { sent: false, reason: 'no_pdf', channel: 'none' };
+
+    const companyEmail = String(emp.companyEmail || '').trim();
+    if (companyEmail) {
+        const mailed = await sendPdfToCompanyEmail({
+            eventKey,
+            employee: emp,
+            companyEmail,
+            pdfBuffer,
+            filename,
+            subject: subject || caption || 'Attachment',
+            html: html || `<p>Please find the PDF attached.</p><p>${caption || ''}</p>`,
+        });
+        return {
+            sent: mailed.sent === true,
+            reason: mailed.reason || (mailed.sent ? 'email' : 'email_failed'),
+            channel: 'email',
+        };
+    }
+
+    return sendToolsWhatsAppPdf({ eventKey, employee: emp, pdfBuffer, filename, caption });
 }
 
 export async function sendToolsHandoverReportWhatsApp({
@@ -112,33 +144,18 @@ export async function sendToolsHandoverReportWhatsApp({
 } = {}) {
     const emp = await resolveEmployeeRecord(employee);
     if (!emp?.employeeId) return { sent: false, reason: 'no_employee' };
-    const channels = await getEventChannels(TOOLS_HANDOVER_REPORT_EVENT);
-    if (!channels.whatsapp) return { sent: false, reason: 'permission_off' };
     if (!pdfBuffer?.length) return { sent: false, reason: 'no_pdf' };
 
     const assetLabel = String(caption || '').trim() || 'Tools handover report';
-    const companyEmail = String(emp.companyEmail || '').trim();
-    if (companyEmail) {
-        const mailed = await sendPdfToCompanyEmail({
-            eventKey: TOOLS_HANDOVER_REPORT_EVENT,
-            employee: emp,
-            companyEmail,
-            pdfBuffer,
-            filename,
-            subject: assetLabel,
-            html: `<p>Please find the asset assignment handover PDF attached.</p><p>${assetLabel}</p>`,
-        });
-        return { ...mailed, channel: 'email' };
-    }
-
-    const sent = await sendToolsWhatsAppPdf({
+    return deliverToolsPdf({
         eventKey: TOOLS_HANDOVER_REPORT_EVENT,
         employee: emp,
         pdfBuffer,
         filename,
         caption: assetLabel,
+        subject: assetLabel,
+        html: `<p>Please find the asset assignment handover PDF attached.</p><p>${assetLabel}</p>`,
     });
-    return { ...sent, channel: sent.sent ? 'whatsapp' : 'none' };
 }
 
 export async function sendToolsMonthlyReportWhatsApp({
@@ -147,11 +164,14 @@ export async function sendToolsMonthlyReportWhatsApp({
     filename = 'tools-monthly-report.pdf',
     caption = '',
 } = {}) {
-    return sendToolsWhatsAppPdf({
+    const label = String(caption || '').trim() || 'Tools monthly report — assigned assets';
+    return deliverToolsPdf({
         eventKey: TOOLS_MONTHLY_REPORT_EVENT,
         employee,
         pdfBuffer,
         filename,
-        caption: caption || 'Tools monthly report — assigned assets',
+        caption: label,
+        subject: label,
+        html: `<p>Please find the monthly assigned-asset PDF attached.</p><p>${label}</p>`,
     });
 }

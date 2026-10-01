@@ -4,11 +4,18 @@ import {
     buildLocatorVehicleDetail,
     ensureLocatorErpVehicle,
 } from '../../services/locatorVehicleListService.js';
+import { getLocatorMonthStatsForDevice } from '../../services/locatorSnapshotService.js';
+import { dubaiDateKey } from '../../services/locatorUnits.js';
 
 export const getLocatorVehicleDetail = async (req, res) => {
     try {
         const { deviceId } = req.params;
         const locatorRow = await buildLocatorVehicleDetail(deviceId);
+        if (locatorRow?.locator) {
+            const monthKey = dubaiDateKey().slice(0, 7);
+            const monthStats = await getLocatorMonthStatsForDevice(deviceId, monthKey);
+            locatorRow.locator.monthIdleLabel = monthStats?.idleTimeLabel || '00:00:00 Hrs';
+        }
 
         const asset = await ensureLocatorErpVehicle({
             deviceId,

@@ -11,6 +11,7 @@ import { getLocatorDeviceOverlay } from '../controllers/locator/getLocatorDevice
 import { postLocatorVehiclePlate } from '../controllers/locator/postLocatorVehiclePlate.js';
 import { postLocatorFixAssignment } from '../controllers/locator/postLocatorFixAssignment.js';
 import { postLocatorEnsureVehicle } from '../controllers/locator/postLocatorEnsureVehicle.js';
+import { postLocatorRefreshGps } from '../controllers/locator/postLocatorRefreshGps.js';
 
 const router = express.Router();
 
@@ -19,6 +20,7 @@ router.get('/vehicle-detail/:deviceId', protect, getLocatorVehicleDetail);
 router.get('/device-overlay/:deviceId', protect, getLocatorDeviceOverlay);
 router.post('/vehicle-plate', protect, postLocatorVehiclePlate);
 router.post('/ensure-vehicle', protect, postLocatorEnsureVehicle);
+router.post('/refresh-gps', protect, postLocatorRefreshGps);
 router.post('/fix-assignment', protect, postLocatorFixAssignment);
 router.get('/fleet-dashboard', protect, getLocatorFleetDashboard);
 router.get('/status', protect, getLocatorStatus);

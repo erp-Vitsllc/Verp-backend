@@ -1097,10 +1097,35 @@ export async function closeFleetHandoverDashboardActions(requestId, status, acti
     );
 }
 
-/**
- * If target already accepted and accessories/body match the previous report,
- * skip a leftover HR stage and finalize as Approved.
- */
+/** Final return approval: vehicle goes back to the unassigned pool. */
+export function clearFleetVehicleAssignmentForReturn(item) {
+    if (!item) return;
+    item.assignedTo = null;
+    item.assignedCompany = null;
+    item.assignedToType = null;
+    item.assignedBy = null;
+    item.acceptedBy = null;
+    item.assignmentType = null;
+    item.assignedDays = null;
+    item.assignedDate = null;
+    item.temporaryEndDate = null;
+    item.temporaryReminderSentAt = null;
+    item.temporaryExpiredSentAt = null;
+    item.negotiationHistory = [];
+    item.ownership = null;
+    item.status = 'Unassigned';
+    item.acceptanceStatus = 'Accepted';
+    item.actionRequiredBy = null;
+    item.pendingAction = null;
+    if (item.pendingActionDetails?.returnHandoverContext) {
+        delete item.pendingActionDetails.returnHandoverContext;
+    }
+    if (item.pendingActionDetails?.vehicleHandoverFlow) {
+        delete item.pendingActionDetails.vehicleHandoverFlow;
+    }
+    item.markModified?.('pendingActionDetails');
+}
+
 export async function healNoChangeHandoverHrSkip(item) {
     if (!item?._id) return { healed: false };
 
@@ -1128,18 +1153,24 @@ export async function healNoChangeHandoverHrSkip(item) {
     const requiresHr = await handoverRequiresHrApproval(historyRecord, item);
     if (requiresHr) return { healed: false };
 
+    const isReturnHandover = flow?.isReturn === true;
+
     await markHandoverLifecycleOnHistory(historyId, HANDOVER_LIFECYCLE.APPROVED, {
         'details.hrApprovalSkipped': true,
     });
 
-    if (item.pendingActionDetails?.vehicleHandoverFlow) {
-        delete item.pendingActionDetails.vehicleHandoverFlow;
-        item.markModified?.('pendingActionDetails');
-    }
-    item.actionRequiredBy = null;
-    if (String(item.acceptanceStatus || '').trim() === 'Pending') {
-        item.acceptanceStatus = 'Accepted';
-        item.status = 'Assigned';
+    if (isReturnHandover) {
+        clearFleetVehicleAssignmentForReturn(item);
+    } else {
+        if (item.pendingActionDetails?.vehicleHandoverFlow) {
+            delete item.pendingActionDetails.vehicleHandoverFlow;
+            item.markModified?.('pendingActionDetails');
+        }
+        item.actionRequiredBy = null;
+        if (String(item.acceptanceStatus || '').trim() === 'Pending') {
+            item.acceptanceStatus = 'Accepted';
+            item.status = 'Assigned';
+        }
     }
     await item.save();
     await closeFleetHandoverDashboardActions(
@@ -1363,7 +1394,7 @@ export async function advanceFleetHandoverOnAccept({
         }
         if (historyId) {
             const assignedRow = await AssetHistory.findById(historyId).select('action details').lean();
-            if (assignedRow?.action === 'Assigned') {
+            if (assignedRow?.action === 'Assigned' || assignedRow?.action === 'Returned') {
                 await markHandoverLifecycleOnHistory(historyId, HANDOVER_LIFECYCLE.ACCEPTED, {
                     'details.handoverTargetAcceptedAt': new Date(),
                 });

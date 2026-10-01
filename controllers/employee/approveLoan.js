@@ -457,18 +457,21 @@ export const approveLoan = async (req, res) => {
                 if (!applicant) {
                     applicant = await EmployeeBasic.findOne({ employeeId: loan.employeeId });
                 }
-                const { sendLoanApprovalWhatsApp } = await import('../../utils/sendLoanApprovalWhatsApp.js');
-                const waResult = await sendLoanApprovalWhatsApp({
-                    loan,
-                    employee: applicant,
-                    pdfBuffer: approvalPdfBuffer,
-                    filename: approvalAckFilename,
-                });
-                employeeGotWhatsApp = waResult?.sent === true;
-                if (employeeGotWhatsApp) {
-                    console.log(`[ApproveLoan] Approval document sent on WhatsApp to ${applicant?.employeeId}.`);
-                } else {
-                    console.log(`[ApproveLoan] WhatsApp approval skipped (${waResult?.reason || 'unknown'}).`);
+                const applicantCompanyEmail = String(applicant?.companyEmail || '').trim();
+                if (!applicantCompanyEmail) {
+                    const { sendLoanApprovalWhatsApp } = await import('../../utils/sendLoanApprovalWhatsApp.js');
+                    const waResult = await sendLoanApprovalWhatsApp({
+                        loan,
+                        employee: applicant,
+                        pdfBuffer: approvalPdfBuffer,
+                        filename: approvalAckFilename,
+                    });
+                    employeeGotWhatsApp = waResult?.sent === true;
+                    if (employeeGotWhatsApp) {
+                        console.log(`[ApproveLoan] Approval document sent on WhatsApp to ${applicant?.employeeId}.`);
+                    } else {
+                        console.log(`[ApproveLoan] WhatsApp approval skipped (${waResult?.reason || 'unknown'}).`);
+                    }
                 }
             } catch (waErr) {
                 console.error('[ApproveLoan] WhatsApp approval document failed:', waErr?.message || waErr);
@@ -615,10 +618,13 @@ export const approveLoan = async (req, res) => {
                         const toEmails = new Set();
                         const ccEmails = new Set();
 
-                        // 1. Applicant Email (fallback to primaryReportee when applicant has no email).
-                        // Skip employee mail when the acknowledgment already went on WhatsApp.
-                        const { email: appEmail, isFallbackToReportee, employeeName, reporteeName } = resolveEmployeeEmail(applicant);
-                        if (appEmail && !employeeGotWhatsApp) toEmails.add(appEmail);
+                        // Applicant gets the PDF on company email only.
+                        // No company email means the PDF already went on WhatsApp, so do not also email them.
+                        const appEmail = String(applicant.companyEmail || '').trim();
+                        const isFallbackToReportee = false;
+                        const employeeName = `${applicant.firstName || ''} ${applicant.lastName || ''}`.trim();
+                        const reporteeName = '';
+                        if (appEmail) toEmails.add(appEmail);
 
                         // 2. Manager Email (His Reportee/Supervisor) - only if not already added from fallback
                         if (applicant.primaryReportee) {

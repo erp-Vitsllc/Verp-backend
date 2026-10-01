@@ -13,6 +13,10 @@ import {
     loanRepaymentMonthCap,
     primaryVisaFromDetails,
 } from "../../utils/loanEligibilityValidation.js";
+import {
+    blockingLoanMessage,
+    findBlockingLoanObligation,
+} from "../../utils/loanRepaymentGate.js";
 
 
 /**
@@ -136,26 +140,20 @@ export const requestLoan = async (req, res) => {
                 : body
         );
 
-        // --- VALIDATION: Existing Loan Check ---
-        // Block if employee already has an Approved or In-Progress loan/advance
-        const existingLoan = await Loan.findOne({
-            employeeId: employeeBasic.employeeId,
-            status: { $in: ['Approved', 'Pending', 'Pending HR', 'Pending Accounts', 'Pending Authorization'] }
-        }).lean();
+        // Block a new loan/advance while any previous one is still in progress
+        // or not fully repaid. A fully repaid record does not block another request.
+        const existingLoan = await findBlockingLoanObligation(employeeBasic.employeeId);
 
         const confirmContinue = Boolean(req.selfServiceLoan && req.body?.hrEligibilityOverride === true);
         const continuedNotes = [];
 
         if (existingLoan) {
-            const isApproved = existingLoan.status === 'Approved';
             loanChecks.existingLoan = {
                 type: existingLoan.type,
                 loanId: existingLoan.loanId,
                 status: existingLoan.status,
             };
-            const existingMessage = isApproved
-                ? `This employee already has an Approved ${existingLoan.type} (${existingLoan.loanId}). A new request cannot be submitted while a loan is active.`
-                : `This employee already has a ${existingLoan.type} application in progress (${existingLoan.loanId} - ${existingLoan.status}).`;
+            const existingMessage = blockingLoanMessage(existingLoan);
             if (req.selfServiceLoan || !confirmContinue) {
                 return res.status(400).json(validationBlock(withChecks({
                     message: existingMessage,

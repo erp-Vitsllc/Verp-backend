@@ -1,6 +1,7 @@
 import nodemailer from 'nodemailer';
 import { resolveEmployeeEmailWithReporteeLoaded } from './resolveEmployeeEmail.js';
 import { employeeDisplayName } from './resolveEmployeeEmail.js';
+import { normalizePdfAttachments } from './normalizeEmailAttachments.js';
 
 /**
  * Sends the final handover-style PDF to the Asset Controller when an assignment is auto-completed
@@ -43,6 +44,7 @@ export async function sendAssetControllerDirectAssignmentRecordEmail({
         const acName = employeeDisplayName(resolvedAc || assetControllerEmployee);
         const assigneeName = employeeDisplayName(assigneeEmployee);
         const assignerName = employeeDisplayName(assignerEmployee);
+        const att = normalizePdfAttachments(attachments);
 
         const listHtml =
             assetSummaryLines.length > 0
@@ -70,7 +72,9 @@ export async function sendAssetControllerDirectAssignmentRecordEmail({
                     <p style="font-size: 14px; color: #64748b;">Recorded by: <strong>${assignerName}</strong></p>
                     ${listHtml}
                     <p style="font-size: 13px; color: #64748b; margin-top: 20px;">
-                        The handover form is saved on the asset record in ERP and can be downloaded from the asset page when needed.
+                        ${att.length
+                            ? 'The handover form PDF is attached to this email. It is also saved on the asset record in ERP.'
+                            : 'The handover form is saved on the asset record in ERP and can be downloaded from the asset page when needed.'}
                     </p>
                 </div>
                 <div style="background-color: #f8fafc; padding: 16px; text-align: center; font-size: 12px; color: #64748b; border-top: 1px solid #e2e8f0;">
@@ -84,6 +88,7 @@ export async function sendAssetControllerDirectAssignmentRecordEmail({
             to: recipientEmail,
             subject,
             html,
+            ...(att.length ? { attachments: att } : {}),
         });
 
         console.log(`[AC direct assignment email] Sent to ${recipientEmail}`);

@@ -522,6 +522,7 @@ export async function postWhatsAppWebhook(req, res) {
                         status: String(statusRow?.status || '').trim(),
                         recipientPhone: String(statusRow?.recipient_id || '').trim(),
                         occurredAt: Number.isFinite(ts) ? new Date(ts * 1000) : new Date(),
+                        errorMessage: firstError.title || firstError.message || firstError.error_data?.details || '',
                     });
                 }
             }

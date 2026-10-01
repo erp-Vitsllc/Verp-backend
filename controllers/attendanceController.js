@@ -27,8 +27,15 @@ import {
     isCompanyShellEmployee,
     REAL_EMPLOYEE_MONGO_FILTER,
 } from '../utils/attendanceEmployeeFilters.js';
+import {
+    bestDayRecord,
+    employeeAttendanceMatch,
+    preferPunchedRows,
+    punchTimeSet,
+} from '../utils/attendanceDayLookup.js';
 import { listPendingHubInboxItems } from '../utils/employeeHubRequestInbox.js';
 import { resolveFlowchartHrEmployee } from '../utils/resolveFlowchartHrEmployee.js';
+import { isUserActiveInFlowchart } from '../utils/getDepartmentHOD.js';
 import { resolveDashboardAssigneeContext } from '../utils/resolveDashboardAssigneeContext.js';
 import { isReqUserSystemSuperUser } from '../utils/systemSuperUser.js';
 import {
@@ -50,6 +57,7 @@ import {
     daysUntilProcessingStart,
     firstOfProcessingMonth,
     isSalaryMonthOpen,
+    loadEnrolledLeaveVisibilityByMongoId,
     processingMonthFromStart,
     processingStartFromEnrollment,
     resolveSalaryProcessingStartDate,
@@ -181,13 +189,110 @@ function inclusiveDateCount(fromDate, toDate) {
 }
 
 function nextDateKey(dateKey) {
+    return shiftDateKey(dateKey, 1);
+}
+
+function shiftDateKey(dateKey, deltaDays) {
     const [year, month, day] = String(dateKey).split('-').map(Number);
-    const dt = new Date(Date.UTC(year, month - 1, day + 1, 12, 0, 0));
+    const dt = new Date(Date.UTC(year, month - 1, day + deltaDays, 12, 0, 0));
     return formatDateKeyFromParts({
         year: dt.getUTCFullYear(),
         month: dt.getUTCMonth() + 1,
         day: dt.getUTCDate(),
     });
+}
+
+const NON_HR_RECENT_MARK_KEYS = new Set(['on_office', 'authorized_leave']);
+
+function isStoredAttendanceAbsent(row) {
+    if (!row) return true;
+    const key = String(row.statusKey || '').trim();
+    const punched = Boolean(String(row.timeIn || '').trim());
+    if (key === 'unauthorized_leave') return true;
+    if (!key || key === 'not_marked' || key === 'absent') return !punched;
+    return false;
+}
+
+async function viewerIsFlowchartHr(req) {
+    try {
+        const actor = await resolveLinkedEmployee(req);
+        return await isUserActiveInFlowchart(
+            {
+                employeeObjectId: actor?._id || req.user?.employeeObjectId || null,
+                employeeId: actor?.employeeId || req.user?.employeeId || '',
+            },
+            'hr',
+        );
+    } catch (error) {
+        console.error('[viewerIsFlowchartHr]', error);
+        return false;
+    }
+}
+
+/**
+ * Non-HR users may mark today, and may change absent rows from the previous
+ * two days to On work or Authorized leave. Older days are flowchart HR only.
+ * @returns {Promise<boolean>} true when the response was already sent
+ */
+async function rejectIfMarkWindowClosed(req, res, { date, entries }) {
+    const today = getDubaiDateKey();
+    const earliest = shiftDateKey(today, -2);
+    if (await viewerIsFlowchartHr(req)) return false;
+
+    const requested = Array.isArray(entries) ? entries : [];
+    const triesClear = requested.some((entry) => {
+        const statusKey = String(entry?.statusKey || '').trim();
+        return statusKey === 'clear_attendance' || statusKey === 'clear';
+    });
+    if (triesClear) {
+        res.status(403).json({
+            message: 'Only the flowchart HR assignee can clear attendance.',
+        });
+        return true;
+    }
+
+    if (!isValidDateKey(date) || date < earliest || date > today) {
+        res.status(403).json({
+            message:
+                'Only the flowchart HR assignee can mark attendance more than 2 days before today.',
+        });
+        return true;
+    }
+
+    if (date === today) return false;
+
+    const list = Array.isArray(entries) ? entries : [];
+    for (const entry of list) {
+        const statusKey = String(entry?.statusKey || '').trim();
+        if (!NON_HR_RECENT_MARK_KEYS.has(statusKey)) {
+            res.status(403).json({
+                message: 'You can only set Authorized leave or mark attendance for the last 2 days.',
+            });
+            return true;
+        }
+    }
+
+    const ids = [
+        ...new Set(list.map((entry) => String(entry?.employeeMongoId || '').trim()).filter(Boolean)),
+    ];
+    if (!ids.length) return false;
+
+    const existing = await Attendance.find({
+        date,
+        employeeMongoId: { $in: ids },
+    })
+        .select('employeeMongoId statusKey timeIn')
+        .lean();
+    const byId = new Map((existing || []).map((row) => [String(row.employeeMongoId), row]));
+    const blocked = ids.find((id) => !isStoredAttendanceAbsent(byId.get(id)));
+    if (blocked) {
+        res.status(403).json({
+            message: 'You can only change absent attendance from the last 2 days.',
+        });
+        return true;
+    }
+
+    return false;
 }
 
 function isNonWorkingDate(dateKey, holidaySet, offWeekdays) {
@@ -549,6 +654,20 @@ function approvalStatusForMark(statusKey) {
     return 'pending';
 }
 
+const APPROVED_LEAVE_DAY_KEYS = new Set([
+    'on_leave',
+    'authorized_leave',
+    'sick_leave',
+    'compoff_leave',
+]);
+
+/** Approved annual, authorized, sick, or comp-off leave owns that day. */
+function isApprovedLeaveDay(record) {
+    if (!record) return false;
+    if (String(record.leaveRequestStatus || '').trim() !== 'approved') return false;
+    return APPROVED_LEAVE_DAY_KEYS.has(String(record.statusKey || '').trim());
+}
+
 async function getActiveEmployeeIdsByStaffType(staffType) {
     const filter = {
         profileStatus: 'active',
@@ -573,7 +692,8 @@ async function countActiveEmployees(staffType = null) {
 /**
  * GET /api/Attendance/mark-roster
  * Lean active-employee list for Mark Attendance (no heavy Employee list aggregation).
- * Query: staffType=office|site (optional)
+ * Query: staffType=office|site (optional), date=yyyy-MM-dd
+ * Only employees enrolled on or before that month are returned.
  */
 export async function getAttendanceMarkRoster(req, res) {
     try {
@@ -581,6 +701,9 @@ export async function getAttendanceMarkRoster(req, res) {
             return res.status(503).json({ message: 'Database not connected.' });
         }
 
+        const requestedDate = String(req.query.date || '').trim();
+        const dateKey = isValidDateKey(requestedDate) ? requestedDate : getDubaiDateKey();
+        const monthKey = dateKey.slice(0, 7);
         const staffType = resolveStaffTypeFilter(req.query.staffType);
         const filter = {
             profileStatus: 'active',
@@ -599,8 +722,14 @@ export async function getAttendanceMarkRoster(req, res) {
             .lean()
             .maxTimeMS(8000);
 
-        const employees = (rows || [])
-            .filter((e) => !isCompanyShellEmployee(e))
+        const activeRows = (rows || []).filter((e) => !isCompanyShellEmployee(e));
+        const enrolledFrom = await loadEnrolledLeaveVisibilityByMongoId(activeRows);
+        const employees = activeRows
+            .filter((e) => {
+                const start = enrolledFrom.get(String(e._id));
+                if (!start) return false;
+                return isSalaryMonthOpen(monthKey, start);
+            })
             .map((e) => ({
                 _id: String(e._id),
                 id: String(e._id),
@@ -616,6 +745,7 @@ export async function getAttendanceMarkRoster(req, res) {
         return res.status(200).json({
             message: 'Attendance mark roster fetched successfully',
             count: employees.length,
+            date: dateKey,
             staffType: staffType || 'all',
             employees,
         });
@@ -792,8 +922,41 @@ export async function markAttendance(req, res) {
             return res.status(400).json({ message: 'At least one mark is required.' });
         }
 
+        const windowClosed = await rejectIfMarkWindowClosed(req, res, {
+            date,
+            entries: marks.map((raw) => ({
+                employeeMongoId: String(raw?.employeeMongoId || raw?.id || '').trim(),
+                statusKey: String(raw?.statusKey || raw?.markKey || '').trim(),
+            })),
+        });
+        if (windowClosed) return;
+
         const markedBy = req.user?.id || null;
         const saved = [];
+
+        const employeeIds = [
+            ...new Set(
+                marks
+                    .map((raw) => String(raw?.employeeMongoId || raw?.id || '').trim())
+                    .filter(Boolean),
+            ),
+        ];
+        if (employeeIds.length) {
+            const existingRows = await Attendance.find({
+                date,
+                employeeMongoId: { $in: employeeIds },
+            })
+                .select('employeeMongoId employeeName statusKey statusLabel leaveRequestStatus')
+                .lean();
+            const locked = (existingRows || []).find((row) => isApprovedLeaveDay(row));
+            if (locked) {
+                const who = String(locked.employeeName || '').trim() || 'This employee';
+                const leaveLabel = String(locked.statusLabel || '').trim() || 'approved leave';
+                return res.status(409).json({
+                    message: `${who} is on ${leaveLabel} for ${date}. Mark Attendance is closed for that day.`,
+                });
+            }
+        }
 
         for (const raw of marks) {
             const employeeMongoId = String(raw?.employeeMongoId || raw?.id || '').trim();
@@ -829,13 +992,7 @@ export async function markAttendance(req, res) {
             const timeIn = raw?.timeIn != null && raw.timeIn !== '—' ? String(raw.timeIn).trim() : '';
             const timeOut = raw?.timeOut != null && raw.timeOut !== '—' ? String(raw.timeOut).trim() : '';
             let reason = String(raw?.reason || '').trim();
-            let leavePayType = leavePayTypeForStatus(statusKey, raw?.leavePayType);
-
-            if (statusKey === 'authorized_leave' && !leavePayType) {
-                return res.status(400).json({
-                    message: 'Choose Paid or Unpaid for authorized leave.',
-                });
-            }
+            let leavePayType = '';
 
             // Apply Flowchart HR Working Time punch rules (grace / early go) when times are set.
             let finalStatusKey = statusKey;
@@ -882,7 +1039,7 @@ export async function markAttendance(req, res) {
                 );
                 if (overflowMap.get(date) === 'authorized_leave') {
                     finalStatusKey = 'authorized_leave';
-                    leavePayType = leavePayType || 'unpaid';
+                    leavePayType = '';
                     finalStatusLabel = authorizedLeaveLabel(leavePayType);
                     reason = reason
                         ? `${reason} · Sick allowance used`
@@ -937,6 +1094,21 @@ export async function markAttendance(req, res) {
 }
 
 /** GET /api/Attendance/me?month=yyyy-MM&forEmployeeId=optionalMongoId */
+
+/** Checked-in days must be Present. Older punches were stored as not_marked. */
+function presentFromOpenPunch(record, todayKey) {
+    if (!record || !punchTimeSet(record.timeIn)) return record;
+    const key = String(record.statusKey || '').trim();
+    if (key !== 'not_marked' && key !== 'absent' && key !== '') return record;
+    const closed = punchTimeSet(record.timeOut);
+    if (!closed && record.date !== todayKey) return record;
+    return {
+        ...record,
+        statusKey: 'on_office',
+        statusLabel: 'Present',
+    };
+}
+
 export async function getMyAttendanceMonth(req, res) {
     try {
         if (mongoose.connection.readyState !== 1) {
@@ -1012,9 +1184,23 @@ export async function getMyAttendanceMonth(req, res) {
             portalApp: contactGate.portalApp,
             web: contactGate.web,
         };
-        if (gate.attendanceLocked) {
+        const attendanceMatch = employeeAttendanceMatch(employee);
+        const loadTodayPunch = async () => {
+            const rows = await Attendance.find({ date: todayKey, ...attendanceMatch }).lean();
+            return presentFromOpenPunch(bestDayRecord(rows, todayKey), todayKey);
+        };
+
+        if (gate.attendanceLocked || !gate.requestedOpen) {
+            const todayRecord = await loadTodayPunch();
+            const locked = Boolean(gate.attendanceLocked);
             return res.status(200).json({
-                ...salaryLockPayload(gate),
+                ...(locked ? salaryLockPayload(gate) : {
+                    message: 'Attendance fetched successfully',
+                    salaryEnrolled: true,
+                    attendanceLocked: false,
+                    processingStartMonth: gate.processingStartMonth || '',
+                    processingStartDate: gate.processingStartDate || '',
+                }),
                 month: requestedMonth,
                 from,
                 to,
@@ -1024,49 +1210,62 @@ export async function getMyAttendanceMonth(req, res) {
                 contactGate,
                 offWeekdays: [],
                 workingTime: { site: {}, office: {}, extra: {} },
-                records: [],
-                todayRecord: null,
-            });
-        }
-        if (!gate.requestedOpen) {
-            return res.status(200).json({
-                message: 'Attendance fetched successfully',
-                salaryEnrolled: true,
-                attendanceLocked: false,
-                processingStartMonth: gate.processingStartMonth || '',
-                processingStartDate: gate.processingStartDate || '',
-                month: requestedMonth,
-                from,
-                to,
-                today: todayKey,
-                isSelf,
-                employee: employeePayload,
-                contactGate,
-                offWeekdays: [],
-                workingTime: { site: {}, office: {}, extra: {} },
-                records: [],
-                todayRecord: null,
+                records: todayRecord ? [todayRecord] : [],
+                todayRecord,
             });
         }
 
-        const [records, workingTime, historicalProfile] = await Promise.all([
+        const [rawRecords, workingTime, historicalProfile] = await Promise.all([
             Attendance.find({
-                employeeMongoId,
+                ...attendanceMatch,
                 date: { $gte: from, $lte: to },
             }).lean(),
             loadWorkingTimeDoc(),
             loadHistoricalLeaveProfile(employee.employeeId),
         ]);
+        const records = preferPunchedRows(rawRecords);
 
         const overlay = overlayHistoricalLeave(historicalProfile, {
             from,
             to,
             includeCountOnly: false,
         });
-        const mergedRecords = mergeHistoricalCalendarRecords(records, overlay.calendarRecords);
+        const mergedRecords = mergeHistoricalCalendarRecords(records, overlay.calendarRecords).map((row) =>
+            presentFromOpenPunch(row, todayKey),
+        );
+        const promoteIds = mergedRecords
+            .filter(
+                (row) =>
+                    row?._id &&
+                    punchTimeSet(row.timeIn) &&
+                    row.statusKey === 'on_office' &&
+                    row.statusLabel === 'Present',
+            )
+            .map((row) => row._id);
+        const alreadyPresentIds = new Set(
+            records
+                .filter((row) => row.statusKey === 'on_office' && row.statusLabel === 'Present')
+                .map((row) => String(row._id)),
+        );
+        const idsToSave = promoteIds.filter(
+            (id) =>
+                mongoose.Types.ObjectId.isValid(id) &&
+                String(id).length === 24 &&
+                !alreadyPresentIds.has(String(id)),
+        );
+        if (idsToSave.length) {
+            try {
+                await Attendance.updateMany(
+                    { _id: { $in: idsToSave } },
+                    { $set: { statusKey: 'on_office', statusLabel: 'Present' } },
+                );
+            } catch (promoteErr) {
+                console.error('[getMyAttendanceMonth] present promote failed:', promoteErr);
+            }
+        }
         const scheduleWeek = getWeekForStaffType(workingTime, staffType);
         const offWeekdays = getOffWeekdayKeys(scheduleWeek);
-        const todayRecord = mergedRecords.find((r) => r.date === todayKey) || null;
+        const todayRecord = presentFromOpenPunch(bestDayRecord(mergedRecords, todayKey), todayKey);
 
         return res.status(200).json({
             message: 'Attendance fetched successfully',
@@ -1645,24 +1844,32 @@ export async function checkInMyAttendance(req, res) {
         }
 
         const { employee } = resolved;
-        if (await rejectIfNotSalaryEnrolled(res, employee)) return;
-
         const date = getDubaiDateKey();
         const timeIn = getDubaiClockTime();
         const employeeMongoId = String(employee._id);
         const employeeName = [employee.firstName, employee.lastName].filter(Boolean).join(' ').trim();
 
-        const existing = await Attendance.findOne({ date, employeeMongoId }).lean();
-        if (existing?.timeIn) {
+        const dayRows = await Attendance.find({
+            date,
+            ...employeeAttendanceMatch(employee),
+        }).lean();
+        const existingPunch = bestDayRecord(dayRows, date);
+        if (punchTimeSet(existingPunch?.timeIn)) {
             return res.status(400).json({
                 message: 'Already checked in for today.',
-                record: existing,
+                date,
+                timeIn: existingPunch.timeIn,
+                record: existingPunch,
             });
         }
+        if (await rejectIfNotSalaryEnrolled(res, employee)) return;
+        const existing =
+            dayRows.find((row) => String(row.employeeMongoId) === employeeMongoId) || existingPunch;
 
         // Punch-in vs Flowchart HR Working Time (15-minute grace).
-        let statusKey = 'not_marked';
-        let statusLabel = 'On time';
+        // On time is Present. Only a punch after the grace window is Late Arrival.
+        let statusKey = 'on_office';
+        let statusLabel = 'Present';
         let reason = '';
         try {
             const staffType = normalizeStaffType(employee.staffType);
@@ -1721,13 +1928,19 @@ export async function checkInMyAttendance(req, res) {
         // Self check-in is allowed even if HR previously marked leave for the day —
         // checking in means the employee is present and starts the timer.
         const doc = await Attendance.findOneAndUpdate(
-            { date, employeeMongoId },
+            existing?._id ? { _id: existing._id } : { date, employeeMongoId },
             {
                 $set: checkInSet,
                 $unset: { checkOutLocation: 1 },
             },
-            { upsert: true, new: true, setDefaultsOnInsert: true },
+            { upsert: !existing?._id, new: true, setDefaultsOnInsert: true },
         );
+
+        try {
+            await syncPunchMapTargets(doc);
+        } catch (mapErr) {
+            console.error('[checkInMyAttendance] punch map sync failed:', mapErr);
+        }
 
         return res.status(200).json({
             message: 'Checked in successfully',
@@ -1738,6 +1951,182 @@ export async function checkInMyAttendance(req, res) {
     } catch (error) {
         console.error('[checkInMyAttendance]', error);
         return res.status(500).json({ message: error.message || 'Failed to check in.' });
+    }
+}
+
+const PRESENCE_STATUS_KEYS = new Set(['on_office', 'late_arrived', 'early_go']);
+
+function plainPunchLocation(loc) {
+    if (!loc) return null;
+    const latitude = loc.latitude ?? null;
+    const longitude = loc.longitude ?? null;
+    const label = String(loc.label || '').trim();
+    if (latitude == null && longitude == null && !label) return null;
+    const source = String(loc.source || '').trim();
+    return {
+        latitude,
+        longitude,
+        accuracy: loc.accuracy ?? null,
+        label,
+        source: source === 'app' || source === 'web' || source === 'manual' ? source : '',
+    };
+}
+
+function employeeFullName(emp) {
+    return [emp?.firstName, emp?.lastName].filter(Boolean).join(' ').trim();
+}
+
+/** Copy a later check-in or check-out onto employees mapped from this person for the same date. */
+async function syncPunchMapTargets(sourceRecord) {
+    const sourceId = String(sourceRecord?.employeeMongoId || '').trim();
+    const date = String(sourceRecord?.date || '').trim();
+    if (!sourceId || !isValidDateKey(date)) return;
+
+    const targets = await Attendance.find({
+        date,
+        punchMappedFromEmployeeMongoId: sourceId,
+    });
+    if (!targets.length) return;
+
+    const hasIn = punchTimeSet(sourceRecord.timeIn);
+    const hasOut = punchTimeSet(sourceRecord.timeOut);
+    const checkInLocation = plainPunchLocation(sourceRecord.checkInLocation);
+    const checkOutLocation = plainPunchLocation(sourceRecord.checkOutLocation);
+
+    for (const target of targets) {
+        let changed = false;
+        if (hasIn && !punchTimeSet(target.timeIn)) {
+            target.timeIn = String(sourceRecord.timeIn || '').trim();
+            target.punchSource = sourceRecord.punchSource || target.punchSource || '';
+            if (checkInLocation) target.checkInLocation = checkInLocation;
+            changed = true;
+        }
+        if (hasOut) {
+            target.timeOut = String(sourceRecord.timeOut || '').trim();
+            target.checkOutSource = sourceRecord.checkOutSource || '';
+            if (checkOutLocation) target.checkOutLocation = checkOutLocation;
+            changed = true;
+        }
+        if (!changed) continue;
+
+        if (PRESENCE_STATUS_KEYS.has(String(sourceRecord.statusKey || ''))) {
+            target.statusKey = sourceRecord.statusKey;
+            target.statusLabel = sourceRecord.statusLabel || 'Present';
+            target.reason = sourceRecord.reason || '';
+            target.approvalStatus = approvalStatusForMark(target.statusKey);
+        } else if (punchTimeSet(target.timeIn)) {
+            target.statusKey = 'on_office';
+            target.statusLabel = 'Present';
+            target.approvalStatus = approvalStatusForMark('on_office');
+        }
+        await target.save();
+    }
+}
+
+/**
+ * POST /api/Attendance/map-punch
+ * Copy one employee's check-in, check-out, and location for this date onto another employee.
+ * A later check-out on the source employee is copied to the mapped employee for this date only.
+ */
+export async function mapAttendanceFromEmployee(req, res) {
+    try {
+        if (mongoose.connection.readyState !== 1) {
+            return res.status(503).json({ message: 'Database not connected.' });
+        }
+
+        const date = String(req.body?.date || '').trim();
+        const targetId = String(req.body?.targetEmployeeMongoId || '').trim();
+        const sourceId = String(req.body?.sourceEmployeeMongoId || '').trim();
+
+        if (!isValidDateKey(date)) {
+            return res.status(400).json({ message: 'Valid date (yyyy-MM-dd) is required.' });
+        }
+        if (!targetId || !sourceId) {
+            return res.status(400).json({ message: 'Select an employee to map.' });
+        }
+        if (targetId === sourceId) {
+            return res.status(400).json({ message: 'Choose a different employee.' });
+        }
+
+        const windowClosed = await rejectIfMarkWindowClosed(req, res, {
+            date,
+            entries: [{ employeeMongoId: targetId, statusKey: 'on_office' }],
+        });
+        if (windowClosed) return;
+
+        const [targetEmp, sourceEmp] = await Promise.all([
+            EmployeeBasic.findById(targetId).select('_id employeeId firstName lastName').lean(),
+            EmployeeBasic.findById(sourceId).select('_id employeeId firstName lastName').lean(),
+        ]);
+        if (!targetEmp || !sourceEmp) {
+            return res.status(404).json({ message: 'Employee not found.' });
+        }
+
+        const [sourceRow, existingTarget] = await Promise.all([
+            Attendance.findOne({ date, employeeMongoId: sourceId }).lean(),
+            Attendance.findOne({ date, employeeMongoId: targetId }).lean(),
+        ]);
+        if (isApprovedLeaveDay(existingTarget)) {
+            const who = employeeFullName(targetEmp) || 'This employee';
+            return res.status(409).json({
+                message: `${who} is on approved leave for ${date}. Mark Attendance is closed for that day.`,
+            });
+        }
+
+        const hasIn = punchTimeSet(sourceRow?.timeIn);
+        const hasOut = punchTimeSet(sourceRow?.timeOut);
+        const sourceStatus = String(sourceRow?.statusKey || '').trim();
+        const statusKey =
+            hasIn && PRESENCE_STATUS_KEYS.has(sourceStatus) ? sourceStatus : 'on_office';
+        const statusLabel =
+            hasIn && PRESENCE_STATUS_KEYS.has(sourceStatus)
+                ? sourceRow.statusLabel || 'Present'
+                : 'Present';
+        const checkInLocation = plainPunchLocation(sourceRow?.checkInLocation);
+        const checkOutLocation = plainPunchLocation(sourceRow?.checkOutLocation);
+
+        const set = {
+            date,
+            employeeMongoId: targetId,
+            employeeId: String(targetEmp.employeeId || '').trim(),
+            employeeName: employeeFullName(targetEmp),
+            statusKey: hasIn ? statusKey : 'not_marked',
+            statusLabel: hasIn ? statusLabel : 'Not marked',
+            reason: hasIn ? String(sourceRow?.reason || '').trim() : '',
+            timeIn: hasIn ? String(sourceRow.timeIn).trim() : '',
+            timeOut: hasOut ? String(sourceRow.timeOut).trim() : '',
+            punchSource: hasIn ? sourceRow.punchSource || 'manual' : '',
+            checkOutSource: hasOut ? sourceRow.checkOutSource || '' : '',
+            approvalStatus: hasIn ? approvalStatusForMark(statusKey) : '',
+            punchMappedFromEmployeeMongoId: sourceId,
+            markedBy: req.user?.id || null,
+        };
+        if (checkInLocation) set.checkInLocation = checkInLocation;
+        if (checkOutLocation) set.checkOutLocation = checkOutLocation;
+
+        const unset = {};
+        if (!checkInLocation) unset.checkInLocation = 1;
+        if (!checkOutLocation) unset.checkOutLocation = 1;
+
+        const doc = await Attendance.findOneAndUpdate(
+            { date, employeeMongoId: targetId },
+            {
+                $set: set,
+                ...(Object.keys(unset).length ? { $unset: unset } : {}),
+            },
+            { upsert: true, new: true, setDefaultsOnInsert: true },
+        );
+
+        return res.status(200).json({
+            message: hasOut
+                ? 'Check-in, check-out, and location copied for this day.'
+                : 'Check-in and location copied for this day. A later check-out on that employee is copied here too.',
+            date,
+            record: doc,
+        });
+    } catch (error) {
+        console.error('[mapAttendanceFromEmployee]', error);
+        return res.status(500).json({ message: error.message || 'Failed to map attendance.' });
     }
 }
 
@@ -1754,17 +2143,22 @@ export async function checkOutMyAttendance(req, res) {
         }
 
         const { employee } = resolved;
-        if (await rejectIfNotSalaryEnrolled(res, employee)) return;
-
         const date = getDubaiDateKey();
         const timeOut = getDubaiClockTime();
-        const employeeMongoId = String(employee._id);
 
-        const existing = await Attendance.findOne({ date, employeeMongoId });
+        const dayRows = await Attendance.find({
+            date,
+            ...employeeAttendanceMatch(employee),
+        });
+        const existing =
+            dayRows.find((row) => punchTimeSet(row.timeIn) && !punchTimeSet(row.timeOut)) ||
+            dayRows.find((row) => punchTimeSet(row.timeIn)) ||
+            null;
         if (!existing?.timeIn) {
+            if (await rejectIfNotSalaryEnrolled(res, employee)) return;
             return res.status(400).json({ message: 'Check in first before checking out.' });
         }
-        if (existing.timeOut) {
+        if (punchTimeSet(existing.timeOut)) {
             return res.status(400).json({
                 message: 'Already checked out for today.',
                 record: existing,
@@ -1824,7 +2218,7 @@ export async function checkOutMyAttendance(req, res) {
             existing.reason = lateReason;
         } else {
             existing.statusKey = 'on_office';
-            existing.statusLabel = 'On work';
+            existing.statusLabel = 'Present';
             if (String(existing.reason || '').toLowerCase().includes('mispunch')) {
                 existing.reason = '';
             }
@@ -1832,6 +2226,11 @@ export async function checkOutMyAttendance(req, res) {
         existing.approvalStatus = approvalStatusForMark(existing.statusKey);
 
         await existing.save();
+        try {
+            await syncPunchMapTargets(existing);
+        } catch (mapErr) {
+            console.error('[checkOutMyAttendance] punch map sync failed:', mapErr);
+        }
 
         return res.status(200).json({
             message: 'Checked out successfully',
@@ -1901,6 +2300,12 @@ export async function markTeamAttendance(req, res) {
             return res.status(400).json({ message: 'At least one employee is required.' });
         }
 
+        const windowClosed = await rejectIfMarkWindowClosed(req, res, {
+            date,
+            entries: ids.map((employeeMongoId) => ({ employeeMongoId, statusKey })),
+        });
+        if (windowClosed) return;
+
         const timeIn =
             req.body?.timeIn != null && req.body.timeIn !== '—' ? String(req.body.timeIn).trim() : '';
         const timeOut =
@@ -1909,15 +2314,9 @@ export async function markTeamAttendance(req, res) {
                 : '';
         const reason = String(req.body?.reason || '').trim();
         const attachmentName = String(req.body?.attachmentName || '').trim();
-        const leavePayType = leavePayTypeForStatus(statusKey, req.body?.leavePayType);
+        const leavePayType = '';
         const markedBy = req.user?.id || null;
         const saved = [];
-
-        if (!isClear && statusKey === 'authorized_leave' && !leavePayType) {
-            return res.status(400).json({
-                message: 'Choose Paid or Unpaid for authorized leave.',
-            });
-        }
 
         for (const employeeMongoId of ids) {
             const allowed = await isEmployeeInTeamTree(self._id, employeeMongoId);
@@ -3015,8 +3414,7 @@ export async function decideLeaveRequestInternal({
             record: groupRecord,
             decision,
             approvedStatusKey: dayKey,
-            leavePayType:
-                dayKey === 'authorized_leave' ? leavePayType || 'unpaid' : leavePayType,
+            leavePayType: '',
             actor,
             subject,
         });
@@ -3101,19 +3499,11 @@ async function applyLeaveDecisionToRecord({
             ? ` · Half day (${record.leaveRequestTimeIn} – ${record.leaveRequestTimeOut})`
             : '';
 
-    if (decision === 'approved') {
-        const payType = normalizeLeavePayType(leavePayType);
+        if (decision === 'approved') {
         const applyAuthorized = () => {
-            if (!payType) {
-                return {
-                    ok: false,
-                    status: 400,
-                    message: 'Choose Paid or Unpaid for authorized leave.',
-                };
-            }
             record.statusKey = 'authorized_leave';
-            record.statusLabel = `${authorizedLeaveLabel(payType)}${halfDaySuffix}`;
-            record.leavePayType = payType;
+            record.statusLabel = `Authorized Leave${halfDaySuffix}`;
+            record.leavePayType = '';
             record.approvalStatus = 'approved';
             if (record.leaveRequestReason) record.reason = record.leaveRequestReason;
             return null;

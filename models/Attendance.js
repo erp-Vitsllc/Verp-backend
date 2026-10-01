@@ -99,6 +99,13 @@ const attendanceSchema = new mongoose.Schema(
             label: { type: String, default: '', trim: true },
             source: { type: String, enum: ['', 'app', 'web', 'manual'], default: '', trim: true },
         },
+        /** This day's punches follow this employee. Later check-out is copied here for this date only. */
+        punchMappedFromEmployeeMongoId: {
+            type: String,
+            default: '',
+            trim: true,
+            index: true,
+        },
         reason: {
             type: String,
             default: '',

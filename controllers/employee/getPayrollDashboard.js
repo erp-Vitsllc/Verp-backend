@@ -22,6 +22,8 @@ import {
     loadWorkingTimeDoc,
     getWeekForStaffType,
 } from '../../utils/workingTimeHelpers.js';
+import { resolveEmployeePayrollPolicy } from '../../utils/employeeLeavePolicy.js';
+import { policyLeaveMultipliers } from '../../utils/salaryHistoricalCalculations.js';
 
 const MONTH_LABELS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 const MONTH_NAMES = [
@@ -45,6 +47,15 @@ const PENDING_ADVANCE_STATUSES = ['Pending', 'Pending HR', 'Pending Accounts', '
 function money(value) {
     const n = Number(value);
     return Number.isFinite(n) ? n : 0;
+}
+
+async function leaveMultipliersForEmployee(emp, cache) {
+    const cacheKey = String(emp?.employeeId || emp?._id || '');
+    if (cache && cacheKey && cache.has(cacheKey)) return cache.get(cacheKey);
+    const policy = await resolveEmployeePayrollPolicy(emp || {});
+    const multipliers = policyLeaveMultipliers(policy);
+    if (cache && cacheKey) cache.set(cacheKey, multipliers);
+    return multipliers;
 }
 
 function toK(aed) {
@@ -320,7 +331,6 @@ async function buildEmployeePayrollView({
     const lopMonthly = emptyYearMonths();
     for (const row of attendanceRows) {
         const key = String(row?._id?.statusKey || '');
-        const pay = String(row?._id?.leavePayType || '').trim().toLowerCase();
         const count = Number(row?.count) || 0;
         const idx = monthIndexFromYm(row?._id?.month);
         if (key === 'authorized_leave') leaveTotals.authorized += count;
@@ -328,10 +338,12 @@ async function buildEmployeePayrollView({
         if (key === 'sick_leave') leaveTotals.sick += count;
         if (key === 'work_from_home') leaveTotals.wfh += count;
 
-        const isLop = key === 'unauthorized_leave' || (key === 'authorized_leave' && pay === 'unpaid');
-        if (isLop && idx >= 0 && idx < 12) {
+        const isLop = key === 'unauthorized_leave' || key === 'authorized_leave';
+        if (isLop && idx >= 0 && idx < 12 && emp) {
+            const multipliers = await leaveMultipliersForEmployee(emp);
+            const times = key === 'authorized_leave' ? multipliers.authorized : multipliers.unauthorized;
             const monthSalary = selectedMonths[idx] || currentSalary;
-            lopMonthly[idx] += (monthSalary / 30) * count;
+            lopMonthly[idx] += (monthSalary / 30) * count * times;
         }
     }
 
@@ -900,23 +912,25 @@ export const getPayrollDashboard = async (req, res) => {
 
         const leaveTotals = { sick: 0, authorized: 0, unauthorized: 0 };
         const empByMongo = new Map(scopedEmployees.map((emp) => [String(emp._id), emp]));
+        const multiplierCache = new Map();
         let lopAmount = 0;
         for (const row of leaveRows) {
             const key = String(row?._id?.statusKey || '');
-            const pay = String(row?._id?.leavePayType || '').trim().toLowerCase();
             const count = Number(row?.count) || 0;
             if (key === 'sick_leave') leaveTotals.sick += count;
             if (key === 'authorized_leave') leaveTotals.authorized += count;
             if (key === 'unauthorized_leave') leaveTotals.unauthorized += count;
 
-            const isLop = key === 'unauthorized_leave' || (key === 'authorized_leave' && pay === 'unpaid');
+            const isLop = key === 'unauthorized_leave' || key === 'authorized_leave';
             if (!isLop || count <= 0) continue;
             const emp = empByMongo.get(String(row?._id?.employeeMongoId || ''));
             if (!emp) continue;
+            const multipliers = await leaveMultipliersForEmployee(emp, multiplierCache);
+            const times = key === 'authorized_leave' ? multipliers.authorized : multipliers.unauthorized;
             const ym = String(row?._id?.month || '');
             const salaryDoc = salaryByCode.get(String(emp.employeeId || '').trim());
             const monthly = salaryAmountForMonth(salaryDoc, ym) || salaryComponentsTotal(salaryDoc);
-            lopAmount += (monthly / 30) * count;
+            lopAmount += (monthly / 30) * count * times;
         }
 
         const scopedCodeSet = new Set(scopedCodes);
