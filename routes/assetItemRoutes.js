@@ -17,6 +17,10 @@ import {
     addVehicleCarWashType,
 } from '../controllers/vehicleCarWashTypeController.js';
 import {
+    listVehicleMechanicalServiceTypes,
+    addVehicleMechanicalServiceType,
+} from '../controllers/vehicleMechanicalServiceTypeController.js';
+import {
     requestOwnerOnDuty,
     getOwnerOnDutyReview,
     respondOwnerOnDuty,
@@ -957,6 +961,8 @@ router.get('/oil-service-types', protect, listVehicleOilServiceTypes);
 router.post('/oil-service-types', protect, addVehicleOilServiceType);
 router.get('/car-wash-types', protect, listVehicleCarWashTypes);
 router.post('/car-wash-types', protect, addVehicleCarWashType);
+router.get('/mechanical-service-types', protect, listVehicleMechanicalServiceTypes);
+router.post('/mechanical-service-types', protect, addVehicleMechanicalServiceType);
 
 router.post('/:id/service', protect, requireAssetFullAccess, addAssetService);
 router.delete('/:id/service/:serviceId', protect, requireAssetFullAccess, deleteAssetService);

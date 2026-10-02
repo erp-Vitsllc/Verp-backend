@@ -22,6 +22,7 @@ import {
     FLEET_VEHICLE_ASSET_ID_PREFIX,
     TOOLS_ASSET_ID_PREFIX,
 } from '../../utils/fleetVehicleAssetId.js';
+import { getSameTypeVehicleServiceRequestBlock } from '../../utils/vehicleSameTypeServiceRequestGate.js';
 
 const CAR_WASH_TYPES = ['Full Wash', 'Body Wash'];
 const MAX_PHOTOS = 8;
@@ -166,6 +167,11 @@ export async function createEmployeeVehicleServiceRequest(req, res) {
             return res.status(400).json({ message: 'No vehicle is assigned to you, so a service request cannot be sent.' });
         } else {
             return res.status(400).json({ message: 'Choose which assigned vehicle this request is for.' });
+        }
+
+        const sameTypeBlock = getSameTypeVehicleServiceRequestBlock(asset, serviceType);
+        if (sameTypeBlock) {
+            return res.status(400).json({ message: sameTypeBlock });
         }
 
         const currentKm = Number(asset.currentKilometer || 0);

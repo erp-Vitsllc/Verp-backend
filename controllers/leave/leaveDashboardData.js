@@ -1,5 +1,6 @@
 import mongoose from 'mongoose';
 import Attendance from '../../models/Attendance.js';
+import DashboardAction from '../../models/DashboardAction.js';
 import EmployeeBasic from '../../models/EmployeeBasic.js';
 import {
     isCompanyShellEmployee,
@@ -146,19 +147,71 @@ function locationGroupsForCounts(locCounts, catalog, locationLabel) {
     return groups;
 }
 
-function teamTrackPeriodRow({ label, periodKey, monthCounts, locCounts, catalog, locationLabel }) {
+function teamTrackPeriodRow({ label, periodKey, monthCounts, locCounts, catalog, locationLabel, items = [] }) {
     const counts = monthCounts || {};
     return {
         month: label,
         monthKey: periodKey,
         total: Object.values(counts).reduce((sum, value) => sum + (Number(value) || 0), 0),
         groups: locationGroupsForCounts(locCounts || new Map(), catalog, locationLabel),
+        items,
         authorizedLeave: counts.authorized_leave || 0,
         unauthorizedLeave: counts.unauthorized_leave || 0,
         sickLeave: counts.sick_leave || 0,
         compoffLeave: counts.compoff_leave || 0,
         annualLeave: counts.on_leave || 0,
     };
+}
+
+function addDaysToDateKey(dateKey, deltaDays) {
+    const [year, month, day] = String(dateKey).split('-').map(Number);
+    const dt = new Date(Date.UTC(year, month - 1, day + Number(deltaDays || 0), 12));
+    const y = dt.getUTCFullYear();
+    const m = String(dt.getUTCMonth() + 1).padStart(2, '0');
+    const d = String(dt.getUTCDate()).padStart(2, '0');
+    return `${y}-${m}-${d}`;
+}
+
+function weekStartKey(dateKey) {
+    const [year, month, day] = String(dateKey).split('-').map(Number);
+    const dt = new Date(Date.UTC(year, month - 1, day, 12));
+    return addDaysToDateKey(dateKey, -dt.getUTCDay());
+}
+
+function weekTrackLabel(fromKey, toKey) {
+    const fromDay = Number(String(fromKey).slice(8));
+    const toDay = Number(String(toKey).slice(8));
+    const fromMonth = MONTH_LABELS[Number(String(fromKey).slice(5, 7)) - 1] || '';
+    const toMonth = MONTH_LABELS[Number(String(toKey).slice(5, 7)) - 1] || '';
+    if (fromKey === toKey) return `${fromDay} ${fromMonth}`;
+    if (fromKey.slice(0, 7) === toKey.slice(0, 7)) return `${fromDay}–${toDay}`;
+    return `${fromDay} ${fromMonth}–${toDay} ${toMonth}`;
+}
+
+function weekPeriodRows(monthKey, todayKey) {
+    const [year, month] = String(monthKey).split('-').map(Number);
+    if (!year || !month) return [];
+    const monthStart = `${year}-${String(month).padStart(2, '0')}-01`;
+    const monthEnd = lastDateKeyOfMonth(year, month);
+    const end = monthEnd < todayKey ? monthEnd : todayKey;
+    if (monthStart > end) return [];
+    const rows = [];
+    let cursor = weekStartKey(monthStart);
+    while (cursor <= end && rows.length < 8) {
+        const weekEnd = addDaysToDateKey(cursor, 6);
+        const sliceStart = cursor < monthStart ? monthStart : cursor;
+        const sliceEnd = weekEnd > end ? end : weekEnd;
+        if (sliceStart <= sliceEnd) {
+            rows.push({
+                periodKey: `${sliceStart}|${sliceEnd}`,
+                label: weekTrackLabel(sliceStart, sliceEnd),
+                from: sliceStart,
+                to: sliceEnd,
+            });
+        }
+        cursor = addDaysToDateKey(cursor, 7);
+    }
+    return rows;
 }
 
 function leaveTypeLabel(record) {
@@ -1465,6 +1518,71 @@ export async function applyLeaveRange(req, res) {
 }
 
 /**
+ * POST /api/Leave/pending-requests/remove
+ * HR removes an approved or pending leave request and clears it from those attendance days.
+ */
+export async function removeLeaveRequest(req, res) {
+    try {
+        if (mongoose.connection.readyState !== 1) {
+            return res.status(503).json({ message: 'Database not connected.' });
+        }
+
+        const hrFlags = await resolveLeaveHrFlags(req);
+        if (!hrFlags.canEdit) {
+            return res.status(403).json({ message: 'Only HR can remove a leave request.' });
+        }
+
+        const attendanceId = String(req.body?.attendanceId || req.body?.approvalId || '').trim();
+        if (!attendanceId || !mongoose.Types.ObjectId.isValid(attendanceId)) {
+            return res.status(400).json({ message: 'attendanceId is required.' });
+        }
+
+        const group = await loadEditableLeaveGroup(attendanceId);
+        const records = (group?.records || []).filter((row) => {
+            const status = String(row.leaveRequestStatus || '').trim();
+            return status === 'pending' || status === 'approved';
+        });
+        if (!records.length) {
+            return res.status(404).json({ message: 'No leave request found to remove.' });
+        }
+
+        const requestIds = new Set();
+        for (const record of records) {
+            if (record.leaveRequestReason && record.reason === record.leaveRequestReason) {
+                record.reason = '';
+            }
+            const groupId = String(record.leaveRequestGroupId || group.groupId || '').trim();
+            const requestId = leaveDashboardRequestObjectId(groupId, record._id);
+            if (requestId && mongoose.Types.ObjectId.isValid(String(requestId))) {
+                requestIds.add(String(requestId));
+            }
+            if (mongoose.Types.ObjectId.isValid(String(record._id))) {
+                requestIds.add(String(record._id));
+            }
+            await revertLeaveAttendanceRecord(record);
+        }
+
+        if (requestIds.size) {
+            await DashboardAction.deleteMany({
+                requestId: { $in: [...requestIds] },
+                requestType: { $in: [LEAVE_DASHBOARD_REQUEST_TYPE, 'Attendance Leave Request'] },
+            });
+        }
+
+        return res.status(200).json({
+            message: 'Leave request removed. Those days are no longer marked as leave.',
+            attendanceId,
+            count: records.length,
+        });
+    } catch (error) {
+        console.error('[removeLeaveRequest]', error);
+        return res.status(500).json({
+            message: error.message || 'Failed to remove leave request.',
+        });
+    }
+}
+
+/**
  * GET /api/Leave/team-track?year=YYYY|all
  * Leave-day totals for the team (approved leave marks).
  * year=all: rolling 12 months ending at the current month (e.g. Sep 2025–Aug 2026).
@@ -1486,6 +1604,14 @@ export async function getLeaveTeamTrack(req, res) {
               ? requestedYear
               : dubai.year;
 
+        const todayKey = `${dubai.year}-${String(dubai.month).padStart(2, '0')}-${String(dubai.day).padStart(2, '0')}`;
+        const bucket = String(req.query.bucket || 'month').trim().toLowerCase() === 'week' ? 'week' : 'month';
+        const monthKey = /^\d{4}-\d{2}$/.test(String(req.query.month || '').trim())
+            ? String(req.query.month).trim()
+            : '';
+        const groupFilter = String(req.query.group || '').trim().toLowerCase();
+        const employeeFilter = String(req.query.employeeId || '').trim();
+
         const [activeEmployees, locationRows] = await Promise.all([
             EmployeeBasic.find({
                 profileStatus: 'active',
@@ -1493,7 +1619,7 @@ export async function getLeaveTeamTrack(req, res) {
                 employeeId: { $ne: 'VEGA-HR-0000' },
                 ...REAL_EMPLOYEE_MONGO_FILTER,
             })
-                .select('_id employeeId staffType')
+                .select('_id employeeId staffType firstName lastName')
                 .lean()
                 .maxTimeMS(12000),
             listActiveWorkLocations(),
@@ -1504,11 +1630,19 @@ export async function getLeaveTeamTrack(req, res) {
         const visibilityByCode = leaveVisibilityByEmployeeId(realEmployees, visibility);
         const locationByMongoId = new Map();
         const locationByCode = new Map();
+        const nameByMongoId = new Map();
+        const nameByCode = new Map();
         for (const emp of realEmployees) {
             const loc = normalizeStaffTypeKey(emp.staffType);
-            locationByMongoId.set(String(emp._id), loc);
+            const mongoId = String(emp._id);
+            const name = [emp.firstName, emp.lastName].filter(Boolean).join(' ').trim();
+            locationByMongoId.set(mongoId, loc);
+            nameByMongoId.set(mongoId, name);
             const code = String(emp.employeeId || '').trim();
-            if (code) locationByCode.set(code, loc);
+            if (code) {
+                locationByCode.set(code, loc);
+                nameByCode.set(code, name);
+            }
         }
         const catalog = (locationRows || []).length
             ? locationRows
@@ -1526,11 +1660,18 @@ export async function getLeaveTeamTrack(req, res) {
             .filter(Boolean);
 
         const rolling = isAll ? rollingTrackWindow(dubai) : null;
-        const from = isAll ? rolling.from : `${year}-01-01`;
-        const to = isAll ? rolling.to : `${year}-12-31`;
+        const rangeFrom = isAll ? rolling.from : `${year}-01-01`;
+        const rangeTo = isAll ? rolling.to : `${year}-12-31`;
+        const from = monthKey ? `${monthKey}-01` : rangeFrom;
+        const monthEnd = monthKey
+            ? lastDateKeyOfMonth(Number(monthKey.slice(0, 4)), Number(monthKey.slice(5, 7)))
+            : rangeTo;
+        const cappedEnd = monthEnd < todayKey ? monthEnd : todayKey;
+        const to = cappedEnd < rangeTo ? cappedEnd : rangeTo;
+        const hasTrackRange = from <= to;
 
         const leaveRows =
-            employeeIds.length === 0
+            !hasTrackRange || employeeIds.length === 0
                 ? []
                 : await Attendance.find({
                       $or: [
@@ -1540,38 +1681,101 @@ export async function getLeaveTeamTrack(req, res) {
                       date: { $gte: from, $lte: to },
                       statusKey: { $in: trackStatusKeysForLeaveType(req.query.leaveType) },
                   })
-                      .select('employeeMongoId employeeId date statusKey')
+                      .select('employeeMongoId employeeId employeeName date statusKey requestedStatusKey leaveRequestStatus')
                       .lean()
                       .maxTimeMS(12000);
 
         const totalsByPeriod = new Map();
         const groupsByPeriod = new Map();
-        for (const row of leaveRows || []) {
-            const dateKey = String(row?.date || '');
-            const statusKey = String(row?.statusKey || '');
-            if (!dateKey || !statusKey) continue;
-            if (
-                !isEmployeeLeaveDateVisible(row.employeeMongoId, dateKey, visibility) &&
-                !isLeaveEntryVisible({ ...row, date: dateKey }, visibility, visibilityByCode)
-            ) {
-                continue;
+        const itemsByPeriod = new Map();
+        const countedDays = new Set();
+        const periodRows = bucket === 'week'
+            ? weekPeriodRows(monthKey || todayKey.slice(0, 7), todayKey)
+            : monthKey
+              ? [{
+                    label: MONTH_LABELS[Number(monthKey.slice(5, 7)) - 1] || monthKey,
+                    periodKey: monthKey,
+                    from: `${monthKey}-01`,
+                    to,
+                }]
+              : (isAll
+                    ? monthPeriodRows(rolling.startYear, rolling.startMonth, rolling.endYear, rolling.endMonth)
+                    : MONTH_LABELS.map((label, index) => ({
+                          label,
+                          periodKey: `${year}-${String(index + 1).padStart(2, '0')}`,
+                      }))
+              ).filter((period) => period.periodKey <= todayKey.slice(0, 7));
+
+        const periodForDate = (dateKey) => {
+            if (bucket === 'week') {
+                return periodRows.find((period) => dateKey >= period.from && dateKey <= period.to) || null;
             }
-            const monthKey = dateKey.slice(0, 7);
+            const key = dateKey.slice(0, 7);
+            return periodRows.find((period) => period.periodKey === key) || null;
+        };
+
+        const addTrackDay = (row, employee) => {
+            const dateKey = String(row?.date || '');
+            let statusKey = String(row?.statusKey || '');
+            const requestedKey = String(row?.requestedStatusKey || '').trim();
+            const requestStatus = String(row?.leaveRequestStatus || '').trim();
+            if (
+                statusKey === 'unauthorized_leave' &&
+                (requestStatus === 'approved' || requestStatus === 'pending') &&
+                ['on_leave', 'authorized_leave', 'sick_leave'].includes(requestedKey)
+            ) {
+                statusKey = requestedKey;
+            }
+            if (!dateKey || !statusKey || dateKey > todayKey) return;
+            const mongoId = String(row.employeeMongoId || employee?._id || '');
+            const code = String(row.employeeId || employee?.employeeId || '').trim();
+            const dayKey = `${mongoId || code}|${dateKey}`;
+            if (countedDays.has(dayKey)) return;
+            if (
+                !isEmployeeLeaveDateVisible(mongoId, dateKey, visibility) &&
+                !isLeaveEntryVisible({ ...row, employeeMongoId: mongoId, employeeId: code, date: dateKey }, visibility, visibilityByCode)
+            ) {
+                return;
+            }
+            const monthOfDay = dateKey.slice(0, 7);
             const processingStart =
-                visibility.get(String(row.employeeMongoId || '')) ||
-                visibilityByCode.get(String(row.employeeId || '').trim());
-            if (processingStart && String(processingStart).slice(0, 7) > monthKey) continue;
-            const periodKey = monthKey;
+                visibility.get(mongoId) || visibilityByCode.get(code);
+            if (processingStart && String(processingStart).slice(0, 7) > monthOfDay) return;
+            const locKey =
+                locationByMongoId.get(mongoId) ||
+                locationByCode.get(code) ||
+                'office';
+            if (groupFilter && groupFilter !== 'all' && locKey !== groupFilter) return;
+            if (
+                employeeFilter &&
+                mongoId !== employeeFilter &&
+                code !== employeeFilter
+            ) {
+                return;
+            }
+            const period = periodForDate(dateKey);
+            if (!period) return;
+            countedDays.add(dayKey);
+            const periodKey = period.periodKey;
             if (!totalsByPeriod.has(periodKey)) totalsByPeriod.set(periodKey, {});
             const periodCounts = totalsByPeriod.get(periodKey);
             periodCounts[statusKey] = (periodCounts[statusKey] || 0) + 1;
-            const locKey =
-                locationByMongoId.get(String(row.employeeMongoId || '')) ||
-                locationByCode.get(String(row.employeeId || '').trim()) ||
-                'office';
             if (!groupsByPeriod.has(periodKey)) groupsByPeriod.set(periodKey, new Map());
             const locCounts = groupsByPeriod.get(periodKey);
             locCounts.set(locKey, (locCounts.get(locKey) || 0) + 1);
+            if (!itemsByPeriod.has(periodKey)) itemsByPeriod.set(periodKey, []);
+            itemsByPeriod.get(periodKey).push({
+                employeeMongoId: mongoId,
+                employeeName: row.employeeName || nameByMongoId.get(mongoId) || nameByCode.get(code) || 'Employee',
+                leaveType: LEAVE_TRACK_META[statusKey]?.fullLabel || statusKey,
+                date: dateKey,
+                groupKey: locKey,
+                groupLabel: locationLabel.get(locKey) || locKey,
+            });
+        };
+
+        for (const row of leaveRows || []) {
+            addTrackDay(row);
         }
 
         const historicalProfiles = await loadHistoricalLeaveProfilesByEmployeeId(enrolledCodes);
@@ -1586,26 +1790,18 @@ export async function getLeaveTeamTrack(req, res) {
                 statusKeys: trackStatusKeys,
             });
             for (const row of overlayRows) {
-                const dateKey = String(row.date || '');
-                const statusKey = String(row.statusKey || '');
-                if (!dateKey || !statusKey) continue;
-                const periodKey = dateKey.slice(0, 7);
-                if (!totalsByPeriod.has(periodKey)) totalsByPeriod.set(periodKey, {});
-                const periodCounts = totalsByPeriod.get(periodKey);
-                periodCounts[statusKey] = (periodCounts[statusKey] || 0) + 1;
-                const locKey = locationByMongoId.get(String(emp._id)) || 'office';
-                if (!groupsByPeriod.has(periodKey)) groupsByPeriod.set(periodKey, new Map());
-                const locCounts = groupsByPeriod.get(periodKey);
-                locCounts.set(locKey, (locCounts.get(locKey) || 0) + 1);
+                addTrackDay(
+                    {
+                        ...row,
+                        employeeMongoId: String(emp._id),
+                        employeeId: emp.employeeId,
+                        employeeName: nameByMongoId.get(String(emp._id)) || '',
+                    },
+                    emp,
+                );
             }
         }
 
-        const periodRows = isAll
-            ? monthPeriodRows(rolling.startYear, rolling.startMonth, rolling.endYear, rolling.endMonth)
-            : MONTH_LABELS.map((label, index) => ({
-                  label,
-                  periodKey: `${year}-${String(index + 1).padStart(2, '0')}`,
-              }));
         const months = periodRows.map((period) =>
             teamTrackPeriodRow({
                 label: period.label,
@@ -1614,6 +1810,9 @@ export async function getLeaveTeamTrack(req, res) {
                 locCounts: groupsByPeriod.get(period.periodKey) || new Map(),
                 catalog,
                 locationLabel,
+                items: (itemsByPeriod.get(period.periodKey) || []).sort(
+                    (a, b) => a.date.localeCompare(b.date) || a.employeeName.localeCompare(b.employeeName),
+                ),
             }),
         );
 
@@ -1622,8 +1821,13 @@ export async function getLeaveTeamTrack(req, res) {
             year,
             from,
             to,
-            bucket: 'month',
-            rangeLabel: isAll ? rolling.rangeLabel : String(year),
+            today: todayKey,
+            bucket,
+            rangeLabel: bucket === 'week'
+                ? (monthKey || todayKey.slice(0, 7))
+                : isAll
+                  ? rolling.rangeLabel
+                  : String(year),
             months,
             series: Object.entries(LEAVE_TRACK_META).map(([statusKey, meta]) => ({
                 statusKey,

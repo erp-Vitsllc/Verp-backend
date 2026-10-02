@@ -674,27 +674,6 @@ function isApprovedLeaveDay(record) {
     return APPROVED_LEAVE_DAY_KEYS.has(String(record.statusKey || '').trim());
 }
 
-async function getActiveEmployeeIdsByStaffType(staffType) {
-    const filter = {
-        profileStatus: 'active',
-        ...REAL_EMPLOYEE_MONGO_FILTER,
-        ...staffTypeMongoClause(staffType),
-    };
-    const rows = await EmployeeBasic.find(filter).select('_id').lean();
-    return rows.map((r) => String(r._id));
-}
-
-async function countActiveEmployees(staffType = null) {
-    if (!staffType) {
-        return EmployeeBasic.countDocuments({
-            profileStatus: 'active',
-            ...REAL_EMPLOYEE_MONGO_FILTER,
-        });
-    }
-    const ids = await getActiveEmployeeIdsByStaffType(staffType);
-    return ids.length;
-}
-
 /**
  * GET /api/Attendance/mark-roster
  * Lean active-employee list for Mark Attendance (no heavy Employee list aggregation).
@@ -797,8 +776,8 @@ export async function getAttendanceByDate(req, res) {
 /**
  * GET /api/Attendance/calendar?month=yyyy-MM
  * Optional: from=yyyy-MM-dd&to=yyyy-MM-dd (overrides month bounds when both valid).
- * Optional: staffType=office|site — filter calendar to that staff group.
- * Returns per-day attendance summary for the HR attendance calendar.
+ * Optional: staffType=office|site — day counts are that group only.
+ * totalStaffAll is every group combined. totalStaff is the selected group.
  */
 export async function getAttendanceCalendarSummary(req, res) {
     try {
@@ -841,14 +820,38 @@ export async function getAttendanceCalendarSummary(req, res) {
             monthKey = `${year}-${String(monthNum).padStart(2, '0')}`;
         }
 
-        const [staffIds, totalStaff, records, workingTime] = await Promise.all([
-            staffType ? getActiveEmployeeIdsByStaffType(staffType) : Promise.resolve(null),
-            countActiveEmployees(staffType),
+        const [employeeRows, records, workingTime] = await Promise.all([
+            EmployeeBasic.find({
+                profileStatus: 'active',
+                ...REAL_EMPLOYEE_MONGO_FILTER,
+            })
+                .select('_id staffType firstName lastName')
+                .lean(),
             Attendance.find({ date: { $gte: from, $lte: to } }).lean(),
             loadWorkingTimeDoc(),
         ]);
 
-        const staffIdSet = staffIds ? new Set(staffIds) : null;
+        const idsByGroup = new Map();
+        for (const emp of employeeRows || []) {
+            if (isCompanyShellEmployee(emp)) continue;
+            const key = normalizeStaffType(emp.staffType);
+            if (!idsByGroup.has(key)) idsByGroup.set(key, []);
+            idsByGroup.get(key).push(String(emp._id));
+        }
+
+        const groupCounts = {};
+        let totalStaffAll = 0;
+        for (const [key, ids] of idsByGroup) {
+            groupCounts[key] = ids.length;
+            totalStaffAll += ids.length;
+        }
+        if (staffType && groupCounts[staffType] == null) groupCounts[staffType] = 0;
+
+        const selectedIds = staffType
+            ? idsByGroup.get(staffType) || []
+            : [...idsByGroup.values()].flat();
+        const totalStaff = selectedIds.length;
+        const staffIdSet = staffType ? new Set(selectedIds) : null;
         const scheduleWeek = getWeekForStaffType(workingTime, staffType);
 
         const byDate = new Map();
@@ -904,6 +907,8 @@ export async function getAttendanceCalendarSummary(req, res) {
             to,
             staffType: staffType || 'all',
             totalStaff,
+            totalStaffAll,
+            groupCounts,
             offWeekdays: staffType ? getOffWeekdayKeys(scheduleWeek) : [],
             days,
         });
@@ -956,13 +961,32 @@ export async function markAttendance(req, res) {
             })
                 .select('employeeMongoId employeeName statusKey statusLabel leaveRequestStatus')
                 .lean();
-            const locked = (existingRows || []).find((row) => isApprovedLeaveDay(row));
-            if (locked) {
-                const who = String(locked.employeeName || '').trim() || 'This employee';
-                const leaveLabel = String(locked.statusLabel || '').trim() || 'approved leave';
-                return res.status(409).json({
-                    message: `${who} is on ${leaveLabel} for ${date}. Mark Attendance is closed for that day.`,
+            const approvedRows = (existingRows || []).filter((row) => isApprovedLeaveDay(row));
+            if (approvedRows.length) {
+                const today = getDubaiDateKey();
+                const hrMayClearAuthLeave = date !== today && (await viewerIsFlowchartHr(req));
+                const locked = approvedRows.find((row) => {
+                    if (
+                        hrMayClearAuthLeave &&
+                        String(row.statusKey || '').trim() === 'authorized_leave'
+                    ) {
+                        const entry = marks.find(
+                            (raw) =>
+                                String(raw?.employeeMongoId || raw?.id || '').trim() ===
+                                String(row.employeeMongoId),
+                        );
+                        const nextKey = String(entry?.statusKey || entry?.markKey || '').trim();
+                        if (nextKey === 'clear_attendance' || nextKey === 'clear') return false;
+                    }
+                    return true;
                 });
+                if (locked) {
+                    const who = String(locked.employeeName || '').trim() || 'This employee';
+                    const leaveLabel = String(locked.statusLabel || '').trim() || 'approved leave';
+                    return res.status(409).json({
+                        message: `${who} is on ${leaveLabel} for ${date}. Mark Attendance is closed for that day.`,
+                    });
+                }
             }
         }
 

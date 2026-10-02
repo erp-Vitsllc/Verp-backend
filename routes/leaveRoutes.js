@@ -6,6 +6,7 @@ import {
     getEmployeeAnnualLeaveEligibility,
     applyLeaveRange,
     decideLeavePendingRequest,
+    removeLeaveRequest,
     getLeavePendingInbox,
     getLeavePendingRequests,
     getLeaveTeamTrack,
@@ -53,6 +54,11 @@ router.post(
     '/pending-requests/decide',
     checkPermission('hrm_leave', 'view'),
     decideLeavePendingRequest,
+);
+router.post(
+    '/pending-requests/remove',
+    checkPermission('hrm_leave', 'view'),
+    removeLeaveRequest,
 );
 router.post(
     '/apply',

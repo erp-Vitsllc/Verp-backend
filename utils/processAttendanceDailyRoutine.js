@@ -44,6 +44,13 @@ const PROTECTED_NO_PUNCH_KEYS = new Set([
     'work_from_home',
 ]);
 
+const SCHEDULED_LEAVE_REQUEST_KEYS = new Set([
+    'on_leave',
+    'authorized_leave',
+    'sick_leave',
+    'compoff_leave',
+]);
+
 /**
  * Daily attendance routine (runs at Asia/Dubai midnight):
  * Checks PREVIOUS DAY ONLY — never the new day for yesterday's status.
@@ -128,6 +135,17 @@ export async function processAttendanceDailyRoutine() {
             Attendance.find({ date: yesterdayKey }).lean(),
         ]);
         const attendanceOpenFrom = await loadAttendanceOpenStartByMongoId(activeEmployees);
+        const coveringLeave = await Attendance.find({
+            leaveRequestStatus: { $in: ['approved', 'pending'] },
+            requestedStatusKey: { $in: [...SCHEDULED_LEAVE_REQUEST_KEYS] },
+            leaveRequestFromDate: { $lte: yesterdayKey },
+            leaveRequestToDate: { $gte: yesterdayKey },
+        })
+            .select('employeeMongoId')
+            .lean();
+        const leaveCoveredEmployeeIds = new Set(
+            (coveringLeave || []).map((row) => String(row.employeeMongoId || '')).filter(Boolean),
+        );
 
         const isHoliday = Boolean(holidayDoc);
         const byEmp = new Map(
@@ -151,6 +169,17 @@ export async function processAttendanceDailyRoutine() {
                 continue;
             }
             if (rec && PROTECTED_NO_PUNCH_KEYS.has(String(rec.statusKey || ''))) {
+                continue;
+            }
+            const requestedLeave = String(rec?.requestedStatusKey || '').trim();
+            const requestStatus = String(rec?.leaveRequestStatus || '').trim();
+            if (
+                (requestStatus === 'approved' || requestStatus === 'pending') &&
+                SCHEDULED_LEAVE_REQUEST_KEYS.has(requestedLeave)
+            ) {
+                continue;
+            }
+            if (leaveCoveredEmployeeIds.has(employeeMongoId)) {
                 continue;
             }
 

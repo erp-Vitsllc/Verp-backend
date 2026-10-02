@@ -314,6 +314,7 @@ import {
     mergeWorkflowServiceRecord,
 } from './vehicleServiceWorkflowController.js';
 import { actorMayManageCarWashRequest, findExistingCarWashForMonth, getLatestOccupiedCarWashMonth, normalizeCarWashMonthKey } from '../utils/carWashWorkflow.js';
+import { getSameTypeVehicleServiceRequestBlock } from '../utils/vehicleSameTypeServiceRequestGate.js';
 import {
     submitTireChangeGarage,
     completeTireChangeService,
@@ -14036,8 +14037,13 @@ export const addAssetService = async (req, res) => {
             });
         }
 
-        // Multiple same-type (and cross-type) service requests may coexist.
-        // A previous request still ending does not block raising or approving the next.
+        // Same type on this vehicle: the latest request must be Completed before another can be added.
+        if (isVehicleAssetForServiceGate()) {
+            const sameTypeBlock = getSameTypeVehicleServiceRequestBlock(asset, serviceType);
+            if (sameTypeBlock) {
+                return res.status(400).json({ message: sameTypeBlock });
+            }
+        }
 
         // Fleet vehicle service request: any authenticated user (same rule as route middleware).
         const isFleetVehicleServiceRequest =

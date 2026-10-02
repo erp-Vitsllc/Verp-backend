@@ -34,6 +34,14 @@ const LEAVE_COUNT_KEYS = [
 /** Personal leave only — holidays are company-wide, not per-user calendar bars. */
 const LEAVE_CALENDAR_KEYS = [...LEAVE_COUNT_KEYS];
 
+/** Applied leave wins over a no-check-in unauthorized mark on the same day. */
+const SCHEDULED_LEAVE_KEYS = new Set(['on_leave', 'authorized_leave', 'sick_leave']);
+const SCHEDULED_LEAVE_LABEL = {
+    on_leave: 'Annual Leave',
+    authorized_leave: 'Authorized Leave',
+    sick_leave: 'Sick Leave',
+};
+
 function calendarStatusKeysForLeaveType(leaveType) {
     const raw = String(leaveType || 'all').trim().toLowerCase();
     if (!raw || raw === 'all') return LEAVE_CALENDAR_KEYS;
@@ -409,10 +417,78 @@ export async function getLeaveCalendar(req, res) {
             employeeByCode.get(String(row.employeeId || '').trim()) ||
             null;
 
+        const scheduledLeaveRows = await Attendance.find({
+            leaveRequestStatus: { $in: ['approved', 'pending'] },
+            requestedStatusKey: { $in: [...SCHEDULED_LEAVE_KEYS] },
+            employeeName: { $not: /\(company\)\s*$/i },
+            $and: [
+                partyFilter,
+                {
+                    $or: [
+                        { date: { $gte: from, $lte: to } },
+                        {
+                            leaveRequestFromDate: { $lte: to },
+                            leaveRequestToDate: { $gte: from },
+                        },
+                    ],
+                },
+            ],
+        })
+            .select(
+                'date employeeMongoId employeeId employeeName statusKey statusLabel requestedStatusKey requestedStatusLabel leaveRequestStatus leaveRequestFromDate leaveRequestToDate leaveRequestGroupId',
+            )
+            .lean()
+            .maxTimeMS(12000);
+
+        const scheduledCover = new Map();
+        const rememberScheduledLeave = (emp, date, info) => {
+            if (!emp || !isValidDateKey(date) || date < from || date > to) return;
+            if (!SCHEDULED_LEAVE_KEYS.has(info.statusKey)) return;
+            const key = `${emp._id}|${date}`;
+            const prev = scheduledCover.get(key);
+            if (prev && !prev.isPending) return;
+            if (prev?.isPending && info.isPending) return;
+            scheduledCover.set(key, info);
+        };
+
+        for (const row of scheduledLeaveRows || []) {
+            const emp = resolveEmp(row);
+            if (!emp) continue;
+            const statusKey = String(row.requestedStatusKey || '').trim();
+            const rangeStart = row.leaveRequestFromDate || row.date;
+            const rangeEnd = row.leaveRequestToDate || row.date;
+            const isPending = String(row.leaveRequestStatus || '').trim() === 'pending';
+            for (const date of eachCalendarDateKeys(
+                rangeStart > from ? rangeStart : from,
+                rangeEnd < to ? rangeEnd : to,
+            )) {
+                rememberScheduledLeave(emp, date, {
+                    id: String(row._id || `${date}-${emp._id}-${statusKey}`),
+                    date,
+                    employeeMongoId: String(emp._id),
+                    employeeId: row.employeeId || emp.employeeId || '',
+                    employeeName: row.employeeName || employeeDisplayName(emp),
+                    statusKey,
+                    statusLabel: row.requestedStatusLabel || SCHEDULED_LEAVE_LABEL[statusKey] || statusKey,
+                    isPending,
+                    leaveRequestGroupId: String(row.leaveRequestGroupId || ''),
+                    rangeStart,
+                    rangeEnd,
+                });
+            }
+        }
+
         const approvedEntries = (records || [])
             .map((row) => {
                 const emp = resolveEmp(row);
                 if (!emp) return null;
+                const statusKey = String(row.statusKey || '').trim();
+                if (
+                    statusKey === 'unauthorized_leave' &&
+                    scheduledCover.has(`${emp._id}|${row.date}`)
+                ) {
+                    return null;
+                }
                 return {
                     id: String(row._id || `${row.date}-${row.employeeMongoId}-${row.statusKey}`),
                     date: row.date,
@@ -426,11 +502,9 @@ export async function getLeaveCalendar(req, res) {
             })
             .filter(Boolean);
 
-        const historicalProfiles = await loadHistoricalLeaveProfilesByEmployeeId(enrolledCodes);
-        const occupiedLeaveDays = new Set(
-            approvedEntries.map((row) => `${row.employeeMongoId}|${row.date}`),
-        );
         const statusKeySet = new Set(statusKeys);
+        const historicalProfiles = await loadHistoricalLeaveProfilesByEmployeeId(enrolledCodes);
+        const historicalByDay = new Map();
         for (const emp of employeeMap.values()) {
             const overlayRows = overlayAttendanceRowsForEmployee({
                 profile: historicalProfiles.get(String(emp.employeeId || '').trim()),
@@ -440,23 +514,60 @@ export async function getLeaveCalendar(req, res) {
                 statusKeys: statusKeySet,
             });
             for (const row of overlayRows) {
-                const occupiedKey = `${row.employeeMongoId}|${row.date}`;
-                if (occupiedLeaveDays.has(occupiedKey)) continue;
-                occupiedLeaveDays.add(occupiedKey);
-                approvedEntries.push({
-                    id: String(row._id || `${row.date}-${row.employeeMongoId}-${row.statusKey}`),
-                    date: row.date,
-                    employeeMongoId: row.employeeMongoId,
-                    employeeId: row.employeeId,
-                    employeeName: row.employeeName || employeeDisplayName(emp),
-                    statusKey: row.statusKey,
-                    statusLabel: row.statusLabel || row.statusKey,
-                    isPending: false,
-                    historical: true,
-                    source: 'Salary enrollment',
-                    leaveRequestKind: 'historical',
-                });
+                historicalByDay.set(`${row.employeeMongoId}|${row.date}`, row);
             }
+        }
+
+        for (let index = approvedEntries.length - 1; index >= 0; index -= 1) {
+            const entry = approvedEntries[index];
+            if (String(entry.statusKey || '') !== 'unauthorized_leave') continue;
+            const dayKey = `${entry.employeeMongoId}|${entry.date}`;
+            const history = historicalByDay.get(dayKey);
+            if (scheduledCover.has(dayKey) || SCHEDULED_LEAVE_KEYS.has(String(history?.statusKey || ''))) {
+                approvedEntries.splice(index, 1);
+            }
+        }
+
+        const occupiedLeaveDays = new Set(
+            approvedEntries.map((row) => `${row.employeeMongoId}|${row.date}`),
+        );
+        for (const info of scheduledCover.values()) {
+            if (info.isPending) continue;
+            const occupiedKey = `${info.employeeMongoId}|${info.date}`;
+            if (occupiedLeaveDays.has(occupiedKey)) continue;
+            if (!statusKeySet.has(info.statusKey)) continue;
+            occupiedLeaveDays.add(occupiedKey);
+            approvedEntries.push({
+                id: `${info.id}-${info.date}`,
+                date: info.date,
+                employeeMongoId: info.employeeMongoId,
+                employeeId: info.employeeId,
+                employeeName: info.employeeName,
+                statusKey: info.statusKey,
+                statusLabel: info.statusLabel,
+                isPending: false,
+                leaveRequestGroupId: info.leaveRequestGroupId,
+                rangeStart: info.rangeStart,
+                rangeEnd: info.rangeEnd,
+            });
+        }
+        for (const row of historicalByDay.values()) {
+            const occupiedKey = `${row.employeeMongoId}|${row.date}`;
+            if (occupiedLeaveDays.has(occupiedKey)) continue;
+            occupiedLeaveDays.add(occupiedKey);
+            approvedEntries.push({
+                id: String(row._id || `${row.date}-${row.employeeMongoId}-${row.statusKey}`),
+                date: row.date,
+                employeeMongoId: row.employeeMongoId,
+                employeeId: row.employeeId,
+                employeeName: row.employeeName,
+                statusKey: row.statusKey,
+                statusLabel: row.statusLabel || row.statusKey,
+                isPending: false,
+                historical: true,
+                source: 'Salary enrollment',
+                leaveRequestKind: 'historical',
+            });
         }
 
         const pendingKeys = new Set();
