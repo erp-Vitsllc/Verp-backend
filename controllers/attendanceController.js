@@ -123,17 +123,23 @@ function normalizeLeavePayType(value) {
     return LEAVE_PAY_TYPES.has(pay) ? pay : '';
 }
 
-function authorizedLeaveLabel(payType) {
-    const pay = normalizeLeavePayType(payType);
-    if (pay === 'paid') return 'Authorized Leave (Paid)';
-    if (pay === 'unpaid') return 'Authorized Leave (Unpaid)';
+function authorizedLeaveLabel() {
     return 'Authorized Leave';
 }
 
-function leavePayTypeForStatus(statusKey, payType) {
-    return String(statusKey || '').trim() === 'authorized_leave'
-        ? normalizeLeavePayType(payType)
-        : '';
+function leavePayTypeForStatus(statusKey) {
+    return String(statusKey || '').trim() === 'authorized_leave' ? 'unpaid' : '';
+}
+
+function presentAuthorizedLeaveRecord(record) {
+    if (!record || String(record.statusKey || '').trim() !== 'authorized_leave') return record;
+    const raw = String(record.statusLabel || '');
+    const halfAt = raw.indexOf('·');
+    return {
+        ...record,
+        leavePayType: 'unpaid',
+        statusLabel: halfAt >= 0 ? `Authorized Leave ${raw.slice(halfAt).trim()}` : 'Authorized Leave',
+    };
 }
 
 function leaveStatusLabel(statusKey, fallback = '', payType = '') {
@@ -778,7 +784,9 @@ export async function getAttendanceByDate(req, res) {
         return res.status(200).json({
             message: 'Attendance fetched successfully',
             date,
-            records: (records || []).filter((r) => !isCompanyShellEmployee(r.employeeName)),
+            records: (records || [])
+                .filter((r) => !isCompanyShellEmployee(r.employeeName))
+                .map(presentAuthorizedLeaveRecord),
         });
     } catch (error) {
         console.error('[getAttendanceByDate]', error);
@@ -1337,8 +1345,13 @@ function serializeYearSummaryEntry(row) {
     return {
         date: String(row?.date || '').trim(),
         statusKey,
-        statusLabel: leaveStatusLabel(statusKey, row?.statusLabel || '', row?.leavePayType),
-        leavePayType: normalizeLeavePayType(row?.leavePayType),
+        statusLabel: leaveStatusLabel(
+            statusKey,
+            row?.statusLabel || '',
+            statusKey === 'authorized_leave' ? 'unpaid' : row?.leavePayType,
+        ),
+        leavePayType:
+            statusKey === 'authorized_leave' ? 'unpaid' : normalizeLeavePayType(row?.leavePayType),
         leaveRequestStatus: requestStatus,
         leaveRequestKind: String(row?.leaveRequestKind || '').trim(),
         leaveRequestGroupId: groupId,
@@ -1628,14 +1641,12 @@ export async function getMyAttendanceYearSummary(req, res) {
 
         for (const row of grouped) {
             const key = String(row?._id?.statusKey || '').trim();
-            const pay = normalizeLeavePayType(row?._id?.leavePayType);
             const n = Number(row.count) || 0;
             if (Object.prototype.hasOwnProperty.call(counts, key)) {
                 counts[key] += n;
             }
             if (key === 'authorized_leave') {
-                if (pay === 'paid') counts.authorized_leave_paid += n;
-                else if (pay === 'unpaid') counts.authorized_leave_unpaid += n;
+                counts.authorized_leave_unpaid += n;
             }
         }
 
@@ -3503,7 +3514,7 @@ async function applyLeaveDecisionToRecord({
         const applyAuthorized = () => {
             record.statusKey = 'authorized_leave';
             record.statusLabel = `Authorized Leave${halfDaySuffix}`;
-            record.leavePayType = '';
+            record.leavePayType = 'unpaid';
             record.approvalStatus = 'approved';
             if (record.leaveRequestReason) record.reason = record.leaveRequestReason;
             return null;

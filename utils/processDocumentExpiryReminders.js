@@ -46,7 +46,6 @@ import {
 } from "./documentExpiryEmailLocation.js";
 import { sendErpEmail, buildEmailDedupeKey } from "./emailDispatch.js";
 import {
-    deliverEmployeePaidMessage,
     isNotificationEnabledForType,
     isEmailEnabledForEvent,
 } from "./notificationEmailPermission.js";
@@ -836,16 +835,17 @@ const processEmployeeReminders = async () => {
                 </div>
             `;
 
-            const text = `Employee document expiry ${stageLabel}: ${subjectName} — ${doc.label} expires ${new Date(doc.expiryDate).toLocaleDateString("en-GB")}.`;
-            await deliverEmployeePaidMessage({
-                eventKey: "hrm.employees.document_expiry",
-                employee,
-                subject,
-                html,
-                text,
-                recordId: `${employee._id}:${docKey}:${emailStage}`,
-                emailType: "EmployeeDocumentExpiry",
-            });
+            const companyEmail = String(employee.companyEmail || "").trim();
+            if (companyEmail) {
+                await sendExpiryReminderEmail({
+                    to: [companyEmail],
+                    subject,
+                    html,
+                    eventKey: "hrm.employees.document_expiry",
+                    emailType: "EmployeeDocumentExpiry",
+                    recordId: `${employee._id}:${docKey}:${emailStage}`,
+                });
+            }
 
             await markReminderSent({
                 targetType: "employee",

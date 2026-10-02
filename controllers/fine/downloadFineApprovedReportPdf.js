@@ -66,16 +66,18 @@ export const downloadFineApprovedReportPdf = async (req, res) => {
         // Point PDF helpers at the concrete sibling Mongo id (not group base fineId)
         req.params.id = String(fine._id);
 
-        const stored =
-            (fine.approvalAttachments || []).find((a) => a.source === 'approved-form') ||
-            (fine.approvalAttachments || []).find((a) => a.source === 'asset-loss-report');
+        const storedList = (fine.approvalAttachments || []).filter(
+            (item) =>
+                item?.publicId &&
+                (item.source === 'approved-form' || item.source === 'asset-loss-report'),
+        );
+        const stored = storedList[storedList.length - 1] || null;
 
-        const storedAt = stored?.addedAt ? new Date(stored.addedAt).getTime() : 0;
-        const fineUpdated = fine.updatedAt ? new Date(fine.updatedAt).getTime() : 0;
+        // addedAt is stamped before Chromium finishes, so updatedAt is always later.
+        // Treating that gap as "stale" rebuilt the PDF on every Attachment open.
         const wantFresh = String(req.query?.fresh || '') === '1';
-        const storedIsStale = !storedAt || storedAt + 1500 < fineUpdated;
 
-        if (stored?.publicId && !wantFresh && !storedIsStale) {
+        if (stored?.publicId && !wantFresh) {
             const bytes = await downloadS3ObjectBytes(stored.publicId);
             if (bytes?.length > 500) {
                 res.setHeader('Content-Type', 'application/pdf');
@@ -83,6 +85,7 @@ export const downloadFineApprovedReportPdf = async (req, res) => {
                     'Content-Disposition',
                     `inline; filename="${stored.name || reportPdfFileName(fine)}"`,
                 );
+                res.setHeader('Content-Length', bytes.length);
                 return res.send(bytes);
             }
         }

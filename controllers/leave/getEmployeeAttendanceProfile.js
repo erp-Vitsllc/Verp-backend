@@ -913,9 +913,7 @@ export async function getEmployeeAttendanceProfile(req, res) {
             const key = String(row.statusKey || '').trim();
             if (counts[key] != null) counts[key] += 1;
             if (key === 'authorized_leave') {
-                const pay = String(row.leavePayType || '').toLowerCase();
-                if (pay === 'paid') counts.authorized_leave_paid += 1;
-                else if (pay === 'unpaid') counts.authorized_leave_unpaid += 1;
+                counts.authorized_leave_unpaid += 1;
             }
             if (key === 'on_leave' && row.date > lastAnnualLeaveDate) {
                 lastAnnualLeaveDate = row.date;
@@ -960,10 +958,13 @@ export async function getEmployeeAttendanceProfile(req, res) {
                     id: `${row.date}-${key}`,
                     date: row.date,
                     statusKey: key,
-                    statusLabel: row.statusLabel || STATUS_LABELS[key] || key,
+                    statusLabel:
+                        key === 'authorized_leave'
+                            ? 'Authorized Leave'
+                            : row.statusLabel || STATUS_LABELS[key] || key,
                     reason: String(row.reason || row.leaveRequestReason || '').trim(),
                     attachmentName: String(row.attachmentName || '').trim(),
-                    leavePayType: String(row.leavePayType || '').trim(),
+                    leavePayType: key === 'authorized_leave' ? 'unpaid' : String(row.leavePayType || '').trim(),
                 });
             }
         }

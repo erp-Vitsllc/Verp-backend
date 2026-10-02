@@ -3,7 +3,8 @@ import { buildLocatorFleetDashboard } from '../../services/locatorSnapshotServic
 export const getLocatorFleetDashboard = async (req, res) => {
     try {
         const year = Number(req.query?.year) || new Date().getFullYear();
-        const data = await buildLocatorFleetDashboard({ year });
+        const fresh = String(req.query?.fresh || '') === '1';
+        const data = await buildLocatorFleetDashboard({ year, fresh });
 
         return res.status(200).json({
             success: true,

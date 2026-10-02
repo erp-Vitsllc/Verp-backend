@@ -46,6 +46,7 @@ import {
     HANDOVER_LIFECYCLE,
     buildFleetHandoverDisplayLabels,
     buildReturnHandoverWorkflowMeta,
+    isReturnHandoverHistoryRecord,
     clearFleetVehicleAssignmentForReturn,
     formatEmployeeDisplayName,
 } from '../utils/vehicleHandoverApprovalFlow.js';
@@ -12951,6 +12952,68 @@ function buildHandoverDeleteAssetPatch(asset, record, historyId, { isInspectionH
     };
 }
 
+/**
+ * Deleting a return puts the vehicle back on the previous holder.
+ * No accept step and no extra mail — management already gets the delete email.
+ */
+async function buildReturnDeleteRestorePatch(asset, record, previousRowId) {
+    const patch = {
+        status: 'Assigned',
+        actionRequiredBy: null,
+        pendingAction: null,
+    };
+
+    const ctx = asset?.pendingActionDetails?.returnHandoverContext;
+    if (ctx && typeof ctx === 'object') {
+        patch.status = ctx.previousStatus || 'Assigned';
+        if (ctx.previousAcceptanceStatus) {
+            patch.acceptanceStatus = ctx.previousAcceptanceStatus;
+        }
+        patch.assignedTo = ctx.previousAssignedTo ?? record.assignedTo ?? null;
+        patch.assignedToType = ctx.previousAssignedToType ?? record.assignedToType ?? 'Employee';
+        patch.assignedCompany = ctx.previousAssignedCompany ?? record.assignedCompany ?? null;
+        patch.assignedBy = ctx.previousAssignedBy ?? null;
+        patch.assignmentType = ctx.previousAssignmentType ?? null;
+        patch.assignedDays = ctx.previousAssignedDays ?? null;
+        patch.assignedDate = ctx.previousAssignedDate ?? null;
+        patch.temporaryEndDate = ctx.previousTemporaryEndDate ?? null;
+        patch.temporaryReminderSentAt = ctx.previousTemporaryReminderSentAt ?? null;
+        patch.temporaryExpiredSentAt = ctx.previousTemporaryExpiredSentAt ?? null;
+        patch.ownership = ctx.previousOwnership ?? null;
+        if (ctx.previousAcceptedBy) patch.acceptedBy = ctx.previousAcceptedBy;
+    } else {
+        const assigneeId = record.assignedTo?._id || record.assignedTo || null;
+        patch.assignedTo = assigneeId;
+        patch.assignedToType = record.assignedToType || 'Employee';
+        patch.assignedCompany = record.assignedCompany || null;
+
+        if (previousRowId) {
+            const prev = await AssetHistory.findById(previousRowId)
+                .select('date details')
+                .lean();
+            const details = prev?.details && typeof prev.details === 'object' ? prev.details : {};
+            if (details.assignmentType) patch.assignmentType = details.assignmentType;
+            if (details.assignedDays != null) patch.assignedDays = details.assignedDays;
+            if (details.assignedBy) patch.assignedBy = details.assignedBy;
+            if (prev?.date) patch.assignedDate = prev.date;
+        }
+
+        if (assigneeId && String(patch.assignedToType).toLowerCase() !== 'company') {
+            const emp = await EmployeeBasic.findById(assigneeId)
+                .select('firstName lastName')
+                .lean();
+            const name = `${emp?.firstName || ''} ${emp?.lastName || ''}`.trim();
+            if (name) patch.ownership = name;
+        }
+    }
+
+    const nextDetails = { ...(asset?.pendingActionDetails || {}) };
+    delete nextDetails.vehicleHandoverFlow;
+    delete nextDetails.returnHandoverContext;
+    patch.pendingActionDetails = Object.keys(nextDetails).length ? nextDetails : null;
+    return patch;
+}
+
 // @desc    Delete a vehicle handover history record (system Super User only)
 // @route   DELETE /api/AssetItem/history-record/:historyId
 // @access  System Super User
@@ -12981,7 +13044,7 @@ export const deleteVehicleHandoverHistory = async (req, res) => {
             });
         }
 
-        // Only the oldest remaining row may be deleted (past rows first).
+        // Only the latest remaining row may be deleted.
         const siblingRows = await AssetHistory.find({
             assetId: record.assetId,
             action: { $in: [...DELETABLE_HANDOVER_HISTORY_ACTIONS] },
@@ -12997,12 +13060,14 @@ export const deleteVehicleHandoverHistory = async (req, res) => {
         });
 
         const rowIndex = ordered.findIndex((row) => String(row._id) === String(historyId));
-        if (rowIndex > 0) {
+        if (rowIndex !== ordered.length - 1) {
             return res.status(400).json({
-                message:
-                    'Cannot delete this handover yet. Delete the past (older) rows first, starting from the top of the list.',
+                message: 'Cannot delete this handover yet. Delete the latest row first.',
             });
         }
+
+        const previousRowId = ordered.length >= 2 ? ordered[ordered.length - 2]?._id : null;
+        const isReturnHandover = isReturnHandoverHistoryRecord(record);
 
         const isInspectionHandover = isInspectionHandoverHistoryRecord(record);
 
@@ -13021,6 +13086,14 @@ export const deleteVehicleHandoverHistory = async (req, res) => {
             const { assetPatch } = patchResult;
             isActiveFlow = patchResult.isActiveFlow;
             isInspectionLinked = patchResult.isInspectionLinked;
+
+            if (isReturnHandover) {
+                const restorePatch = await buildReturnDeleteRestorePatch(asset, record, previousRowId);
+                Object.assign(assetPatch, restorePatch);
+                if (!Object.prototype.hasOwnProperty.call(restorePatch, 'acceptanceStatus')) {
+                    delete assetPatch.acceptanceStatus;
+                }
+            }
 
             if (Array.isArray(asset.vehicleAccessoriesListEntries)) {
                 const filtered = asset.vehicleAccessoriesListEntries.filter(

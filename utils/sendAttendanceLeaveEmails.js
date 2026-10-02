@@ -96,7 +96,7 @@ export async function sendAttendanceLeaveRequestEmail({
         const confirmLine = isFutureAnnual
             ? 'If you <strong>Approve</strong>, the day is marked as Annual Leave. If you <strong>Reject</strong>, it stays upcoming.'
             : isFutureLeave
-            ? 'If you <strong>Approve</strong>, choose Paid or Unpaid Authorized Leave. If you <strong>Reject</strong>, it stays upcoming.'
+            ? 'If you <strong>Approve</strong>, the day is marked as Authorized Leave. Authorized leave is unpaid. If you <strong>Reject</strong>, it stays upcoming.'
             : isFutureLate
               ? 'If you <strong>Approve</strong>, the day shows green as Late arrival approved. If you <strong>Reject</strong>, it stays upcoming.'
               : isFutureEarly
