@@ -11279,32 +11279,6 @@ export const returnAssetItem = async (req, res) => {
         // Fleet return uses the same handover as assign: pending row, photos, then approval.
         // The vehicle stays with the current holder until that handover is approved.
         if (fleetVehicle && !req.body?.reassignTo) {
-            const openFlow = item.pendingActionDetails?.vehicleHandoverFlow;
-            const openFlowHistoryId = openFlow?.historyId;
-            if (openFlowHistoryId && mongoose.Types.ObjectId.isValid(openFlowHistoryId)) {
-                const flowHistory = await AssetHistory.findById(openFlowHistoryId).select('_id').lean();
-                if (!flowHistory) {
-                    if (item.pendingActionDetails && typeof item.pendingActionDetails === 'object') {
-                        delete item.pendingActionDetails.vehicleHandoverFlow;
-                        delete item.pendingActionDetails.returnHandoverContext;
-                        if (item.pendingActionDetails.assignmentReason === 'Vehicle return') {
-                            delete item.pendingActionDetails.assignmentReason;
-                        }
-                        item.markModified('pendingActionDetails');
-                    }
-                    if (openFlow?.isReturn) {
-                        item.pendingAction = null;
-                        item.actionRequiredBy = null;
-                    }
-                    await item.save();
-                }
-            }
-            if (item.pendingAction || item.pendingActionDetails?.vehicleHandoverFlow?.historyId) {
-                return res.status(400).json({
-                    message: 'This vehicle already has a pending request. Finish or reject it before returning.',
-                });
-            }
-
             const adminOfficer = await resolveAdminOfficerEmployee();
             if (!adminOfficer?._id) {
                 return res.status(400).json({
@@ -11408,6 +11382,7 @@ export const returnAssetItem = async (req, res) => {
 
             item.status = 'Pending';
             item.acceptanceStatus = 'Pending';
+            item.pendingAction = null;
             item.actionRequiredBy = adminOfficer._id;
             item.pendingActionDetails = {
                 ...(item.pendingActionDetails || {}),
