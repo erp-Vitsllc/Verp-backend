@@ -14,7 +14,7 @@ import nodemailer from 'nodemailer';
 import { pickEffectiveEmail } from './resolveEmployeeEmail.js';
 import { normalizeS3Key } from './s3Upload.js';
 import { handoverRequiresHrApproval } from './vehicleAccessoriesListSync.js';
-import { canLoginThroughAnyChannel } from './loginThrough.js';
+import { canLoginThroughAnyChannel, loadLoginThroughForCheck } from './loginThrough.js';
 
 export const HANDOVER_FLOW_STAGES = {
     TARGET: 'target',
@@ -646,13 +646,7 @@ export async function employeeHasActivePortalUser(emp) {
         .select('_id')
         .lean();
     if (!user) return false;
-    let source = emp;
-    if (!(emp.loginThrough && typeof emp.loginThrough === 'object')) {
-        const row = await EmployeeBasic.findOne({ employeeId: String(empId) })
-            .select('loginThrough')
-            .lean();
-        if (row) source = row;
-    }
+    const source = await loadLoginThroughForCheck(emp);
     return canLoginThroughAnyChannel(source);
 }
 

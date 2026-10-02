@@ -32,6 +32,33 @@ export function canLoginThroughAnyChannel(source) {
     return through.portalApp === true || through.web === true;
 }
 
+/**
+ * Mongoose always exposes nested `loginThrough` as an object, even when the
+ * query did not select it. Only real booleans mean Web/App was loaded.
+ */
+export function loginThroughFlagsAreLoaded(source) {
+    const stored = source?.loginThrough;
+    if (!stored || typeof stored !== 'object') return false;
+    return typeof stored.portalApp === 'boolean' || typeof stored.web === 'boolean';
+}
+
+/** Reload Web/App from the employee record when the in-memory copy was not selected. */
+export async function loadLoginThroughForCheck(emp) {
+    if (!emp || loginThroughFlagsAreLoaded(emp)) return emp;
+    const empId = emp.employeeId ? String(emp.employeeId).trim() : '';
+    if (!empId) return emp;
+    const EmployeeBasic = (await import('../models/EmployeeBasic.js')).default;
+    const row = await EmployeeBasic.findOne({ employeeId: empId })
+        .select('loginThrough')
+        .lean()
+        .catch(() => null);
+    if (!row) return emp;
+    return {
+        employeeId: empId,
+        loginThrough: row.loginThrough || { portalApp: false, web: false },
+    };
+}
+
 export function loginThroughFromBody(body, current) {
     const next = normalizeLoginThrough(current);
     const incoming = body?.loginThrough;

@@ -56,7 +56,7 @@ import {
     notifyVehicleHandoverAfterHrDecision,
 } from '../utils/sendVehicleHandoverLifecycleMessages.js';
 import { allocateNextServiceReqNo } from '../utils/assetServiceReqNo.js';
-import { canLoginThroughAnyChannel } from '../utils/loginThrough.js';
+import { canLoginThroughAnyChannel, loadLoginThroughForCheck } from '../utils/loginThrough.js';
 import {
     buildInitialHandoverEscalationMeta,
     markHandoverEscalationResolved,
@@ -707,9 +707,8 @@ const buildAssetActionApprovalHandoverAttachments = async (req, assets) => {
 
 /**
  * Can the assignee Accept in ERP themselves?
- * Rule: Active User account with portal enabled → assignee gets Accept / "Waiting for {assignee}".
- * No user account (or portal disabled) → primary reportee gets Accept / "Waiting for {reportee}".
- * Company email is used for notifications only; it does not decide who Approves.
+ * Active User + Web or App on → assignee. Otherwise primary reportee.
+ * Company email only chooses the inbox address; it does not choose who Accepts.
  */
 const assigneeCanSelfAcknowledgeAssignment = async (emp) => {
     if (!emp) return false;
@@ -720,14 +719,7 @@ const assigneeCanSelfAcknowledgeAssignment = async (emp) => {
         .lean()
         .catch(() => null);
     if (!linkedUser) return false;
-    let source = emp;
-    if (!(emp.loginThrough && typeof emp.loginThrough === 'object')) {
-        const row = await EmployeeBasic.findOne({ employeeId: empId })
-            .select('loginThrough')
-            .lean()
-            .catch(() => null);
-        if (row) source = row;
-    }
+    const source = await loadLoginThroughForCheck(emp);
     return canLoginThroughAnyChannel(source);
 };
 
@@ -11287,6 +11279,26 @@ export const returnAssetItem = async (req, res) => {
         // Fleet return uses the same handover as assign: pending row, photos, then approval.
         // The vehicle stays with the current holder until that handover is approved.
         if (fleetVehicle && !req.body?.reassignTo) {
+            const openFlow = item.pendingActionDetails?.vehicleHandoverFlow;
+            const openFlowHistoryId = openFlow?.historyId;
+            if (openFlowHistoryId && mongoose.Types.ObjectId.isValid(openFlowHistoryId)) {
+                const flowHistory = await AssetHistory.findById(openFlowHistoryId).select('_id').lean();
+                if (!flowHistory) {
+                    if (item.pendingActionDetails && typeof item.pendingActionDetails === 'object') {
+                        delete item.pendingActionDetails.vehicleHandoverFlow;
+                        delete item.pendingActionDetails.returnHandoverContext;
+                        if (item.pendingActionDetails.assignmentReason === 'Vehicle return') {
+                            delete item.pendingActionDetails.assignmentReason;
+                        }
+                        item.markModified('pendingActionDetails');
+                    }
+                    if (openFlow?.isReturn) {
+                        item.pendingAction = null;
+                        item.actionRequiredBy = null;
+                    }
+                    await item.save();
+                }
+            }
             if (item.pendingAction || item.pendingActionDetails?.vehicleHandoverFlow?.historyId) {
                 return res.status(400).json({
                     message: 'This vehicle already has a pending request. Finish or reject it before returning.',
@@ -13007,10 +13019,16 @@ async function buildReturnDeleteRestorePatch(asset, record, previousRowId) {
         }
     }
 
-    const nextDetails = { ...(asset?.pendingActionDetails || {}) };
-    delete nextDetails.vehicleHandoverFlow;
-    delete nextDetails.returnHandoverContext;
-    patch.pendingActionDetails = Object.keys(nextDetails).length ? nextDetails : null;
+    const sourceDetails =
+        asset?.pendingActionDetails && typeof asset.pendingActionDetails === 'object'
+            ? JSON.parse(JSON.stringify(asset.pendingActionDetails))
+            : {};
+    delete sourceDetails.vehicleHandoverFlow;
+    delete sourceDetails.returnHandoverContext;
+    if (sourceDetails.assignmentReason === 'Vehicle return') {
+        delete sourceDetails.assignmentReason;
+    }
+    patch.pendingActionDetails = Object.keys(sourceDetails).length ? sourceDetails : null;
     return patch;
 }
 
@@ -13090,9 +13108,10 @@ export const deleteVehicleHandoverHistory = async (req, res) => {
             if (isReturnHandover) {
                 const restorePatch = await buildReturnDeleteRestorePatch(asset, record, previousRowId);
                 Object.assign(assetPatch, restorePatch);
-                if (!Object.prototype.hasOwnProperty.call(restorePatch, 'acceptanceStatus')) {
-                    delete assetPatch.acceptanceStatus;
-                }
+                delete assetPatch.acceptanceStatus;
+                delete assetPatch.pendingAction;
+                delete assetPatch.pendingActionDetails;
+                delete assetPatch.actionRequiredBy;
             }
 
             if (Array.isArray(asset.vehicleAccessoriesListEntries)) {
@@ -13104,8 +13123,20 @@ export const deleteVehicleHandoverHistory = async (req, res) => {
                 }
             }
 
+            const assetUpdate = {};
             if (Object.keys(assetPatch).length) {
-                await AssetItem.findByIdAndUpdate(asset._id, { $set: assetPatch });
+                assetUpdate.$set = assetPatch;
+            }
+            if (isReturnHandover) {
+                assetUpdate.$unset = {
+                    pendingAction: '',
+                    actionRequiredBy: '',
+                    'pendingActionDetails.vehicleHandoverFlow': '',
+                    'pendingActionDetails.returnHandoverContext': '',
+                };
+            }
+            if (Object.keys(assetUpdate).length) {
+                await AssetItem.findByIdAndUpdate(asset._id, assetUpdate);
             }
 
             // Heal stuck Active inspection when link was cleared earlier but status remained.

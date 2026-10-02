@@ -71,12 +71,24 @@ export const sendAssetAssignmentEmail = async ({
         const recipientRecord = resolvedRecipient || recipient;
         const isSelfAssignment =
             !employee?.isCompany && recipientRecord?._id?.toString() === employee?._id?.toString();
+        const recipientIsOtherPerson =
+            !employee?.isCompany &&
+            !!recipientRecord?._id &&
+            !!employee?._id &&
+            recipientRecord._id?.toString() !== employee._id?.toString();
+        const assigneeHasBusinessEmail = !!(
+            String(employee?.companyEmail || '').trim() ||
+            String(employee?.workEmail || '').trim()
+        );
+        // Transfer mail already names the role. This notice is only when assignment
+        // mail went to the primary reportee instead of the assignee.
         const isPrimaryReporteeRecipient =
-            isFallbackToReportee ||
-            (!employee?.isCompany &&
-                !!recipientRecord?._id &&
-                !!employee?._id &&
-                recipientRecord._id?.toString() !== employee._id?.toString());
+            notificationContext !== 'transfer' &&
+            (isFallbackToReportee || recipientIsOtherPerson);
+        const reporteeNoticeReason =
+            isFallbackToReportee || !assigneeHasBusinessEmail
+                ? 'You are receiving this because the assignee has no company email on file; please respond on their behalf.'
+                : 'You are receiving this because the assignee cannot sign in on Web or App; please respond on their behalf.';
 
         const isTransfer = notificationContext === 'transfer';
         const transferRoleNote = isTransfer
@@ -119,7 +131,7 @@ export const sendAssetAssignmentEmail = async ({
                 <div style="background-color: #fffbeb; border: 1px solid #f59e0b; color: #92400e; padding: 12px; border-radius: 8px; margin-bottom: 18px; font-size: 13px;">
                     <strong>Primary Reportee Notice:</strong> This asset is assigned under your reportee
                     <strong> ${employeeName}</strong>${employee?.employeeId ? ` (${employee.employeeId})` : ''}.
-                    You are receiving this because the assignee has no company email on file; please respond on their behalf.
+                    ${reporteeNoticeReason}
                 </div>
             `
             : "";

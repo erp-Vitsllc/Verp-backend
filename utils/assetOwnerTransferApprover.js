@@ -12,7 +12,7 @@ import {
 } from './assetOperationalFlags.js';
 import { getDepartmentHOD } from './getDepartmentHOD.js';
 import { resolveAssetControllerEmployee } from './assetApprovalHelpers.js';
-import { canLoginThroughAnyChannel } from './loginThrough.js';
+import { canLoginThroughAnyChannel, loadLoginThroughForCheck } from './loginThrough.js';
 
 export const NO_PORTAL_NO_REPORTEE_OWNER_APPROVAL_MESSAGE =
     'This assigned employee has no user account, and no primary reportee. Set a primary reportee (with a login) on their profile before sending Leave / End of Services — otherwise approval waits forever on someone who cannot log in.';
@@ -55,14 +55,7 @@ export const assigneeCanSelfApproveOwnerTransfer = async (emp) => {
     if (!assigneeHasCompanyEmailOnRecord(emp)) return false;
     const linkedUser = await findActiveUserForEmployee(emp);
     if (!linkedUser) return false;
-    let source = emp;
-    if (!(emp.loginThrough && typeof emp.loginThrough === 'object')) {
-        const empId = emp.employeeId ? String(emp.employeeId).trim() : '';
-        const row = empId
-            ? await EmployeeBasic.findOne({ employeeId: empId }).select('loginThrough').lean().catch(() => null)
-            : null;
-        if (row) source = row;
-    }
+    const source = await loadLoginThroughForCheck(emp);
     return canLoginThroughAnyChannel(source);
 };
 
