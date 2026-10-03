@@ -73,19 +73,15 @@ export function evaluateFlexibleDay({ workedMinutes, requiredHours }) {
     };
 }
 
-/** Sun = inside 12 AM–12 PM. Moon = inside 12 PM–12 AM. Both when the span crosses 12. */
+/** Sun = same-day shift, including late arrival and early go. Moon = check-out after the next midnight. */
 export function shiftIcons({ date, timeIn, timeOut, timeOutDate }) {
     const inMin = clockTimeToMinutes(timeIn);
     const outMin = clockTimeToMinutes(timeOut);
     if (inMin == null || outMin == null) return { sun: false, moon: false };
     const outDate = String(timeOutDate || '').trim();
     const crossesMidnight = Boolean(outDate && outDate !== date) || outMin < inMin;
-    if (crossesMidnight) return { sun: true, moon: true };
-    const inMorning = inMin < 12 * 60;
-    const outMorning = outMin < 12 * 60;
-    if (inMorning && outMorning) return { sun: true, moon: false };
-    if (!inMorning && !outMorning) return { sun: false, moon: true };
-    return { sun: true, moon: true };
+    if (crossesMidnight) return { sun: false, moon: true };
+    return { sun: true, moon: false };
 }
 
 export function approvedOtRemainder(approvedHours) {
