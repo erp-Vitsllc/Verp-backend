@@ -9,12 +9,15 @@ const dayScheduleSchema = new mongoose.Schema(
         endHour: { type: String, default: '06' },
         endMinute: { type: String, default: '00' },
         endMeridiem: { type: String, enum: ['AM', 'PM'], default: 'PM' },
+        workingHours: { type: Number, default: 9, min: 0, max: 24 },
     },
     { _id: false },
 );
 
 const weekSchema = new mongoose.Schema(
     {
+        timingMode: { type: String, enum: ['scheduled', 'flexible'], default: 'scheduled' },
+        hoursPerDay: { type: Number, default: 9, min: 0, max: 24 },
         monday: { type: dayScheduleSchema, default: () => ({}) },
         tuesday: { type: dayScheduleSchema, default: () => ({}) },
         wednesday: { type: dayScheduleSchema, default: () => ({}) },

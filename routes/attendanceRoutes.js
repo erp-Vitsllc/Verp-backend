@@ -20,6 +20,15 @@ import {
     requestAttendanceFuture,
     decideAttendanceLeaveRequest,
 } from '../controllers/attendanceController.js';
+import {
+    getCompOffMonth,
+    requestCompOffLeave,
+    settleCompOff,
+} from '../controllers/compOffController.js';
+import {
+    requestFlexibleOvertime,
+    decideFlexibleOvertime,
+} from '../controllers/flexibleOtController.js';
 
 const router = express.Router();
 
@@ -35,6 +44,19 @@ router.post('/me/leave-request', requestAttendanceLeave);
 router.post('/me/yellow-request', requestAttendanceYellow);
 router.post('/me/future-request', requestAttendanceFuture);
 router.post('/me/leave-request/decide', decideAttendanceLeaveRequest);
+router.post('/me/compoff-request', requestCompOffLeave);
+router.get(
+    '/compoff',
+    checkPermissionAny('hrm_attendance', ['create', 'edit', 'view']),
+    getCompOffMonth,
+);
+router.post(
+    '/compoff/settle',
+    checkPermissionAny('hrm_attendance', ['create', 'edit', 'view']),
+    settleCompOff,
+);
+router.post('/flexible-ot/request', requestFlexibleOvertime);
+router.post('/flexible-ot/decide', decideFlexibleOvertime);
 router.post('/team/mark', markTeamAttendance);
 
 // Leave-request inbox is scoped to the viewer's reportees (no HR module permission required)

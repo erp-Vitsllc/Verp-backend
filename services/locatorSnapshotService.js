@@ -1,6 +1,8 @@
 import LocatorGpsSnapshot from '../models/LocatorGpsSnapshot.js';
 import LocatorDailySummary from '../models/LocatorDailySummary.js';
+import LocatorFuelMonthStat from '../models/LocatorFuelMonthStat.js';
 import AssetItem from '../models/AssetItem.js';
+import { fuelMonthGpsIsFresh, fuelMonthGpsIsUsable, fuelMonthRangeIsClosed } from '../utils/fuelMonthGpsCache.js';
 import { fetchExcessiveIdlingReport, fetchLatestPositions, fetchVehicleWiseSummary, isLocatorConfigured } from './locatorService.js';
 import { reconcileLocatorPositionsToErp } from './locatorVehicleListService.js';
 import { currentDistanceKm, dubaiDateKey, dubaiReportRange, dubaiReportStamp, formatDuration, locatorSampleTime } from './locatorUnits.js';
@@ -1806,27 +1808,44 @@ function defaultRangeDayKeys(now = new Date()) {
     };
 }
 
+const GPS_SNAPSHOT_POINT_SELECT =
+    'deviceId deviceName totalDistanceM odometer state speedKmh statusDurationSec idleStart capturedAt';
+
+async function mapLimit(items, limit, fn) {
+    const list = items || [];
+    if (!list.length) return;
+    let next = 0;
+    const workers = Math.min(Math.max(1, limit), list.length);
+    await Promise.all(
+        Array.from({ length: workers }, async () => {
+            while (next < list.length) {
+                const index = next;
+                next += 1;
+                await fn(list[index], index);
+            }
+        }),
+    );
+}
+
 async function lastOdometerRowsBefore(deviceIds, before) {
     const ids = (deviceIds || []).map((id) => Number(id)).filter((n) => Number.isFinite(n) && n > 0);
     if (!ids.length || !before) return [];
-    return LocatorGpsSnapshot.aggregate([
-        { $match: { deviceId: { $in: ids }, capturedAt: { $lt: before } } },
-        { $sort: { capturedAt: -1 } },
-        {
-            $group: {
-                _id: '$deviceId',
-                deviceId: { $first: '$deviceId' },
-                deviceName: { $first: '$deviceName' },
-                totalDistanceM: { $first: '$totalDistanceM' },
-                odometer: { $first: '$odometer' },
-                state: { $first: '$state' },
-                speedKmh: { $first: '$speedKmh' },
-                statusDurationSec: { $first: '$statusDurationSec' },
-                idleStart: { $first: '$idleStart' },
-                capturedAt: { $first: '$capturedAt' },
-            },
-        },
-    ]);
+    // One indexed seek per device. Sorting the whole history for every vehicle is what made month loads stall.
+    const rows = await mapLimitCollect(ids, 8, (deviceId) =>
+        LocatorGpsSnapshot.findOne({ deviceId, capturedAt: { $lt: before } })
+            .sort({ capturedAt: -1 })
+            .select(GPS_SNAPSHOT_POINT_SELECT)
+            .lean(),
+    );
+    return rows.filter(Boolean);
+}
+
+async function mapLimitCollect(items, limit, fn) {
+    const out = new Array((items || []).length);
+    await mapLimit(items, limit, async (item, index) => {
+        out[index] = await fn(item, index);
+    });
+    return out;
 }
 
 /**
@@ -1878,8 +1897,147 @@ export async function getLocatorMonthStatsForDevice(deviceId, monthKey) {
     return map[String(monthKey)] || emptyMonthStats(start, end);
 }
 
-/** One month of running KM + idle for many GPS devices (fuel list). */
-export async function getLocatorMonthStatsByDevices(deviceIds = [], monthKey) {
+const fuelMonthGpsMemory = new Map();
+const fuelMonthGpsInflight = new Map();
+let fuelMonthGpsQueue = Promise.resolve();
+
+function rememberFuelMonthStats(monthKey, byDevice) {
+    const bucket = fuelMonthGpsMemory.get(monthKey) || {};
+    for (const [id, stat] of Object.entries(byDevice || {})) {
+        if (stat) bucket[String(id)] = stat;
+    }
+    fuelMonthGpsMemory.set(monthKey, bucket);
+}
+
+function fuelMonthStatFromDoc(doc) {
+    return {
+        kmRun: Number(doc?.kmRun) || 0,
+        runningKm: Number(doc?.runningKm ?? doc?.kmRun) || 0,
+        currentKm: Number(doc?.currentKm) || 0,
+        idleTimeMinutes: Number(doc?.idleTimeMinutes) || 0,
+        idleTimeSeconds: Number(doc?.idleTimeSeconds) || 0,
+        idleTimeLabel: doc?.idleTimeLabel || '',
+        rangeStart: doc?.rangeStart || null,
+        rangeEnd: doc?.rangeEnd || null,
+        summarySource: doc?.summarySource || '',
+        computedAt: doc?.computedAt || doc?.updatedAt || null,
+    };
+}
+
+async function readStoredFuelMonthStats(ids, monthKey) {
+    const now = new Date();
+    const { end } = monthBoundsForKey(monthKey, now);
+    const memory = fuelMonthGpsMemory.get(monthKey) || {};
+    const byDevice = {};
+    const missing = [];
+    for (const id of ids) {
+        const stat = memory[String(id)];
+        if (stat && fuelMonthGpsIsUsable(stat, end, now)) byDevice[String(id)] = stat;
+        else missing.push(id);
+    }
+    if (missing.length) {
+        const docs = await LocatorFuelMonthStat.find({
+            monthKey,
+            deviceId: { $in: missing },
+        })
+            .select(
+                'deviceId kmRun runningKm currentKm idleTimeMinutes idleTimeSeconds idleTimeLabel rangeStart rangeEnd summarySource computedAt updatedAt',
+            )
+            .lean();
+        const loaded = {};
+        for (const doc of docs) {
+            const stat = fuelMonthStatFromDoc(doc);
+            if (!fuelMonthGpsIsUsable(stat, end, now)) continue;
+            loaded[String(doc.deviceId)] = stat;
+            byDevice[String(doc.deviceId)] = stat;
+        }
+        if (Object.keys(loaded).length) rememberFuelMonthStats(monthKey, loaded);
+    }
+    const complete = ids.every((id) => byDevice[String(id)]);
+    const fresh = complete && ids.every((id) => fuelMonthGpsIsFresh(byDevice[String(id)], end, now));
+    return {
+        byDevice,
+        complete,
+        fresh,
+        closed: fuelMonthRangeIsClosed(end, now),
+    };
+}
+
+async function distancePoint(deviceId, capturedAt, direction) {
+    return LocatorGpsSnapshot.findOne({
+        deviceId,
+        capturedAt,
+        $or: [{ odometer: { $gt: 0 } }, { totalDistanceM: { $gt: 0 } }],
+    })
+        .sort({ capturedAt: direction })
+        .select('totalDistanceM odometer capturedAt')
+        .lean();
+}
+
+async function fastMonthStatsForDevice(deviceId, start, end) {
+    const inRange = { $gte: start, $lt: end };
+    const [anchor, first, last] = await Promise.all([
+        distancePoint(deviceId, { $lt: start }, -1),
+        distancePoint(deviceId, inRange, 1),
+        distancePoint(deviceId, inRange, -1),
+    ]);
+    const rows = [anchor, first, last].filter(Boolean);
+    const kmRun = runningKmSumForDeviceInRange(rows, start, end, { calendarMonth: true });
+    const closing = last || first;
+    return {
+        ...emptyMonthStats(start, end),
+        kmRun,
+        runningKm: kmRun,
+        currentKm: currentKmFromSnapshot(closing),
+        summarySource: 'odometer',
+    };
+}
+
+async function computeFastMonthStats(ids, start, end) {
+    const result = Object.fromEntries(ids.map((id) => [String(id), emptyMonthStats(start, end)]));
+    await mapLimit(ids, 6, async (deviceId) => {
+        result[String(deviceId)] = await fastMonthStatsForDevice(deviceId, start, end);
+    });
+    return result;
+}
+
+async function persistFuelMonthStats(monthKey, byDevice) {
+    const entries = Object.entries(byDevice || {}).filter(([, stat]) => stat);
+    if (!entries.length) return;
+    const computedAt = new Date();
+    await LocatorFuelMonthStat.bulkWrite(
+        entries.map(([id, stat]) => ({
+            updateOne: {
+                filter: { deviceId: Number(id), monthKey },
+                update: {
+                    $set: {
+                        deviceId: Number(id),
+                        monthKey,
+                        kmRun: Number(stat.kmRun) || 0,
+                        runningKm: Number(stat.runningKm) || 0,
+                        currentKm: Number(stat.currentKm) || 0,
+                        idleTimeMinutes: Number(stat.idleTimeMinutes) || 0,
+                        idleTimeSeconds: Number(stat.idleTimeSeconds) || 0,
+                        idleTimeLabel: stat.idleTimeLabel || '',
+                        rangeStart: stat.rangeStart || null,
+                        rangeEnd: stat.rangeEnd || null,
+                        summarySource: stat.summarySource || 'odometer',
+                        computedAt,
+                    },
+                },
+                upsert: true,
+            },
+        })),
+        { ordered: false },
+    );
+    rememberFuelMonthStats(
+        monthKey,
+        Object.fromEntries(entries.map(([id, stat]) => [id, { ...stat, computedAt }])),
+    );
+}
+
+/** Local GPS samples for one month. Used only when the Locator idle report is unavailable. */
+async function computeSnapshotMonthStats(deviceIds, monthKey) {
     const key = String(monthKey || '').trim();
     const now = new Date();
     const { start, end } = monthBoundsForKey(key, now);
@@ -1893,8 +2051,8 @@ export async function getLocatorMonthStatsByDevices(deviceIds = [], monthKey) {
             deviceId: { $in: ids },
             capturedAt: { $gte: start, $lt: end },
         })
-            .select('deviceId totalDistanceM odometer state speedKmh statusDurationSec idleStart capturedAt')
-            .sort({ capturedAt: 1 })
+            .select(GPS_SNAPSHOT_POINT_SELECT)
+            .maxTimeMS(12000)
             .lean(),
     ]);
 
@@ -1910,11 +2068,111 @@ export async function getLocatorMonthStatsByDevices(deviceIds = [], monthKey) {
             (a, b) => new Date(a.capturedAt) - new Date(b.capturedAt),
         );
         const inMonth = deviceRows.filter((row) => isCapturedInRange(row.capturedAt, start, end));
-        result[String(id)] = monthIdleKmPayload(deviceRows, inMonth, start, end);
+        result[String(id)] = {
+            ...monthIdleKmPayload(deviceRows, inMonth, start, end),
+            summarySource: 'snapshots',
+        };
+    }
+    return result;
+}
+
+async function computeFuelMonthStats(ids, monthKey) {
+    const now = new Date();
+    const { start, end } = monthBoundsForKey(monthKey, now);
+    const toKey = monthKeyEndDate(monthKey);
+    const [result, idleMap] = await Promise.all([
+        computeFastMonthStats(ids, start, end),
+        excessiveIdleMap(ids, `${String(monthKey).slice(0, 7)}-01`, toKey).catch((error) => {
+            console.warn('[FuelMonthGps] idle report failed:', error?.message || error);
+            return new Map();
+        }),
+    ]);
+
+    let appliedIdle = false;
+    for (const id of ids) {
+        const idle = idleMap?.get?.(String(id));
+        if (!idle || !result[String(id)]) continue;
+        result[String(id)] = applyExcessiveIdle(result[String(id)], idle.idleTimeMs);
+        appliedIdle = true;
     }
 
-    await overlayMonthExcessiveIdle(result, ids, key);
+    if (!appliedIdle) {
+        try {
+            const snapshotStats = await computeSnapshotMonthStats(ids, monthKey);
+            for (const id of ids) {
+                const snap = snapshotStats[String(id)];
+                if (!snap) continue;
+                result[String(id)] = { ...result[String(id)], ...snap, summarySource: 'snapshots' };
+            }
+        } catch (error) {
+            console.warn('[FuelMonthGps] snapshot fallback failed:', error?.message || error);
+        }
+    }
+
+    await persistFuelMonthStats(monthKey, result);
     return result;
+}
+
+function enqueueFuelMonthGps(ids, monthKey) {
+    const existing = fuelMonthGpsInflight.get(monthKey);
+    if (existing) return existing;
+    const job = fuelMonthGpsQueue
+        .catch(() => {})
+        .then(() => computeFuelMonthStats(ids, monthKey))
+        .catch((error) => {
+            console.warn('[FuelMonthGps]', monthKey, error?.message || error);
+            return null;
+        });
+    fuelMonthGpsQueue = job.then(
+        () => {},
+        () => {},
+    );
+    fuelMonthGpsInflight.set(monthKey, job);
+    void job.finally(() => {
+        if (fuelMonthGpsInflight.get(monthKey) === job) fuelMonthGpsInflight.delete(monthKey);
+    });
+    return job;
+}
+
+/**
+ * Fuel-list GPS for one month.
+ * Stored previous months return immediately. A cold month does not block on Locator;
+ * pass wait:true only after the vehicle list is already on screen.
+ */
+export async function loadFuelAccessGps(deviceIds = [], monthKey, options = {}) {
+    const key = String(monthKey || '').trim();
+    const ids = [...new Set((deviceIds || []).map((id) => Number(id)).filter((n) => Number.isFinite(n) && n > 0))];
+    if (!ids.length || !/^\d{4}-(0[1-9]|1[0-2])$/.test(key)) {
+        return { byDevice: {}, gpsPending: false };
+    }
+
+    const stored = await readStoredFuelMonthStats(ids, key);
+    const needsRefresh = !stored.complete || !stored.fresh;
+    if (!needsRefresh) {
+        return { byDevice: stored.byDevice, gpsPending: false };
+    }
+
+    const job = enqueueFuelMonthGps(ids, key);
+    const gpsPending = !stored.complete || (!stored.closed && !stored.fresh);
+    if (!options.wait) {
+        return { byDevice: stored.byDevice, gpsPending };
+    }
+
+    await job;
+    const again = await readStoredFuelMonthStats(ids, key);
+    return { byDevice: again.byDevice, gpsPending: false };
+}
+
+/** One month of running KM + idle for many GPS devices (fuel list). */
+export async function getLocatorMonthStatsByDevices(deviceIds = [], monthKey) {
+    const key = String(monthKey || '').trim();
+    const now = new Date();
+    const { start, end } = monthBoundsForKey(key, now);
+    const ids = [...new Set((deviceIds || []).map((id) => Number(id)).filter((n) => Number.isFinite(n) && n > 0))];
+    const result = Object.fromEntries(ids.map((id) => [String(id), emptyMonthStats(start, end)]));
+    if (!ids.length || !/^\d{4}-(0[1-9]|1[0-2])$/.test(key)) return result;
+    const loaded = await loadFuelAccessGps(ids, key, { wait: true });
+    return { ...result, ...loaded.byDevice };
 }
 
 /**

@@ -220,10 +220,46 @@ const attendanceSchema = new mongoose.Schema(
             type: Boolean,
             default: false,
         },
+        /** Flexible group only. Checkout calendar day when it is after the check-in date. */
+        timeOutDate: {
+            type: String,
+            default: '',
+            trim: true,
+        },
+        flexibleWorkedHours: { type: Number, default: 0 },
+        flexibleRequiredHours: { type: Number, default: 0 },
+        flexibleOtHours: { type: Number, default: 0 },
+        flexibleOtStatus: {
+            type: String,
+            enum: ['', 'pending', 'approved', 'rejected'],
+            default: '',
+            trim: true,
+        },
+        flexibleOtApprovedHours: { type: Number, default: 0 },
+        flexibleOtReason: { type: String, default: '', trim: true },
+        flexibleOtNextDayDate: { type: String, default: '', trim: true },
+        flexibleFromOtDate: { type: String, default: '', trim: true },
         markedBy: {
             type: mongoose.Schema.Types.ObjectId,
             ref: 'User',
             default: null,
+        },
+        /**
+         * Comp-off settlement. Empty state means the leave day is still open
+         * in the month of `date`. One jump moves chargeMonth forward once.
+         */
+        compOff: {
+            state: {
+                type: String,
+                enum: ['', 'open', 'adjusted', 'jumped'],
+                default: '',
+            },
+            chargeMonth: { type: String, default: '', trim: true },
+            jumpCount: { type: Number, default: 0 },
+            otHoursBefore: { type: Number, default: 0 },
+            otHoursDeducted: { type: Number, default: 0 },
+            otHoursAfter: { type: Number, default: 0 },
+            adjustedAt: { type: Date, default: null },
         },
     },
     { timestamps: true },

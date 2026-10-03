@@ -14,8 +14,10 @@ import {
     getWeekForStaffType,
     holidayAppliesToStaff,
     summarizePunchOvertime,
+    isFlexibleTiming,
     WEEKDAY_KEYS,
 } from '../../utils/workingTimeHelpers.js';
+import { summarizeApprovedFlexibleOvertime } from '../../utils/flexibleAttendance.js';
 import { listActiveWorkLocations, normalizeStaffTypeKey } from '../../utils/workLocationHelpers.js';
 import { getCalendarPartsInTz, getScheduledEmailTimeZone } from '../../utils/scheduleDailyAtMidnight.js';
 import { hasPermission, isUserAdministrator } from '../../services/permissionService.js';
@@ -395,10 +397,13 @@ async function loadLiveAttendanceEligibility({ employee, from, to, staffType }) 
         date: { $gte: periodStart, $lte: periodEnd },
         $or: clauses,
     })
-        .select('date statusKey leaveRequestStatus requestedStatusKey reason timeIn timeOut')
+        .select('date statusKey leaveRequestStatus requestedStatusKey reason timeIn timeOut flexibleOtStatus flexibleOtApprovedHours')
         .lean();
     const live = summarizeAttendanceEligibility(rows, { throughDate: periodEnd });
-    const overtime = summarizePunchOvertime(rows, getWeekForStaffType(workingTime, staffType));
+    const week = getWeekForStaffType(workingTime, staffType);
+    const overtime = isFlexibleTiming(week)
+        ? summarizeApprovedFlexibleOvertime(rows)
+        : summarizePunchOvertime(rows, week);
     const coveredDates = new Set(
         (rows || []).map((row) => String(row?.date || '').trim()).filter((date) => isDateKey(date)),
     );

@@ -17,8 +17,11 @@ import {
     getScheduledPunchMinutes,
     getWeekForStaffType,
     holidayAppliesToStaff,
+    isFlexibleTiming,
     loadWorkingTimeDoc,
 } from './workingTimeHelpers.js';
+import { approvedOtRemainder } from './flexibleAttendance.js';
+import { compOffAdjustedHours } from './compOffSettlement.js';
 import { getVegaLogoDataUrl } from './buildSalarySlipPdfHtml.js';
 import { resolveEmployeePayrollPolicy } from './employeeLeavePolicy.js';
 import {
@@ -707,7 +710,7 @@ export async function buildSalarySlipPayload({
                 $or: [{ employeeMongoId: mongoId }, { employeeId: idPattern }],
                 date: { $gte: from, $lte: to },
             })
-                .select('date statusKey leavePayType timeIn timeOut')
+                .select('date statusKey leavePayType timeIn timeOut flexibleOtStatus flexibleOtApprovedHours')
                 .lean(),
             Holiday.find({ date: { $gte: from, $lte: to } }).select('date appliesTo').lean(),
             Loan.find({
@@ -822,13 +825,20 @@ export async function buildSalarySlipPayload({
         const punched = Boolean(row.timeIn && row.timeOut);
         if (isHolidayDate && punched) holidaysWorked += 1;
 
-        const ot = overtimeFromPunch({
-            timeIn: row.timeIn,
-            timeOut: row.timeOut,
-            date,
-            week,
-            monthlySalary: monthly,
-        });
+        const ot = isFlexibleTiming(week)
+            ? {
+                hours: String(row.flexibleOtStatus || '') === 'approved'
+                    ? approvedOtRemainder(row.flexibleOtApprovedHours)
+                    : 0,
+                isOffDay: false,
+            }
+            : overtimeFromPunch({
+                timeIn: row.timeIn,
+                timeOut: row.timeOut,
+                date,
+                week,
+                monthlySalary: monthly,
+            });
         if (ot.hours <= 0) continue;
         if (ot.isOffDay || isHolidayDate) {
             otDays += 1;
@@ -866,6 +876,11 @@ export async function buildSalarySlipPayload({
         },
         exclusions,
     ));
+
+    const compOffOtDeducted = await compOffAdjustedHours(mongoId, ym);
+    if (compOffOtDeducted > 0) {
+        otHours = Math.max(0, Math.round((otHours - compOffOtDeducted) * 100) / 100);
+    }
 
     const holidays = Math.max(holidaySet.size, holidayMarks);
     const authorizedDeductionDays = authorizedDays;

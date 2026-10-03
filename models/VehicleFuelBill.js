@@ -35,6 +35,8 @@ const vehicleFuelBillSchema = new mongoose.Schema(
         limitAlert100SentAt: { type: Date, default: null },
         kmRun: { type: Number, default: 0 },
         idleTimeMinutes: { type: Number, default: 0 },
+        /** Owner at the time of that fuel month. Later unassign or return must not rewrite it. */
+        vehicleOwner: { type: String, default: '' },
         entries: { type: [fuelEntrySchema], default: [] },
         closedAt: { type: Date, default: null },
         closedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null },
@@ -45,5 +47,6 @@ const vehicleFuelBillSchema = new mongoose.Schema(
 );
 
 vehicleFuelBillSchema.index({ vehicleId: 1, monthKey: 1 }, { unique: true });
+vehicleFuelBillSchema.index({ monthKey: 1 });
 
 export default mongoose.model('VehicleFuelBill', vehicleFuelBillSchema);

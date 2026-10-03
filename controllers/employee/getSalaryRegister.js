@@ -13,6 +13,7 @@ import Loan from '../../models/Loan.js';
 import EmployeeHubRequest from '../../models/EmployeeHubRequest.js';
 import DashboardAction from '../../models/DashboardAction.js';
 import User from '../../models/User.js';
+import { unsettledCompOffMessage } from '../../utils/compOffSettlement.js';
 import { getDepartmentHOD } from '../../utils/getDepartmentHOD.js';
 import { getManagementHOD } from '../../utils/getManagementHOD.js';
 import {
@@ -2137,6 +2138,11 @@ export const createSalaryMonthPayment = async (req, res) => {
                 message: 'One or more employees are already in another payment for this month.',
                 employeeIds: alreadyClaimed,
             });
+        }
+
+        const compOffBlock = await unsettledCompOffMessage(requested, monthKey);
+        if (compOffBlock) {
+            return res.status(400).json({ message: compOffBlock });
         }
 
         const enrolled = await SalaryEnrollment.find({

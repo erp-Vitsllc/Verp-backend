@@ -16,6 +16,7 @@ import {
     serializeSalarySlipForClient,
     summarizeSalarySlipListRow,
 } from '../../utils/buildSalarySlipPayload.js';
+import { unsettledCompOffMessage } from '../../utils/compOffSettlement.js';
 import {
     salarySlipMonthAllowed,
     salarySlipMonthRange,
@@ -219,6 +220,10 @@ export async function saveSalarySlipMonth(req, res) {
         const gate = await loadSalarySlipEnrollment(code);
         if (!salarySlipMonthAllowed(monthKey, gate)) {
             return res.status(400).json({ message: slipMonthDeniedMessage(gate.enrolled, gate.fromMonth) });
+        }
+        const compOffBlock = await unsettledCompOffMessage([code], monthKey);
+        if (compOffBlock) {
+            return res.status(400).json({ message: compOffBlock });
         }
         const live = await buildSalarySlipPayload({ employeeId: code, monthKey, skipOverride: true });
         const next = applySalarySlipOverride(live, req.body?.slip || {});

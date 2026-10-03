@@ -210,8 +210,12 @@ export function overtimeHoursFromPunch({ timeIn, timeOut, date, week }) {
     const scheduled = getScheduledPunchMinutes(week, date);
     let scheduledMinutes = 0;
     if (!scheduled.isOffDay) {
-        scheduledMinutes = (scheduled.endMinutes ?? 18 * 60) - (scheduled.startMinutes ?? 9 * 60);
-        if (scheduledMinutes <= 0) scheduledMinutes += 24 * 60;
+        if (scheduled.flexible) {
+            scheduledMinutes = Number(scheduled.scheduledMinutes) || 0;
+        } else {
+            scheduledMinutes = (scheduled.endMinutes ?? 18 * 60) - (scheduled.startMinutes ?? 9 * 60);
+            if (scheduledMinutes <= 0) scheduledMinutes += 24 * 60;
+        }
     }
 
     const otMinutes = scheduled.isOffDay ? worked : Math.max(0, worked - scheduledMinutes);
@@ -269,16 +273,39 @@ export function summarizePunchOvertime(rows = [], week) {
     };
 }
 
+export function isFlexibleTiming(week) {
+    return String(week?.timingMode || '').toLowerCase() === 'flexible';
+}
+
+export function flexibleHoursPerDay(week) {
+    const hours = Number(week?.hoursPerDay);
+    if (!Number.isFinite(hours) || hours <= 0) return 9;
+    return Math.min(24, hours);
+}
+
 /** Scheduled punch-in / punch-out minutes for a staff week + date (yyyy-MM-dd). */
 export function getScheduledPunchMinutes(week, dateKey) {
     const dayKey = weekdayKeyFromDateKey(dateKey);
-    if (!dayKey) return { startMinutes: null, endMinutes: null, isOffDay: false };
+    if (!dayKey) return { startMinutes: null, endMinutes: null, isOffDay: false, flexible: false };
     const source = week && typeof week === 'object' ? week : defaultWeek();
     const day = source?.[dayKey] || null;
+    const isOffDay = Boolean(day?.isOffDay);
+    if (isFlexibleTiming(source)) {
+        const dayHours = Number(day?.workingHours);
+        const hours = Number.isFinite(dayHours) && dayHours > 0 ? Math.min(24, dayHours) : flexibleHoursPerDay(source);
+        return {
+            startMinutes: null,
+            endMinutes: null,
+            isOffDay,
+            flexible: true,
+            scheduledMinutes: isOffDay ? 0 : Math.round(hours * 60),
+        };
+    }
     return {
         startMinutes: dayScheduleToMinutes(day, 'start'),
         endMinutes: dayScheduleToMinutes(day, 'end'),
-        isOffDay: Boolean(day?.isOffDay),
+        isOffDay,
+        flexible: false,
     };
 }
 

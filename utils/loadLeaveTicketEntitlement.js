@@ -52,8 +52,10 @@ import {
     getWeekForStaffType,
     holidayAppliesToStaff,
     summarizePunchOvertime,
+    isFlexibleTiming,
     WEEKDAY_KEYS,
 } from './workingTimeHelpers.js';
+import { summarizeApprovedFlexibleOvertime } from './flexibleAttendance.js';
 
 const ISO = /^\d{4}-\d{2}-\d{2}$/;
 
@@ -366,10 +368,13 @@ async function loadLiveAttendanceEligibility({ employee, from, to, staffType }) 
         date: { $gte: periodStart, $lte: periodEnd },
         $or: clauses,
     })
-        .select('date statusKey leaveRequestStatus requestedStatusKey reason timeIn timeOut')
+        .select('date statusKey leaveRequestStatus requestedStatusKey reason timeIn timeOut flexibleOtStatus flexibleOtApprovedHours')
         .lean();
     const live = summarizeAttendanceEligibility(rows, { throughDate: periodEnd });
-    const overtime = summarizePunchOvertime(rows, getWeekForStaffType(workingTime, staffType));
+    const week = getWeekForStaffType(workingTime, staffType);
+    const overtime = isFlexibleTiming(week)
+        ? summarizeApprovedFlexibleOvertime(rows)
+        : summarizePunchOvertime(rows, week);
     const coveredDates = new Set(
         (rows || []).map((row) => String(row?.date || '').trim()).filter((date) => isDateKey(date)),
     );

@@ -26,6 +26,7 @@ function defaultDay(isWeekend) {
         endHour: '06',
         endMinute: '00',
         endMeridiem: 'PM',
+        workingHours: 9,
     };
 }
 
@@ -55,7 +56,14 @@ function sanitizeDay(raw, fallbackWeekend) {
         endHour: VALID_HOURS.has(endHour) ? endHour : base.endHour,
         endMinute: VALID_MINUTES.has(endMinute) ? endMinute : base.endMinute,
         endMeridiem,
+        workingHours: sanitizeHoursPerDay(raw.workingHours ?? raw.hoursPerDay),
     };
+}
+
+function sanitizeHoursPerDay(raw) {
+    const hours = Number(raw);
+    if (!Number.isFinite(hours) || hours <= 0) return 9;
+    return Math.round(Math.min(24, hours) * 100) / 100;
 }
 
 function sanitizeWeek(raw) {
@@ -64,6 +72,8 @@ function sanitizeWeek(raw) {
     DAY_KEYS.forEach((key, index) => {
         base[key] = sanitizeDay(raw[key], index >= 5);
     });
+    base.timingMode = String(raw.timingMode || '').toLowerCase() === 'flexible' ? 'flexible' : 'scheduled';
+    base.hoursPerDay = sanitizeHoursPerDay(raw.hoursPerDay);
     return base;
 }
 

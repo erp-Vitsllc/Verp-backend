@@ -15,9 +15,12 @@ import {
     normalizeStaffType,
     getWeekForStaffType,
     resolveStatusFromPunches,
+    isFlexibleTiming,
     weekdayKeyFromDateKey,
 } from '../utils/workingTimeHelpers.js';
+import { addDaysKey, evaluateFlexibleDay, requiredHoursForDate, workedMinutesAcross } from '../utils/flexibleAttendance.js';
 import { staffTypeMongoClause } from '../utils/workLocationHelpers.js';
+import { getDepartmentHOD } from '../utils/getDepartmentHOD.js';
 import { syncDashboardAction } from '../utils/syncDashboard.js';
 import {
     sendAttendanceLeaveRequestEmail,
@@ -702,7 +705,7 @@ export async function getAttendanceMarkRoster(req, res) {
         }
 
         const rows = await EmployeeBasic.find(filter)
-            .select('_id employeeId firstName lastName staffType profileStatus status')
+            .select('_id employeeId firstName lastName staffType primaryReportee profileStatus status')
             .sort({ firstName: 1, lastName: 1 })
             .lean()
             .maxTimeMS(8000);
@@ -723,6 +726,7 @@ export async function getAttendanceMarkRoster(req, res) {
                 lastName: e.lastName || '',
                 name: [e.firstName, e.lastName].filter(Boolean).join(' ').trim(),
                 staffType: normalizeStaffType(e.staffType),
+                primaryReportee: e.primaryReportee ? String(e.primaryReportee) : '',
                 profileStatus: e.profileStatus || 'active',
                 status: e.status || '',
             }));
@@ -1106,6 +1110,7 @@ export async function markAttendance(req, res) {
                     $unset: {
                         checkInLocation: 1,
                         checkOutLocation: 1,
+                        ...(finalStatusKey === 'compoff_leave' ? {} : { compOff: 1 }),
                     },
                 },
                 { upsert: true, new: true, setDefaultsOnInsert: true },
@@ -1139,6 +1144,24 @@ function presentFromOpenPunch(record, todayKey) {
         statusKey: 'on_office',
         statusLabel: 'Present',
     };
+}
+
+async function openFlexibleSession(employee, todayKey, todayRecord) {
+    const workingTime = await loadWorkingTimeDoc();
+    const week = getWeekForStaffType(workingTime, normalizeStaffType(employee?.staffType));
+    if (!isFlexibleTiming(week)) return { todayRecord, openFlexiblePunch: false };
+    const open = await Attendance.findOne({
+        employeeMongoId: String(employee._id),
+        date: { $gte: addDaysKey(todayKey, -7), $lte: todayKey },
+        timeIn: { $gt: '' },
+        $or: [{ timeOut: '' }, { timeOut: null }],
+    })
+        .sort({ date: -1 })
+        .lean();
+    if (!open || !String(open.timeIn || '').trim() || String(open.timeOut || '').trim()) {
+        return { todayRecord, openFlexiblePunch: false };
+    }
+    return { todayRecord: open, openFlexiblePunch: true };
 }
 
 export async function getMyAttendanceMonth(req, res) {
@@ -1223,7 +1246,8 @@ export async function getMyAttendanceMonth(req, res) {
         };
 
         if (gate.attendanceLocked || !gate.requestedOpen) {
-            const todayRecord = await loadTodayPunch();
+            const loadedToday = await loadTodayPunch();
+            const session = await openFlexibleSession(employee, todayKey, loadedToday);
             const locked = Boolean(gate.attendanceLocked);
             return res.status(200).json({
                 ...(locked ? salaryLockPayload(gate) : {
@@ -1242,8 +1266,9 @@ export async function getMyAttendanceMonth(req, res) {
                 contactGate,
                 offWeekdays: [],
                 workingTime: { site: {}, office: {}, extra: {} },
-                records: todayRecord ? [todayRecord] : [],
-                todayRecord,
+                records: session.todayRecord ? [session.todayRecord] : [],
+                todayRecord: session.todayRecord,
+                openFlexiblePunch: session.openFlexiblePunch,
             });
         }
 
@@ -1297,7 +1322,8 @@ export async function getMyAttendanceMonth(req, res) {
         }
         const scheduleWeek = getWeekForStaffType(workingTime, staffType);
         const offWeekdays = getOffWeekdayKeys(scheduleWeek);
-        const todayRecord = presentFromOpenPunch(bestDayRecord(mergedRecords, todayKey), todayKey);
+        const loadedToday = presentFromOpenPunch(bestDayRecord(mergedRecords, todayKey), todayKey);
+        const session = await openFlexibleSession(employee, todayKey, loadedToday);
 
         return res.status(200).json({
             message: 'Attendance fetched successfully',
@@ -1319,7 +1345,8 @@ export async function getMyAttendanceMonth(req, res) {
                 extra: workingTime.extra || {},
             },
             records: mergedRecords,
-            todayRecord,
+            todayRecord: session.todayRecord,
+            openFlexiblePunch: session.openFlexiblePunch,
         });
     } catch (error) {
         console.error('[getMyAttendanceMonth]', error);
@@ -1902,7 +1929,7 @@ export async function checkInMyAttendance(req, res) {
             dayRows.find((row) => String(row.employeeMongoId) === employeeMongoId) || existingPunch;
 
         // Punch-in vs Flowchart HR Working Time (15-minute grace).
-        // On time is Present. Only a punch after the grace window is Late Arrival.
+        // Flexible groups ignore the clock and keep the session open until checkout.
         let statusKey = 'on_office';
         let statusLabel = 'Present';
         let reason = '';
@@ -1910,15 +1937,34 @@ export async function checkInMyAttendance(req, res) {
             const staffType = normalizeStaffType(employee.staffType);
             const workingTime = await loadWorkingTimeDoc();
             const week = getWeekForStaffType(workingTime, staffType);
-            const { startMinutes, isOffDay } = getScheduledPunchMinutes(week, date);
-            const actualMinutes = clockTimeToMinutes(timeIn);
-            if (!isOffDay && startMinutes != null && actualMinutes != null) {
-                const graceLimit = startMinutes + 15;
-                if (actualMinutes > graceLimit) {
-                    const lateMinutes = actualMinutes - graceLimit;
-                    statusKey = 'late_arrived';
-                    statusLabel = 'Late Arrival';
-                    reason = `${lateMinutes} minute${lateMinutes === 1 ? '' : 's'} late`;
+            if (isFlexibleTiming(week)) {
+                const openFrom = addDaysKey(date, -7);
+                const open = await Attendance.findOne({
+                    employeeMongoId,
+                    date: { $gte: openFrom, $lte: date },
+                    timeIn: { $gt: '' },
+                    $or: [{ timeOut: '' }, { timeOut: null }],
+                })
+                    .sort({ date: -1 })
+                    .lean();
+                if (open && String(open.timeIn || '').trim() && !String(open.timeOut || '').trim()) {
+                    return res.status(400).json({
+                        message: 'Check out the open check-in before checking in again.',
+                        date: open.date,
+                        timeIn: open.timeIn,
+                    });
+                }
+            } else {
+                const { startMinutes, isOffDay } = getScheduledPunchMinutes(week, date);
+                const actualMinutes = clockTimeToMinutes(timeIn);
+                if (!isOffDay && startMinutes != null && actualMinutes != null) {
+                    const graceLimit = startMinutes + 15;
+                    if (actualMinutes > graceLimit) {
+                        const lateMinutes = actualMinutes - graceLimit;
+                        statusKey = 'late_arrived';
+                        statusLabel = 'Late Arrival';
+                        reason = `${lateMinutes} minute${lateMinutes === 1 ? '' : 's'} late`;
+                    }
                 }
             }
         } catch (scheduleErr) {
@@ -2180,24 +2226,49 @@ export async function checkOutMyAttendance(req, res) {
         const { employee } = resolved;
         const date = getDubaiDateKey();
         const timeOut = getDubaiClockTime();
+        const staffType = normalizeStaffType(employee.staffType);
+        const workingTime = await loadWorkingTimeDoc();
+        const week = getWeekForStaffType(workingTime, staffType);
+        const flexible = isFlexibleTiming(week);
 
-        const dayRows = await Attendance.find({
-            date,
-            ...employeeAttendanceMatch(employee),
-        });
-        const existing =
-            dayRows.find((row) => punchTimeSet(row.timeIn) && !punchTimeSet(row.timeOut)) ||
-            dayRows.find((row) => punchTimeSet(row.timeIn)) ||
-            null;
-        if (!existing?.timeIn) {
-            if (await rejectIfNotSalaryEnrolled(res, employee)) return;
-            return res.status(400).json({ message: 'Check in first before checking out.' });
-        }
-        if (punchTimeSet(existing.timeOut)) {
-            return res.status(400).json({
-                message: 'Already checked out for today.',
-                record: existing,
+        let existing;
+        if (flexible) {
+            const openFrom = addDaysKey(date, -7);
+            existing = await Attendance.findOne({
+                employeeMongoId: String(employee._id),
+                date: { $gte: openFrom, $lte: date },
+                timeIn: { $gt: '' },
+                $or: [{ timeOut: '' }, { timeOut: null }],
+            }).sort({ date: -1 });
+            if (!existing?.timeIn) {
+                if (await rejectIfNotSalaryEnrolled(res, employee)) return;
+                return res.status(400).json({ message: 'Check in first before checking out.' });
+            }
+            if (punchTimeSet(existing.timeOut)) {
+                return res.status(400).json({
+                    message: 'Already checked out.',
+                    record: existing,
+                });
+            }
+        } else {
+            const dayRows = await Attendance.find({
+                date,
+                ...employeeAttendanceMatch(employee),
             });
+            existing =
+                dayRows.find((row) => punchTimeSet(row.timeIn) && !punchTimeSet(row.timeOut)) ||
+                dayRows.find((row) => punchTimeSet(row.timeIn)) ||
+                null;
+            if (!existing?.timeIn) {
+                if (await rejectIfNotSalaryEnrolled(res, employee)) return;
+                return res.status(400).json({ message: 'Check in first before checking out.' });
+            }
+            if (punchTimeSet(existing.timeOut)) {
+                return res.status(400).json({
+                    message: 'Already checked out for today.',
+                    record: existing,
+                });
+            }
         }
 
         existing.timeOut = timeOut;
@@ -2222,6 +2293,42 @@ export async function checkOutMyAttendance(req, res) {
             });
         }
         existing.checkOutLocation = checkOutLocation;
+
+        if (flexible) {
+            existing.timeOut = timeOut;
+            existing.timeOutDate = date !== existing.date ? date : '';
+            const result = evaluateFlexibleDay({
+                workedMinutes: workedMinutesAcross({
+                    date: existing.date,
+                    timeIn: existing.timeIn,
+                    timeOut,
+                    timeOutDate: existing.timeOutDate,
+                }),
+                requiredHours: requiredHoursForDate(week, existing.date),
+            });
+            existing.statusKey = result.statusKey;
+            existing.statusLabel = result.statusLabel;
+            existing.reason = result.reason;
+            existing.flexibleWorkedHours = result.workedHours;
+            existing.flexibleRequiredHours = result.requiredHours;
+            existing.flexibleOtHours = result.otHours;
+            existing.flexibleOtStatus = '';
+            existing.flexibleOtApprovedHours = 0;
+            existing.flexibleOtReason = '';
+            existing.approvalStatus = approvalStatusForMark(existing.statusKey);
+            await existing.save();
+            try {
+                await syncPunchMapTargets(existing);
+            } catch (mapErr) {
+                console.error('[checkOutMyAttendance] punch map sync failed:', mapErr);
+            }
+            return res.status(200).json({
+                message: 'Checked out successfully',
+                date: existing.date,
+                timeOut,
+                record: existing,
+            });
+        }
 
         const wasLate = existing.statusKey === 'late_arrived';
         const lateReason = wasLate ? String(existing.reason || '').trim() : '';
@@ -2434,6 +2541,7 @@ export async function markTeamAttendance(req, res) {
                     $unset: {
                         checkInLocation: 1,
                         checkOutLocation: 1,
+                        ...(finalStatusKey === 'compoff_leave' ? {} : { compOff: 1 }),
                     },
                 },
                 { upsert: true, new: true, setDefaultsOnInsert: true },
@@ -2495,12 +2603,47 @@ export async function getAttendancePendingInbox(req, res) {
             assigneeIds: [self._id],
             kinds: ['salary'],
         });
+        const hr = await getDepartmentHOD('hr').catch(() => null);
+        const viewerIsHr = hr && String(hr._id) === String(self._id);
+        const otRows = viewerIsHr
+            ? await Attendance.find({ flexibleOtStatus: 'pending' })
+                .sort({ updatedAt: -1 })
+                .limit(100)
+                .lean()
+            : [];
+        const otEmployeeIds = [...new Set((otRows || []).map((row) => String(row.employeeMongoId || '')).filter(Boolean))];
+        const otEmployees = otEmployeeIds.length
+            ? await EmployeeBasic.find({ _id: { $in: otEmployeeIds } }).select('staffType').lean()
+            : [];
+        const otStaffById = new Map((otEmployees || []).map((row) => [String(row._id), normalizeStaffType(row.staffType)]));
+        const otItems = (otRows || []).map((r) => ({
+            id: String(r._id),
+            dashboardActionId: String(r._id),
+            requestType: 'Flexible OT Request',
+            requestObjectId: String(r._id),
+            date: r.date,
+            employeeMongoId: r.employeeMongoId,
+            employeeId: r.employeeId || '',
+            subjectName: r.employeeName || 'Employee',
+            staffType: otStaffById.get(String(r.employeeMongoId)) || 'office',
+            leaveRequestKind: 'flexible_ot',
+            timeIn: r.timeIn || '',
+            timeOut: r.timeOut || '',
+            reason: r.flexibleOtReason || '',
+            flexibleOtApprovedHours: r.flexibleOtApprovedHours || 0,
+            flexibleOtHours: r.flexibleOtHours || 0,
+            flexibleWorkedHours: r.flexibleWorkedHours || 0,
+            status: 'Pending',
+            extra1: r.date,
+            extra2: `OT request ${r.date}: ${r.flexibleOtApprovedHours || 0} hr`,
+            message: `OT request for ${r.employeeName || 'employee'} on ${r.date}`,
+        }));
 
         if (!reporteeIds.length) {
             return res.status(200).json({
                 message: 'Attendance pending inbox fetched successfully',
-                count: hubItems.length,
-                items: hubItems,
+                count: hubItems.length + otItems.length,
+                items: [...hubItems, ...otItems],
             });
         }
 
@@ -2577,8 +2720,8 @@ export async function getAttendancePendingInbox(req, res) {
 
         return res.status(200).json({
             message: 'Attendance pending inbox fetched successfully',
-            count: items.length + hubItems.length,
-            items: [...hubItems, ...items],
+            count: items.length + hubItems.length + otItems.length,
+            items: [...hubItems, ...otItems, ...items],
         });
     } catch (error) {
         console.error('[getAttendancePendingInbox]', error);
@@ -3420,7 +3563,7 @@ export async function decideLeaveRequestInternal({
             overflowMap = await resolveSickOverflowStatuses(subject, extraDates, {
                 excludeGroupId: groupId,
             });
-        } else {
+        } else if (requestedKey !== 'compoff_leave') {
             const allowanceError = await checkEmployeeLeaveAllowance(subject, {
                 statusKey: requestedKey,
                 extraDates,

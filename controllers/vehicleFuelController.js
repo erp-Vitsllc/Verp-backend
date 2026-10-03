@@ -1,5 +1,6 @@
 import mongoose from 'mongoose';
 import VehicleFuelBill from '../models/VehicleFuelBill.js';
+import AssetHistory from '../models/AssetHistory.js';
 import AssetItem from '../models/AssetItem.js';
 import AssetType from '../models/AssetType.js';
 import Company from '../models/Company.js';
@@ -8,7 +9,7 @@ import { isFleetVehicleAsset } from '../utils/assetApprovalHelpers.js';
 import {
     getLocatorMonthStatsForDevice,
     getLocatorMonthStatsMap,
-    getLocatorMonthStatsByDevices,
+    loadFuelAccessGps,
     buildFuelGpsPageStats,
     formatLocatorIdleLabel,
 } from '../services/locatorSnapshotService.js';
@@ -94,6 +95,106 @@ function ownerOf(asset) {
     return 'Unassigned';
 }
 
+function isHistoricalFuelMonth(bill) {
+    if (!bill) return false;
+    if (String(bill.status || '') === 'closed') return true;
+    const key = String(bill.monthKey || '');
+    return /^\d{4}-\d{2}$/.test(key) && key < currentMonthKey();
+}
+
+function fuelBillOwner(bill, asset) {
+    const stored = String(bill?.vehicleOwner || '').trim();
+    if (stored && isHistoricalFuelMonth(bill)) return stored;
+    return ownerOf(asset);
+}
+
+function historyOwnerName(event) {
+    if (String(event?.assignedToType || '') === 'Company' && event?.assignedCompany) {
+        const company = event.assignedCompany;
+        return company?.name || company?.nickName || 'Company';
+    }
+    const emp = event?.assignedTo;
+    if (emp && typeof emp === 'object') {
+        const name = `${emp.firstName || ''} ${emp.lastName || ''}`.trim();
+        return name || emp.employeeId || '';
+    }
+    return '';
+}
+
+function monthExclusiveEnd(monthKey) {
+    const [year, month] = String(monthKey || '').split('-').map(Number);
+    if (!year || !month) return null;
+    return new Date(year, month, 1, 0, 0, 0, 0);
+}
+
+/** Who held the vehicle at the end of that month, from assignment history. */
+async function ownersAtMonthEnd(vehicleIds, monthKey) {
+    const end = monthExclusiveEnd(monthKey);
+    const ids = [...new Set((vehicleIds || []).map((id) => String(id)))].filter((id) =>
+        mongoose.Types.ObjectId.isValid(id),
+    );
+    const names = new Map();
+    if (!end || !ids.length) return names;
+    const events = await AssetHistory.find({
+        assetId: { $in: ids },
+        date: { $lt: end },
+        action: { $in: ['Assigned', 'Accepted', 'Transfer', 'Returned', 'Unassigned'] },
+    })
+        .sort({ date: 1 })
+        .select('assetId action assignedToType assignedTo assignedCompany')
+        .populate('assignedTo', 'firstName lastName employeeId')
+        .populate('assignedCompany', 'name nickName')
+        .lean();
+    for (const event of events) {
+        const id = String(event.assetId);
+        if (event.action === 'Returned' || event.action === 'Unassigned') {
+            names.set(id, '');
+            continue;
+        }
+        const name = historyOwnerName(event);
+        if (name) names.set(id, name);
+    }
+    for (const [id, name] of names) {
+        if (!name) names.delete(id);
+    }
+    return names;
+}
+
+/** Freeze a past fuel month's owner on the bill so a later return cannot rewrite it. */
+async function attachHistoricalFuelOwners(bills) {
+    const pending = (bills || []).filter(
+        (bill) => isHistoricalFuelMonth(bill) && !String(bill?.vehicleOwner || '').trim(),
+    );
+    if (!pending.length) return;
+    const byMonth = new Map();
+    for (const bill of pending) {
+        const key = String(bill.monthKey || '');
+        if (!byMonth.has(key)) byMonth.set(key, []);
+        byMonth.get(key).push(bill);
+    }
+    const writes = [];
+    for (const [monthKey, group] of byMonth) {
+        const names = await ownersAtMonthEnd(
+            group.map((bill) => bill.vehicleId),
+            monthKey,
+        );
+        for (const bill of group) {
+            const name = names.get(String(bill.vehicleId));
+            if (!name) continue;
+            bill.vehicleOwner = name;
+            writes.push({
+                updateOne: {
+                    filter: { _id: bill._id },
+                    update: { $set: { vehicleOwner: name } },
+                },
+            });
+        }
+    }
+    if (writes.length) {
+        await VehicleFuelBill.bulkWrite(writes, { ordered: false });
+    }
+}
+
 async function locatorStatsForVehicle(asset, monthKey) {
     return getLocatorMonthStatsForDevice(asset?.locatorDeviceId, monthKey);
 }
@@ -173,7 +274,7 @@ function serializeBill(bill, asset, gpsStats = null) {
         _id: entry._id,
         amount: entry.amount,
         createdAt: entry.createdAt,
-        hasAttachment: Boolean(entry.attachment?.data || entry.attachment?.name),
+        hasAttachment: Boolean(entry.hasAttachment || entry.attachment?.name || entry.attachment?.data),
         attachmentName: entry.attachment?.name || '',
         attachmentMime: entry.attachment?.mimeType || '',
     }));
@@ -199,7 +300,7 @@ function serializeBill(bill, asset, gpsStats = null) {
         vehicleName: asset?.name || '—',
         vehicleAssetNo: asset?.assetId || '—',
         plateNo: plateOf(asset) || '—',
-        vehicleOwner: ownerOf(asset),
+        vehicleOwner: fuelBillOwner(bill, asset),
         closedAt: bill.closedAt || null,
         entries,
         createdAt: bill.createdAt,
@@ -248,6 +349,20 @@ function serializeFuelVehicle(v) {
         assigned,
         fuelMonthlyLimit: resolveVehicleMonthlyLimit(v) || 0,
     };
+}
+
+function gpsStatsForAccessRow(gpsByDevice, vehicle, bill) {
+    const cached = gpsByDevice?.[String(vehicle?.locatorDeviceId || '')];
+    if (cached) return cached;
+    if (bill) {
+        const idleTimeMinutes = Number(bill.idleTimeMinutes) || 0;
+        return {
+            kmRun: Number(bill.kmRun) || 0,
+            idleTimeMinutes,
+            idleTimeSeconds: idleTimeMinutes * 60,
+        };
+    }
+    return { kmRun: 0, idleTimeMinutes: 0 };
 }
 
 function serializePendingLimitVehicle(v) {
@@ -509,20 +624,31 @@ export async function listAccessFuel(req, res) {
             ? String(req.query.monthKey).trim()
             : currentMonthKey();
 
-        await syncVehicleAccessFuelReminder().catch((err) => {
+        // Reminders are for the inbox, not this screen. Don't hold the list on them.
+        void syncVehicleAccessFuelReminder().catch((err) => {
             console.error('[VehicleFuel] access fuel reminder sync failed:', err?.message || err);
         });
 
-        const fleetVehicles = await loadFuelFleetVehicles(req);
+        const [fleetVehicles, bills, limitLog, permissionFlags] = await Promise.all([
+            loadFuelFleetVehicles(req),
+            // Bill files are large. The list only needs to know that a file exists.
+            VehicleFuelBill.find({ monthKey }).select('-entries.attachment.data').lean(),
+            VehicleAccessFuelMonthlyLimitLog.findOne({ monthKey }).select('vehicleIds vehicleCount').lean(),
+            Promise.all([
+                actorCanManageFuel(req.user),
+                actorCanDeleteFuel(req.user),
+                actorCanEditFuelEntry(req.user),
+            ]),
+        ]);
+        const [canManage, canDelete, canEditFuel] = permissionFlags;
+        await attachHistoricalFuelOwners(bills);
         const assignedVehicles = fleetVehicles.filter(isAssignedVehicleForAccessFuel);
         const fuelVehicles = [
             ...assignedVehicles,
             ...fleetVehicles.filter((vehicle) => !isAssignedVehicleForAccessFuel(vehicle)),
         ];
 
-        const bills = await VehicleFuelBill.find({ monthKey }).lean();
         const billsByVehicle = new Map(bills.map((bill) => [String(bill.vehicleId), bill]));
-        const limitLog = await VehicleAccessFuelMonthlyLimitLog.findOne({ monthKey }).select('vehicleIds vehicleCount').lean();
         const pendingLimitVehicles = pendingAccessFuelLimitVehicles({
             assignedVehicles: assignedVehiclesForLimitLog(assignedVehicles),
             billedVehicleIds: assignedVehicles
@@ -536,18 +662,16 @@ export async function listAccessFuel(req, res) {
         let totalAmount = 0;
         let exceedCount = 0;
 
-        const gpsByDevice = await getLocatorMonthStatsByDevices(
+        const gps = await loadFuelAccessGps(
             fleetVehicles.map((vehicle) => vehicle.locatorDeviceId),
             monthKey,
+            { wait: String(req.query.waitGps || '') === '1' },
         );
 
         for (const vehicle of fleetVehicles) {
             const assigned = isAssignedVehicleForAccessFuel(vehicle);
             const bill = billsByVehicle.get(String(vehicle._id));
-            const gpsStats = gpsByDevice[String(vehicle.locatorDeviceId || '')] || {
-                kmRun: 0,
-                idleTimeMinutes: 0,
-            };
+            const gpsStats = gpsStatsForAccessRow(gps.byDevice, vehicle, bill);
             if (bill) {
                 const row = serializeBill(bill, vehicle, gpsStats);
                 added.push(row);
@@ -608,13 +732,14 @@ export async function listAccessFuel(req, res) {
                 totalAmount,
                 exceedCount,
             },
-            canManage: await actorCanManageFuel(req.user),
-            canDelete: await actorCanDeleteFuel(req.user),
+            canManage,
+            canDelete,
             canCreateMonthlyLimit: monthlyLimitGate.canCreate,
             monthlyLimitDisabledReason: monthlyLimitGate.reason,
             canCloseMonthlyFuel: monthlyCloseGate.canClose,
             closeMonthlyDisabledReason: monthlyCloseGate.reason,
-            canEditFuel: await actorCanEditFuelEntry(req.user),
+            canEditFuel,
+            gpsPending: Boolean(gps.gpsPending),
         });
     } catch (error) {
         return res.status(500).json({ message: error.message || 'Failed to load access fuel.' });
@@ -806,6 +931,7 @@ export async function listVehicleFuelBills(req, res) {
         const bills = await VehicleFuelBill.find({ vehicleId })
             .sort({ monthKey: -1, createdAt: -1 })
             .lean();
+        await attachHistoricalFuelOwners(bills);
 
         const gpsByMonth = await getLocatorMonthStatsMap(
             asset?.locatorDeviceId,
@@ -836,6 +962,7 @@ export async function lookupVehicleFuel(req, res) {
         const asset = await loadFleetVehicle(vehicleId);
         if (!asset) return res.status(404).json({ message: 'Vehicle not found.' });
         const bill = await VehicleFuelBill.findOne({ vehicleId, monthKey }).lean();
+        if (bill) await attachHistoricalFuelOwners([bill]);
         const gpsStats = await locatorStatsForVehicle(asset, monthKey);
         return res.json({
             data: bill ? serializeBill(bill, asset, gpsStats) : null,
@@ -895,6 +1022,7 @@ export async function addVehicleFuel(req, res) {
             status: 'open',
             amountUsed: amount,
             monthlyLimit,
+            vehicleOwner: ownerOf(asset),
             kmRun: stats.kmRun,
             idleTimeMinutes: stats.idleTimeMinutes,
             entries: [

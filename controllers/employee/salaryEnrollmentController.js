@@ -7,6 +7,7 @@ import {
     isCompanyShellEmployee,
     REAL_EMPLOYEE_MONGO_FILTER,
 } from '../../utils/attendanceEmployeeFilters.js';
+import { unsettledCompOffMessage } from '../../utils/compOffSettlement.js';
 import { resolveNewSalaryEnrollmentFromMonth } from '../../utils/salaryEnrollmentStartMonth.js';
 import { normalizeStaffTypeKey } from '../../utils/workLocationHelpers.js';
 import {
@@ -221,6 +222,11 @@ export async function createSalaryEnrollment(req, res) {
         const existing = await SalaryEnrollment.findOne({ employeeId }).lean();
         if (existing) {
             return res.status(409).json({ message: 'This employee is already enrolled.' });
+        }
+
+        const compOffBlock = await unsettledCompOffMessage([employeeId]);
+        if (compOffBlock) {
+            return res.status(400).json({ message: compOffBlock });
         }
 
         const policy = await policyCopyForEmployee(employee, salaryDay);
