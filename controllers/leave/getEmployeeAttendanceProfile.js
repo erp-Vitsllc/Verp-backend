@@ -8,6 +8,8 @@ import Fine from '../../models/Fine.js';
 import AssetItem from '../../models/AssetItem.js';
 import EmployeeSalary from '../../models/EmployeeSalary.js';
 import UtilityBillPayment from '../../models/UtilityBillPayment.js';
+import EmployeeHubRequest from '../../models/EmployeeHubRequest.js';
+import { hubRequestDisplayLabel } from '../../utils/employeeHubRequestTypes.js';
 import { isCompanyShellEmployee } from '../../utils/attendanceEmployeeFilters.js';
 import { resolveEmployeeFinePayableAmount } from '../../utils/finePayableAmount.js';
 import { normalizeStaffTypeKey } from '../../utils/workLocationHelpers.js';
@@ -509,6 +511,27 @@ function formatMonthYear(dateKey) {
         year: 'numeric',
         timeZone: 'UTC',
     });
+}
+
+function optionalRuleNumber(value) {
+    if (value == null || value === '') return null;
+    const number = Number(value);
+    return Number.isFinite(number) ? number : null;
+}
+
+function publicDeductionRule(row) {
+    if (!row || typeof row !== 'object') return null;
+    const minutes = optionalRuleNumber(row.minutes);
+    const events = optionalRuleNumber(row.events);
+    const deduct = String(row.deduct || '').trim().toLowerCase();
+    const title = String(row.title || '').trim();
+    if (!title && !deduct && minutes == null && events == null) return null;
+    return {
+        title,
+        minutes,
+        events: events != null && events > 0 ? events : null,
+        deduct,
+    };
 }
 
 function daysAgoLabel(fromKey, todayKey) {
@@ -1218,6 +1241,25 @@ export async function getEmployeeAttendanceProfile(req, res) {
                 daysAgo: daysAgoCount(createdKey, todayKey),
             });
         }
+        const workTaskRows = await EmployeeHubRequest.find({
+            assignedTo: employeeMongoId,
+            status: 'Pending',
+        })
+            .sort({ createdAt: -1 })
+            .limit(30)
+            .select('kind assetType description requesterName createdAt')
+            .lean();
+        const workTasks = (workTaskRows || []).map((row) => {
+            const createdKey = toDateKey(row.createdAt);
+            return {
+                id: String(row._id),
+                title: hubRequestDisplayLabel(row.kind, row.assetType),
+                subtitle: String(row.description || '').trim(),
+                requesterName: String(row.requesterName || '').trim(),
+                badge: daysAgoLabel(createdKey, todayKey),
+                kind: row.kind || '',
+            };
+        });
         const rawPhoto = employee.profilePicture || '';
         const profilePicture = rawPhoto.startsWith('data:')
             ? rawPhoto
@@ -1316,6 +1358,10 @@ export async function getEmployeeAttendanceProfile(req, res) {
                 authorizedDeductionDays: entitlements.multipliers.authorized,
                 unauthorizedDeductionDays: entitlements.multipliers.unauthorized,
                 leaveSalaryWorkingDays: entitlements.airTicketRequiredDays,
+                lateRule: publicDeductionRule(
+                    (policy?.lateInRules || [])[0] || (policy?.lateOutRules || [])[0],
+                ),
+                extraLateRules: (policy?.extraLateRules || []).map(publicDeductionRule).filter(Boolean),
             },
             events,
             financial: {
@@ -1347,7 +1393,8 @@ export async function getEmployeeAttendanceProfile(req, res) {
             requests: {
                 pending: pendingHrRequests,
                 hrPendingCount: pendingHrRequests.length,
-                workTaskPendingCount: 0,
+                workTasks,
+                workTaskPendingCount: workTasks.length,
                 workflowActiveIndex: pendingHrRequests.length ? 1 : 3,
                 taskAging: taskAgingBuckets(pendingHrRequests),
             },
