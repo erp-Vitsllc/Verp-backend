@@ -20,6 +20,10 @@ import {
     REAL_EMPLOYEE_MONGO_FILTER,
 } from './attendanceEmployeeFilters.js';
 import { loadAttendanceOpenStartByMongoId } from './leaveSalaryVisibility.js';
+import {
+    coveredEmployeeIdsOnDate,
+    loadLeaveCoverIndex,
+} from './attendanceLeaveDayCover.js';
 
 function formatDateKey({ year, month, day }) {
     return `${year}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
@@ -146,6 +150,18 @@ export async function processAttendanceDailyRoutine() {
         const leaveCoveredEmployeeIds = new Set(
             (coveringLeave || []).map((row) => String(row.employeeMongoId || '')).filter(Boolean),
         );
+        try {
+            const leaveCover = await loadLeaveCoverIndex({
+                from: yesterdayKey,
+                to: yesterdayKey,
+                employees: activeEmployees,
+            });
+            for (const id of coveredEmployeeIdsOnDate(leaveCover, yesterdayKey)) {
+                leaveCoveredEmployeeIds.add(id);
+            }
+        } catch (coverErr) {
+            console.error('[AttendanceDailyRoutine] leave cover lookup failed:', coverErr);
+        }
 
         const isHoliday = Boolean(holidayDoc);
         const byEmp = new Map(

@@ -178,40 +178,71 @@ function weekStartKey(dateKey) {
     return addDaysToDateKey(dateKey, -dt.getUTCDay());
 }
 
-function weekTrackLabel(fromKey, toKey) {
-    const fromDay = Number(String(fromKey).slice(8));
-    const toDay = Number(String(toKey).slice(8));
-    const fromMonth = MONTH_LABELS[Number(String(fromKey).slice(5, 7)) - 1] || '';
-    const toMonth = MONTH_LABELS[Number(String(toKey).slice(5, 7)) - 1] || '';
-    if (fromKey === toKey) return `${fromDay} ${fromMonth}`;
-    if (fromKey.slice(0, 7) === toKey.slice(0, 7)) return `${fromDay}–${toDay}`;
-    return `${fromDay} ${fromMonth}–${toDay} ${toMonth}`;
+const WEEKDAY_SHORT = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+
+function weekdayIndex(dateKey) {
+    const [year, month, day] = String(dateKey).split('-').map(Number);
+    return new Date(Date.UTC(year, month - 1, day, 12)).getUTCDay();
 }
 
-function weekPeriodRows(monthKey, todayKey) {
-    const [year, month] = String(monthKey).split('-').map(Number);
-    if (!year || !month) return [];
-    const monthStart = `${year}-${String(month).padStart(2, '0')}-01`;
-    const monthEnd = lastDateKeyOfMonth(year, month);
-    const end = monthEnd < todayKey ? monthEnd : todayKey;
-    if (monthStart > end) return [];
+function formatShortDay(dateKey) {
+    const day = Number(String(dateKey).slice(8));
+    const monthName = MONTH_LABELS[Number(String(dateKey).slice(5, 7)) - 1] || '';
+    return `${day} ${monthName}`;
+}
+
+function currentWeekRangeLabel(fromKey, toKey) {
+    const fromYear = String(fromKey).slice(0, 4);
+    const toYear = String(toKey).slice(0, 4);
+    if (fromKey === toKey) return `${formatShortDay(fromKey)} ${toYear}`;
+    if (fromKey.slice(0, 7) === toKey.slice(0, 7)) {
+        return `${Number(fromKey.slice(8))}–${formatShortDay(toKey)} ${toYear}`;
+    }
+    if (fromYear === toYear) return `${formatShortDay(fromKey)} – ${formatShortDay(toKey)}`;
+    return `${formatShortDay(fromKey)} ${fromYear} – ${formatShortDay(toKey)} ${toYear}`;
+}
+
+function currentWeekDayRows(todayKey) {
+    const start = weekStartKey(todayKey);
     const rows = [];
-    let cursor = weekStartKey(monthStart);
-    while (cursor <= end && rows.length < 8) {
-        const weekEnd = addDaysToDateKey(cursor, 6);
-        const sliceStart = cursor < monthStart ? monthStart : cursor;
-        const sliceEnd = weekEnd > end ? end : weekEnd;
-        if (sliceStart <= sliceEnd) {
-            rows.push({
-                periodKey: `${sliceStart}|${sliceEnd}`,
-                label: weekTrackLabel(sliceStart, sliceEnd),
-                from: sliceStart,
-                to: sliceEnd,
-            });
-        }
-        cursor = addDaysToDateKey(cursor, 7);
+    let cursor = start;
+    while (cursor <= todayKey && rows.length < 7) {
+        const dayNum = Number(cursor.slice(8));
+        const weekday = WEEKDAY_SHORT[weekdayIndex(cursor)] || '';
+        rows.push({
+            periodKey: cursor,
+            label: `${weekday} ${dayNum}`,
+            from: cursor,
+            to: cursor,
+        });
+        cursor = addDaysToDateKey(cursor, 1);
     }
     return rows;
+}
+
+function monthFourWeekRows(monthKey, todayKey) {
+    const [year, month] = String(monthKey).split('-').map(Number);
+    if (!year || !month) return [];
+    const prefix = `${year}-${String(month).padStart(2, '0')}`;
+    const lastDay = Number(lastDateKeyOfMonth(year, month).slice(8));
+    const spans = [
+        [1, 7],
+        [8, 14],
+        [15, 21],
+        [22, lastDay],
+    ];
+    return spans.map(([startDay, endDay], index) => {
+        const from = `${prefix}-${String(startDay).padStart(2, '0')}`;
+        const naturalTo = `${prefix}-${String(Math.min(endDay, lastDay)).padStart(2, '0')}`;
+        const to = naturalTo < todayKey ? naturalTo : todayKey;
+        const open = from <= to;
+        return {
+            periodKey: `${prefix}-W${index + 1}`,
+            label: `Week ${index + 1}`,
+            from: open ? from : '',
+            to: open ? to : '',
+        };
+    });
 }
 
 function leaveTypeLabel(record) {
@@ -1583,9 +1614,11 @@ export async function removeLeaveRequest(req, res) {
 }
 
 /**
- * GET /api/Leave/team-track?year=YYYY|all
- * Leave-day totals for the team (approved leave marks).
- * year=all: rolling 12 months ending at the current month (e.g. Sep 2025–Aug 2026).
+ * GET /api/Leave/team-track?year=YYYY|all&bucket=week|month&month=YYYY-MM
+ * Leave-day totals for the team (approved leave marks), through today.
+ * bucket=week: Sunday of the current week through today, one bar per day.
+ * bucket=month with month: that month as Week 1–4 (1–7, 8–14, 15–21, 22–end).
+ * year=all: rolling 12 months ending at the current month.
  * year=YYYY: January–December of that year.
  */
 export async function getLeaveTeamTrack(req, res) {
@@ -1662,12 +1695,20 @@ export async function getLeaveTeamTrack(req, res) {
         const rolling = isAll ? rollingTrackWindow(dubai) : null;
         const rangeFrom = isAll ? rolling.from : `${year}-01-01`;
         const rangeTo = isAll ? rolling.to : `${year}-12-31`;
-        const from = monthKey ? `${monthKey}-01` : rangeFrom;
-        const monthEnd = monthKey
-            ? lastDateKeyOfMonth(Number(monthKey.slice(0, 4)), Number(monthKey.slice(5, 7)))
-            : rangeTo;
-        const cappedEnd = monthEnd < todayKey ? monthEnd : todayKey;
-        const to = cappedEnd < rangeTo ? cappedEnd : rangeTo;
+        const weekFrom = weekStartKey(todayKey);
+        let from;
+        let to;
+        if (bucket === 'week') {
+            from = weekFrom;
+            to = todayKey;
+        } else {
+            from = monthKey ? `${monthKey}-01` : rangeFrom;
+            const monthEnd = monthKey
+                ? lastDateKeyOfMonth(Number(monthKey.slice(0, 4)), Number(monthKey.slice(5, 7)))
+                : rangeTo;
+            const cappedEnd = monthEnd < todayKey ? monthEnd : todayKey;
+            to = cappedEnd < rangeTo ? cappedEnd : rangeTo;
+        }
         const hasTrackRange = from <= to;
 
         const leaveRows =
@@ -1690,14 +1731,9 @@ export async function getLeaveTeamTrack(req, res) {
         const itemsByPeriod = new Map();
         const countedDays = new Set();
         const periodRows = bucket === 'week'
-            ? weekPeriodRows(monthKey || todayKey.slice(0, 7), todayKey)
+            ? currentWeekDayRows(todayKey)
             : monthKey
-              ? [{
-                    label: MONTH_LABELS[Number(monthKey.slice(5, 7)) - 1] || monthKey,
-                    periodKey: monthKey,
-                    from: `${monthKey}-01`,
-                    to,
-                }]
+              ? monthFourWeekRows(monthKey, todayKey)
               : (isAll
                     ? monthPeriodRows(rolling.startYear, rolling.startMonth, rolling.endYear, rolling.endMonth)
                     : MONTH_LABELS.map((label, index) => ({
@@ -1707,8 +1743,12 @@ export async function getLeaveTeamTrack(req, res) {
               ).filter((period) => period.periodKey <= todayKey.slice(0, 7));
 
         const periodForDate = (dateKey) => {
-            if (bucket === 'week') {
-                return periodRows.find((period) => dateKey >= period.from && dateKey <= period.to) || null;
+            if (bucket === 'week' || monthKey) {
+                return (
+                    periodRows.find(
+                        (period) => period.from && dateKey >= period.from && dateKey <= period.to,
+                    ) || null
+                );
             }
             const key = dateKey.slice(0, 7);
             return periodRows.find((period) => period.periodKey === key) || null;
@@ -1824,7 +1864,7 @@ export async function getLeaveTeamTrack(req, res) {
             today: todayKey,
             bucket,
             rangeLabel: bucket === 'week'
-                ? (monthKey || todayKey.slice(0, 7))
+                ? currentWeekRangeLabel(weekFrom, todayKey)
                 : isAll
                   ? rolling.rangeLabel
                   : String(year),

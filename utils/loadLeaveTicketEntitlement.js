@@ -31,6 +31,7 @@ import {
     uniqueConsumingCycles,
     overtimeHoursToDays,
 } from './salaryHistoricalCalculations.js';
+import { applyEnrollmentMaskToLiveLeave } from './attendanceLeaveDayCover.js';
 import {
     remainingLeaveTicketBalances,
 } from './salarySlipLeaveTicket.js';
@@ -378,15 +379,22 @@ async function loadLiveAttendanceEligibility({ employee, from, to, staffType }) 
     const coveredDates = new Set(
         (rows || []).map((row) => String(row?.date || '').trim()).filter((date) => isDateKey(date)),
     );
+    const masked = await applyEnrollmentMaskToLiveLeave({
+        employeeId: employee.employeeId,
+        from: periodStart,
+        to: periodEnd,
+        leaveRecords: live.leaveRecords,
+        coveredDates,
+    });
     const implicitLeave = implicitUnauthorizedLeaveForSchedule({
         scheduledDates: stats.workingDateKeys,
-        coveredDates,
+        coveredDates: masked.coveredDates,
         throughDate: periodEnd,
     });
     return {
         workingDays: live.workingDays,
         leaveRecords: liveLeaveRecordsInProcessingWindow(
-            [...live.leaveRecords, ...implicitLeave],
+            [...masked.leaveRecords, ...implicitLeave],
             periodStart,
             periodEnd,
         ),
@@ -545,7 +553,17 @@ async function loadAttendanceLeaveInRange({ employee, from, to }) {
     })
         .select('date statusKey leaveRequestStatus requestedStatusKey reason')
         .lean();
-    return summarizeAttendanceEligibility(rows, { throughDate: to }).leaveRecords || [];
+    const liveRecords = summarizeAttendanceEligibility(rows, { throughDate: to }).leaveRecords || [];
+    const masked = await applyEnrollmentMaskToLiveLeave({
+        employeeId: employee.employeeId,
+        from,
+        to,
+        leaveRecords: liveRecords,
+        coveredDates: new Set(
+            (rows || []).map((row) => String(row?.date || '').trim()).filter((date) => isDateKey(date)),
+        ),
+    });
+    return masked.leaveRecords;
 }
 
 function countLiveMarksSince(records = [], fromKey) {

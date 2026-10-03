@@ -18,6 +18,7 @@ import {
     WEEKDAY_KEYS,
 } from '../../utils/workingTimeHelpers.js';
 import { summarizeApprovedFlexibleOvertime } from '../../utils/flexibleAttendance.js';
+import { applyEnrollmentMaskToLiveLeave } from '../../utils/attendanceLeaveDayCover.js';
 import { listActiveWorkLocations, normalizeStaffTypeKey } from '../../utils/workLocationHelpers.js';
 import { getCalendarPartsInTz, getScheduledEmailTimeZone } from '../../utils/scheduleDailyAtMidnight.js';
 import { hasPermission, isUserAdministrator } from '../../services/permissionService.js';
@@ -407,15 +408,22 @@ async function loadLiveAttendanceEligibility({ employee, from, to, staffType }) 
     const coveredDates = new Set(
         (rows || []).map((row) => String(row?.date || '').trim()).filter((date) => isDateKey(date)),
     );
+    const masked = await applyEnrollmentMaskToLiveLeave({
+        employeeId: employee.employeeId,
+        from: periodStart,
+        to: periodEnd,
+        leaveRecords: live.leaveRecords,
+        coveredDates,
+    });
     const implicitLeave = implicitUnauthorizedLeaveForSchedule({
         scheduledDates: stats.workingDateKeys,
-        coveredDates,
+        coveredDates: masked.coveredDates,
         throughDate: periodEnd,
     });
     return {
         workingDays: live.workingDays,
         leaveRecords: liveLeaveRecordsInProcessingWindow(
-            [...live.leaveRecords, ...implicitLeave],
+            [...masked.leaveRecords, ...implicitLeave],
             periodStart,
             periodEnd,
         ),

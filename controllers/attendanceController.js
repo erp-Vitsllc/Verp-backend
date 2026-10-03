@@ -78,9 +78,13 @@ import {
     applyOverlayCountsToBalances,
     lastOverlayAnnualLeaveDate,
     loadHistoricalLeaveProfile,
-    mergeHistoricalCalendarRecords,
     overlayHistoricalLeave,
 } from '../utils/historicalLeaveAttendanceOverlay.js';
+import {
+    applyLeaveCoverIndex,
+    enrollmentCoverIndexForEmployee,
+    loadLeaveCoverIndex,
+} from '../utils/attendanceLeaveDayCover.js';
 import { loadCurrentLeaveCycleEligibility, loadEmployeeSalaryWorkingDays } from '../utils/loadLeaveTicketEntitlement.js';
 
 const LEAVE_REQUEST_STATUS_KEYS = new Set([
@@ -758,12 +762,18 @@ export async function getAttendanceByDate(req, res) {
             return res.status(400).json({ message: 'Valid date (yyyy-MM-dd) is required.' });
         }
 
-        const records = await Attendance.find({
-            date,
-            employeeName: { $not: /\(company\)\s*$/i },
-        })
-            .sort({ employeeName: 1 })
-            .lean();
+        const [storedRecords, coverIndex] = await Promise.all([
+            Attendance.find({
+                date,
+                employeeName: { $not: /\(company\)\s*$/i },
+            })
+                .sort({ employeeName: 1 })
+                .lean(),
+            loadLeaveCoverIndex({ from: date, to: date }),
+        ]);
+        const records = applyLeaveCoverIndex(storedRecords, coverIndex).filter(
+            (row) => String(row?.date || '') === date,
+        );
         return res.status(200).json({
             message: 'Attendance fetched successfully',
             date,
@@ -824,16 +834,22 @@ export async function getAttendanceCalendarSummary(req, res) {
             monthKey = `${year}-${String(monthNum).padStart(2, '0')}`;
         }
 
-        const [employeeRows, records, workingTime] = await Promise.all([
+        const [employeeRows, storedRecords, workingTime] = await Promise.all([
             EmployeeBasic.find({
                 profileStatus: 'active',
                 ...REAL_EMPLOYEE_MONGO_FILTER,
             })
-                .select('_id staffType firstName lastName')
+                .select('_id employeeId staffType firstName lastName')
                 .lean(),
             Attendance.find({ date: { $gte: from, $lte: to } }).lean(),
             loadWorkingTimeDoc(),
         ]);
+        const coverIndex = await loadLeaveCoverIndex({
+            from,
+            to,
+            employees: (employeeRows || []).filter((emp) => !isCompanyShellEmployee(emp)),
+        });
+        const records = applyLeaveCoverIndex(storedRecords, coverIndex);
 
         const idsByGroup = new Map();
         for (const emp of employeeRows || []) {
@@ -1272,22 +1288,16 @@ export async function getMyAttendanceMonth(req, res) {
             });
         }
 
-        const [rawRecords, workingTime, historicalProfile] = await Promise.all([
+        const [rawRecords, workingTime, coverIndex] = await Promise.all([
             Attendance.find({
                 ...attendanceMatch,
                 date: { $gte: from, $lte: to },
             }).lean(),
             loadWorkingTimeDoc(),
-            loadHistoricalLeaveProfile(employee.employeeId),
+            loadLeaveCoverIndex({ from, to, employees: [employee] }),
         ]);
         const records = preferPunchedRows(rawRecords);
-
-        const overlay = overlayHistoricalLeave(historicalProfile, {
-            from,
-            to,
-            includeCountOnly: false,
-        });
-        const mergedRecords = mergeHistoricalCalendarRecords(records, overlay.calendarRecords).map((row) =>
+        const mergedRecords = applyLeaveCoverIndex(records, coverIndex).map((row) =>
             presentFromOpenPunch(row, todayKey),
         );
         const promoteIds = mergedRecords
@@ -1707,6 +1717,24 @@ export async function getMyAttendanceYearSummary(req, res) {
             includeCountOnly: true,
         });
         Object.assign(counts, applyOverlayCounts(counts, overlay.extraCounts));
+        const yearCover = enrollmentCoverIndexForEmployee(
+            historicalProfile,
+            self,
+            attendanceFrom,
+            to,
+        );
+        const paintedDetails = applyLeaveCoverIndex(detailRows, yearCover, { fillMissing: false });
+        let movedOffUnauthorized = 0;
+        for (const row of detailRows || []) {
+            const date = String(row?.date || '').trim();
+            if (String(row?.statusKey || '') !== 'unauthorized_leave' || !date) continue;
+            if (!yearCover.has(`${String(self._id)}|${date}`)) continue;
+            const punched = Boolean(String(row?.timeIn || '').trim() || String(row?.timeOut || '').trim());
+            if (!punched) movedOffUnauthorized += 1;
+        }
+        if (movedOffUnauthorized) {
+            counts.unauthorized_leave = Math.max(0, (counts.unauthorized_leave || 0) - movedOffUnauthorized);
+        }
 
         const staffType = normalizeStaffType(employee?.staffType || self.staffType);
         const scheduleWeek = getWeekForStaffType(workingTime, staffType);
@@ -1746,7 +1774,7 @@ export async function getMyAttendanceYearSummary(req, res) {
             employee: { _id: self._id, employeeId: self.employeeId, staffType },
             profile: historicalProfile,
             policy,
-            attendanceRecords: detailRows,
+            attendanceRecords: paintedDetails,
         });
         const enrollUsed = leaveCycle.used || {};
         const enrollAttendance = leaveCycle.attendance || {};
@@ -1781,7 +1809,7 @@ export async function getMyAttendanceYearSummary(req, res) {
                 lastAnnualLeave?.date || '',
             ),
             entries: [
-                ...(detailRows || []).map(serializeYearSummaryEntry),
+                ...(paintedDetails || []).map(serializeYearSummaryEntry),
                 ...overlay.entries,
             ],
             leaveBalances,
