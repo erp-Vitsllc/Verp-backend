@@ -18,7 +18,14 @@ import {
     isFlexibleTiming,
     weekdayKeyFromDateKey,
 } from '../utils/workingTimeHelpers.js';
-import { addDaysKey, evaluateFlexibleDay, requiredHoursForDate, workedMinutesAcross } from '../utils/flexibleAttendance.js';
+import { addDaysKey, evaluateFlexibleDay, flexibleOtFieldsFromDuration, requiredHoursForDate, workedMinutesAcross } from '../utils/flexibleAttendance.js';
+import { flexibleOtManualUpdate, refreshFlexibleOtRecords } from '../utils/syncFlexibleOt.js';
+import {
+    nonWorkingAttendanceMark,
+    repairBlankNonWorkingRows,
+    restoreClearedAttendance,
+} from '../utils/attendanceNonWorkingDay.js';
+import { nonHrMarkableDateKeys } from '../utils/nonHrMarkWindow.js';
 import { staffTypeMongoClause } from '../utils/workLocationHelpers.js';
 import { getDepartmentHOD } from '../utils/getDepartmentHOD.js';
 import { syncDashboardAction } from '../utils/syncDashboard.js';
@@ -242,14 +249,17 @@ async function viewerIsFlowchartHr(req) {
     }
 }
 
+const NON_HR_MARK_WINDOW_MESSAGE =
+    'Only the flowchart HR assignee can mark attendance outside today and the two previous days. Holidays are skipped.';
+
 /**
- * Non-HR users may mark today, and may change absent rows from the previous
- * two days to On work or Authorized leave. Older days are flowchart HR only.
+ * Non-HR users may mark today, and may change absent rows on the two previous
+ * days to On work or Authorized leave. Holiday dates are skipped and do not
+ * count, so the window reaches further back. Older days are flowchart HR only.
  * @returns {Promise<boolean>} true when the response was already sent
  */
 async function rejectIfMarkWindowClosed(req, res, { date, entries }) {
     const today = getDubaiDateKey();
-    const earliest = shiftDateKey(today, -2);
     if (await viewerIsFlowchartHr(req)) return false;
 
     const requested = Array.isArray(entries) ? entries : [];
@@ -264,30 +274,64 @@ async function rejectIfMarkWindowClosed(req, res, { date, entries }) {
         return true;
     }
 
-    if (!isValidDateKey(date) || date < earliest || date > today) {
-        res.status(403).json({
-            message:
-                'Only the flowchart HR assignee can mark attendance more than 2 days before today.',
-        });
+    if (!isValidDateKey(date) || date > today) {
+        res.status(403).json({ message: NON_HR_MARK_WINDOW_MESSAGE });
+        return true;
+    }
+
+    const ids = [
+        ...new Set(
+            requested.map((entry) => String(entry?.employeeMongoId || '').trim()).filter(Boolean),
+        ),
+    ];
+    const validIds = ids.filter((id) => mongoose.Types.ObjectId.isValid(id));
+    const employees = validIds.length
+        ? await EmployeeBasic.find({ _id: { $in: validIds } }).select('_id staffType').lean()
+        : [];
+    const staffById = new Map(
+        (employees || []).map((row) => [String(row._id), normalizeStaffType(row.staffType)]),
+    );
+    const staffTypes = ids.length
+        ? [...new Set(ids.map((id) => staffById.get(id) || 'office'))]
+        : ['office'];
+
+    const holidayRows = await Holiday.find({
+        date: { $gte: shiftDateKey(today, -60), $lte: today },
+    })
+        .select('date appliesTo')
+        .lean();
+
+    const allowedByStaff = new Map();
+    for (const staffType of staffTypes) {
+        const holidayDates = (holidayRows || [])
+            .filter((row) => holidayAppliesToStaff(row, staffType))
+            .map((row) => String(row.date || '').trim())
+            .filter(Boolean);
+        allowedByStaff.set(staffType, nonHrMarkableDateKeys(today, holidayDates));
+    }
+
+    const dateAllowed = ids.length
+        ? ids.every((id) => allowedByStaff.get(staffById.get(id) || 'office')?.has(date))
+        : [...allowedByStaff.values()].every((set) => set.has(date));
+    if (!dateAllowed) {
+        res.status(403).json({ message: NON_HR_MARK_WINDOW_MESSAGE });
         return true;
     }
 
     if (date === today) return false;
 
-    const list = Array.isArray(entries) ? entries : [];
+    const list = requested;
     for (const entry of list) {
         const statusKey = String(entry?.statusKey || '').trim();
         if (!NON_HR_RECENT_MARK_KEYS.has(statusKey)) {
             res.status(403).json({
-                message: 'You can only set Authorized leave or mark attendance for the last 2 days.',
+                message:
+                    'You can only set Authorized leave or mark attendance for today and the two previous days. Holidays are skipped.',
             });
             return true;
         }
     }
 
-    const ids = [
-        ...new Set(list.map((entry) => String(entry?.employeeMongoId || '').trim()).filter(Boolean)),
-    ];
     if (!ids.length) return false;
 
     const existing = await Attendance.find({
@@ -300,7 +344,8 @@ async function rejectIfMarkWindowClosed(req, res, { date, entries }) {
     const blocked = ids.find((id) => !isStoredAttendanceAbsent(byId.get(id)));
     if (blocked) {
         res.status(403).json({
-            message: 'You can only change absent attendance from the last 2 days.',
+            message:
+                'You can only change absent attendance from today and the two previous days. Holidays are skipped.',
         });
         return true;
     }
@@ -771,6 +816,12 @@ export async function getAttendanceByDate(req, res) {
                 .lean(),
             loadLeaveCoverIndex({ from: date, to: date }),
         ]);
+        try {
+            await repairBlankNonWorkingRows(storedRecords);
+            await refreshFlexibleOtRecords(storedRecords);
+        } catch (otErr) {
+            console.error('[getAttendanceByDate] flexible OT refresh failed:', otErr);
+        }
         const records = applyLeaveCoverIndex(storedRecords, coverIndex).filter(
             (row) => String(row?.date || '') === date,
         );
@@ -1019,18 +1070,14 @@ export async function markAttendance(req, res) {
                 return res.status(400).json({ message: 'employeeMongoId is required for each mark.' });
             }
 
-            // Clear attendance → remove the day record so status shows blank.
+            // Clear attendance. A holiday or weekly off returns to that status.
             if (statusKey === 'clear_attendance' || statusKey === 'clear') {
-                await Attendance.deleteOne({ date, employeeMongoId });
-                saved.push({
-                    date,
+                const restored = await restoreClearedAttendance({
                     employeeMongoId,
-                    cleared: true,
-                    statusKey: '',
-                    statusLabel: '',
-                    timeIn: '',
-                    timeOut: '',
+                    date,
+                    markedBy,
                 });
+                saved.push(restored);
                 continue;
             }
 
@@ -1103,6 +1150,14 @@ export async function markAttendance(req, res) {
                 finalStatusLabel = authorizedLeaveLabel(leavePayType);
             }
 
+            const otUpdate = await flexibleOtManualUpdate({
+                employee: markEmployee || { _id: employeeMongoId, staffType: 'office' },
+                date,
+                timeIn,
+                timeOut,
+                statusKey: finalStatusKey,
+            });
+
             const doc = await Attendance.findOneAndUpdate(
                 { date, employeeMongoId },
                 {
@@ -1122,6 +1177,7 @@ export async function markAttendance(req, res) {
                         punchSource: 'manual',
                         checkOutSource: timeOut ? 'manual' : '',
                         markedBy,
+                        ...otUpdate,
                     },
                     $unset: {
                         checkInLocation: 1,
@@ -2325,21 +2381,33 @@ export async function checkOutMyAttendance(req, res) {
         if (flexible) {
             existing.timeOut = timeOut;
             existing.timeOutDate = date !== existing.date ? date : '';
+            const workedMinutes = workedMinutesAcross({
+                date: existing.date,
+                timeIn: existing.timeIn,
+                timeOut,
+                timeOutDate: existing.timeOutDate,
+            });
             const result = evaluateFlexibleDay({
-                workedMinutes: workedMinutesAcross({
-                    date: existing.date,
-                    timeIn: existing.timeIn,
-                    timeOut,
-                    timeOutDate: existing.timeOutDate,
-                }),
+                workedMinutes,
                 requiredHours: requiredHoursForDate(week, existing.date),
+            });
+            const nonWorking = Boolean(await nonWorkingAttendanceMark(employee, existing.date));
+            const otFields = flexibleOtFieldsFromDuration({
+                isFlexible: true,
+                nonWorking,
+                date: existing.date,
+                timeIn: existing.timeIn,
+                timeOut,
+                timeOutDate: existing.timeOutDate,
+                requiredHours: result.requiredHours,
+                statusKey: result.statusKey,
             });
             existing.statusKey = result.statusKey;
             existing.statusLabel = result.statusLabel;
             existing.reason = result.reason;
-            existing.flexibleWorkedHours = result.workedHours;
-            existing.flexibleRequiredHours = result.requiredHours;
-            existing.flexibleOtHours = result.otHours;
+            existing.flexibleWorkedHours = otFields.flexibleWorkedHours;
+            existing.flexibleRequiredHours = otFields.flexibleRequiredHours;
+            existing.flexibleOtHours = otFields.flexibleOtHours;
             existing.flexibleOtStatus = '';
             existing.flexibleOtApprovedHours = 0;
             existing.flexibleOtReason = '';
@@ -2497,14 +2565,12 @@ export async function markTeamAttendance(req, res) {
             }
 
             if (isClear) {
-                await Attendance.deleteOne({ date, employeeMongoId });
-                saved.push({
-                    date,
+                const restored = await restoreClearedAttendance({
                     employeeMongoId,
-                    cleared: true,
-                    statusKey: '',
-                    statusLabel: '',
+                    date,
+                    markedBy,
                 });
+                saved.push(restored);
                 continue;
             }
 
@@ -2546,6 +2612,14 @@ export async function markTeamAttendance(req, res) {
                 finalStatusLabel = authorizedLeaveLabel(leavePayType);
             }
 
+            const otUpdate = await flexibleOtManualUpdate({
+                employee: emp,
+                date,
+                timeIn,
+                timeOut,
+                statusKey: finalStatusKey,
+            });
+
             const doc = await Attendance.findOneAndUpdate(
                 { date, employeeMongoId },
                 {
@@ -2565,6 +2639,7 @@ export async function markTeamAttendance(req, res) {
                         punchSource: 'manual',
                         checkOutSource: timeOut ? 'manual' : '',
                         markedBy,
+                        ...otUpdate,
                     },
                     $unset: {
                         checkInLocation: 1,

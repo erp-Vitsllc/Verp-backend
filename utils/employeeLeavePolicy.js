@@ -102,6 +102,55 @@ function lateRulesHaveDeduct(rules) {
     return (Array.isArray(rules) ? rules : []).some((row) => String(row?.deduct || '').trim());
 }
 
+function preferDeductRules(groupRules, ownRules) {
+    if (lateRulesHaveDeduct(groupRules)) return groupRules;
+    if (lateRulesHaveDeduct(ownRules)) return ownRules;
+    return Array.isArray(groupRules) ? groupRules : ownRules || [];
+}
+
+const GROUP_LEAVE_RULE_KEYS = [
+    'sandwichLeave',
+    'allowedSickLeavePerYear',
+    'allSickLeaveApproval',
+    'allAuthorizedLeaves',
+    'allUnauthorizedLeave',
+    'pendingAuthorizedLeaveApproval',
+    'pendingUnauthorizedLeaveApproval',
+    'pendingSickLeaveApproval',
+    'pendingLeaveApproval',
+];
+
+/** Leave allowance and deductions come from the work-location group policy. */
+export function applyGroupLeavePolicy(policy, groupPolicy, leaveExclusionEmployeeIds) {
+    const group = groupPolicy || {};
+    const rules = { ...(policy?.processingRules || {}) };
+    const groupRules = group.processingRules || {};
+    for (const key of GROUP_LEAVE_RULE_KEYS) {
+        if (Object.prototype.hasOwnProperty.call(groupRules, key)) {
+            rules[key] = Boolean(groupRules[key]);
+        }
+    }
+    return {
+        ...policy,
+        processingRules: rules,
+        lateInRules: preferDeductRules(group.lateInRules, policy?.lateInRules),
+        lateOutRules: preferDeductRules(group.lateOutRules, policy?.lateOutRules),
+        extraLateRules: preferDeductRules(group.extraLateRules, policy?.extraLateRules),
+        authorizedLeaveDeductionDays: group.authorizedLeaveDeductionDays ?? null,
+        unauthorizedLeaveDeductionDays: group.unauthorizedLeaveDeductionDays ?? null,
+        allowedSickLeaveDaysPerYear: group.allowedSickLeaveDaysPerYear ?? null,
+        workingDaysRequiredToEligible: group.workingDaysRequiredToEligible ?? null,
+        leaveSalaryWorkingDays: group.leaveSalaryWorkingDays ?? null,
+        workingDaysRequiredForAirTicket: group.workingDaysRequiredForAirTicket ?? null,
+        airTicketAmount: group.airTicketAmount ?? null,
+        minAllowedLeavePerGroupPercent: group.minAllowedLeavePerGroupPercent ?? null,
+        maxAllowedLeavePerGroupPercent: group.maxAllowedLeavePerGroupPercent ?? null,
+        leaveExclusionEmployeeIds: Array.isArray(leaveExclusionEmployeeIds)
+            ? leaveExclusionEmployeeIds
+            : group.leaveExclusionEmployeeIds || [],
+    };
+}
+
 export async function resolveEmployeePayrollPolicy(employee) {
     const employeeId = String(employee?.employeeId || '').trim();
     const staffType = normalizeStaffTypeKey(employee?.staffType);
@@ -123,26 +172,23 @@ export async function resolveEmployeePayrollPolicy(employee) {
         ),
     };
     if (!enrollment?.policy || typeof enrollment.policy !== 'object') {
-        return { ...groupPolicy, ...exclusionLists };
+        return applyGroupLeavePolicy(
+            { ...groupPolicy, ...exclusionLists },
+            groupPolicy,
+            exclusionLists.leaveExclusionEmployeeIds,
+        );
     }
     const own = serializePayrollSettings(enrollment.policy);
-    return {
+    const merged = {
         ...groupPolicy,
         ...own,
-        authorizedLeaveDeductionDays:
-            own.authorizedLeaveDeductionDays ?? groupPolicy.authorizedLeaveDeductionDays,
-        unauthorizedLeaveDeductionDays:
-            own.unauthorizedLeaveDeductionDays ?? groupPolicy.unauthorizedLeaveDeductionDays,
         lateInRules: lateRulesHaveDeduct(own.lateInRules) ? own.lateInRules : groupPolicy.lateInRules,
         attendanceExclusionEmployeeIds: mergeEmployeeIdLists(
             exclusionLists.attendanceExclusionEmployeeIds,
             own.attendanceExclusionEmployeeIds,
         ),
-        leaveExclusionEmployeeIds: mergeEmployeeIdLists(
-            exclusionLists.leaveExclusionEmployeeIds,
-            own.leaveExclusionEmployeeIds,
-        ),
     };
+    return applyGroupLeavePolicy(merged, groupPolicy, exclusionLists.leaveExclusionEmployeeIds);
 }
 
 export function leavePolicyEntitlements(policy) {

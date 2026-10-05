@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 import {
+    applyGroupLeavePolicy,
     assertLeaveBalance,
     applySickAllowanceToLeaveRecords,
     buildLeaveBalances,
@@ -13,6 +14,54 @@ import {
 } from './employeeLeavePolicy.js';
 
 describe('employee leave policy', () => {
+    it('uses the group salary policy for leave even when the employee copy differs', () => {
+        const applied = applyGroupLeavePolicy(
+            {
+                authorizedLeaveDeductionDays: 0.5,
+                unauthorizedLeaveDeductionDays: 1,
+                allowedSickLeaveDaysPerYear: 3,
+                processingRules: { sandwichLeave: false, allowedSickLeavePerYear: false, fine: true },
+                leaveExclusionEmployeeIds: ['VEGA-OWN'],
+            },
+            {
+                authorizedLeaveDeductionDays: 2,
+                unauthorizedLeaveDeductionDays: 0,
+                allowedSickLeaveDaysPerYear: 12,
+                processingRules: { sandwichLeave: true, allowedSickLeavePerYear: true },
+                leaveExclusionEmployeeIds: ['VEGA-GROUP'],
+            },
+            ['VEGA-GROUP'],
+        );
+        assert.equal(applied.authorizedLeaveDeductionDays, 2);
+        assert.equal(applied.unauthorizedLeaveDeductionDays, 0);
+        assert.equal(applied.allowedSickLeaveDaysPerYear, 12);
+        assert.equal(applied.processingRules.sandwichLeave, true);
+        assert.equal(applied.processingRules.allowedSickLeavePerYear, true);
+        assert.equal(applied.processingRules.fine, true);
+        assert.deepEqual(applied.leaveExclusionEmployeeIds, ['VEGA-GROUP']);
+        assert.equal(leavePolicyEntitlements(applied).sickAllowedDays, 12);
+        assert.equal(leavePolicyEntitlements(applied).multipliers.authorized, 2);
+    });
+
+    it('uses the group late and missed-punch rules when that policy has a deduct', () => {
+        const applied = applyGroupLeavePolicy(
+            {
+                lateInRules: [{ events: 1, deduct: 'half' }],
+                extraLateRules: [],
+            },
+            {
+                lateInRules: [{ events: 4, deduct: 'quarter' }],
+                lateOutRules: [{ events: 4, deduct: 'quarter' }],
+                extraLateRules: [{ title: 'Missed punch', events: 1, deduct: 'full' }],
+            },
+            [],
+        );
+        assert.equal(applied.lateInRules[0].deduct, 'quarter');
+        assert.equal(applied.lateInRules[0].events, 4);
+        assert.equal(applied.extraLateRules[0].title, 'Missed punch');
+        assert.equal(applied.extraLateRules[0].deduct, 'full');
+    });
+
     it('exposes salary-policy allowed sick leave days even when the HR toggle is off', () => {
         const off = leavePolicyEntitlements({
             processingRules: { allowedSickLeavePerYear: false },

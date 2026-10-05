@@ -426,7 +426,7 @@ function structureYearlySalary(entry) {
         }));
 }
 
-function overtimeFromPunch({ timeIn, timeOut, date, week, monthlySalary }) {
+function overtimeFromPunch({ timeIn, timeOut, date, week, monthlySalary, isHoliday = false }) {
     const actualIn = clockTimeToMinutes(timeIn);
     const actualOut = clockTimeToMinutes(timeOut);
     if (actualIn == null || actualOut == null || monthlySalary <= 0) {
@@ -435,19 +435,20 @@ function overtimeFromPunch({ timeIn, timeOut, date, week, monthlySalary }) {
     let worked = actualOut - actualIn;
     if (worked <= 0) worked += 24 * 60;
     const scheduled = getScheduledPunchMinutes(week, date);
+    const offDay = Boolean(scheduled.isOffDay || isHoliday);
     let scheduledMinutes = 0;
-    if (!scheduled.isOffDay) {
+    if (!offDay) {
         scheduledMinutes = (scheduled.endMinutes ?? 18 * 60) - (scheduled.startMinutes ?? 9 * 60);
         if (scheduledMinutes <= 0) scheduledMinutes += 24 * 60;
     }
-    const otMinutes = scheduled.isOffDay ? worked : Math.max(0, worked - scheduledMinutes);
-    if (otMinutes <= 0) return { amount: 0, hours: 0, isOffDay: Boolean(scheduled.isOffDay) };
+    const otMinutes = offDay ? worked : Math.max(0, worked - scheduledMinutes);
+    if (otMinutes <= 0) return { amount: 0, hours: 0, isOffDay: offDay };
     const dayHours = (scheduledMinutes > 0 ? scheduledMinutes : 8 * 60) / 60;
     const hourly = monthlySalary / 30 / dayHours;
     return {
         amount: money(hourly * OT_MULTIPLIER * (otMinutes / 60)),
         hours: otMinutes / 60,
-        isOffDay: Boolean(scheduled.isOffDay),
+        isOffDay: offDay,
     };
 }
 
@@ -838,6 +839,7 @@ export async function buildSalarySlipPayload({
                 date,
                 week,
                 monthlySalary: monthly,
+                isHoliday: isHolidayDate,
             });
         if (ot.hours <= 0) continue;
         if (ot.isOffDay || isHolidayDate) {
@@ -891,8 +893,8 @@ export async function buildSalarySlipPayload({
     const sickAmount = money(daily * unpaidSickDays);
     const annualAmount = 0;
     const lateCharge = lateDeductionFromEvents(lateEvents, policy);
-    const lateChargeable = lateCharge.units;
-    const lateAmount = money(daily * lateTimes * lateChargeable);
+    const lateChargeable = lateCharge.eventShare;
+    const lateAmount = money(daily * lateCharge.dayFraction);
 
     const earnings = structureEarnings(entry);
     upsertEarning(
@@ -1300,13 +1302,11 @@ export async function buildSalarySlipPayload({
             category: 'Late Arrival',
             qty: qtyLabel(lateChargeable, 'event'),
             rate: formatAed(money(daily * lateTimes)),
-            calculation: lateChargeable > 0 && lateTimes > 0
+            calculation: lateAmount > 0
                 ? lateCharge.eventBundle > 0
-                    ? `${lateEvents} combined late in/out ÷ ${lateCharge.eventBundle} = ${qtyLabel(lateChargeable, 'event')} x ${lateTimes} x ${formatAed(daily)}`
+                    ? `${lateEvents} combined late in/out ÷ ${lateCharge.eventBundle} x ${lateTimes} x ${formatAed(daily)}`
                     : `${lateEvents} combined late in/out x ${lateTimes} x ${formatAed(daily)}`
-                : lateEvents > 0 && lateCharge.eventBundle > 0
-                    ? `${lateEvents} combined late in/out (need ${lateCharge.eventBundle}) — no deduction`
-                    : 'No deduction for this month',
+                : 'No deduction for this month',
             total: lateAmount,
         },
     ];

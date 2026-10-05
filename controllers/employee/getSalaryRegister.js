@@ -1535,7 +1535,7 @@ export const getSalaryRegister = async (req, res) => {
                 const monthly = salaryAmountForMonth(getByEmployeeCode(salaryByCode, code), ym);
                 const daily = daySalaryForMonth(monthly, ym);
                 const lateCharge = lateDeductionFromEvents(combined, policyForEmployee(emp));
-                addDeduction(code, ym, daily * lateCharge.multiplier * lateCharge.units);
+                addDeduction(code, ym, daily * lateCharge.dayFraction);
             }
         }
 

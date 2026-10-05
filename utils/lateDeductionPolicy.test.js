@@ -48,6 +48,17 @@ describe('late in/out combined events', () => {
         });
         assert.equal(result.combinedEvents, 3);
         assert.equal(result.units, 1);
+        assert.equal(result.eventShare, 1);
+        assert.equal(result.dayFraction, 0.25);
         assert.equal(result.multiplier, 0.25);
+    });
+
+    it('converts a partial event bundle into the same share of the deduct day', () => {
+        const result = lateDeductionFromEvents(2, {
+            lateInRules: [{ events: 4, deduct: 'quarter' }],
+        });
+        assert.equal(result.units, 0);
+        assert.equal(result.eventShare, 0.5);
+        assert.equal(result.dayFraction, 0.125);
     });
 });

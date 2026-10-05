@@ -33,6 +33,14 @@ export function chargeableLateEventUnits(totalEvents, policyEvents) {
     return Math.floor(total / per);
 }
 
+/** Share of a deduct bundle already earned, including a partial bundle. */
+export function lateEventShare(totalEvents, policyEvents) {
+    const total = Math.max(0, Number(totalEvents) || 0);
+    const per = Number(policyEvents);
+    if (!Number.isFinite(per) || per <= 0) return total;
+    return total / per;
+}
+
 function minutesThresholdOf(rule) {
     const n = Number(rule?.minutes);
     return Number.isFinite(n) && n > 0 ? n : 0;
@@ -112,11 +120,14 @@ export function lateDeductionFromEvents(totalEvents, policy) {
     const combined = Math.max(0, Math.floor(Number(totalEvents) || 0));
     const units = chargeableLateEventUnits(combined, rule?.events);
     const multiplier = lateDeductMultiplier(rule);
+    const eventShare = lateEventShare(combined, rule?.events);
     return {
         rule,
         combinedEvents: combined,
         eventBundle: Number(rule?.events) > 0 ? Number(rule.events) : 0,
         units,
+        eventShare,
+        dayFraction: multiplier * eventShare,
         multiplier,
         minutesThreshold: minutesThresholdOf(rule),
     };
