@@ -845,7 +845,7 @@ export async function getEmployeeAttendanceProfile(req, res) {
             await Promise.all([
             Attendance.find({ employeeMongoId, date: { $gte: from, $lte: to } })
                 .select(
-                    'date statusKey statusLabel reason timeIn timeOut attachmentName leavePayType leaveRequestReason leaveRequestStatus requestedStatusKey requestedStatusLabel previousStatusKey leaveRequestKind leaveRequestGroupId leaveRequestFromDate leaveRequestToDate leaveRequestedAt leaveRequestTimeOut',
+                    'date statusKey statusLabel reason timeIn timeOut attachmentName leavePayType leaveDayFraction leaveRequestDayPart leaveDeductionTimes leaveRequestReason leaveRequestStatus requestedStatusKey requestedStatusLabel previousStatusKey leaveRequestKind leaveRequestGroupId leaveRequestFromDate leaveRequestToDate leaveRequestedAt leaveRequestTimeOut',
                 )
                 .sort({ date: -1 })
                 .lean(),
@@ -998,6 +998,11 @@ export async function getEmployeeAttendanceProfile(req, res) {
                     reason: String(row.reason || row.leaveRequestReason || '').trim(),
                     attachmentName: String(row.attachmentName || '').trim(),
                     leavePayType: key === 'authorized_leave' ? 'unpaid' : String(row.leavePayType || '').trim(),
+                    timeIn: String(row.timeIn || '').trim(),
+                    timeOut: String(row.timeOut || '').trim(),
+                    leaveDayFraction: Number(row.leaveDayFraction) || 0,
+                    leaveRequestDayPart: String(row.leaveRequestDayPart || '').trim(),
+                    leaveDeductionTimes: Number(row.leaveDeductionTimes) || 0,
                 });
             }
         }
