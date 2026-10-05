@@ -129,6 +129,22 @@ function toExtraLateRules(value) {
     });
 }
 
+function toMissedPunchRule(value) {
+    const deduct = String(value?.deduct || '').trim().toLowerCase();
+    return {
+        events: toDays(value?.events),
+        deduct: LATE_DEDUCT.has(deduct) ? deduct : '',
+    };
+}
+
+function serializeMissedPunchRule(value) {
+    const rule = toMissedPunchRule(value);
+    return {
+        events: rule.events ?? '',
+        deduct: rule.deduct,
+    };
+}
+
 function serializeExtraLateRules(value) {
     const rows = Array.isArray(value) ? value : [];
     return rows.map((row) => ({
@@ -263,6 +279,7 @@ export function serializePayrollSettings(doc) {
         lateInRules: sharedLate,
         lateOutRules: sharedLate,
         extraLateRules: serializeExtraLateRules(doc?.extraLateRules),
+        missedPunchRule: serializeMissedPunchRule(doc?.missedPunchRule),
         salaryProcessReminders: serializeReminders(doc?.salaryProcessReminders),
         minAllowedLeavePerGroupPercent: readGroupLeavePercent(doc?.minAllowedLeavePerGroupPercent),
         maxAllowedLeavePerGroupPercent: readGroupLeavePercent(doc?.maxAllowedLeavePerGroupPercent),
@@ -325,6 +342,10 @@ export function buildPayrollPolicyPayload(body, existing) {
             body?.extraLateRules !== undefined
                 ? toExtraLateRules(body.extraLateRules)
                 : toExtraLateRules(existing?.extraLateRules),
+        missedPunchRule:
+            body?.missedPunchRule !== undefined
+                ? toMissedPunchRule(body.missedPunchRule)
+                : toMissedPunchRule(existing?.missedPunchRule),
         salaryProcessReminders:
             body?.salaryProcessReminders !== undefined
                 ? toReminders(body.salaryProcessReminders)

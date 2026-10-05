@@ -48,11 +48,13 @@ describe('employee leave policy', () => {
             {
                 lateInRules: [{ events: 1, deduct: 'half' }],
                 extraLateRules: [],
+                missedPunchRule: { events: 0, deduct: 'full' },
             },
             {
                 lateInRules: [{ events: 4, deduct: 'quarter' }],
                 lateOutRules: [{ events: 4, deduct: 'quarter' }],
                 extraLateRules: [{ title: 'Missed punch', events: 1, deduct: 'full' }],
+                missedPunchRule: { events: 2, deduct: 'half' },
             },
             [],
         );
@@ -60,6 +62,8 @@ describe('employee leave policy', () => {
         assert.equal(applied.lateInRules[0].events, 4);
         assert.equal(applied.extraLateRules[0].title, 'Missed punch');
         assert.equal(applied.extraLateRules[0].deduct, 'full');
+        assert.equal(applied.missedPunchRule.deduct, 'half');
+        assert.equal(applied.missedPunchRule.events, 2);
     });
 
     it('exposes salary-policy allowed sick leave days even when the HR toggle is off', () => {

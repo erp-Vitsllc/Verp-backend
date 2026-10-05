@@ -136,6 +136,7 @@ export function applyGroupLeavePolicy(policy, groupPolicy, leaveExclusionEmploye
         lateInRules: preferDeductRules(group.lateInRules, policy?.lateInRules),
         lateOutRules: preferDeductRules(group.lateOutRules, policy?.lateOutRules),
         extraLateRules: preferDeductRules(group.extraLateRules, policy?.extraLateRules),
+        missedPunchRule: group.missedPunchRule || {},
         authorizedLeaveDeductionDays: group.authorizedLeaveDeductionDays ?? null,
         unauthorizedLeaveDeductionDays: group.unauthorizedLeaveDeductionDays ?? null,
         allowedSickLeaveDaysPerYear: group.allowedSickLeaveDaysPerYear ?? null,
@@ -161,6 +162,13 @@ export async function resolveEmployeePayrollPolicy(employee) {
     ]);
     const mainPolicy = serializePayrollSettings(main || {});
     const groupPolicy = serializePayrollSettings(group || main || {});
+    if (
+        group &&
+        !lateRulesHaveDeduct(groupPolicy.extraLateRules) &&
+        lateRulesHaveDeduct(mainPolicy.extraLateRules)
+    ) {
+        groupPolicy.extraLateRules = mainPolicy.extraLateRules;
+    }
     const exclusionLists = {
         attendanceExclusionEmployeeIds: mergeEmployeeIdLists(
             mainPolicy.attendanceExclusionEmployeeIds,

@@ -270,9 +270,10 @@ async function leaveItems(self) {
             details: [
                 detail('From', from),
                 detail('To', to),
-                detail('Day', row.leaveRequestDayPart),
-                detail('Time in', row.leaveRequestTimeIn),
-                detail('Time out', row.leaveRequestTimeOut),
+                detail('Day', [row.leaveRequestDayPart, row.leaveRequestSession].filter(Boolean).join(' ')),
+                detail('Work', row.leaveRequestTimeIn && row.leaveRequestTimeOut
+                    ? `${row.leaveRequestTimeIn}–${row.leaveRequestTimeOut}`
+                    : ''),
                 detail('Reason', row.leaveRequestReason),
             ].filter(Boolean),
             tracking: [],

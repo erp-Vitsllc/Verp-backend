@@ -28,8 +28,11 @@ import {
 import { serializePayrollSettings, reminderAudienceList } from './payrollSettingsController.js';
 import {
     countDayLateInOutEvents,
+    countExtraLateRules,
     lateDeductionFromEvents,
+    missedPunchDeduction,
 } from '../../utils/lateDeductionPolicy.js';
+import { partialLeavePortion } from '../../utils/partialLeaveWindow.js';
 import { resolveEmployeeFinePayableAmount } from '../../utils/finePayableAmount.js';
 import { buildLoanInstallments } from '../../utils/upsertLoanPartyExpenseFromPayment.js';
 import {
@@ -1380,7 +1383,7 @@ export const getSalaryRegister = async (req, res) => {
         const [molByCode, payrollDocs] = await Promise.all([
             companyMolByEmployeeId(codes),
             PayrollSettings.find({ key: { $in: payrollKeys } })
-                .select('key authorizedLeaveDeductionDays unauthorizedLeaveDeductionDays lateInRules')
+                .select('key authorizedLeaveDeductionDays unauthorizedLeaveDeductionDays lateInRules missedPunchRule extraLateRules')
                 .lean()
                 .maxTimeMS(8000),
         ]);
@@ -1388,8 +1391,18 @@ export const getSalaryRegister = async (req, res) => {
             (payrollDocs || []).map((doc) => [String(doc.key || ''), serializePayrollSettings(doc)]),
         );
         const defaultPolicy = payrollByKey.get('default') || serializePayrollSettings({});
-        const policyForEmployee = (emp) =>
-            payrollByKey.get(`group:${normalizeStaffTypeKey(emp?.staffType)}`) || defaultPolicy;
+        const policyForEmployee = (emp) => {
+            const groupPolicy = payrollByKey.get(`group:${normalizeStaffTypeKey(emp?.staffType)}`);
+            if (!groupPolicy) return defaultPolicy;
+            const groupExtras = Array.isArray(groupPolicy.extraLateRules) ? groupPolicy.extraLateRules : [];
+            const mainExtras = Array.isArray(defaultPolicy.extraLateRules) ? defaultPolicy.extraLateRules : [];
+            const groupHasDeduct = groupExtras.some((row) => String(row?.deduct || '').trim());
+            const mainHasDeduct = mainExtras.some((row) => String(row?.deduct || '').trim());
+            if (!groupHasDeduct && mainHasDeduct) {
+                return { ...groupPolicy, extraLateRules: mainExtras };
+            }
+            return groupPolicy;
+        };
         const pendingEmployeeIds = new Set(
             (enrollmentOverview?.pendingRequests || [])
                 .map((row) => employeeCodeKey(row?.employeeId))
@@ -1446,35 +1459,29 @@ export const getSalaryRegister = async (req, res) => {
         };
 
         const leaveRows = mongoIds.length
-            ? await Attendance.aggregate([
-                {
-                    $match: {
-                        employeeMongoId: { $in: mongoIds },
-                        date: { $gte: from, $lte: to },
-                        statusKey: { $in: ['authorized_leave', 'unauthorized_leave'] },
-                    },
-                },
-                {
-                    $group: {
-                        _id: {
-                            employeeMongoId: '$employeeMongoId',
-                            month: { $substr: ['$date', 0, 7] },
-                            statusKey: '$statusKey',
-                            leavePayType: '$leavePayType',
-                        },
-                        count: { $sum: 1 },
-                    },
-                },
-            ])
+            ? await Attendance.find({
+                employeeMongoId: { $in: mongoIds },
+                date: { $gte: from, $lte: to },
+                statusKey: { $in: ['authorized_leave', 'unauthorized_leave'] },
+            })
+                .select('employeeMongoId date statusKey leaveRequestDayPart leaveDayFraction leaveDeductionTimes')
+                .lean()
+                .maxTimeMS(15000)
             : [];
 
         for (const row of leaveRows) {
-            const key = String(row?._id?.statusKey || '');
-            const count = Number(row?.count) || 0;
-            const ym = String(row?._id?.month || '');
-            if (count <= 0 || !/^\d{4}-\d{2}$/.test(ym)) continue;
-            const emp = empByMongo.get(String(row?._id?.employeeMongoId || ''));
+            const key = String(row?.statusKey || '');
+            const ym = String(row?.date || '').slice(0, 7);
+            if (!/^\d{4}-\d{2}$/.test(ym)) continue;
+            const emp = empByMongo.get(String(row?.employeeMongoId || ''));
             if (!emp) continue;
+            const part = String(row.leaveRequestDayPart || '');
+            const fraction = part === 'half' || part === 'quarter'
+                ? partialLeavePortion(part)
+                : Number(row.leaveDayFraction) > 0 && Number(row.leaveDayFraction) < 1
+                  ? Number(row.leaveDayFraction)
+                  : 1;
+            const doubled = key === 'authorized_leave' && Number(row.leaveDeductionTimes) === 2 ? 2 : 1;
             const code = String(emp.employeeId || '').trim();
             const monthly = salaryAmountForMonth(getByEmployeeCode(salaryByCode, code), ym);
             const daily = daySalaryForMonth(monthly, ym);
@@ -1487,7 +1494,7 @@ export const getSalaryRegister = async (req, res) => {
             } else {
                 continue;
             }
-            addDeduction(code, ym, daily * times * count);
+            addDeduction(code, ym, daily * times * fraction * doubled);
         }
 
         if (mongoIds.length) {
@@ -1536,6 +1543,70 @@ export const getSalaryRegister = async (req, res) => {
                 const daily = daySalaryForMonth(monthly, ym);
                 const lateCharge = lateDeductionFromEvents(combined, policyForEmployee(emp));
                 addDeduction(code, ym, daily * lateCharge.dayFraction);
+            }
+
+            const missedRows = await Attendance.find({
+                employeeMongoId: { $in: mongoIds },
+                date: { $gte: from, $lte: to },
+                statusKey: 'mispunch',
+            })
+                .select('employeeMongoId date')
+                .lean()
+                .maxTimeMS(15000);
+            const missedByKey = new Map();
+            for (const row of missedRows || []) {
+                const emp = empByMongo.get(String(row.employeeMongoId || ''));
+                if (!emp) continue;
+                const ym = String(row.date || '').slice(0, 7);
+                if (!/^\d{4}-\d{2}$/.test(ym)) continue;
+                const code = String(emp.employeeId || '').trim();
+                const mapKey = `${code}|${ym}`;
+                missedByKey.set(mapKey, (missedByKey.get(mapKey) || 0) + 1);
+            }
+            for (const [mapKey, count] of missedByKey.entries()) {
+                const [code, ym] = String(mapKey).split('|');
+                const emp = getByEmployeeCode(empByCode, code);
+                if (!emp) continue;
+                const monthly = salaryAmountForMonth(getByEmployeeCode(salaryByCode, code), ym);
+                const daily = daySalaryForMonth(monthly, ym);
+                const missedCharge = missedPunchDeduction(count, policyForEmployee(emp));
+                addDeduction(code, ym, daily * missedCharge.dayFraction);
+            }
+
+            const punchRows = await Attendance.find({
+                employeeMongoId: { $in: mongoIds },
+                date: { $gte: from, $lte: to },
+                timeIn: { $nin: ['', null] },
+            })
+                .select('employeeMongoId date timeIn timeOut statusKey')
+                .lean()
+                .maxTimeMS(15000);
+            const punchesByKey = new Map();
+            for (const row of punchRows || []) {
+                const emp = empByMongo.get(String(row.employeeMongoId || ''));
+                if (!emp) continue;
+                const ym = String(row.date || '').slice(0, 7);
+                if (!/^\d{4}-\d{2}$/.test(ym)) continue;
+                const code = String(emp.employeeId || '').trim();
+                const mapKey = `${code}|${ym}`;
+                const list = punchesByKey.get(mapKey) || [];
+                list.push(row);
+                punchesByKey.set(mapKey, list);
+            }
+            for (const [mapKey, punches] of punchesByKey.entries()) {
+                const [code, ym] = String(mapKey).split('|');
+                const emp = getByEmployeeCode(empByCode, code);
+                if (!emp) continue;
+                const monthly = salaryAmountForMonth(getByEmployeeCode(salaryByCode, code), ym);
+                const daily = daySalaryForMonth(monthly, ym);
+                const charges = countExtraLateRules(
+                    punches,
+                    policyForEmployee(emp),
+                    getWeekForStaffType(workingTime, emp.staffType),
+                );
+                for (const charge of charges) {
+                    addDeduction(code, ym, daily * charge.dayFraction);
+                }
             }
         }
 

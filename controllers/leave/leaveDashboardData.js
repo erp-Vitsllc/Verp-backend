@@ -271,15 +271,21 @@ function formatEndDateLabel(record) {
     const fromDate = record.leaveRequestFromDate || record.date;
     const toDate = record.leaveRequestToDate || record.date;
 
-    if (record.leaveRequestDayPart === 'half' && record.leaveRequestTimeIn && record.leaveRequestTimeOut) {
-        return `First Half (${record.leaveRequestTimeIn} – ${record.leaveRequestTimeOut})`;
+    if (record.leaveRequestDayPart === 'half' || record.leaveRequestDayPart === 'quarter') {
+        const name = record.leaveRequestDayPart === 'quarter' ? 'Quarter day' : 'Half day';
+        const side = record.leaveRequestSession === 'pm' ? 'PM' : record.leaveRequestSession === 'am' ? 'AM' : '';
+        const work = record.leaveRequestTimeIn && record.leaveRequestTimeOut
+            ? `work ${record.leaveRequestTimeIn}–${record.leaveRequestTimeOut}`
+            : '';
+        return [name, side, work].filter(Boolean).join(' · ');
     }
 
     if (fromDate && toDate && fromDate !== toDate) {
         return formatDisplayDate(toDate);
     }
 
-    if (record.leaveRequestDayPart === 'half') return 'First Half';
+    if (record.leaveRequestDayPart === 'half') return 'Half day';
+    if (record.leaveRequestDayPart === 'quarter') return 'Quarter day';
     return formatDisplayDate(toDate || record.date);
 }
 

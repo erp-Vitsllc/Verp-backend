@@ -5,6 +5,8 @@ import {
     chargeableLateEventUnits,
     countDayLateInOutEvents,
     lateDeductionFromEvents,
+    countExtraLateRules,
+    missedPunchDeduction,
 } from './lateDeductionPolicy.js';
 
 describe('late in/out combined events', () => {
@@ -51,5 +53,63 @@ describe('late in/out combined events', () => {
         assert.equal(fifth.dayFraction, 0.25);
         assert.equal(lateDeductionFromEvents(8, policy).units, 1);
         assert.equal(lateDeductionFromEvents(9, policy).units, 2);
+    });
+
+    it('deducts each missed punch as full, half, or quarter from the group rule', () => {
+        const eachQuarter = missedPunchDeduction(2, { missedPunchRule: { events: 0, deduct: 'quarter' } });
+        assert.equal(eachQuarter.units, 2);
+        assert.equal(eachQuarter.dayFraction, 0.5);
+
+        const freeThenHalf = missedPunchDeduction(3, { missedPunchRule: { events: 2, deduct: 'half' } });
+        assert.equal(freeThenHalf.units, 1);
+        assert.equal(freeThenHalf.dayFraction, 0.5);
+
+        const fromGroup = missedPunchDeduction(1, {
+            missedPunchRule: { events: 0, deduct: 'full' },
+            extraLateRules: [{ title: 'Missed punch', events: 0, deduct: 'quarter' }],
+        });
+        assert.equal(fromGroup.multiplier, 1);
+    });
+
+    it('applies only the highest extra late band and deducts every match when events are 0', () => {
+        const week = {
+            timingMode: 'scheduled',
+            monday: {
+                isOffDay: false,
+                startHour: 9,
+                startMinute: 0,
+                startMeridiem: 'AM',
+                endHour: 6,
+                endMinute: 0,
+                endMeridiem: 'PM',
+            },
+        };
+        const policy = {
+            extraLateRules: [
+                { title: 'Late in', minutes: 90, events: 0, deduct: 'half' },
+                { title: 'Late Out', minutes: 90, events: 0, deduct: 'half' },
+                { title: 'Late in', minutes: 240, events: 0, deduct: 'full' },
+                { title: 'Late Out', minutes: 250, events: 0, deduct: 'full' },
+            ],
+        };
+        const charges = countExtraLateRules(
+            [
+                { date: '2026-10-05', statusKey: 'late_arrived', timeIn: '10:40', timeOut: '18:00' },
+                { date: '2026-10-05', statusKey: 'on_office', timeIn: '13:00', timeOut: '13:00' },
+            ],
+            policy,
+            week,
+        );
+        const halfIn = charges.find((row) => row.label === 'Late in 90 min');
+        const fullIn = charges.find((row) => row.label === 'Late in 240 min');
+        const halfOut = charges.find((row) => row.label === 'Late Out 90 min');
+        const fullOut = charges.find((row) => row.label === 'Late Out 250 min');
+        assert.equal(halfIn.count, 1);
+        assert.equal(halfIn.dayFraction, 0.5);
+        assert.equal(fullIn.count, 1);
+        assert.equal(fullIn.dayFraction, 1);
+        assert.equal(halfOut.count, 0);
+        assert.equal(fullOut.count, 1);
+        assert.equal(fullOut.dayFraction, 1);
     });
 });

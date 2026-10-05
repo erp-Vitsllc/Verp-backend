@@ -8,7 +8,7 @@ const LEAVE_TAKEN_DEDUCTION_NAMES = new Set([
     'compoff leave',
 ]);
 
-const LATE_DEDUCTION_NAMES = new Set(['late arrival', 'late in', 'late out']);
+const LATE_DEDUCTION_NAMES = new Set(['late arrival', 'late in', 'late out', 'missed punch']);
 
 function deductionNameKey(name) {
     return String(name || '')
@@ -81,6 +81,7 @@ export function applySalarySlipCountExclusions(counts = {}, exclusions = {}) {
     }
     if (exclusions.attendance) {
         next.lateEvents = 0;
+        next.missedPunchDays = 0;
         next.holidaysWorked = 0;
         next.otHours = 0;
         next.otDays = 0;

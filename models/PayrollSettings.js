@@ -68,6 +68,7 @@ const payrollSettingsSchema = new mongoose.Schema(
         lateInRules: { type: [lateDeductRuleSchema], default: () => [] },
         lateOutRules: { type: [lateDeductRuleSchema], default: () => [] },
         extraLateRules: { type: [lateDeductRuleSchema], default: () => [] },
+        missedPunchRule: { type: lateDeductRuleSchema, default: () => ({}) },
         salaryProcessReminders: { type: [salaryProcessReminderSchema], default: () => [] },
         minAllowedLeavePerGroupPercent: { type: Number, default: null },
         maxAllowedLeavePerGroupPercent: { type: Number, default: null },

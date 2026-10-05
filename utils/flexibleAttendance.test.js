@@ -7,7 +7,7 @@ import {
 } from './flexibleAttendance.js';
 
 describe('flexibleOtFieldsFromDuration', () => {
-    it('drops overtime when the new duration is only the required day plus one hour', () => {
+    it('shows overtime once the required day plus one hour is complete, and counts that hour', () => {
         const fields = flexibleOtFieldsFromDuration({
             isFlexible: true,
             date: '2026-10-05',
@@ -16,11 +16,11 @@ describe('flexibleOtFieldsFromDuration', () => {
             requiredHours: 9,
             statusKey: 'on_office',
         });
-        assert.equal(fields.flexibleOtHours, 0);
+        assert.equal(fields.flexibleOtHours, 1);
         assert.equal(fields.flexibleWorkedHours, 10);
     });
 
-    it('keeps overtime for hours past the required day and the first extra hour', () => {
+    it('counts every hour after the required day once the overtime button applies', () => {
         const fields = flexibleOtFieldsFromDuration({
             isFlexible: true,
             date: '2026-10-05',
@@ -29,7 +29,20 @@ describe('flexibleOtFieldsFromDuration', () => {
             requiredHours: 9,
             statusKey: 'on_office',
         });
-        assert.equal(fields.flexibleOtHours, 1);
+        assert.equal(fields.flexibleOtHours, 2);
+    });
+
+    it('hides overtime until the extra hour after the required day is complete', () => {
+        const fields = flexibleOtFieldsFromDuration({
+            isFlexible: true,
+            date: '2026-10-05',
+            timeIn: '09:00',
+            timeOut: '18:30',
+            requiredHours: 9,
+            statusKey: 'on_office',
+        });
+        assert.equal(fields.flexibleOtHours, 0);
+        assert.equal(fields.flexibleWorkedHours, 9.5);
     });
 
     it('counts every worked hour as overtime on a holiday or weekly off', () => {

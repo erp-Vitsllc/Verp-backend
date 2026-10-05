@@ -1362,6 +1362,7 @@ export async function getEmployeeAttendanceProfile(req, res) {
                     (policy?.lateInRules || [])[0] || (policy?.lateOutRules || [])[0],
                 ),
                 extraLateRules: (policy?.extraLateRules || []).map(publicDeductionRule).filter(Boolean),
+                missedPunchRule: publicDeductionRule(policy?.missedPunchRule),
             },
             events,
             financial: {

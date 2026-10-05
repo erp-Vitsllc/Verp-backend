@@ -24,6 +24,7 @@ import {
     coveredEmployeeIdsOnDate,
     loadLeaveCoverIndex,
 } from './attendanceLeaveDayCover.js';
+import { partialLeaveOutcome } from './partialLeaveWindow.js';
 
 function formatDateKey({ year, month, day }) {
     return `${year}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
@@ -238,6 +239,13 @@ export async function processAttendanceDailyRoutine() {
         console.error('[AttendanceDailyRoutine] unauthorized leave apply failed:', err);
     }
 
+    let partialLeaveCount = 0;
+    try {
+        partialLeaveCount = await applyPartialLeaveOutcomes(yesterdayKey);
+    } catch (err) {
+        console.error('[AttendanceDailyRoutine] partial leave apply failed:', err);
+    }
+
     const yesterdayMarkedCount = await Attendance.countDocuments({ date: yesterdayKey });
 
     await AttendanceDay.findOneAndUpdate(
@@ -294,6 +302,34 @@ export async function processAttendanceDailyRoutine() {
         closedMarkedCount: yesterdayMarkedCount,
         mispunchedCount: mispunchResult.modifiedCount || 0,
         unauthorizedCount,
+        partialLeaveCount,
         weeklyOffSync,
     };
+}
+
+async function applyPartialLeaveOutcomes(dateKey) {
+    const workingTime = await loadWorkingTimeDoc();
+    const rows = await Attendance.find({
+        date: dateKey,
+        timeIn: { $nin: ['', null] },
+        timeOut: { $nin: ['', null] },
+    })
+        .select('employeeMongoId date statusKey timeIn timeOut timeOutDate leaveRequestStatus leaveRequestDayPart leaveRequestSession leaveDeductionTimes')
+        .lean();
+    if (!rows.length) return 0;
+    const employees = await EmployeeBasic.find({
+        _id: { $in: [...new Set(rows.map((row) => String(row.employeeMongoId)))] },
+    })
+        .select('staffType')
+        .lean();
+    const staffById = new Map(employees.map((employee) => [String(employee._id), employee.staffType]));
+    let changed = 0;
+    for (const row of rows) {
+        const week = getWeekForStaffType(workingTime, staffById.get(String(row.employeeMongoId)));
+        const outcome = partialLeaveOutcome(row, week);
+        if (!outcome) continue;
+        await Attendance.updateOne({ _id: row._id }, { $set: outcome });
+        changed += 1;
+    }
+    return changed;
 }

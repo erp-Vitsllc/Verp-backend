@@ -62,7 +62,8 @@ export function manualTimeOutDate(date, timeIn, timeOut) {
 
 /**
  * Overtime follows the current check-in and check-out.
- * The first hour past the required day is not overtime; hours after that are.
+ * The button appears only after the required hours plus one hour.
+ * Once it appears, overtime is every hour after the required hours.
  */
 export function flexibleOtFieldsFromDuration({
     isFlexible = false,
@@ -152,7 +153,8 @@ export function evaluateFlexibleDay({ workedMinutes, requiredHours }) {
             requiredHours: required,
         };
     }
-    const otHours = Math.max(0, Math.round((workedHours - required - 1) * 100) / 100);
+    const pastRequired = Math.round((workedHours - required) * 100) / 100;
+    const otHours = pastRequired + 0.001 >= 1 ? pastRequired : 0;
     return {
         statusKey: 'on_office',
         statusLabel: 'Present',

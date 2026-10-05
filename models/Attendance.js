@@ -168,12 +168,28 @@ const attendanceSchema = new mongoose.Schema(
             default: '',
             trim: true,
         },
-        /** Full day, or a half day bounded by leaveRequestTimeIn / leaveRequestTimeOut. */
+        /** Full day, half day, or quarter day. AM/PM is leaveRequestSession. */
         leaveRequestDayPart: {
             type: String,
-            enum: ['', 'full', 'half'],
+            enum: ['', 'full', 'half', 'quarter'],
             default: '',
             trim: true,
+        },
+        leaveRequestSession: {
+            type: String,
+            enum: ['', 'am', 'pm'],
+            default: '',
+            trim: true,
+        },
+        /** 1, 0.5, or 0.25 of a salary day. */
+        leaveDayFraction: {
+            type: Number,
+            default: null,
+        },
+        /** 2 when an approved partial day is punched outside the allowed window. */
+        leaveDeductionTimes: {
+            type: Number,
+            default: 1,
         },
         leaveRequestTimeIn: {
             type: String,

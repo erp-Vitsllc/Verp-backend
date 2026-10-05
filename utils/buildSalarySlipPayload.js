@@ -26,11 +26,14 @@ import { getVegaLogoDataUrl } from './buildSalarySlipPdfHtml.js';
 import { resolveEmployeePayrollPolicy } from './employeeLeavePolicy.js';
 import {
     countDayLateInOutEvents,
+    countExtraLateRules,
     lateDeductionFromEvents,
+    missedPunchDeduction,
 } from './lateDeductionPolicy.js';
 import { loadLeaveTicketEntitlement } from './loadLeaveTicketEntitlement.js';
 import { resolveSalarySlipApprovers } from './resolveSalarySlipApprovers.js';
 import { isSalarySlipCycle } from './salarySlipLeaveTicket.js';
+import { partialLeavePortion } from './partialLeaveWindow.js';
 import {
     applySalarySlipCountExclusions,
     salarySlipPolicyExclusions,
@@ -61,6 +64,17 @@ export class SalarySlipError extends Error {
 
 function pad2(n) {
     return String(n).padStart(2, '0');
+}
+
+function leaveChargeWeight(row, authorized) {
+    const part = String(row?.leaveRequestDayPart || '');
+    const fraction = part === 'half' || part === 'quarter'
+        ? partialLeavePortion(part)
+        : Number(row?.leaveDayFraction) > 0 && Number(row.leaveDayFraction) < 1
+          ? Number(row.leaveDayFraction)
+          : 1;
+    const doubled = authorized && Number(row?.leaveDeductionTimes) === 2 ? 2 : 1;
+    return fraction * doubled;
 }
 
 function money(value) {
@@ -791,6 +805,7 @@ export async function buildSalarySlipPayload({
     let unpaidSickDays = 0;
     let annualDays = 0;
     let lateEvents = 0;
+    let missedPunchDays = 0;
     let holidayMarks = 0;
     let holidaysWorked = 0;
     let compOffDays = 0;
@@ -815,12 +830,13 @@ export async function buildSalarySlipPayload({
         });
         if (PRESENT_KEYS.has(key)) presentDays += 1;
         if (LEAVE_KEYS.has(key)) workingDayLeaves += 1;
-        if (key === 'authorized_leave') authorizedDays += 1;
-        if (key === 'unauthorized_leave') unauthorizedDays += 1;
+        if (key === 'authorized_leave') authorizedDays += leaveChargeWeight(row, true);
+        if (key === 'unauthorized_leave') unauthorizedDays += leaveChargeWeight(row, false);
         if (key === 'sick_leave') {
             sickDays += 1;
         }
         if (key === 'on_leave') annualDays += 1;
+        if (key === 'mispunch') missedPunchDays += 1;
 
         const isHolidayDate = holidaySet.has(date) || key === 'holiday';
         const punched = Boolean(row.timeIn && row.timeOut);
@@ -859,6 +875,7 @@ export async function buildSalarySlipPayload({
         annualDays,
         compOffDays,
         lateEvents,
+        missedPunchDays,
         holidaysWorked,
         otHours,
         otDays,
@@ -872,6 +889,7 @@ export async function buildSalarySlipPayload({
             annualDays,
             compOffDays,
             lateEvents,
+            missedPunchDays,
             holidaysWorked,
             otHours,
             otDays,
@@ -895,6 +913,16 @@ export async function buildSalarySlipPayload({
     const lateCharge = lateDeductionFromEvents(lateEvents, policy);
     const lateChargeable = lateCharge.units;
     const lateAmount = money(daily * lateCharge.dayFraction);
+    const missedCharge = missedPunchDeduction(missedPunchDays, policy);
+    const missedAmount = money(daily * missedCharge.dayFraction);
+    const extraLateCharges = countExtraLateRules(
+        (attendance || []).filter((row) => isDateInSalaryMonth(dateKeyOf(row.date), ym)),
+        policy,
+        week,
+    );
+    const extraLateAmount = money(
+        extraLateCharges.reduce((sum, row) => sum + daily * row.dayFraction, 0),
+    );
 
     const earnings = structureEarnings(entry);
     upsertEarning(
@@ -1248,6 +1276,12 @@ export async function buildSalarySlipPayload({
         { component: 'Sick Leave', basis: qtyLabel(sickDays, 'day'), amount: sickAmount },
         { component: 'Annual Leave', basis: qtyLabel(annualDays, 'day'), amount: annualAmount },
         { component: 'Late Arrival', basis: qtyLabel(lateChargeable, 'event'), amount: lateAmount },
+        { component: 'Missed Punch', basis: qtyLabel(missedCharge.units, 'day'), amount: missedAmount },
+        ...extraLateCharges.map((row) => ({
+            component: row.label,
+            basis: qtyLabel(row.units, 'day'),
+            amount: money(daily * row.dayFraction),
+        })),
         { component: 'Salary Advance', basis: 'Schedule', amount: advanceMonth },
         { component: 'Loan', basis: 'Monthly', amount: loanMonth },
         { component: 'Fine', basis: 'Installment', amount: fineMonth },
@@ -1258,7 +1292,7 @@ export async function buildSalarySlipPayload({
     const totalDeductions = money(deductions.reduce((sum, row) => sum + money(row.amount), 0));
     const netSalary = money(Math.max(0, grossEarnings - totalDeductions));
     const attendanceDeductionTotal = money(
-        authorizedAmount + unauthorizedAmount + sickAmount + annualAmount + lateAmount,
+        authorizedAmount + unauthorizedAmount + sickAmount + annualAmount + lateAmount + missedAmount + extraLateAmount,
     );
 
     const attendanceDeductions = [
@@ -1309,6 +1343,28 @@ export async function buildSalarySlipPayload({
                 : 'No deduction for this month',
             total: lateAmount,
         },
+        {
+            category: 'Missed Punch',
+            qty: qtyLabel(missedCharge.units, 'day'),
+            rate: formatAed(money(daily * missedCharge.multiplier)),
+            calculation: missedAmount > 0
+                ? missedCharge.eventBundle > 0
+                    ? `${missedPunchDays} missed punches, free ${missedCharge.eventBundle}, x ${missedCharge.multiplier} x ${formatAed(daily)}`
+                    : `${missedPunchDays} missed punches x ${missedCharge.multiplier} x ${formatAed(daily)}`
+                : 'No deduction for this month',
+            total: missedAmount,
+        },
+        ...extraLateCharges.map((row) => ({
+            category: row.label,
+            qty: qtyLabel(row.units, 'day'),
+            rate: formatAed(money(daily * row.multiplier)),
+            calculation: row.dayFraction > 0
+                ? row.rule?.events > 0
+                    ? `${row.count} matching days, free ${row.rule.events}, x ${row.multiplier} x ${formatAed(daily)}`
+                    : `${row.count} matching days x ${row.multiplier} x ${formatAed(daily)}`
+                : 'No deduction for this month',
+            total: money(daily * row.dayFraction),
+        })),
     ];
 
     const payload = {

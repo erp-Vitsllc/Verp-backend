@@ -26,6 +26,7 @@ import {
     restoreClearedAttendance,
 } from '../utils/attendanceNonWorkingDay.js';
 import { nonHrMarkableDateKeys } from '../utils/nonHrMarkWindow.js';
+import { describePartialLeave, partialLeaveOutcome, partialLeavePortion } from '../utils/partialLeaveWindow.js';
 import { staffTypeMongoClause } from '../utils/workLocationHelpers.js';
 import { getDepartmentHOD } from '../utils/getDepartmentHOD.js';
 import { syncDashboardAction } from '../utils/syncDashboard.js';
@@ -1986,6 +1987,12 @@ export async function checkInMyAttendance(req, res) {
                 message: 'Location is off. Turn on location, then check in.',
             });
         }
+        const keepPartialLeave = isApprovedPartialLeave(existing);
+        if (keepPartialLeave) {
+            statusKey = existing.statusKey;
+            statusLabel = existing.statusLabel || statusLabel;
+            reason = existing.reason || '';
+        }
         const checkInSet = {
             date,
             employeeMongoId,
@@ -1997,7 +2004,9 @@ export async function checkInMyAttendance(req, res) {
             timeOut: '',
             reason,
             attachmentName: existing?.attachmentName || '',
-            approvalStatus: approvalStatusForMark(statusKey),
+            approvalStatus: keepPartialLeave
+                ? existing.approvalStatus || 'approved'
+                : approvalStatusForMark(statusKey),
             punchSource,
             checkOutSource: '',
             markedBy: req.user?.id || null,
@@ -2291,6 +2300,9 @@ export async function checkOutMyAttendance(req, res) {
                 timeOut,
                 timeOutDate: existing.timeOutDate,
             });
+            const keepPartial = isApprovedPartialLeave(existing);
+            const keptLabel = existing.statusLabel;
+            const keptReason = existing.reason;
             const result = evaluateFlexibleDay({
                 workedMinutes,
                 requiredHours: requiredHoursForDate(week, existing.date),
@@ -2315,7 +2327,16 @@ export async function checkOutMyAttendance(req, res) {
             existing.flexibleOtStatus = '';
             existing.flexibleOtApprovedHours = 0;
             existing.flexibleOtReason = '';
-            existing.approvalStatus = approvalStatusForMark(existing.statusKey);
+            if (keepPartial) {
+                existing.statusKey = 'authorized_leave';
+                existing.statusLabel = keptLabel;
+                existing.reason = keptReason;
+                const outcome = partialLeaveOutcome(existing.toObject(), week);
+                if (outcome?.leaveDeductionTimes) existing.leaveDeductionTimes = outcome.leaveDeductionTimes;
+            }
+            existing.approvalStatus = keepPartial
+                ? 'approved'
+                : approvalStatusForMark(existing.statusKey);
             await existing.save();
             try {
                 await syncPunchMapTargets(existing);
@@ -2348,7 +2369,10 @@ export async function checkOutMyAttendance(req, res) {
             console.error('[checkOutMyAttendance] schedule lookup failed:', scheduleErr);
         }
 
-        if (earlyGo) {
+        if (isApprovedPartialLeave(existing)) {
+            const outcome = partialLeaveOutcome(existing.toObject(), week);
+            if (outcome?.leaveDeductionTimes) existing.leaveDeductionTimes = outcome.leaveDeductionTimes;
+        } else if (earlyGo) {
             existing.statusKey = 'early_go';
             existing.statusLabel = 'Early Go';
             existing.reason = lateReason
@@ -2365,7 +2389,9 @@ export async function checkOutMyAttendance(req, res) {
                 existing.reason = '';
             }
         }
-        existing.approvalStatus = approvalStatusForMark(existing.statusKey);
+        existing.approvalStatus = isApprovedPartialLeave(existing)
+            ? existing.approvalStatus || 'approved'
+            : approvalStatusForMark(existing.statusKey);
 
         await existing.save();
         try {
@@ -2682,8 +2708,12 @@ export async function getAttendancePendingInbox(req, res) {
                         ? `${r.leaveRequestFromDate} → ${r.leaveRequestToDate}`
                         : r.date;
                 const dayPartLabel =
-                    r.leaveRequestDayPart === 'half' && r.leaveRequestTimeIn && r.leaveRequestTimeOut
-                        ? ` · Half day (${r.leaveRequestTimeIn} – ${r.leaveRequestTimeOut})`
+                    r.leaveRequestDayPart === 'half' || r.leaveRequestDayPart === 'quarter'
+                        ? ` · ${partialDayLabel(r.leaveRequestDayPart, r.leaveRequestSession, {
+                            flexible: !r.leaveRequestTimeIn,
+                            workStart: r.leaveRequestTimeIn,
+                            workEnd: r.leaveRequestTimeOut,
+                        })}`
                         : '';
                 const summary = isYellow
                     ? `Clarification: mark ${r.date} as Present (currently ${currentLabel})`
@@ -3117,8 +3147,23 @@ function normalizeClockHHmm(value) {
     return `${String(hour).padStart(2, '0')}:${String(minute).padStart(2, '0')}`;
 }
 
-function halfDayWindowLabel(timeIn, timeOut) {
-    return `Half day (${timeIn} – ${timeOut})`;
+function isApprovedPartialLeave(record) {
+    const part = String(record?.leaveRequestDayPart || '');
+    return (
+        String(record?.leaveRequestStatus || '') === 'approved' &&
+        String(record?.statusKey || '') === 'authorized_leave' &&
+        (part === 'half' || part === 'quarter')
+    );
+}
+
+function partialDayLabel(dayPart, session, described) {
+    const name = dayPart === 'quarter' ? 'Quarter day' : dayPart === 'half' ? 'Half day' : 'Full day';
+    if (dayPart !== 'half' && dayPart !== 'quarter') return name;
+    const side = session === 'pm' ? 'PM' : 'AM';
+    if (described && !described.flexible && described.workStart && described.workEnd) {
+        return `${name} ${side} (work ${described.workStart}–${described.workEnd})`;
+    }
+    return `${name} ${side}`;
 }
 
 function futureRequestRangeLabel(fromDate, toDate) {
@@ -3128,7 +3173,7 @@ function futureRequestRangeLabel(fromDate, toDate) {
 /**
  * POST /api/Attendance/me/future-request
  * Planned leave / late / early across future working days (not tomorrow; skip holidays).
- * Body: { fromDate, toDate, kind, dayPart: full|half, timeIn, timeOut, reason, attachmentName }
+ * Body: { fromDate, toDate, kind, dayPart: full|half|quarter, session: am|pm, reason, attachmentName }
  */
 export async function requestAttendanceFuture(req, res) {
     try {
@@ -3155,14 +3200,19 @@ export async function requestAttendanceFuture(req, res) {
         const attachmentName = String(req.body?.attachmentName || '').trim();
         const isMultiDay = fromDate !== toDate;
         const isAnnualLeave = kind === 'annual_leave';
-        let dayPart =
-            !isMultiDay &&
-            !isAnnualLeave &&
-            String(req.body?.dayPart || 'full').trim() === 'half'
-                ? 'half'
+        const requestedPart = String(req.body?.dayPart || 'full').trim();
+        const dayPart =
+            !isMultiDay && !isAnnualLeave && (requestedPart === 'half' || requestedPart === 'quarter')
+                ? requestedPart
                 : 'full';
-        const halfTimeIn = dayPart === 'half' ? normalizeClockHHmm(req.body?.timeIn) : '';
-        const halfTimeOut = dayPart === 'half' ? normalizeClockHHmm(req.body?.timeOut) : '';
+        const session =
+            dayPart === 'full'
+                ? ''
+                : String(req.body?.session || '').trim().toLowerCase() === 'pm'
+                  ? 'pm'
+                  : String(req.body?.session || '').trim().toLowerCase() === 'am'
+                    ? 'am'
+                    : '';
         const spec =
             FUTURE_REQUEST_KINDS[
                 kind === 'annual_leave' ? 'annual_leave' : kind === 'leave' ? 'leave' : kind
@@ -3183,17 +3233,20 @@ export async function requestAttendanceFuture(req, res) {
         if (!spec) {
             return res.status(400).json({ message: 'Choose Leave, Late arrival, or Early go.' });
         }
-        if (dayPart === 'half' && (!halfTimeIn || !halfTimeOut)) {
-            return res.status(400).json({ message: 'Choose a time in and time out for the half day.' });
-        }
-        if (dayPart === 'half' && halfTimeOut <= halfTimeIn) {
-            return res.status(400).json({ message: 'Time out must be after time in.' });
+        if (dayPart !== 'full' && !session) {
+            return res.status(400).json({ message: 'Choose AM or PM for a half day or quarter day.' });
         }
         if (kind === 'leave' && !reason) {
             return res.status(400).json({ message: 'Reason is required for authorized leave.' });
         }
 
         const todayKey = getDubaiDateKey();
+        const tomorrowKey = nextDateKey(todayKey);
+        if (kind === 'leave' && (fromDate <= tomorrowKey || toDate <= tomorrowKey)) {
+            return res.status(400).json({
+                message: 'Authorized leave cannot be requested for today or tomorrow.',
+            });
+        }
         if (fromDate <= todayKey) {
             return res.status(400).json({ message: 'This request is only for future working days.' });
         }
@@ -3292,19 +3345,19 @@ export async function requestAttendanceFuture(req, res) {
             });
         }
 
-        if (dayPart === 'half') {
-            const schedule = getScheduledPunchMinutes(scheduleWeek, requestDates[0]);
-            const inMinutes = clockTimeToMinutes(halfTimeIn);
-            const outMinutes = clockTimeToMinutes(halfTimeOut);
-            if (
-                schedule?.startMinutes != null &&
-                schedule?.endMinutes != null &&
-                (inMinutes < schedule.startMinutes || outMinutes > schedule.endMinutes)
-            ) {
-                return res.status(400).json({
-                    message: 'Half day times must stay inside your working hours.',
+        const partialLeave =
+            dayPart === 'full'
+                ? null
+                : describePartialLeave({
+                    week: scheduleWeek,
+                    dateKey: requestDates[0],
+                    dayPart,
+                    session,
                 });
-            }
+        if (dayPart !== 'full' && !partialLeave) {
+            return res.status(400).json({
+                message: 'This working day has no hours for a half day or quarter day.',
+            });
         }
 
         const existing = await Attendance.find({
@@ -3336,15 +3389,14 @@ export async function requestAttendanceFuture(req, res) {
         const groupId = new mongoose.Types.ObjectId().toString();
         const requestedAt = new Date();
         const rangeLabel = futureRequestRangeLabel(fromDate, toDate);
-        const dayPartLabel =
-            dayPart === 'half' ? halfDayWindowLabel(halfTimeIn, halfTimeOut) : 'Full day';
+        const dayPartLabel = partialDayLabel(dayPart, session, partialLeave);
         const requestedStatusLabel =
-            dayPart === 'half' && kind === 'leave'
-                ? 'Half day leave'
+            dayPart !== 'full' && kind === 'leave'
+                ? dayPartLabel
                 : spec.requestedStatusLabel;
         const extra2Prefix =
-            dayPart === 'half' && kind === 'leave'
-                ? 'Future half day leave'
+            dayPart !== 'full' && kind === 'leave'
+                ? `Future ${dayPartLabel}`
                 : spec.extra2Prefix;
         const durationLabel = `${requestDates.length} day${requestDates.length === 1 ? '' : 's'}`;
         const savedRecords = [];
@@ -3370,8 +3422,15 @@ export async function requestAttendanceFuture(req, res) {
             record.attachmentName = attachmentName;
             record.leaveRequestStatus = 'pending';
             record.leaveRequestDayPart = dayPart;
-            record.leaveRequestTimeIn = halfTimeIn;
-            record.leaveRequestTimeOut = halfTimeOut;
+            record.leaveRequestSession = session;
+            record.leaveDayFraction = partialLeavePortion(dayPart);
+            record.leaveDeductionTimes = 1;
+            record.leaveRequestTimeIn = partialLeave
+                ? partialLeave.workStart || ''
+                : normalizeClockHHmm(req.body?.timeIn);
+            record.leaveRequestTimeOut = partialLeave
+                ? partialLeave.workEnd || ''
+                : normalizeClockHHmm(req.body?.timeOut);
             record.leaveRequestFromDate = fromDate;
             record.leaveRequestToDate = toDate;
             record.leaveRequestGroupId = groupId;
@@ -3401,6 +3460,7 @@ export async function requestAttendanceFuture(req, res) {
                         leaveRequestKind: spec.leaveRequestKind,
                         leaveRequestGroupId: groupId,
                         dayPart,
+                        session,
                     }),
                 });
             }
@@ -3678,17 +3738,32 @@ async function applyLeaveDecisionToRecord({
     const requestedLabel =
         record.requestedStatusLabel || leaveStatusLabel(requestedKey);
     const kind = String(record.leaveRequestKind || '');
-    const isHalfDay = String(record.leaveRequestDayPart || '') === 'half';
-    const halfDaySuffix =
-        isHalfDay && record.leaveRequestTimeIn && record.leaveRequestTimeOut
-            ? ` · Half day (${record.leaveRequestTimeIn} – ${record.leaveRequestTimeOut})`
+    const partialLabel = partialDayLabel(
+        record.leaveRequestDayPart,
+        record.leaveRequestSession,
+        {
+            flexible: !record.leaveRequestTimeIn,
+            workStart: record.leaveRequestTimeIn,
+            workEnd: record.leaveRequestTimeOut,
+        },
+    );
+    const partialSuffix =
+        record.leaveRequestDayPart === 'half' || record.leaveRequestDayPart === 'quarter'
+            ? ` · ${partialLabel}`
             : '';
 
         if (decision === 'approved') {
         const applyAuthorized = () => {
+            const part = String(record.leaveRequestDayPart || 'full');
             record.statusKey = 'authorized_leave';
-            record.statusLabel = `Authorized Leave${halfDaySuffix}`;
+            record.statusLabel =
+                part === 'half'
+                    ? `Authorized Half Day${record.leaveRequestSession ? ` (${String(record.leaveRequestSession).toUpperCase()})` : ''}`
+                    : part === 'quarter'
+                      ? `Authorized Quarter Day${record.leaveRequestSession ? ` (${String(record.leaveRequestSession).toUpperCase()})` : ''}`
+                      : 'Authorized Leave';
             record.leavePayType = 'unpaid';
+            record.leaveDayFraction = partialLeavePortion(part);
             record.approvalStatus = 'approved';
             if (record.leaveRequestReason) record.reason = record.leaveRequestReason;
             return null;
@@ -3716,7 +3791,7 @@ async function applyLeaveDecisionToRecord({
             if (record.leaveRequestReason) record.reason = record.leaveRequestReason;
         } else if (kind === 'future_late' || kind === 'past_late') {
             record.statusKey = 'late_arrived';
-            record.statusLabel = kind === 'past_late' ? 'Late Arrival' : `Late arrival approved${halfDaySuffix}`;
+            record.statusLabel = kind === 'past_late' ? 'Late Arrival' : `Late arrival approved${partialSuffix}`;
             record.leavePayType = '';
             record.approvalStatus = 'approved';
             if (kind === 'past_late') {
