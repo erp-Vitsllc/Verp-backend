@@ -58,7 +58,7 @@ const SKIP_LATE_STATUS = new Set([
  * Count late-in and late-out as separate events on the same day so they share
  * one monthly total. A day with both is 2 events, not two independent policies.
  */
-export function countDayLateInOutEvents({
+export function sharedLateSides({
     timeIn,
     timeOut,
     date,
@@ -66,9 +66,10 @@ export function countDayLateInOutEvents({
     statusKey,
     minutesThreshold,
 } = {}) {
+    const none = { in: false, out: false };
     const key = String(statusKey || '');
-    if (SKIP_LATE_STATUS.has(key)) return 0;
-    if (key !== 'late_arrived' && key !== 'early_go') return 0;
+    if (SKIP_LATE_STATUS.has(key)) return none;
+    if (key !== 'late_arrived' && key !== 'early_go') return none;
 
     const threshold = Number(minutesThreshold);
     const minMinutes = Number.isFinite(threshold) && threshold > 0 ? threshold : 0;
@@ -78,15 +79,16 @@ export function countDayLateInOutEvents({
     const canUseSchedule = Boolean(scheduled && !scheduled.isOffDay);
 
     if (canUseSchedule && minMinutes > 0 && (actualIn != null || actualOut != null)) {
-        const lateIn =
-            actualIn != null &&
-            scheduled.startMinutes != null &&
-            actualIn - scheduled.startMinutes >= minMinutes;
-        const lateOut =
-            actualOut != null &&
-            scheduled.endMinutes != null &&
-            scheduled.endMinutes - actualOut >= minMinutes;
-        return (lateIn ? 1 : 0) + (lateOut ? 1 : 0);
+        return {
+            in:
+                actualIn != null &&
+                scheduled.startMinutes != null &&
+                actualIn - scheduled.startMinutes >= minMinutes,
+            out:
+                actualOut != null &&
+                scheduled.endMinutes != null &&
+                scheduled.endMinutes - actualOut >= minMinutes,
+        };
     }
 
     let lateIn = key === 'late_arrived';
@@ -109,7 +111,12 @@ export function countDayLateInOutEvents({
             lateOut = true;
         }
     }
-    return (lateIn ? 1 : 0) + (lateOut ? 1 : 0);
+    return { in: lateIn, out: lateOut };
+}
+
+export function countDayLateInOutEvents(args = {}) {
+    const sides = sharedLateSides(args);
+    return (sides.in ? 1 : 0) + (sides.out ? 1 : 0);
 }
 
 function isMissedPunchTitle(title) {
@@ -159,13 +166,8 @@ export function extraLateRuleDirection(rule) {
     return '';
 }
 
-/**
- * Each extra late rule is its own deduction.
- * A day matches only the highest minute band in that direction.
- * An event count of 0 means every matching day deducts.
- */
-export function countExtraLateRules(rows, policy, week) {
-    const rules = (Array.isArray(policy?.extraLateRules) ? policy.extraLateRules : [])
+function prepareExtraLateRules(policy) {
+    return (Array.isArray(policy?.extraLateRules) ? policy.extraLateRules : [])
         .map((rule, index) => ({ rule, index, direction: extraLateRuleDirection(rule) }))
         .filter(
             (row) =>
@@ -173,38 +175,115 @@ export function countExtraLateRules(rows, policy, week) {
                 lateDeductMultiplier(row.rule) > 0 &&
                 !isMissedPunchTitle(row.rule?.title),
         );
+}
+
+function highestExtraMatch(minutes, indexes, rules) {
+    if (minutes <= 0) return null;
+    const match = indexes.find(
+        (index) => minutes >= Math.max(0, Number(rules[index].rule?.minutes) || 0),
+    );
+    return match == null ? null : match;
+}
+
+function splitFraction(total, inCount, outCount) {
+    const fraction = Math.max(0, Number(total) || 0);
+    const weights = { in: Math.max(0, inCount), out: Math.max(0, outCount) };
+    const sum = weights.in + weights.out;
+    if (!fraction || !sum) return { in: 0, out: 0 };
+    const inn = Math.round(fraction * (weights.in / sum) * 100) / 100;
+    const out = Math.round((fraction - inn) * 100) / 100;
+    return { in: inn, out: Math.max(0, out) };
+}
+
+/**
+ * One result for late in and one for late out.
+ * A day that meets a stricter minute band is counted only on that band,
+ * not also on the shared late in / late out allowance.
+ */
+export function lateInOutSummary(rows, policy, week) {
+    const rules = prepareExtraLateRules(policy);
     const counts = rules.map(() => 0);
-    if (!rules.length || isFlexibleTiming(week)) {
-        return rules.map((row, index) => extraLateCharge(row, counts[index]));
-    }
     const order = { in: [], out: [] };
     rules.forEach((row, index) => order[row.direction].push(index));
     const byMinutes = (a, b) => (Number(rules[b].rule?.minutes) || 0) - (Number(rules[a].rule?.minutes) || 0);
     order.in.sort(byMinutes);
     order.out.sort(byMinutes);
+    const flexible = isFlexibleTiming(week);
+    const threshold = minutesThresholdOf(sharedLateRule(policy));
+    let sharedLateIn = 0;
+    let sharedLateOut = 0;
 
     for (const row of rows || []) {
-        if (EXTRA_LATE_SKIP.has(String(row?.statusKey || ''))) continue;
-        const date = String(row?.date || '').slice(0, 10);
-        const scheduled = getScheduledPunchMinutes(week, date);
-        if (!scheduled || scheduled.isOffDay || scheduled.startMinutes == null || scheduled.endMinutes == null) {
-            continue;
+        const statusKey = String(row?.statusKey || '');
+        let extraIn = false;
+        let extraOut = false;
+        if (!flexible && rules.length && !EXTRA_LATE_SKIP.has(statusKey)) {
+            const date = String(row?.date || '').slice(0, 10);
+            const scheduled = getScheduledPunchMinutes(week, date);
+            if (scheduled && !scheduled.isOffDay && scheduled.startMinutes != null && scheduled.endMinutes != null) {
+                const actualIn = clockTimeToMinutes(row?.timeIn);
+                const actualOut = clockTimeToMinutes(row?.timeOut);
+                const gaps = {
+                    in: actualIn == null ? 0 : actualIn - scheduled.startMinutes,
+                    out: actualOut == null ? 0 : scheduled.endMinutes - actualOut,
+                };
+                const matchIn = highestExtraMatch(gaps.in, order.in, rules);
+                const matchOut = highestExtraMatch(gaps.out, order.out, rules);
+                if (matchIn != null) {
+                    counts[matchIn] += 1;
+                    extraIn = true;
+                }
+                if (matchOut != null) {
+                    counts[matchOut] += 1;
+                    extraOut = true;
+                }
+            }
         }
-        const actualIn = clockTimeToMinutes(row?.timeIn);
-        const actualOut = clockTimeToMinutes(row?.timeOut);
-        const gaps = {
-            in: actualIn == null ? 0 : actualIn - scheduled.startMinutes,
-            out: actualOut == null ? 0 : scheduled.endMinutes - actualOut,
-        };
-        for (const side of ['in', 'out']) {
-            if (gaps[side] <= 0) continue;
-            const match = order[side].find(
-                (index) => gaps[side] >= Math.max(0, Number(rules[index].rule?.minutes) || 0),
-            );
-            if (match != null) counts[match] += 1;
-        }
+        const sharedSides = sharedLateSides({
+            timeIn: row?.timeIn,
+            timeOut: row?.timeOut,
+            date: row?.date,
+            week,
+            statusKey,
+            minutesThreshold: threshold,
+        });
+        if (!extraIn && sharedSides.in) sharedLateIn += 1;
+        if (!extraOut && sharedSides.out) sharedLateOut += 1;
     }
-    return rules.map((row, index) => extraLateCharge(row, counts[index]));
+
+    const extra = rules.map((row, index) => extraLateCharge(row, counts[index]));
+    const shared = lateDeductionFromEvents(sharedLateIn + sharedLateOut, policy);
+    const extraIn = extra.filter((row) => row.direction === 'in');
+    const extraOut = extra.filter((row) => row.direction === 'out');
+    const extraInFraction = extraIn.reduce((sum, row) => sum + row.dayFraction, 0);
+    const extraOutFraction = extraOut.reduce((sum, row) => sum + row.dayFraction, 0);
+    const sharedSplit = splitFraction(shared.dayFraction, sharedLateIn, sharedLateOut);
+    const roundFraction = (value) => Math.round(value * 100) / 100;
+    return {
+        sharedLateIn,
+        sharedLateOut,
+        shared,
+        extra,
+        lateIn: {
+            count: sharedLateIn + extraIn.reduce((sum, row) => sum + row.count, 0),
+            sharedCount: sharedLateIn,
+            dayFraction: roundFraction(sharedSplit.in + extraInFraction),
+        },
+        lateOut: {
+            count: sharedLateOut + extraOut.reduce((sum, row) => sum + row.count, 0),
+            sharedCount: sharedLateOut,
+            dayFraction: roundFraction(sharedSplit.out + extraOutFraction),
+        },
+    };
+}
+
+/**
+ * Each extra late rule is its own deduction.
+ * A day matches only the highest minute band in that direction.
+ * An event count of 0 means every matching day deducts.
+ */
+export function countExtraLateRules(rows, policy, week) {
+    return lateInOutSummary(rows, policy, week).extra;
 }
 
 function extraLateCharge(row, count) {

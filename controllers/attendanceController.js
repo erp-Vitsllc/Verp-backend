@@ -582,6 +582,8 @@ function emptyDayStats(totalStaff = 0) {
         workFromHome: 0,
         missedPunch: 0,
         compOffLeave: 0,
+        earlyGo: 0,
+        halfDay: 0,
         // No marks yet — calendar shows total staff only until attendance is recorded.
         notMarked: 0,
         holiday: 0,
@@ -601,6 +603,13 @@ function emptyDayStats(totalStaff = 0) {
  * Aggregate attendance marks for one calendar day.
  * unauthorized_leave counts with not_marked (same bucket).
  */
+function isHalfDayAttendance(row) {
+    const part = String(row?.leaveRequestDayPart || '').trim().toLowerCase();
+    if (part === 'half') return true;
+    if (Number(row?.leaveDayFraction) === 0.5) return true;
+    return /half\s*day/i.test(String(row?.statusLabel || ''));
+}
+
 function buildDayStatsFromRecords(records, totalStaff = 0, { isWeeklyOffDay = false } = {}) {
     const rows = Array.isArray(records) ? records : [];
     const counts = {
@@ -618,11 +627,15 @@ function buildDayStatsFromRecords(records, totalStaff = 0, { isWeeklyOffDay = fa
         mispunch: 0,
     };
 
+    let earlyGo = 0;
+    let halfDay = 0;
     for (const row of rows) {
         const key = String(row?.statusKey || '').trim();
         if (Object.prototype.hasOwnProperty.call(counts, key)) {
             counts[key] += 1;
         }
+        if (key === 'early_go') earlyGo += 1;
+        else if (key !== 'on_office' && key !== 'late_arrived' && isHalfDayAttendance(row)) halfDay += 1;
     }
 
     const markedCount = rows.length;
@@ -645,6 +658,8 @@ function buildDayStatsFromRecords(records, totalStaff = 0, { isWeeklyOffDay = fa
         workFromHome: counts.work_from_home,
         missedPunch: counts.mispunch,
         compOffLeave: counts.compoff_leave,
+        earlyGo,
+        halfDay,
         notMarked: isWeeklyOffDay ? 0 : notMarked,
         holiday,
         weeklyOff,

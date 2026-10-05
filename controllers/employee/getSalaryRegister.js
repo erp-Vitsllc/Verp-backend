@@ -27,9 +27,7 @@ import {
 } from '../../utils/workLocationHelpers.js';
 import { serializePayrollSettings, reminderAudienceList } from './payrollSettingsController.js';
 import {
-    countDayLateInOutEvents,
-    countExtraLateRules,
-    lateDeductionFromEvents,
+    lateInOutSummary,
     missedPunchDeduction,
 } from '../../utils/lateDeductionPolicy.js';
 import { partialLeavePortion } from '../../utils/partialLeaveWindow.js';
@@ -1535,7 +1533,7 @@ export const getSalaryRegister = async (req, res) => {
                 .lean()
                 .maxTimeMS(15000);
 
-            const lateEventsByKey = new Map();
+            const lateRowsByKey = new Map();
             const seenLateDates = new Set();
             for (const row of lateRows || []) {
                 const emp = empByMongo.get(String(row.employeeMongoId || ''));
@@ -1546,30 +1544,11 @@ export const getSalaryRegister = async (req, res) => {
                 const stamp = `${emp._id}|${date}`;
                 if (seenLateDates.has(stamp)) continue;
                 seenLateDates.add(stamp);
-                const policy = policyForEmployee(emp);
-                const latePolicy = lateDeductionFromEvents(0, policy);
-                const events = countDayLateInOutEvents({
-                    timeIn: row.timeIn,
-                    timeOut: row.timeOut,
-                    date,
-                    week: getWeekForStaffType(workingTime, emp.staffType),
-                    statusKey: row.statusKey,
-                    minutesThreshold: latePolicy.minutesThreshold,
-                });
-                if (events <= 0) continue;
                 const code = String(emp.employeeId || '').trim();
                 const mapKey = `${code}|${ym}`;
-                lateEventsByKey.set(mapKey, (lateEventsByKey.get(mapKey) || 0) + events);
-            }
-
-            for (const [mapKey, combined] of lateEventsByKey.entries()) {
-                const [code, ym] = String(mapKey).split('|');
-                const emp = getByEmployeeCode(empByCode, code);
-                if (!emp) continue;
-                const monthly = salaryAmountForMonth(getByEmployeeCode(salaryByCode, code), ym);
-                const daily = daySalaryForMonth(monthly, ym);
-                const lateCharge = lateDeductionFromEvents(combined, policyForEmployee(emp));
-                addDeduction(code, ym, daily * lateCharge.dayFraction);
+                const list = lateRowsByKey.get(mapKey) || [];
+                list.push(row);
+                lateRowsByKey.set(mapKey, list);
             }
 
             const missedRows = await Attendance.find({
@@ -1620,20 +1599,26 @@ export const getSalaryRegister = async (req, res) => {
                 list.push(row);
                 punchesByKey.set(mapKey, list);
             }
-            for (const [mapKey, punches] of punchesByKey.entries()) {
+            const lateKeys = new Set([...lateRowsByKey.keys(), ...punchesByKey.keys()]);
+            for (const mapKey of lateKeys) {
                 const [code, ym] = String(mapKey).split('|');
                 const emp = getByEmployeeCode(empByCode, code);
                 if (!emp) continue;
+                const byDate = new Map();
+                for (const row of [...(lateRowsByKey.get(mapKey) || []), ...(punchesByKey.get(mapKey) || [])]) {
+                    const date = String(row?.date || '').slice(0, 10);
+                    if (!date) continue;
+                    const current = byDate.get(date);
+                    if (!current || (!current.timeIn && row.timeIn)) byDate.set(date, row);
+                }
                 const monthly = salaryAmountForMonth(getByEmployeeCode(salaryByCode, code), ym);
                 const daily = daySalaryForMonth(monthly, ym);
-                const charges = countExtraLateRules(
-                    punches,
+                const summary = lateInOutSummary(
+                    [...byDate.values()],
                     policyForEmployee(emp),
                     getWeekForStaffType(workingTime, emp.staffType),
                 );
-                for (const charge of charges) {
-                    addDeduction(code, ym, daily * charge.dayFraction);
-                }
+                addDeduction(code, ym, daily * (summary.lateIn.dayFraction + summary.lateOut.dayFraction));
             }
         }
 

@@ -6,6 +6,7 @@ import {
     countDayLateInOutEvents,
     lateDeductionFromEvents,
     countExtraLateRules,
+    lateInOutSummary,
     missedPunchDeduction,
 } from './lateDeductionPolicy.js';
 
@@ -111,5 +112,43 @@ describe('late in/out combined events', () => {
         assert.equal(halfOut.count, 0);
         assert.equal(fullOut.count, 1);
         assert.equal(fullOut.dayFraction, 1);
+    });
+
+    it('counts a stricter late band once and leaves shorter lates on the shared allowance', () => {
+        const week = {
+            timingMode: 'scheduled',
+            monday: {
+                isOffDay: false,
+                startHour: 9,
+                startMinute: 0,
+                startMeridiem: 'AM',
+                endHour: 6,
+                endMinute: 0,
+                endMeridiem: 'PM',
+            },
+        };
+        const policy = {
+            lateInRules: [{ minutes: 15, events: 4, deduct: 'quarter' }],
+            extraLateRules: [
+                { title: 'Late in', minutes: 90, events: 0, deduct: 'half' },
+                { title: 'Late Out', minutes: 90, events: 0, deduct: 'half' },
+            ],
+        };
+        const summary = lateInOutSummary(
+            [
+                { date: '2026-10-05', statusKey: 'late_arrived', timeIn: '09:30', timeOut: '18:00' },
+                { date: '2026-10-06', statusKey: 'late_arrived', timeIn: '10:40', timeOut: '18:00' },
+            ],
+            policy,
+            {
+                ...week,
+                tuesday: week.monday,
+            },
+        );
+        assert.equal(summary.sharedLateIn, 1);
+        assert.equal(summary.lateIn.count, 2);
+        assert.equal(summary.lateIn.dayFraction, 0.5);
+        assert.equal(summary.lateOut.count, 0);
+        assert.equal(summary.lateOut.dayFraction, 0);
     });
 });

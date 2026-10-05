@@ -26,9 +26,8 @@ import { compOffAdjustedHours } from './compOffSettlement.js';
 import { getVegaLogoDataUrl } from './buildSalarySlipPdfHtml.js';
 import { resolveEmployeePayrollPolicy } from './employeeLeavePolicy.js';
 import {
-    countDayLateInOutEvents,
-    countExtraLateRules,
     lateDeductionFromEvents,
+    lateInOutSummary,
     missedPunchDeduction,
 } from './lateDeductionPolicy.js';
 import { loadLeaveTicketEntitlement } from './loadLeaveTicketEntitlement.js';
@@ -817,6 +816,7 @@ export async function buildSalarySlipPayload({
     let otHours = 0;
     let otDays = 0;
     const countedDates = new Set();
+    const countedAttendance = [];
 
     const enrollment = await SalaryEnrollment.findOne({ employeeId: idPattern })
         .select('fromMonth salaryDate processDate')
@@ -830,17 +830,10 @@ export async function buildSalarySlipPayload({
         if (!isDateInSalaryMonth(date, ym) || countedDates.has(date)) continue;
         if (!keepAttendanceForProcessingStart(row, processingStart)) continue;
         countedDates.add(date);
+        countedAttendance.push(row);
         const key = String(row.statusKey || '');
         if (key === 'holiday') holidayMarks += 1;
         if (key === 'compoff_leave') compOffDays += 1;
-        lateEvents += countDayLateInOutEvents({
-            timeIn: row.timeIn,
-            timeOut: row.timeOut,
-            date,
-            week,
-            statusKey: key,
-            minutesThreshold: latePolicy.minutesThreshold,
-        });
         if (PRESENT_KEYS.has(key)) presentDays += 1;
         if (LEAVE_KEYS.has(key)) workingDayLeaves += 1;
         if (key === 'authorized_leave') authorizedDays += leaveChargeWeight(row, true);
@@ -923,19 +916,15 @@ export async function buildSalarySlipPayload({
     const unauthorizedAmount = money(daily * unauthTimes * unauthorizedDays);
     const sickAmount = money(daily * unpaidSickDays);
     const annualAmount = 0;
-    const lateCharge = lateDeductionFromEvents(lateEvents, policy);
-    const lateChargeable = lateCharge.units;
-    const lateAmount = money(daily * lateCharge.dayFraction);
+    const lateSummary = exclusions.attendance
+        ? lateInOutSummary([], policy, week)
+        : lateInOutSummary(countedAttendance, policy, week);
+    const lateInDays = lateSummary.lateIn.dayFraction;
+    const lateOutDays = lateSummary.lateOut.dayFraction;
+    const lateInAmount = money(daily * lateInDays);
+    const lateOutAmount = money(daily * lateOutDays);
     const missedCharge = missedPunchDeduction(missedPunchDays, policy);
     const missedAmount = money(daily * missedCharge.dayFraction);
-    const extraLateCharges = countExtraLateRules(
-        (attendance || []).filter((row) => isDateInSalaryMonth(dateKeyOf(row.date), ym)),
-        policy,
-        week,
-    );
-    const extraLateAmount = money(
-        extraLateCharges.reduce((sum, row) => sum + daily * row.dayFraction, 0),
-    );
 
     const earnings = structureEarnings(entry);
     upsertEarning(
@@ -1288,13 +1277,9 @@ export async function buildSalarySlipPayload({
         { component: 'Unauthorized Leave', basis: qtyLabel(unauthorizedDays, 'day'), amount: unauthorizedAmount },
         { component: 'Sick Leave', basis: qtyLabel(sickDays, 'day'), amount: sickAmount },
         { component: 'Annual Leave', basis: qtyLabel(annualDays, 'day'), amount: annualAmount },
-        { component: 'Late Arrival', basis: qtyLabel(lateChargeable, 'event'), amount: lateAmount },
+        { component: 'Late in', basis: qtyLabel(lateSummary.lateIn.count, 'event'), amount: lateInAmount },
+        { component: 'Late out', basis: qtyLabel(lateSummary.lateOut.count, 'event'), amount: lateOutAmount },
         { component: 'Missed Punch', basis: qtyLabel(missedCharge.units, 'day'), amount: missedAmount },
-        ...extraLateCharges.map((row) => ({
-            component: row.label,
-            basis: qtyLabel(row.units, 'day'),
-            amount: money(daily * row.dayFraction),
-        })),
         { component: 'Salary Advance', basis: 'Schedule', amount: advanceMonth },
         { component: 'Loan', basis: 'Monthly', amount: loanMonth },
         { component: 'Fine', basis: 'Installment', amount: fineMonth },
@@ -1305,7 +1290,7 @@ export async function buildSalarySlipPayload({
     const totalDeductions = money(deductions.reduce((sum, row) => sum + money(row.amount), 0));
     const netSalary = money(Math.max(0, grossEarnings - totalDeductions));
     const attendanceDeductionTotal = money(
-        authorizedAmount + unauthorizedAmount + sickAmount + annualAmount + lateAmount + missedAmount + extraLateAmount,
+        authorizedAmount + unauthorizedAmount + sickAmount + annualAmount + lateInAmount + lateOutAmount + missedAmount,
     );
 
     const attendanceDeductions = [
@@ -1346,15 +1331,22 @@ export async function buildSalarySlipPayload({
             total: annualAmount,
         },
         {
-            category: 'Late Arrival',
-            qty: qtyLabel(lateChargeable, 'event'),
-            rate: formatAed(money(daily * lateTimes)),
-            calculation: lateAmount > 0
-                ? lateCharge.eventBundle > 0
-                    ? `${lateEvents} combined late in/out ÷ ${lateCharge.eventBundle} x ${lateTimes} x ${formatAed(daily)}`
-                    : `${lateEvents} combined late in/out x ${lateTimes} x ${formatAed(daily)}`
+            category: 'Late in',
+            qty: qtyLabel(lateSummary.lateIn.count, 'event'),
+            rate: formatAed(daily),
+            calculation: lateInAmount > 0
+                ? `${qtyLabel(lateInDays, 'day')} x ${formatAed(daily)}`
                 : 'No deduction for this month',
-            total: lateAmount,
+            total: lateInAmount,
+        },
+        {
+            category: 'Late out',
+            qty: qtyLabel(lateSummary.lateOut.count, 'event'),
+            rate: formatAed(daily),
+            calculation: lateOutAmount > 0
+                ? `${qtyLabel(lateOutDays, 'day')} x ${formatAed(daily)}`
+                : 'No deduction for this month',
+            total: lateOutAmount,
         },
         {
             category: 'Missed Punch',
@@ -1367,17 +1359,6 @@ export async function buildSalarySlipPayload({
                 : 'No deduction for this month',
             total: missedAmount,
         },
-        ...extraLateCharges.map((row) => ({
-            category: row.label,
-            qty: qtyLabel(row.units, 'day'),
-            rate: formatAed(money(daily * row.multiplier)),
-            calculation: row.dayFraction > 0
-                ? row.rule?.events > 0
-                    ? `${row.count} matching days, free ${row.rule.events}, x ${row.multiplier} x ${formatAed(daily)}`
-                    : `${row.count} matching days x ${row.multiplier} x ${formatAed(daily)}`
-                : 'No deduction for this month',
-            total: money(daily * row.dayFraction),
-        })),
     ];
 
     const payload = {
@@ -1465,7 +1446,7 @@ export async function buildSalarySlipPayload({
             lossOfPayDays: {
                 authorized: authorizedDeductionDays,
                 unauthorized: unauthorizedDays,
-                late: lateChargeable,
+                late: Math.round((lateInDays + lateOutDays) * 100) / 100,
                 annual: annualDays,
                 compOff: compOffDays,
             },
