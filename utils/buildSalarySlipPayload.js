@@ -893,7 +893,7 @@ export async function buildSalarySlipPayload({
     const sickAmount = money(daily * unpaidSickDays);
     const annualAmount = 0;
     const lateCharge = lateDeductionFromEvents(lateEvents, policy);
-    const lateChargeable = lateCharge.eventShare;
+    const lateChargeable = lateCharge.units;
     const lateAmount = money(daily * lateCharge.dayFraction);
 
     const earnings = structureEarnings(entry);

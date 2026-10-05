@@ -222,17 +222,6 @@ function shiftDateKey(dateKey, deltaDays) {
     });
 }
 
-const NON_HR_RECENT_MARK_KEYS = new Set(['on_office', 'authorized_leave']);
-
-function isStoredAttendanceAbsent(row) {
-    if (!row) return true;
-    const key = String(row.statusKey || '').trim();
-    const punched = Boolean(String(row.timeIn || '').trim());
-    if (key === 'unauthorized_leave') return true;
-    if (!key || key === 'not_marked' || key === 'absent') return !punched;
-    return false;
-}
-
 async function viewerIsFlowchartHr(req) {
     try {
         const actor = await resolveLinkedEmployee(req);
@@ -253,9 +242,9 @@ const NON_HR_MARK_WINDOW_MESSAGE =
     'Only the flowchart HR assignee can mark attendance outside today and the two previous days. Holidays are skipped.';
 
 /**
- * Non-HR users may mark today, and may change absent rows on the two previous
- * days to On work or Authorized leave. Holiday dates are skipped and do not
- * count, so the window reaches further back. Older days are flowchart HR only.
+ * Flowchart HR may mark any status on any past or future day.
+ * Other users may mark any status today and on the two previous days.
+ * Holiday dates are skipped and do not count, so the window reaches further back.
  * @returns {Promise<boolean>} true when the response was already sent
  */
 async function rejectIfMarkWindowClosed(req, res, { date, entries }) {
@@ -315,38 +304,6 @@ async function rejectIfMarkWindowClosed(req, res, { date, entries }) {
         : [...allowedByStaff.values()].every((set) => set.has(date));
     if (!dateAllowed) {
         res.status(403).json({ message: NON_HR_MARK_WINDOW_MESSAGE });
-        return true;
-    }
-
-    if (date === today) return false;
-
-    const list = requested;
-    for (const entry of list) {
-        const statusKey = String(entry?.statusKey || '').trim();
-        if (!NON_HR_RECENT_MARK_KEYS.has(statusKey)) {
-            res.status(403).json({
-                message:
-                    'You can only set Authorized leave or mark attendance for today and the two previous days. Holidays are skipped.',
-            });
-            return true;
-        }
-    }
-
-    if (!ids.length) return false;
-
-    const existing = await Attendance.find({
-        date,
-        employeeMongoId: { $in: ids },
-    })
-        .select('employeeMongoId statusKey timeIn')
-        .lean();
-    const byId = new Map((existing || []).map((row) => [String(row.employeeMongoId), row]));
-    const blocked = ids.find((id) => !isStoredAttendanceAbsent(byId.get(id)));
-    if (blocked) {
-        res.status(403).json({
-            message:
-                'You can only change absent attendance from today and the two previous days. Holidays are skipped.',
-        });
         return true;
     }
 
@@ -1017,49 +974,6 @@ export async function markAttendance(req, res) {
 
         const markedBy = req.user?.id || null;
         const saved = [];
-
-        const employeeIds = [
-            ...new Set(
-                marks
-                    .map((raw) => String(raw?.employeeMongoId || raw?.id || '').trim())
-                    .filter(Boolean),
-            ),
-        ];
-        if (employeeIds.length) {
-            const existingRows = await Attendance.find({
-                date,
-                employeeMongoId: { $in: employeeIds },
-            })
-                .select('employeeMongoId employeeName statusKey statusLabel leaveRequestStatus')
-                .lean();
-            const approvedRows = (existingRows || []).filter((row) => isApprovedLeaveDay(row));
-            if (approvedRows.length) {
-                const today = getDubaiDateKey();
-                const hrMayClearAuthLeave = date !== today && (await viewerIsFlowchartHr(req));
-                const locked = approvedRows.find((row) => {
-                    if (
-                        hrMayClearAuthLeave &&
-                        String(row.statusKey || '').trim() === 'authorized_leave'
-                    ) {
-                        const entry = marks.find(
-                            (raw) =>
-                                String(raw?.employeeMongoId || raw?.id || '').trim() ===
-                                String(row.employeeMongoId),
-                        );
-                        const nextKey = String(entry?.statusKey || entry?.markKey || '').trim();
-                        if (nextKey === 'clear_attendance' || nextKey === 'clear') return false;
-                    }
-                    return true;
-                });
-                if (locked) {
-                    const who = String(locked.employeeName || '').trim() || 'This employee';
-                    const leaveLabel = String(locked.statusLabel || '').trim() || 'approved leave';
-                    return res.status(409).json({
-                        message: `${who} is on ${leaveLabel} for ${date}. Mark Attendance is closed for that day.`,
-                    });
-                }
-            }
-        }
 
         for (const raw of marks) {
             const employeeMongoId = String(raw?.employeeMongoId || raw?.id || '').trim();
@@ -2227,17 +2141,7 @@ export async function mapAttendanceFromEmployee(req, res) {
             return res.status(404).json({ message: 'Employee not found.' });
         }
 
-        const [sourceRow, existingTarget] = await Promise.all([
-            Attendance.findOne({ date, employeeMongoId: sourceId }).lean(),
-            Attendance.findOne({ date, employeeMongoId: targetId }).lean(),
-        ]);
-        if (isApprovedLeaveDay(existingTarget)) {
-            const who = employeeFullName(targetEmp) || 'This employee';
-            return res.status(409).json({
-                message: `${who} is on approved leave for ${date}. Mark Attendance is closed for that day.`,
-            });
-        }
-
+        const sourceRow = await Attendance.findOne({ date, employeeMongoId: sourceId }).lean();
         const hasIn = punchTimeSet(sourceRow?.timeIn);
         const hasOut = punchTimeSet(sourceRow?.timeOut);
         const sourceStatus = String(sourceRow?.statusKey || '').trim();

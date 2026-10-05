@@ -8,11 +8,12 @@ import {
 } from './lateDeductionPolicy.js';
 
 describe('late in/out combined events', () => {
-    it('deducts from the combined total, not late in and late out separately', () => {
+    it('keeps the policy count free and deducts on the next event', () => {
         assert.equal(chargeableLateEventUnits(2, 3), 0);
-        assert.equal(chargeableLateEventUnits(3, 3), 1);
-        assert.equal(chargeableLateEventUnits(5, 3), 1);
-        assert.equal(chargeableLateEventUnits(6, 3), 2);
+        assert.equal(chargeableLateEventUnits(3, 3), 0);
+        assert.equal(chargeableLateEventUnits(4, 3), 1);
+        assert.equal(chargeableLateEventUnits(6, 3), 1);
+        assert.equal(chargeableLateEventUnits(7, 3), 2);
     });
 
     it('counts late in and late out on the same day as two events toward the same pool', () => {
@@ -41,24 +42,14 @@ describe('late in/out combined events', () => {
         assert.equal(events, 0);
     });
 
-    it('turns three mixed late in/out events into one deduct unit', () => {
-        const result = lateDeductionFromEvents(3, {
-            lateInRules: [{ minutes: 30, events: 3, deduct: 'quarter' }],
-            lateOutRules: [{ minutes: 30, events: 3, deduct: 'quarter' }],
-        });
-        assert.equal(result.combinedEvents, 3);
-        assert.equal(result.units, 1);
-        assert.equal(result.eventShare, 1);
-        assert.equal(result.dayFraction, 0.25);
-        assert.equal(result.multiplier, 0.25);
-    });
-
-    it('converts a partial event bundle into the same share of the deduct day', () => {
-        const result = lateDeductionFromEvents(2, {
-            lateInRules: [{ events: 4, deduct: 'quarter' }],
-        });
-        assert.equal(result.units, 0);
-        assert.equal(result.eventShare, 0.5);
-        assert.equal(result.dayFraction, 0.125);
+    it('uses the salary-policy count, so 4 free events deduct on the 5th', () => {
+        const policy = { lateInRules: [{ events: 4, deduct: 'quarter' }] };
+        assert.equal(lateDeductionFromEvents(4, policy).units, 0);
+        assert.equal(lateDeductionFromEvents(4, policy).dayFraction, 0);
+        const fifth = lateDeductionFromEvents(5, policy);
+        assert.equal(fifth.units, 1);
+        assert.equal(fifth.dayFraction, 0.25);
+        assert.equal(lateDeductionFromEvents(8, policy).units, 1);
+        assert.equal(lateDeductionFromEvents(9, policy).units, 2);
     });
 });

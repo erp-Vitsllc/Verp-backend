@@ -25,20 +25,17 @@ export function lateDeductMultiplier(rule) {
     return 0;
 }
 
-/** Combined late in + late out events, then one deduct unit per policy event bundle. */
+/**
+ * The policy count is the free allowance for the month.
+ * A count of 4 means events 1–4 deduct nothing, and event 5 takes the first deduct.
+ * The next deduct starts one event after the next full count.
+ */
 export function chargeableLateEventUnits(totalEvents, policyEvents) {
     const total = Math.max(0, Math.floor(Number(totalEvents) || 0));
     const per = Number(policyEvents);
     if (!Number.isFinite(per) || per <= 0) return total;
-    return Math.floor(total / per);
-}
-
-/** Share of a deduct bundle already earned, including a partial bundle. */
-export function lateEventShare(totalEvents, policyEvents) {
-    const total = Math.max(0, Number(totalEvents) || 0);
-    const per = Number(policyEvents);
-    if (!Number.isFinite(per) || per <= 0) return total;
-    return total / per;
+    if (total <= per) return 0;
+    return Math.floor((total - 1) / per);
 }
 
 function minutesThresholdOf(rule) {
@@ -120,14 +117,12 @@ export function lateDeductionFromEvents(totalEvents, policy) {
     const combined = Math.max(0, Math.floor(Number(totalEvents) || 0));
     const units = chargeableLateEventUnits(combined, rule?.events);
     const multiplier = lateDeductMultiplier(rule);
-    const eventShare = lateEventShare(combined, rule?.events);
     return {
         rule,
         combinedEvents: combined,
         eventBundle: Number(rule?.events) > 0 ? Number(rule.events) : 0,
         units,
-        eventShare,
-        dayFraction: multiplier * eventShare,
+        dayFraction: multiplier * units,
         multiplier,
         minutesThreshold: minutesThresholdOf(rule),
     };
