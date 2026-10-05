@@ -38,6 +38,10 @@ import {
 import { loadCurrentLeaveCycleEligibility } from '../../utils/loadLeaveTicketEntitlement.js';
 import { laterDateKey } from '../../utils/currentLeaveCycle.js';
 import {
+    keepAttendanceForProcessingStart,
+    loadEnrolledLeaveVisibilityByMongoId,
+} from '../../utils/leaveSalaryVisibility.js';
+import {
     fineIsVisibleToEmployee,
     loanIsVisibleToEmployee,
     rewardIsVisibleToEmployee,
@@ -841,7 +845,7 @@ export async function getEmployeeAttendanceProfile(req, res) {
             await Promise.all([
             Attendance.find({ employeeMongoId, date: { $gte: from, $lte: to } })
                 .select(
-                    'date statusKey statusLabel reason attachmentName leavePayType leaveRequestReason leaveRequestStatus requestedStatusKey requestedStatusLabel previousStatusKey leaveRequestKind leaveRequestGroupId leaveRequestFromDate leaveRequestToDate leaveRequestedAt leaveRequestTimeOut',
+                    'date statusKey statusLabel reason timeIn timeOut attachmentName leavePayType leaveRequestReason leaveRequestStatus requestedStatusKey requestedStatusLabel previousStatusKey leaveRequestKind leaveRequestGroupId leaveRequestFromDate leaveRequestToDate leaveRequestedAt leaveRequestTimeOut',
                 )
                 .sort({ date: -1 })
                 .lean(),
@@ -910,6 +914,12 @@ export async function getEmployeeAttendanceProfile(req, res) {
                 .maxTimeMS(12000),
         ]);
 
+        const processingVisibility = await loadEnrolledLeaveVisibilityByMongoId([employee]);
+        const processingStart = processingVisibility.get(employeeMongoId) || '';
+        const attendanceRows = (records || []).filter((row) =>
+            keepAttendanceForProcessingStart(row, processingStart),
+        );
+
         const counts = {
             on_leave: 0,
             sick_leave: 0,
@@ -932,7 +942,7 @@ export async function getEmployeeAttendanceProfile(req, res) {
         const requestStats = tallyRequestStats(requestRows);
         let lastAnnualLeaveDate = '';
 
-        for (const row of records || []) {
+        for (const row of attendanceRows) {
             const key = String(row.statusKey || '').trim();
             if (counts[key] != null) counts[key] += 1;
             if (key === 'authorized_leave') {
@@ -1020,7 +1030,7 @@ export async function getEmployeeAttendanceProfile(req, res) {
             employee,
             profile: historicalProfile,
             policy,
-            attendanceRecords: records,
+            attendanceRecords: attendanceRows,
         });
         lastAnnualLeaveDate = laterDateKey(lastAnnualLeaveDate, leaveCycle.lastAnnualLeaveEnd);
 
@@ -1037,7 +1047,7 @@ export async function getEmployeeAttendanceProfile(req, res) {
         const pieTo = todayKey > to ? to : todayKey;
         const periodDays = daysBetweenInclusive(pieFrom, pieTo);
 
-        const periodRecords = (records || []).filter((r) => r.date >= pieFrom && r.date <= pieTo);
+        const periodRecords = attendanceRows.filter((r) => r.date >= pieFrom && r.date <= pieTo);
         let periodPresent = 0;
         let periodAnnual = 0;
         let periodOtherLeave = 0;
@@ -1056,7 +1066,7 @@ export async function getEmployeeAttendanceProfile(req, res) {
             lastAnnualLeaveEnd: lastHolidayEnd,
         });
         const nextHolidayStart =
-            [...(records || []), ...(overlay.calendarRecords || [])]
+            [...attendanceRows, ...(overlay.calendarRecords || [])]
                 .filter(
                     (row) =>
                         String(row.statusKey || '') === 'on_leave' &&
@@ -1078,15 +1088,20 @@ export async function getEmployeeAttendanceProfile(req, res) {
                 date: { $gte: cycleBounds.start, $lt: from },
                 statusKey: { $in: [...LEAVE_STATUS_KEYS] },
             })
-                .select('date statusKey leaveRequestStatus requestedStatusKey leaveRequestGroupId')
+                .select('date statusKey reason timeIn timeOut leaveRequestStatus requestedStatusKey leaveRequestGroupId')
                 .lean()
                 .maxTimeMS(12000);
-            priorCycleRecords = [...(priorCycleRecords || []), ...(priorOverlay.calendarRecords || [])];
+            priorCycleRecords = [
+                ...(priorCycleRecords || []).filter((row) =>
+                    keepAttendanceForProcessingStart(row, processingStart),
+                ),
+                ...(priorOverlay.calendarRecords || []),
+            ];
         }
         const balanceByDate = new Map();
         for (const row of [
             ...priorCycleRecords,
-            ...(records || []),
+            ...attendanceRows,
             ...(overlay.calendarRecords || []).filter((row) => LEAVE_STATUS_KEYS.has(String(row.statusKey || ''))),
         ]) {
             const date = String(row?.date || '').trim();
@@ -1125,7 +1140,7 @@ export async function getEmployeeAttendanceProfile(req, res) {
         const yearCard = buildAttendanceYearCard({
             year,
             profile: historicalProfile,
-            attendanceRecords: records,
+            attendanceRecords: attendanceRows,
             annualUnlocked: annualGrantUnlocked,
             annualGrant: Number(entitlements.annualAllowedDays) || 0,
             sickAllowed:

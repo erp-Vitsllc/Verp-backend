@@ -16,6 +16,8 @@ import {
     processingStartFromEnrollment,
     resolveSalaryProcessingStartDate,
     salaryOpensFromMessage,
+    isSystemAutoUnauthorizedLeave,
+    keepAttendanceForProcessingStart,
 } from './leaveSalaryVisibility.js';
 
 describe('leave salary visibility', () => {
@@ -148,5 +150,25 @@ describe('leave salary visibility', () => {
             ),
             true,
         );
+    });
+
+    it('hides automatic unauthorized leave before the salary processing date and keeps a hand-marked day', () => {
+        const auto = {
+            statusKey: 'unauthorized_leave',
+            reason: 'No punch-in or punch-out (auto at midnight)',
+            timeIn: '',
+            timeOut: '',
+            date: '2026-08-29',
+        };
+        const marked = {
+            statusKey: 'authorized_leave',
+            reason: 'Sick note',
+            date: '2026-08-20',
+        };
+        assert.equal(isSystemAutoUnauthorizedLeave(auto), true);
+        assert.equal(keepAttendanceForProcessingStart(auto, '2026-09-01'), false);
+        assert.equal(keepAttendanceForProcessingStart({ ...auto, date: '2026-09-01' }, '2026-09-01'), true);
+        assert.equal(keepAttendanceForProcessingStart(marked, '2026-09-01'), true);
+        assert.equal(keepAttendanceForProcessingStart(auto, ''), true);
     });
 });

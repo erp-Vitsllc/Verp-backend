@@ -68,6 +68,7 @@ import {
     daysUntilProcessingStart,
     firstOfProcessingMonth,
     isSalaryMonthOpen,
+    keepAttendanceForProcessingStart,
     loadEnrolledLeaveVisibilityByMongoId,
     processingMonthFromStart,
     processingStartFromEnrollment,
@@ -579,6 +580,8 @@ function emptyDayStats(totalStaff = 0) {
         lateArrived: 0,
         sickLeave: 0,
         workFromHome: 0,
+        missedPunch: 0,
+        compOffLeave: 0,
         // No marks yet — calendar shows total staff only until attendance is recorded.
         notMarked: 0,
         holiday: 0,
@@ -612,6 +615,7 @@ function buildDayStatsFromRecords(records, totalStaff = 0, { isWeeklyOffDay = fa
         unauthorized_leave: 0,
         holiday: 0,
         weekly_off: 0,
+        mispunch: 0,
     };
 
     for (const row of rows) {
@@ -639,6 +643,8 @@ function buildDayStatsFromRecords(records, totalStaff = 0, { isWeeklyOffDay = fa
         lateArrived: counts.late_arrived,
         sickLeave: counts.sick_leave,
         workFromHome: counts.work_from_home,
+        missedPunch: counts.mispunch,
+        compOffLeave: counts.compoff_leave,
         notMarked: isWeeklyOffDay ? 0 : notMarked,
         holiday,
         weeklyOff,
@@ -859,6 +865,9 @@ export async function getAttendanceCalendarSummary(req, res) {
             employees: (employeeRows || []).filter((emp) => !isCompanyShellEmployee(emp)),
         });
         const records = applyLeaveCoverIndex(storedRecords, coverIndex);
+        const processingStartById = await loadEnrolledLeaveVisibilityByMongoId(
+            (employeeRows || []).filter((emp) => !isCompanyShellEmployee(emp)),
+        );
 
         const idsByGroup = new Map();
         for (const emp of employeeRows || []) {
@@ -897,18 +906,31 @@ export async function getAttendanceCalendarSummary(req, res) {
         const end = new Date(`${to}T12:00:00.000Z`);
         for (let cursor = start; cursor <= end; cursor.setUTCDate(cursor.getUTCDate() + 1)) {
             const dateKey = cursor.toISOString().slice(0, 10);
-            const dayRecords = byDate.get(dateKey) || [];
+            const roster = new Set(
+                selectedIds.filter((id) => {
+                    const startDate = processingStartById.get(id);
+                    return !startDate || dateKey >= startDate;
+                }),
+            );
+            const dayRecords = [];
+            for (const row of byDate.get(dateKey) || []) {
+                const id = String(row?.employeeMongoId || '');
+                if (!keepAttendanceForProcessingStart(row, processingStartById.get(id) || '')) continue;
+                if (!roster.has(id)) roster.add(id);
+                dayRecords.push(row);
+            }
+            const dayStaff = roster.size;
             const isWeeklyOffDay = staffType
                 ? isWeekOffForStaff(scheduleWeek, dateKey)
                 : false;
             const stats =
                 dayRecords.length > 0 || isWeeklyOffDay
-                    ? buildDayStatsFromRecords(dayRecords, totalStaff, { isWeeklyOffDay })
-                    : emptyDayStats(totalStaff);
+                    ? buildDayStatsFromRecords(dayRecords, dayStaff, { isWeeklyOffDay })
+                    : emptyDayStats(dayStaff);
 
             if (isWeeklyOffDay) {
                 stats.isWeeklyOff = true;
-                stats.weeklyOff = Math.max(Number(stats.weeklyOff) || 0, totalStaff);
+                stats.weeklyOff = Math.max(Number(stats.weeklyOff) || 0, dayStaff);
                 stats.notMarked = 0;
                 stats.absentUnauthorized = 0;
             }
@@ -916,12 +938,12 @@ export async function getAttendanceCalendarSummary(req, res) {
             // When filtered to one staff group, mirror totals into that group's present/total fields.
             if (staffType === 'office') {
                 stats.officePresent = stats.totalPresent;
-                stats.officeTotal = totalStaff;
+                stats.officeTotal = dayStaff;
                 stats.sitePresent = 0;
                 stats.siteTotal = 0;
             } else if (staffType === 'site') {
                 stats.sitePresent = stats.totalPresent;
-                stats.siteTotal = totalStaff;
+                stats.siteTotal = dayStaff;
                 stats.officePresent = 0;
                 stats.officeTotal = 0;
             }

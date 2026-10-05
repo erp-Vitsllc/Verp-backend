@@ -6,6 +6,7 @@ import Holiday from '../models/Holiday.js';
 import Loan from '../models/Loan.js';
 import PartyExpense from '../models/PartyExpense.js';
 import Reward from '../models/Reward.js';
+import SalaryEnrollment from '../models/SalaryEnrollment.js';
 import SalaryHistoricalProfile from '../models/SalaryHistoricalProfile.js';
 import SalarySlipMonth from '../models/SalarySlipMonth.js';
 import UtilityBillPayment from '../models/UtilityBillPayment.js';
@@ -34,6 +35,10 @@ import { loadLeaveTicketEntitlement } from './loadLeaveTicketEntitlement.js';
 import { resolveSalarySlipApprovers } from './resolveSalarySlipApprovers.js';
 import { isSalarySlipCycle } from './salarySlipLeaveTicket.js';
 import { partialLeavePortion } from './partialLeaveWindow.js';
+import {
+    keepAttendanceForProcessingStart,
+    resolveSalaryProcessingStartDate,
+} from './leaveSalaryVisibility.js';
 import {
     applySalarySlipCountExclusions,
     salarySlipPolicyExclusions,
@@ -725,7 +730,7 @@ export async function buildSalarySlipPayload({
                 $or: [{ employeeMongoId: mongoId }, { employeeId: idPattern }],
                 date: { $gte: from, $lte: to },
             })
-                .select('date statusKey leavePayType timeIn timeOut flexibleOtStatus flexibleOtApprovedHours')
+                .select('date statusKey reason leavePayType timeIn timeOut flexibleOtStatus flexibleOtApprovedHours')
                 .lean(),
             Holiday.find({ date: { $gte: from, $lte: to } }).select('date appliesTo').lean(),
             Loan.find({
@@ -813,9 +818,17 @@ export async function buildSalarySlipPayload({
     let otDays = 0;
     const countedDates = new Set();
 
+    const enrollment = await SalaryEnrollment.findOne({ employeeId: idPattern })
+        .select('fromMonth salaryDate processDate')
+        .lean();
+    const processingStart = resolveSalaryProcessingStartDate({
+        verpStartDate: profile?.verpStartDate,
+        enrollment,
+    });
     for (const row of attendance || []) {
         const date = dateKeyOf(row.date);
         if (!isDateInSalaryMonth(date, ym) || countedDates.has(date)) continue;
+        if (!keepAttendanceForProcessingStart(row, processingStart)) continue;
         countedDates.add(date);
         const key = String(row.statusKey || '');
         if (key === 'holiday') holidayMarks += 1;

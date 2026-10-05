@@ -33,6 +33,10 @@ import {
     missedPunchDeduction,
 } from '../../utils/lateDeductionPolicy.js';
 import { partialLeavePortion } from '../../utils/partialLeaveWindow.js';
+import {
+    keepAttendanceForProcessingStart,
+    resolveSalaryProcessingStartDate,
+} from '../../utils/leaveSalaryVisibility.js';
 import { resolveEmployeeFinePayableAmount } from '../../utils/finePayableAmount.js';
 import { buildLoanInstallments } from '../../utils/upsertLoanPartyExpenseFromPayment.js';
 import {
@@ -1464,10 +1468,32 @@ export const getSalaryRegister = async (req, res) => {
                 date: { $gte: from, $lte: to },
                 statusKey: { $in: ['authorized_leave', 'unauthorized_leave'] },
             })
-                .select('employeeMongoId date statusKey leaveRequestDayPart leaveDayFraction leaveDeductionTimes')
+                .select('employeeMongoId date statusKey reason timeIn timeOut leaveRequestDayPart leaveDayFraction leaveDeductionTimes')
                 .lean()
                 .maxTimeMS(15000)
             : [];
+
+        const [processingProfiles, processingEnrollments] = await Promise.all([
+            SalaryHistoricalProfile.find({ employeeId: { $in: codes } })
+                .select('employeeId verpStartDate')
+                .lean()
+                .maxTimeMS(12000),
+            SalaryEnrollment.find({ employeeId: { $in: codes } })
+                .select('employeeId fromMonth salaryDate processDate')
+                .lean()
+                .maxTimeMS(12000),
+        ]);
+        const verpByCode = new Map(
+            (processingProfiles || []).map((row) => [employeeCodeKey(row.employeeId), row.verpStartDate]),
+        );
+        const enrollmentByCode = new Map(
+            (processingEnrollments || []).map((row) => [employeeCodeKey(row.employeeId), row]),
+        );
+        const processingStartFor = (emp) =>
+            resolveSalaryProcessingStartDate({
+                verpStartDate: verpByCode.get(employeeCodeKey(emp?.employeeId)),
+                enrollment: enrollmentByCode.get(employeeCodeKey(emp?.employeeId)),
+            });
 
         for (const row of leaveRows) {
             const key = String(row?.statusKey || '');
@@ -1475,6 +1501,7 @@ export const getSalaryRegister = async (req, res) => {
             if (!/^\d{4}-\d{2}$/.test(ym)) continue;
             const emp = empByMongo.get(String(row?.employeeMongoId || ''));
             if (!emp) continue;
+            if (!keepAttendanceForProcessingStart(row, processingStartFor(emp))) continue;
             const part = String(row.leaveRequestDayPart || '');
             const fraction = part === 'half' || part === 'quarter'
                 ? partialLeavePortion(part)

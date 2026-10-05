@@ -122,6 +122,27 @@ export function isSalaryMonthOpen(compareMonth, processingMonth) {
     return current >= start;
 }
 
+const AUTO_MIDNIGHT_UNAUTHORIZED = 'No punch-in or punch-out (auto at midnight)';
+
+/** Midnight job row: no punches, created because the day had no attendance. */
+export function isSystemAutoUnauthorizedLeave(row) {
+    if (String(row?.statusKey || '').trim() !== 'unauthorized_leave') return false;
+    if (String(row?.timeIn || '').trim() || String(row?.timeOut || '').trim()) return false;
+    return String(row?.reason || '').trim() === AUTO_MIDNIGHT_UNAUTHORIZED;
+}
+
+/**
+ * Automatic unauthorized leave before the salary processing date is not live attendance.
+ * A hand-marked row on an earlier date stays.
+ */
+export function keepAttendanceForProcessingStart(row, processingStart) {
+    const start = String(processingStart || '').trim();
+    if (!isDateKey(start)) return true;
+    const date = String(row?.date || '').trim();
+    if (!isDateKey(date) || date >= start) return true;
+    return !isSystemAutoUnauthorizedLeave(row);
+}
+
 /** Live leave days before the salary processing start date stay hidden. */
 export function isLeaveDateVisible(dateKey, processingStartDate) {
     if (!isDateKey(dateKey) || !isDateKey(processingStartDate)) return false;
