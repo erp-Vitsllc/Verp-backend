@@ -68,6 +68,7 @@ import { syncVehicleAccessoriesListOnAssessmentComplete, signVehicleAccessoriesL
 import { sendAssetResponseEmail } from '../utils/sendAssetResponseEmail.js';
 import { sendAssetReassignmentEmail } from '../utils/sendAssetReassignmentEmail.js';
 import DashboardAction from '../models/DashboardAction.js';
+import { loadTaskManagerInboxItems } from '../utils/taskManagerModule.js';
 import { sendAssetActionApprovalEmail } from '../utils/sendAssetActionApprovalEmail.js';
 import { sendAssetActionFinalAcknowledgeEmail } from '../utils/sendAssetActionFinalAcknowledgeEmail.js';
 import Fine from '../models/Fine.js';
@@ -21151,6 +21152,14 @@ export const getPendingAssetDashboardInbox = async (req, res) => {
                     row.requestType !== 'Vehicle Service Request' ||
                     !isVehicleServiceAccountsBillingNotification(row),
             );
+        }
+
+        if (assigneeClauses.length && (scope === "vehicle" || scope === "tools")) {
+            const modules = scope === "vehicle" ? ["vehicle"] : ["tools", "utility"];
+            for (const moduleName of modules) {
+                const taskRows = await loadTaskManagerInboxItems(assigneeClauses, moduleName);
+                items.push(...taskRows);
+            }
         }
 
         const hubItems = await listPendingHubInboxItems({

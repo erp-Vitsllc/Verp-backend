@@ -19,6 +19,7 @@ import {
     resolveDashboardAssigneeContext,
 } from '../../utils/resolveDashboardAssigneeContext.js';
 import { listPendingHubInboxItems } from '../../utils/employeeHubRequestInbox.js';
+import { loadTaskManagerInboxItems } from '../../utils/taskManagerModule.js';
 
 const FINE_INBOX_TYPES = ['Fine', 'Group Fine Request'];
 
@@ -312,7 +313,8 @@ export const getPendingFineDashboardInbox = async (req, res) => {
             kinds: ['fine'],
         });
 
-        const merged = [...hubItems, ...items];
+        const taskItems = await loadTaskManagerInboxItems(assigneeClauses, 'fine');
+        const merged = [...hubItems, ...items, ...taskItems];
         res.json({ count: merged.length, items: merged });
     } catch (error) {
         console.error('getPendingFineDashboardInbox:', error);

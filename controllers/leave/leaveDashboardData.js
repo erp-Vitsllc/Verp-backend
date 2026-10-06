@@ -28,7 +28,11 @@ import { checkEmployeeLeaveAllowance, resolveEmployeePayrollPolicy, resolveSickO
 import { hasPermission } from '../../services/permissionService.js';
 import { listPendingHubInboxItems } from '../../utils/employeeHubRequestInbox.js';
 import { isReqUserSystemSuperUser } from '../../utils/systemSuperUser.js';
-import { resolveDashboardAssigneeContext } from '../../utils/resolveDashboardAssigneeContext.js';
+import {
+    buildAssigneeClauses,
+    resolveDashboardAssigneeContext,
+} from '../../utils/resolveDashboardAssigneeContext.js';
+import { loadTaskManagerInboxItems } from '../../utils/taskManagerModule.js';
 import { syncDashboardAction } from '../../utils/syncDashboard.js';
 import {
     LEAVE_DASHBOARD_REQUEST_TYPE,
@@ -856,7 +860,11 @@ export async function getLeavePendingInbox(req, res) {
             };
         });
 
-        const items = [...hubMapped, ...attendanceItems];
+        const taskItems = await loadTaskManagerInboxItems(
+            buildAssigneeClauses(ctx.relevantIds || [], ctx.employeeIdCode),
+            'leave',
+        );
+        const items = [...hubMapped, ...attendanceItems, ...taskItems];
         return res.status(200).json({
             message: 'Leave pending inbox fetched successfully',
             count: items.length,

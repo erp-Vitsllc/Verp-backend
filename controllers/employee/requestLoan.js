@@ -13,10 +13,7 @@ import {
     loanRepaymentMonthCap,
     primaryVisaFromDetails,
 } from "../../utils/loanEligibilityValidation.js";
-import {
-    blockingLoanMessage,
-    findBlockingLoanObligation,
-} from "../../utils/loanRepaymentGate.js";
+import { assertSameTypeRequestAllowed } from "../../utils/loanRepaymentGate.js";
 
 
 /**
@@ -140,27 +137,30 @@ export const requestLoan = async (req, res) => {
                 : body
         );
 
-        // Block a new loan/advance while any previous one is still in progress
-        // or not fully repaid. A fully repaid record does not block another request.
-        const existingLoan = await findBlockingLoanObligation(employeeBasic.employeeId);
-
-        const confirmContinue = Boolean(req.selfServiceLoan && req.body?.hrEligibilityOverride === true);
+        // Same type only: an open or unpaid Advance blocks another Advance,
+        // and an open or unpaid Loan blocks another Loan. The other type is allowed.
+        // Flowchart HR may override. The employee cannot.
+        const sameTypeGate = await assertSameTypeRequestAllowed(req, {
+            employeeId: employeeBasic.employeeId,
+            type,
+        });
         const continuedNotes = [];
 
-        if (existingLoan) {
+        if (sameTypeGate.existing) {
             loanChecks.existingLoan = {
-                type: existingLoan.type,
-                loanId: existingLoan.loanId,
-                status: existingLoan.status,
+                type: sameTypeGate.existing.type,
+                loanId: sameTypeGate.existing.loanId,
+                status: sameTypeGate.existing.status,
             };
-            const existingMessage = blockingLoanMessage(existingLoan);
-            if (req.selfServiceLoan || !confirmContinue) {
-                return res.status(400).json(validationBlock(withChecks({
-                    message: existingMessage,
-                    canContinue: !req.selfServiceLoan,
-                })));
-            }
-            continuedNotes.push(existingMessage);
+        }
+        if (!sameTypeGate.ok) {
+            return res.status(sameTypeGate.status || 400).json(validationBlock(withChecks({
+                message: sameTypeGate.message,
+                canContinue: Boolean(sameTypeGate.canContinue),
+            })));
+        }
+        if (sameTypeGate.overridden && sameTypeGate.message) {
+            continuedNotes.push(sameTypeGate.message);
         }
 
         // --- VALIDATION: Visa / status eligibility (employee may continue; HR still receives the warning) ---

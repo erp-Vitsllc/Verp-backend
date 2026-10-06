@@ -1,6 +1,7 @@
 import EmployeeBasic from "../../models/EmployeeBasic.js";
 import EmployeeSalary from "../../models/EmployeeSalary.js";
 import EmployeeVisa from "../../models/EmployeeVisa.js";
+import Loan from "../../models/Loan.js";
 
 function hasVisaSlot(slot) {
     if (!slot) return false;
@@ -104,7 +105,7 @@ export const getMyLoanProfile = async (req, res) => {
             });
         }
 
-        const [salary, visa] = await Promise.all([
+        const [salary, visa, loans] = await Promise.all([
             EmployeeSalary.findOne(
                 { employeeId: self.employeeId },
                 'employeeId totalSalary monthlySalary',
@@ -113,6 +114,9 @@ export const getMyLoanProfile = async (req, res) => {
                 { employeeId: self.employeeId },
                 'employeeId employment.expiryDate spouse.expiryDate visit.expiryDate',
             ).lean(),
+            Loan.find({ employeeId: self.employeeId })
+                .select('loanId employeeId type status approvalStatus amount repaidAmount')
+                .lean(),
         ]);
 
         return res.status(200).json({
@@ -121,6 +125,17 @@ export const getMyLoanProfile = async (req, res) => {
                 salary?.totalSalary || salary?.monthlySalary || 0,
                 visaFromRecord(visa),
             ),
+            loans: (loans || []).map((loan) => ({
+                id: loan._id,
+                _id: loan._id,
+                loanId: loan.loanId,
+                employeeId: loan.employeeId,
+                type: loan.type,
+                status: loan.status,
+                approvalStatus: loan.approvalStatus || loan.status,
+                amount: loan.amount,
+                repaidAmount: loan.repaidAmount || 0,
+            })),
         });
     } catch (error) {
         console.error('Error fetching my loan profile:', error);

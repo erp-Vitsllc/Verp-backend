@@ -6,6 +6,7 @@ import {
     buildAssigneeClauses,
     resolveDashboardAssigneeContext,
 } from '../../utils/resolveDashboardAssigneeContext.js';
+import { loadTaskManagerInboxItems } from '../../utils/taskManagerModule.js';
 
 /**
  * Pending reward dashboard actions for the logged-in user, or for ?targetUserId= (team view).
@@ -96,7 +97,9 @@ export const getPendingRewardDashboardInbox = async (req, res) => {
             };
         });
 
-        res.json({ count: items.length, items });
+        const taskItems = await loadTaskManagerInboxItems(assigneeClauses, 'reward');
+        const merged = [...items, ...taskItems];
+        res.json({ count: merged.length, items: merged });
     } catch (error) {
         console.error('getPendingRewardDashboardInbox:', error);
         res.status(500).json({ message: 'Failed to load reward notifications' });

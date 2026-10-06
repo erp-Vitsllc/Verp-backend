@@ -11,6 +11,7 @@ import {
     resolveDashboardAssigneeContext,
 } from '../../utils/resolveDashboardAssigneeContext.js';
 import { listPendingHubInboxItems } from '../../utils/employeeHubRequestInbox.js';
+import { loadTaskManagerInboxItems } from '../../utils/taskManagerModule.js';
 
 const CLOSED_LOAN_STATUSES = new Set(['Rejected', 'Cancelled', 'Draft', 'Paid']);
 
@@ -274,7 +275,8 @@ export const getPendingLoanDashboardInbox = async (req, res) => {
             assigneeIds: ctx.relevantIds,
             kinds: ['advance', 'loan'],
         });
-        const merged = [...hubItems, ...items];
+        const taskItems = await loadTaskManagerInboxItems(assigneeClauses, 'loan');
+        const merged = [...hubItems, ...items, ...taskItems];
         res.json({ count: merged.length, items: merged });
     } catch (error) {
         console.error('getPendingLoanDashboardInbox:', error);

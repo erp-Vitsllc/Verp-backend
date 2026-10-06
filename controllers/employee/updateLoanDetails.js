@@ -9,10 +9,7 @@ import {
     restrictApprovedLoanUpdates,
 } from "../../utils/loanApprovedEditAuth.js";
 import { assertLoanEmployeeEligibility } from "../../utils/loanEligibilityValidation.js";
-import {
-    blockingLoanMessage,
-    findBlockingLoanObligation,
-} from "../../utils/loanRepaymentGate.js";
+import { assertSameTypeRequestAllowed } from "../../utils/loanRepaymentGate.js";
 
 export const updateLoanDetails = async (req, res) => {
     const { id } = req.params;
@@ -248,12 +245,23 @@ export const updateLoanDetails = async (req, res) => {
         let employeeBasic = null;
 
         if (oldStatus === 'Draft' && newStatus === 'Pending') {
-            const activeLoan = await findBlockingLoanObligation(loan.employeeId, id);
-
-            if (activeLoan) {
-                return res.status(400).json({
-                    message: blockingLoanMessage(activeLoan),
+            const sameTypeGate = await assertSameTypeRequestAllowed(req, {
+                employeeId: loan.employeeId,
+                type: type || loan.type,
+                excludeId: id,
+            });
+            if (!sameTypeGate.ok) {
+                return res.status(sameTypeGate.status || 400).json({
+                    message: sameTypeGate.message,
+                    canContinue: Boolean(sameTypeGate.canContinue),
                 });
+            }
+            if (sameTypeGate.overridden && sameTypeGate.message) {
+                loan.eligibilityOverride = true;
+                const prior = String(loan.eligibilityNotes || '').trim();
+                loan.eligibilityNotes = prior
+                    ? `${prior}\n${sameTypeGate.message}`
+                    : sameTypeGate.message;
             }
 
             employeeBasic = await getCompleteEmployee(loan.employeeObjectId);
@@ -271,12 +279,24 @@ export const updateLoanDetails = async (req, res) => {
                 }
             }
         } else if (req.body.resubmit && oldStatus === 'Rejected') {
-            const activeLoan = await findBlockingLoanObligation(loan.employeeId, id);
-
-            if (activeLoan) {
-                return res.status(400).json({
-                    message: blockingLoanMessage(activeLoan, { resubmit: true }),
+            const sameTypeGate = await assertSameTypeRequestAllowed(req, {
+                employeeId: loan.employeeId,
+                type: type || loan.type,
+                excludeId: id,
+                resubmit: true,
+            });
+            if (!sameTypeGate.ok) {
+                return res.status(sameTypeGate.status || 400).json({
+                    message: sameTypeGate.message,
+                    canContinue: Boolean(sameTypeGate.canContinue),
                 });
+            }
+            if (sameTypeGate.overridden && sameTypeGate.message) {
+                loan.eligibilityOverride = true;
+                const prior = String(loan.eligibilityNotes || '').trim();
+                loan.eligibilityNotes = prior
+                    ? `${prior}\n${sameTypeGate.message}`
+                    : sameTypeGate.message;
             }
 
             // === RESUBMIT LOGIC ===

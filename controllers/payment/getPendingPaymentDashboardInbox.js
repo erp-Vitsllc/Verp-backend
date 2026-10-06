@@ -6,6 +6,7 @@ import {
     buildAssigneeClauses,
     resolveDashboardAssigneeContext,
 } from '../../utils/resolveDashboardAssigneeContext.js';
+import { loadTaskManagerInboxItems } from '../../utils/taskManagerModule.js';
 
 /**
  * Pending payment approvals for the viewer (or full queue for portal admin on own inbox).
@@ -78,7 +79,9 @@ export const getPendingPaymentDashboardInbox = async (req, res) => {
             })
             .filter(Boolean);
 
-        res.json({ count: items.length, items });
+        const taskItems = await loadTaskManagerInboxItems(assigneeClauses, 'payment');
+        const merged = [...items, ...taskItems];
+        res.json({ count: merged.length, items: merged });
     } catch (error) {
         console.error('getPendingPaymentDashboardInbox:', error);
         res.status(500).json({ message: 'Failed to load payment notifications' });

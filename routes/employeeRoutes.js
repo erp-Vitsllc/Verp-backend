@@ -172,6 +172,21 @@ router.get("/request-loan", (req, res) => {
 });
 
 import { getDashboardStats } from "../controllers/stats/getDashboardStats.js";
+import { getTaskManagerNotifications } from "../controllers/stats/getTaskManagerNotifications.js";
+import { createTaskManagerTask, getTaskManagerAssignees } from "../controllers/stats/createTaskManagerTask.js";
+import {
+    addTaskManagerComment,
+    addTaskManagerUpdate,
+    deleteTaskManagerTask,
+    decideTaskManagerWorkflow,
+    getTaskManagerTask,
+    getTaskManagerWorkflow,
+    reassignTaskManagerTask,
+    updateTaskManagerNotifications,
+    updateTaskManagerReminders,
+    updateTaskManagerTask,
+    updateTaskManagerTaskStatus,
+} from "../controllers/stats/taskManagerTaskActions.js";
 import { getPayrollDashboard } from "../controllers/employee/getPayrollDashboard.js";
 import { getSalaryRegister, deleteSalaryRegisterMonth, restoreSalaryRegisterMonths, sendPayrollBlockerReminders, createSalaryMonthPayment } from "../controllers/employee/getSalaryRegister.js";
 import { getPayrollSettings, savePayrollSettings, getGroupPayrollSettings, saveGroupPayrollSettings, copyMainPayrollSettingsToGroup } from "../controllers/employee/payrollSettingsController.js";
@@ -581,6 +596,22 @@ router.get("/dashboard/stats", checkPermission('hrm_employees_list', 'view'), ge
 
 // User Specific Stats - basic access for anyone logged in
 router.get("/dashboard/user-stats", getUserActivityStats);
+
+// Company-wide notification list for Task Manager. Read-only.
+router.get("/task-manager/notifications", getTaskManagerNotifications);
+router.get("/task-manager/assignees", getTaskManagerAssignees);
+router.post("/task-manager/tasks", createTaskManagerTask);
+router.get("/task-manager/tasks/:taskKey", getTaskManagerTask);
+router.get("/task-manager/tasks/:taskKey/workflow", getTaskManagerWorkflow);
+router.post("/task-manager/tasks/:taskKey/workflow/decision", decideTaskManagerWorkflow);
+router.patch("/task-manager/tasks/:taskKey", updateTaskManagerTask);
+router.delete("/task-manager/tasks/:taskKey", deleteTaskManagerTask);
+router.post("/task-manager/tasks/:taskKey/reassign", reassignTaskManagerTask);
+router.post("/task-manager/tasks/:taskKey/status", updateTaskManagerTaskStatus);
+router.post("/task-manager/tasks/:taskKey/comments", addTaskManagerComment);
+router.post("/task-manager/tasks/:taskKey/updates", addTaskManagerUpdate);
+router.patch("/task-manager/tasks/:taskKey/notifications", updateTaskManagerNotifications);
+router.patch("/task-manager/tasks/:taskKey/reminders", updateTaskManagerReminders);
 
 // Dismiss a dashboard notification row (own assignee or admin)
 router.delete("/dashboard/actions/:actionId", deleteDashboardAction);

@@ -89,7 +89,7 @@ export async function requesterCanOverrideLoanEligibility(req) {
 
 /**
  * Visa / status eligibility. Flowchart HR may continue after confirming in the UI
- * (`hrEligibilityOverride: true`). Duplicate active-loan checks stay elsewhere.
+ * (`hrEligibilityOverride: true`). A second advance or a second loan is checked separately.
  */
 export async function assertLoanEmployeeEligibility(req, employee, type) {
     const visa = primaryVisaFromDetails(employee?.visaDetails);

@@ -47,7 +47,11 @@ import {
 import { listPendingHubInboxItems } from '../utils/employeeHubRequestInbox.js';
 import { resolveFlowchartHrEmployee } from '../utils/resolveFlowchartHrEmployee.js';
 import { isUserActiveInFlowchart } from '../utils/getDepartmentHOD.js';
-import { resolveDashboardAssigneeContext } from '../utils/resolveDashboardAssigneeContext.js';
+import {
+    buildAssigneeClauses,
+    resolveDashboardAssigneeContext,
+} from '../utils/resolveDashboardAssigneeContext.js';
+import { loadTaskManagerInboxItems } from '../utils/taskManagerModule.js';
 import { isReqUserSystemSuperUser } from '../utils/systemSuperUser.js';
 import {
     isLeaveDashboardAttendanceRow,
@@ -2709,11 +2713,16 @@ export async function getAttendancePendingInbox(req, res) {
             message: `OT request for ${r.employeeName || 'employee'} on ${r.date}`,
         }));
 
+        const attendanceTaskItems = await loadTaskManagerInboxItems(
+            buildAssigneeClauses(ctx.relevantIds || [], ctx.employeeIdCode),
+            'attendance',
+        );
+
         if (!reporteeIds.length) {
             return res.status(200).json({
                 message: 'Attendance pending inbox fetched successfully',
-                count: hubItems.length + otItems.length,
-                items: [...hubItems, ...otItems],
+                count: hubItems.length + otItems.length + attendanceTaskItems.length,
+                items: [...hubItems, ...otItems, ...attendanceTaskItems],
             });
         }
 
@@ -2794,8 +2803,8 @@ export async function getAttendancePendingInbox(req, res) {
 
         return res.status(200).json({
             message: 'Attendance pending inbox fetched successfully',
-            count: items.length + hubItems.length + otItems.length,
-            items: [...hubItems, ...otItems, ...items],
+            count: items.length + hubItems.length + otItems.length + attendanceTaskItems.length,
+            items: [...hubItems, ...otItems, ...items, ...attendanceTaskItems],
         });
     } catch (error) {
         console.error('[getAttendancePendingInbox]', error);

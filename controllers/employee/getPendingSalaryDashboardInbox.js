@@ -14,6 +14,7 @@ import {
     buildAssigneeClauses,
     resolveDashboardAssigneeContext,
 } from '../../utils/resolveDashboardAssigneeContext.js';
+import { loadTaskManagerInboxItems } from '../../utils/taskManagerModule.js';
 import {
     SALARY_ENROLLMENT_REQUEST_TYPE,
     rewriteSalaryEnrollmentWaitingCopy,
@@ -282,7 +283,9 @@ export const getPendingSalaryDashboardInbox = async (req, res) => {
             items.push(...(await buildPendingEnrollmentInboxItems(exclude)));
         }
 
-        return res.json({ count: items.length, items });
+        const taskItems = await loadTaskManagerInboxItems(assigneeClauses, 'salary');
+        const merged = [...items, ...taskItems];
+        return res.json({ count: merged.length, items: merged });
     } catch (error) {
         console.error('[getPendingSalaryDashboardInbox]', error);
         return res.status(500).json({ message: 'Failed to load salary notifications.' });
