@@ -236,15 +236,30 @@ export const getTaskManagerNotifications = async (req, res) => {
         const summary = { total: 0, pending: 0, pendingDue: 0, completed: 0 };
         const uniqueActions = [];
         const seenRequest = new Map();
+        const actionDuplicateKey = (action) => {
+            const type = String(action.requestType || "");
+            const requestId = String(action.requestId || "").trim();
+            const extra = String(action.extra1 || "").trim().toLowerCase().replace(/\s+/g, " ");
+            const subject = String(action.subjectName || action.requestedByName || "").trim().toLowerCase();
+            const assignee = String(action.assignedTo || action.assignedToEmpId || "");
+            if (taskCategory(type) === "System Task") {
+                if (!requestId && !extra) return "";
+                return `system|${type}|${requestId}|${extra}`;
+            }
+            const detail = extra && extra !== type.toLowerCase() ? extra : "";
+            // Same workflow item, even when several notification rows were saved for it.
+            if (detail) return `request|${type}|${subject}|${detail}`;
+            if (subject || assignee) return `request|${type}|${subject}|${assignee}`;
+            if (requestId) return `request|${type}|${requestId}`;
+            return "";
+        };
         for (const action of actions) {
             if (action.requestType === "Task Manager") continue;
-            const requestId = String(action.requestId || "").trim();
-            const extra = String(action.extra1 || "").trim().toLowerCase();
-            if (!requestId && !extra) {
+            const key = actionDuplicateKey(action);
+            if (!key) {
                 uniqueActions.push(action);
                 continue;
             }
-            const key = `${action.requestType}|${requestId}|${extra}|${String(action.assignedTo || action.assignedToEmpId || "")}`;
             const previous = seenRequest.get(key);
             if (!previous) {
                 seenRequest.set(key, action);
