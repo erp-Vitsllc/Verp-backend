@@ -2,10 +2,9 @@ import mongoose from "mongoose";
 import EmployeeBasic from "../../models/EmployeeBasic.js";
 import TaskManagerTask from "../../models/TaskManagerTask.js";
 import { uploadDocumentToS3 } from "../../utils/s3Upload.js";
-import { sendTaskActivityEmail, syncManualTaskNotification } from "../../utils/taskManagerModule.js";
+import { canonicalTaskType, sendTaskActivityEmail, syncManualTaskNotification } from "../../utils/taskManagerModule.js";
 import { viewerMaySeeAllNotifications } from "./getTaskManagerNotifications.js";
 
-const TASK_TYPES = new Set(["System Task", "Work Flow Task", "General Task"]);
 const PRIORITIES = new Set(["High", "Medium", "Low"]);
 const MAX_ATTACHMENTS = 5;
 
@@ -59,15 +58,15 @@ export const createTaskManagerTask = async (req, res) => {
             return res.status(403).json({ message: "Access denied. HRM view permission is required." });
         }
 
-        const taskType = String(req.body?.taskType || "").trim();
-        const priority = String(req.body?.priority || "").trim();
+        const taskType = canonicalTaskType(req.body?.taskType);
+        const priority = taskType === "System Task" ? "High" : String(req.body?.priority || "").trim();
         const taskName = String(req.body?.taskName || "").trim();
         const description = String(req.body?.description || "").trim();
         const assigneeId = String(req.body?.assigneeId || "").trim();
         const completionDate = parseCompletionDate(req.body?.completionDate);
         const attachments = Array.isArray(req.body?.attachments) ? req.body.attachments : [];
 
-        if (!TASK_TYPES.has(taskType)) {
+        if (!taskType) {
             return res.status(400).json({ message: "Choose a task type." });
         }
         if (!PRIORITIES.has(priority)) {

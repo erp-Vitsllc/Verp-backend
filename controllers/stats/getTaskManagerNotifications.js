@@ -4,6 +4,8 @@ import EmployeeBasic from "../../models/EmployeeBasic.js";
 import TaskManagerTask from "../../models/TaskManagerTask.js";
 import User from "../../models/User.js";
 import {
+    accessPathFor,
+    displayTaskType,
     moduleForRequestType,
     moduleForText,
     resolveTaskViewer,
@@ -59,10 +61,25 @@ export function taskCategory(requestType) {
     if (/reminder|expiry|incomplete|not renew|probation|card deleted|value missing|overdue/i.test(type)) {
         return "System Task";
     }
-    if (/request|approval|activation|loan|fine|reward|leave|salary|payment|assignment|transfer|service|inspection|disposition|notice/i.test(type)) {
-        return "Work Flow Task";
+    if (/certificate|utility|early salary|salary request|employee asset|employee vehicle|employee utility|employee certificate|asset request|tool/i.test(type)) {
+        return "General Task";
     }
-    return "General Task";
+    if (/approval|leave|fine|loan|reward|payment|notice|activation|inspection|disposition|assignment|transfer|service/i.test(type)) {
+        return "Workflow Task";
+    }
+    if (/request/i.test(type)) return "General Task";
+    return "Workflow Task";
+}
+
+function canDeleteTask(viewer, { manual, requestedByName, requestedByUserId }) {
+    if (viewer?.superUser) return true;
+    if (!manual) return false;
+    if (requestedByUserId) {
+        return Boolean(viewer?.userId && String(requestedByUserId) === String(viewer.userId));
+    }
+    const owner = String(requestedByName || "").trim().toLowerCase();
+    const name = String(viewer?.name || "").trim().toLowerCase();
+    return Boolean(owner && name && owner === name);
 }
 
 export function displayStatus(rawStatus, requestType, requestedKey, todayKey) {
@@ -194,7 +211,7 @@ export const getTaskManagerNotifications = async (req, res) => {
 
         const manualRows = await TaskManagerTask.find({})
             .select(
-                "taskType priority taskName description assignee assigneeEmpId assigneeName completionDate requestedByName status createdAt updatedAt sourceDashboardActionId attachments comments history reminders",
+                "taskType priority taskName description assignee assigneeEmpId assigneeName completionDate requestedByName requestedByUserId status createdAt updatedAt sourceDashboardActionId attachments comments history reminders",
             )
             .lean()
             .maxTimeMS(10000);
@@ -217,7 +234,32 @@ export const getTaskManagerNotifications = async (req, res) => {
         };
 
         const summary = { total: 0, pending: 0, pendingDue: 0, completed: 0 };
-        const tasks = actions.filter((action) => action.requestType !== "Task Manager").map((action) => {
+        const uniqueActions = [];
+        const seenRequest = new Map();
+        for (const action of actions) {
+            if (action.requestType === "Task Manager") continue;
+            const requestId = String(action.requestId || "").trim();
+            const extra = String(action.extra1 || "").trim().toLowerCase();
+            if (!requestId && !extra) {
+                uniqueActions.push(action);
+                continue;
+            }
+            const key = `${action.requestType}|${requestId}|${extra}|${String(action.assignedTo || action.assignedToEmpId || "")}`;
+            const previous = seenRequest.get(key);
+            if (!previous) {
+                seenRequest.set(key, action);
+                continue;
+            }
+            const openness = (status) => (status === "Pending" || status === "On Hold" ? 0 : 1);
+            const previousTime = new Date(previous.requestedDate || previous.createdAt || 0).getTime();
+            const nextTime = new Date(action.requestedDate || action.createdAt || 0).getTime();
+            const nextIsBetter = openness(action.status) < openness(previous.status)
+                || (openness(action.status) === openness(previous.status) && nextTime >= previousTime);
+            if (nextIsBetter) seenRequest.set(key, action);
+        }
+        uniqueActions.push(...seenRequest.values());
+
+        const tasks = uniqueActions.map((action) => {
             const requestedAt = action.requestedDate || action.createdAt || null;
             const requestedKey = dubaiDateKey(requestedAt);
             const status = displayStatus(action.status, action.requestType, requestedKey, todayKey);
@@ -230,8 +272,10 @@ export const getTaskManagerNotifications = async (req, res) => {
             const assigneeEmpId = String(overlay?.assigneeEmpId || action.assignedToEmpId || "").trim();
             const assigneeRecord = byId.get(assigneeId) || byCode.get(assigneeEmpId) || assignee;
             const assigneeName = personName(assigneeRecord) || overlay?.assigneeName || String(action.assignedToEmpId || "").trim() || "Unassigned";
-            const requesterName = String(action.requestedByName || "").trim() || "System";
+            const requesterName = String(overlay?.requestedByName || action.requestedByName || "").trim() || "System";
             const destination = moduleForRequestType(action.requestType, `${action.extra1 || ""} ${action.extra2 || ""}`);
+            const category = displayTaskType(overlay?.taskType) || taskCategory(action.requestType);
+            const priority = category === "System Task" ? "High" : (overlay?.priority || priorityFor(status, action.requestType));
             const requestMonth = monthKeyFromDateKey(requestedKey);
             const completedMonth = monthKeyFromDateKey(dubaiDateKey(action.actionedDate || requestedAt));
 
@@ -253,10 +297,12 @@ export const getTaskManagerNotifications = async (req, res) => {
                 manual: false,
                 workflowLocked: action.requestType !== "Task Manager",
                 canReassign: viewerCanReassign(viewer, assigneeId, assigneeEmpId),
+                canDelete: canDeleteTask(viewer, { manual: false, requestedByName: requesterName }),
                 taskNumber: "",
                 requestDate: requestedAt,
                 completionDate: overlay?.completionDate || action.actionedDate || null,
-                taskCategory: overlay?.taskType || taskCategory(action.requestType),
+                taskCategory: category,
+                accessPath: accessPathFor(destination, action.requestId, action.subjectEmployeeId),
                 requestType: action.requestType || "Notification",
                 taskName: overlay?.taskName || String(action.extra1 || "").trim() || action.requestType || "Notification",
                 description: overlay?.description || String(action.extra2 || action.extra1 || "").trim(),
@@ -266,7 +312,7 @@ export const getTaskManagerNotifications = async (req, res) => {
                 assigneeName,
                 assigneePhoto: assigneeRecord?.profilePicture || "",
                 assigneeEmpId: String(assigneeRecord?.employeeId || assigneeEmpId).trim(),
-                priority: overlay?.priority || priorityFor(status, action.requestType),
+                priority,
                 module: destination.module,
                 moduleLabel: destination.label,
                 modulePath: destination.path,
@@ -279,8 +325,8 @@ export const getTaskManagerNotifications = async (req, res) => {
                 extra3: action.extra3 || "",
                 targetEmployeeId: action.subjectEmployeeId || "",
                 subjectName: action.subjectName || "",
-                requestedBy: action.requestedByName || "",
-                requestedByName: action.requestedByName || "",
+                requestedBy: requesterName,
+                requestedByName: requesterName,
                 status: action.status || "Pending",
                 requestedDate: requestedAt,
             };
@@ -320,16 +366,23 @@ export const getTaskManagerNotifications = async (req, res) => {
 
             const destination = moduleForText(row.taskName, row.description, row.taskType);
             const assigneeId = String(row.assignee || "");
+            const category = displayTaskType(row.taskType);
             tasks.push({
                 actionId: `manual-${row._id}`,
                 manual: true,
                 workflowLocked: false,
                 canReassign: viewerCanReassign(viewer, assigneeId, row.assigneeEmpId),
+                canDelete: canDeleteTask(viewer, {
+                    manual: true,
+                    requestedByName: requesterName,
+                    requestedByUserId: row.requestedByUserId,
+                }),
                 taskNumber: "",
                 requestDate: requestedAt,
                 completionDate: row.completionDate || null,
-                taskCategory: row.taskType,
-                requestType: row.taskType,
+                taskCategory: category,
+                accessPath: accessPathFor(destination, "", ""),
+                requestType: displayTaskType(row.taskType),
                 taskName: row.taskName || "Task",
                 description: row.description || "",
                 requesterName,
@@ -338,14 +391,14 @@ export const getTaskManagerNotifications = async (req, res) => {
                 assigneeName,
                 assigneePhoto: assignee?.profilePicture || "",
                 assigneeEmpId: String(assignee?.employeeId || row.assigneeEmpId || "").trim(),
-                priority: row.priority || "Medium",
+                priority: category === "System Task" ? "High" : (row.priority || "Medium"),
                 module: destination.module,
                 moduleLabel: destination.label,
                 modulePath: destination.path,
                 displayStatus: status,
                 rawStatus: row.status || "Pending",
                 id: String(row._id),
-                type: row.taskType || "",
+                type: displayTaskType(row.taskType),
                 extra1: row.description || row.taskName || "",
                 extra2: "",
                 extra3: "",
@@ -369,7 +422,8 @@ export const getTaskManagerNotifications = async (req, res) => {
             const year = dubaiDateKey(task.requestDate || new Date()).slice(0, 4) || "0000";
             const next = (yearSequence.get(year) || 0) + 1;
             yearSequence.set(year, next);
-            task.taskNumber = `TSK-${year}-${String(next).padStart(3, "0")}`;
+            const sequence = String(next).padStart(3, "0");
+            task.taskNumber = `task${year.slice(-2)}${sequence}`;
         }
 
         const statusRank = {

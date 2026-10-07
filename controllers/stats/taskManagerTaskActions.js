@@ -3,13 +3,17 @@ import EmployeeBasic from "../../models/EmployeeBasic.js";
 import TaskManagerTask from "../../models/TaskManagerTask.js";
 import { getDepartmentHOD } from "../../utils/getDepartmentHOD.js";
 import { uploadDocumentToS3 } from "../../utils/s3Upload.js";
+import { emailFrontendUrl } from "../../utils/resolveFrontendBaseUrl.js";
 import {
     displayStatus,
     taskCategory as categoryFromRequestType,
     viewerMaySeeAllNotifications,
 } from "./getTaskManagerNotifications.js";
 import {
+    accessPathFor,
+    canonicalTaskType,
     contactCard,
+    displayTaskType,
     isObjectId,
     loadPeopleDetails,
     moduleForRequestType,
@@ -54,7 +58,6 @@ function detailDisplayStatus(task, action, manual) {
     );
 }
 
-const TASK_TYPES = new Set(["System Task", "Work Flow Task", "General Task"]);
 const PRIORITIES = new Set(["High", "Medium", "Low"]);
 const STATUSES = new Set(["Pending", "In Progress", "Completed", "Cancelled"]);
 
@@ -148,8 +151,8 @@ async function notifyParties(task, { notifyKind, subject, html }) {
     return result;
 }
 
-async function pushWorkUpdate(task, entry) {
-    const mail = await notifyParties(task, {
+async function pushWorkUpdate(task, entry, preparedMail = null) {
+    const mail = preparedMail || await notifyParties(task, {
         notifyKind: "workUpdate",
         subject: `Task Updated: ${task.taskName || "Task"}`,
         html: `
@@ -162,6 +165,51 @@ async function pushWorkUpdate(task, entry) {
     });
     task.updates = task.updates || [];
     task.updates.push({ ...entry, ...mail, createdAt: new Date() });
+}
+
+async function notifyWorkUpdateAudience(task, { text, authorName, mentionIds, accessPath }) {
+    const settings = task?.notifications || {};
+    const result = {
+        emailSent: false,
+        assigneeNotified: false,
+        requesterNotified: false,
+        assigneeName: task?.assigneeName || "",
+        requesterName: task?.requestedByName || "",
+    };
+    if (settings.workUpdate === false) return result;
+    const ids = [...new Set((Array.isArray(mentionIds) ? mentionIds : []).map((id) => String(id || "")).filter(isObjectId))];
+    let people = [];
+    if (ids.length) {
+        people = await EmployeeBasic.find({ _id: { $in: ids }, status: { $ne: "Left User" } })
+            .select("firstName lastName companyEmail workEmail")
+            .lean();
+    } else if (isObjectId(task?.assignee)) {
+        const assignee = await findAssignee(String(task.assignee));
+        if (assignee) people = [assignee];
+    }
+    const to = [...new Set(people.map((person) => person.companyEmail || person.workEmail).map((item) => String(item || "").trim()).filter(Boolean))];
+    if (!to.length) return result;
+    const taskKey = task?.sourceDashboardActionId ? String(task.sourceDashboardActionId) : `manual-${task?._id || ""}`;
+    const taskLink = `${emailFrontendUrl()}/task-manager/${encodeURIComponent(taskKey)}`;
+    const sectionLink = accessPath ? `${emailFrontendUrl()}${accessPath.startsWith("/") ? accessPath : `/${accessPath}`}` : "";
+    try {
+        const sent = await sendTaskActivityEmail({
+            to,
+            subject: `Task Updated: ${task.taskName || "Task"}`,
+            html: `
+                <p>${escapeHtml(authorName || "Someone")} added a work update.</p>
+                <p><strong>${escapeHtml(task.taskName || "Task")}</strong></p>
+                <p>${escapeHtml(text)}</p>
+                <p><a href="${escapeHtml(taskLink)}">Open the task</a></p>
+                ${sectionLink ? `<p><a href="${escapeHtml(sectionLink)}">Open the related page</a></p>` : ""}
+            `,
+        });
+        result.emailSent = Boolean(sent.sent);
+        result.assigneeNotified = Boolean(result.emailSent && !ids.length);
+    } catch (error) {
+        console.error("Task work update email failed:", error);
+    }
+    return result;
 }
 
 async function denyUnlessViewer(req, res) {
@@ -212,7 +260,7 @@ async function buildDetail(target, viewer) {
     const people = await loadPeopleDetails([assigneeId], [assigneeCode]);
     const { byId, byCode } = peopleIndex(people);
     const assigneeEmp = byId.get(String(assigneeId || "")) || byCode.get(String(assigneeCode || "")) || null;
-    const requesterName = (manual ? task.requestedByName : action.requestedByName) || task?.requestedByName || "System";
+    const requesterName = String(task?.requestedByName || action?.requestedByName || "").trim() || "System";
     const requester = await findEmployeeByName(requesterName);
     const destination = manual
         ? moduleForText(task.taskName, task.description, task.taskType)
@@ -230,12 +278,30 @@ async function buildDetail(target, viewer) {
         manual,
         workflowLocked,
         canReassign: viewerCanReassign(viewer, currentAssigneeId, assigneeEmpId),
+        canDelete: Boolean(
+            viewer?.superUser
+            || (manual && (
+                task?.requestedByUserId
+                    ? viewer?.userId && String(task.requestedByUserId) === String(viewer.userId)
+                    : (
+                        String(task?.requestedByName || "").trim()
+                        && String(task.requestedByName).trim().toLowerCase() === String(viewer?.name || "").trim().toLowerCase()
+                    )
+            )),
+        ),
+        accessPath: accessPathFor(
+            destination,
+            manual ? "" : action?.requestId,
+            manual ? "" : action?.subjectEmployeeId,
+        ),
         taskName: (task?.taskName || action?.extra1 || "Task").trim(),
         description: task?.description || (manual ? "" : action?.extra2 || ""),
-        taskCategory: task?.taskType || categoryFromRequestType(action?.requestType),
+        taskCategory: displayTaskType(task?.taskType) || categoryFromRequestType(action?.requestType),
         displayStatus: detailDisplayStatus(task, action, manual),
-        requestType: manual ? task.taskType : action.requestType,
-        priority: task?.priority || "Medium",
+        requestType: manual ? displayTaskType(task.taskType) : action.requestType,
+        priority: (displayTaskType(task?.taskType) || categoryFromRequestType(action?.requestType)) === "System Task"
+            ? "High"
+            : (task?.priority || "Medium"),
         status: task?.status || action?.status || "Pending",
         requestDate: manual ? task.createdAt : action.requestedDate || action.createdAt,
         completionDate: task?.completionDate || action?.actionedDate || null,
@@ -312,15 +378,15 @@ export const updateTaskManagerTask = async (req, res) => {
         const target = await loadTarget(req.params.taskKey);
         if (!target) return res.status(404).json({ message: "Task not found." });
 
-        const taskType = String(req.body?.taskType || "").trim();
-        const priority = String(req.body?.priority || "").trim();
+        const taskType = canonicalTaskType(req.body?.taskType);
+        const priority = taskType === "System Task" ? "High" : String(req.body?.priority || "").trim();
         const taskName = String(req.body?.taskName || "").trim();
         const description = String(req.body?.description || "").trim();
         const assigneeId = String(req.body?.assigneeId || "").trim();
         const completionDate = parseCompletionDate(req.body?.completionDate);
         const attachments = Array.isArray(req.body?.attachments) ? req.body.attachments : [];
 
-        if (!TASK_TYPES.has(taskType)) return res.status(400).json({ message: "Choose a task type." });
+        if (!taskType) return res.status(400).json({ message: "Choose a task type." });
         if (!PRIORITIES.has(priority)) return res.status(400).json({ message: "Choose a task priority." });
         if (!taskName) return res.status(400).json({ message: "Task name is required." });
         if (!isObjectId(assigneeId)) return res.status(400).json({ message: "Select an assignee." });
@@ -466,6 +532,7 @@ export const reassignTaskManagerTask = async (req, res) => {
             task.assignee = assignee._id;
             task.assigneeEmpId = assignee.employeeId || "";
             task.assigneeName = assigneeName;
+            task.requestedByName = viewer.name || task.requestedByName;
             task.history = task.history || [];
             task.history.push(historyEntry("Reassigned", detail, viewer.name));
             await pushWorkUpdate(task, {
@@ -490,7 +557,7 @@ export const reassignTaskManagerTask = async (req, res) => {
             if (!overlay) {
                 overlay = new TaskManagerTask({
                     sourceDashboardActionId: action._id,
-                    taskType: "Work Flow Task",
+                    taskType: "Workflow Task",
                     priority: "Medium",
                     taskName: action.extra1 || action.requestType || "Task",
                     description: action.extra2 || "",
@@ -502,6 +569,7 @@ export const reassignTaskManagerTask = async (req, res) => {
             overlay.assignee = assignee._id;
             overlay.assigneeEmpId = assignee.employeeId || "";
             overlay.assigneeName = assigneeName;
+            overlay.requestedByName = viewer.name || overlay.requestedByName || action.requestedByName || "";
             overlay.history = overlay.history || [];
             overlay.history.push(historyEntry("Reassigned", detail, viewer.name));
             await pushWorkUpdate(overlay, {
@@ -611,7 +679,7 @@ export const addTaskManagerComment = async (req, res) => {
         if (!task && target.action) {
             task = new TaskManagerTask({
                 sourceDashboardActionId: target.action._id,
-                taskType: "Work Flow Task",
+                taskType: "Workflow Task",
                 priority: "Medium",
                 taskName: target.action.extra1 || target.action.requestType || "Task",
                 description: "",
@@ -661,7 +729,7 @@ export const updateTaskManagerReminders = async (req, res) => {
         if (!target.task && target.action) {
             target.task = new TaskManagerTask({
                 sourceDashboardActionId: target.action._id,
-                taskType: "Work Flow Task",
+                taskType: "Workflow Task",
                 priority: "Medium",
                 taskName: target.action.extra1 || target.action.requestType || "Task",
                 description: "",
@@ -691,7 +759,7 @@ export const updateTaskManagerReminders = async (req, res) => {
 function blankOverlay(action) {
     return new TaskManagerTask({
         sourceDashboardActionId: action._id,
-        taskType: "Work Flow Task",
+        taskType: "Workflow Task",
         priority: "Medium",
         taskName: action.extra1 || action.requestType || "Task",
         description: action.extra2 || "",
@@ -712,16 +780,31 @@ export const addTaskManagerUpdate = async (req, res) => {
         const text = String(req.body?.text || "").trim();
         if (!text) return res.status(400).json({ message: "Work update is required." });
         if (text.length > 2000) return res.status(400).json({ message: "Work update must be 2000 characters or less." });
+        const mentionIds = Array.isArray(req.body?.mentions) ? req.body.mentions : [];
         const viewer = await resolveTaskViewer(req);
         const task = target.task || (target.action ? blankOverlay(target.action) : null);
         if (!task) return res.status(404).json({ message: "Task not found." });
+        const destination = target.kind === "manual"
+            ? moduleForText(task.taskName, task.description, task.taskType)
+            : moduleForRequestType(target.action?.requestType, `${target.action?.extra1 || ""} ${target.action?.extra2 || ""}`);
+        const accessPath = accessPathFor(
+            destination,
+            target.kind === "manual" ? "" : target.action?.requestId,
+            target.kind === "manual" ? "" : target.action?.subjectEmployeeId,
+        );
+        const mail = await notifyWorkUpdateAudience(task, {
+            text,
+            authorName: viewer.name,
+            mentionIds,
+            accessPath,
+        });
         await pushWorkUpdate(task, {
             authorName: viewer.name,
             authorRole: await authorRoleFor(viewer),
             kind: "Work Update",
             badge: "",
             text,
-        });
+        }, mail);
         task.history = task.history || [];
         task.history.push(historyEntry("Work Update", text, viewer.name));
         await task.save();
@@ -805,7 +888,7 @@ async function buildTaskWorkflow(target, viewer) {
     const action = target.action;
     const { assigneeId, assigneeEmpId } = assigneeOf(target);
     const assigneeEmp = await findAssignee(assigneeId);
-    const requesterName = (manual ? task?.requestedByName : action?.requestedByName) || task?.requestedByName || "System";
+    const requesterName = String(task?.requestedByName || action?.requestedByName || "").trim() || "System";
     const requesterEmp = await findEmployeeByName(requesterName);
     const assigneeName = stepPerson(assigneeEmp, manual ? task?.assigneeName : action?.subjectName || "Unassigned").personName;
     const destination = manual
@@ -924,6 +1007,11 @@ async function buildTaskWorkflow(target, viewer) {
         module: destination.module,
         moduleLabel: destination.label,
         modulePath: destination.path,
+        accessPath: accessPathFor(
+            destination,
+            manual ? "" : action?.requestId,
+            manual ? "" : action?.subjectEmployeeId,
+        ),
         workflowLocked,
         taskName: (task?.taskName || action?.extra1 || "Task").trim(),
         steps,
@@ -1021,16 +1109,30 @@ export const deleteTaskManagerTask = async (req, res) => {
         if (!(await denyUnlessViewer(req, res))) return;
         const target = await loadTarget(req.params.taskKey);
         if (!target) return res.status(404).json({ message: "Task not found." });
-        if (target.kind === "dashboard" && target.action?.requestType !== "Task Manager") {
-            return res.status(400).json({
-                message: "This request stays on its own page and cannot be deleted here.",
+        const viewer = await resolveTaskViewer(req);
+        const manual = target.kind === "manual";
+        const ownerName = String(target.task?.requestedByName || "").trim().toLowerCase();
+        const viewerName = String(viewer?.name || "").trim().toLowerCase();
+        const ownsCreatedTask = manual && (
+            target.task?.requestedByUserId
+                ? viewer?.userId && String(target.task.requestedByUserId) === String(viewer.userId)
+                : Boolean(ownerName && ownerName === viewerName)
+        );
+        if (!viewer?.superUser && !ownsCreatedTask) {
+            return res.status(403).json({
+                message: manual
+                    ? "Only the person who created this task, or an admin super user, can delete it."
+                    : "Only an admin super user can delete a system or workflow task.",
             });
         }
         const task = target.task;
-        if (task?._id) {
+        if (manual && task?._id) {
             await DashboardAction.deleteMany({ requestId: task._id, requestType: "Task Manager" });
             await TaskManagerTask.deleteOne({ _id: task._id });
-        } else if (target.action?._id) {
+        } else if (viewer?.superUser && target.action?._id) {
+            if (task?._id) await TaskManagerTask.deleteOne({ _id: task._id });
+            await DashboardAction.deleteOne({ _id: target.action._id });
+        } else if (target.action?._id && target.action.requestType === "Task Manager") {
             await DashboardAction.deleteOne({ _id: target.action._id, requestType: "Task Manager" });
         }
         return res.status(200).json({ message: "Task deleted." });

@@ -13,7 +13,7 @@ const taskManagerTaskSchema = new mongoose.Schema(
     {
         taskType: {
             type: String,
-            enum: ["System Task", "Work Flow Task", "General Task"],
+            enum: ["System Task", "Workflow Task", "Work Flow Task", "General Task"],
             required: true,
         },
         priority: {

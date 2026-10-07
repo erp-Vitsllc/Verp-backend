@@ -6,6 +6,26 @@ import { emailFrontendUrl } from "./resolveFrontendBaseUrl.js";
 import { resolveEmployeeEmailWithReporteeLoaded } from "./resolveEmployeeEmail.js";
 import { isReqUserSystemSuperUser } from "./systemSuperUser.js";
 
+const TASK_TYPE_LABELS = new Map([
+    ["system", "System Task"],
+    ["system task", "System Task"],
+    ["workflow", "Workflow Task"],
+    ["workflow task", "Workflow Task"],
+    ["work flow task", "Workflow Task"],
+    ["general", "General Task"],
+    ["general task", "General Task"],
+]);
+
+export function canonicalTaskType(value) {
+    const key = String(value || "").trim().toLowerCase().replace(/\s+/g, " ");
+    return TASK_TYPE_LABELS.get(key) || "";
+}
+
+/** UI label. Keeps an unknown stored value so older rows still display. */
+export function displayTaskType(value) {
+    return canonicalTaskType(value) || String(value || "").trim();
+}
+
 export function personName(record) {
     if (!record) return "";
     if (record.name) return String(record.name).trim();
@@ -65,6 +85,22 @@ export function moduleForRequestType(requestType, extraText = "") {
         return { module: "employees", label: "Employees", path: "/emp" };
     }
     return moduleForText(type, extraText);
+}
+
+/** Opens the record behind a task. Falls back to the module list when there is no record id. */
+export function accessPathFor(destination, requestId, subjectEmployeeId) {
+    const id = String(requestId || "").trim();
+    const employeeCode = String(subjectEmployeeId || "").trim();
+    const moduleName = destination?.module || "";
+    const base = destination?.path || "/task-manager";
+    if (moduleName === "fine" && id) return `/HRM/Fine/${id}`;
+    if (moduleName === "loan" && id) return `/HRM/LoanAndAdvance/${id}`;
+    if (moduleName === "reward" && id) return `/HRM/Reward/${id}`;
+    if (moduleName === "vehicle" && id) return `/HRM/Asset/Vehicle/details/${id}`;
+    if (moduleName === "tools" && id) return `/HRM/Asset/details/${id}`;
+    if (moduleName === "employees" && employeeCode) return `/emp/${encodeURIComponent(employeeCode)}`;
+    if (moduleName === "company" && id) return `/Company/${id}`;
+    return base;
 }
 
 export async function resolveTaskViewer(req) {
