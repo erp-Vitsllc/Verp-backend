@@ -11,6 +11,22 @@ import {
 import { normalizePdfAttachments } from "./normalizeEmailAttachments.js";
 import { skipVehicleHandoverEmail } from "./vehicleHandoverEmailGate.js";
 
+async function resolveOwnBusinessEmail(emp) {
+    const direct = String(emp?.companyEmail || emp?.workEmail || '').trim();
+    if (direct) return { email: direct, employee: emp };
+    if (!emp?._id && !emp?.employeeId) return { email: null, employee: emp };
+    const EmployeeBasic = (await import('../models/EmployeeBasic.js')).default;
+    const query = emp._id
+        ? EmployeeBasic.findById(emp._id)
+        : EmployeeBasic.findOne({ employeeId: emp.employeeId });
+    const full = await query
+        .select('firstName lastName employeeId companyEmail workEmail')
+        .lean()
+        .catch(() => null);
+    const email = String(full?.companyEmail || full?.workEmail || '').trim();
+    return { email: email || null, employee: full || emp };
+}
+
 export const sendAssetAssignmentEmail = async ({
     asset,
     assets = [],
@@ -31,15 +47,33 @@ export const sendAssetAssignmentEmail = async ({
     stageLabel = null,
     /** Optional extra dedupe segment (e.g. handover history id) */
     dedupeEvent = '',
+    /**
+     * Assignee approval must not be emailed to the primary reportee just because
+     * the assignee has no company email. They accept on Web or the app instead.
+     */
+    allowReporteeFallback = true,
 }) => {
     if (skipVehicleHandoverEmail(asset)) return false;
     try {
-        const { email: recipientEmail, isFallbackToReportee, employee: resolvedRecipient } =
-            await resolveEmployeeEmailWithReporteeLoaded(recipient);
+        let recipientEmail = null;
+        let isFallbackToReportee = false;
+        let resolvedRecipient = recipient;
+        if (allowReporteeFallback === false) {
+            const own = await resolveOwnBusinessEmail(recipient);
+            recipientEmail = own.email;
+            resolvedRecipient = own.employee || recipient;
+        } else {
+            const resolved = await resolveEmployeeEmailWithReporteeLoaded(recipient);
+            recipientEmail = resolved.email;
+            isFallbackToReportee = resolved.isFallbackToReportee;
+            resolvedRecipient = resolved.employee;
+        }
 
         if (!recipientEmail) {
             console.warn(
-                `[Email Warning] No company/work email for assignee ${recipient?.employeeId || recipient?._id} and no primary reportee business email`,
+                allowReporteeFallback === false
+                    ? `[Email Warning] No company email for ${recipient?.employeeId || recipient?._id}. Assignment request stays on their Web or App notification.`
+                    : `[Email Warning] No company/work email for assignee ${recipient?.employeeId || recipient?._id} and no primary reportee business email`,
             );
             return false;
         }

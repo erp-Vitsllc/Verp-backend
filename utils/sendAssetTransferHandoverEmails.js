@@ -103,7 +103,9 @@ export async function sendAssetTransferHandoverEmails({
         const reportee = targetFull.primaryReportee;
         if (reportee && typeof reportee === 'object' && reportee._id) {
             const hasCompany = !!(String(targetFull.companyEmail || '').trim() || String(targetFull.workEmail || '').trim());
-            if (!hasCompany) pushRecipient(reportee, 'target_reportee');
+            const { resolveAssigneeAcceptChannel } = await import('./assignmentRequestNotice.js');
+            const canAccept = await resolveAssigneeAcceptChannel(targetFull);
+            if (!hasCompany && !canAccept) pushRecipient(reportee, 'target_reportee');
         }
     }
 
@@ -124,6 +126,7 @@ export async function sendAssetTransferHandoverEmails({
                 attachments,
                 notificationContext: 'transfer',
                 transferRecipientRole: role === 'target_reportee' ? 'target_reportee' : role,
+                allowReporteeFallback: role !== 'target',
             });
             if (ok) sent += 1;
         } catch (mailErr) {

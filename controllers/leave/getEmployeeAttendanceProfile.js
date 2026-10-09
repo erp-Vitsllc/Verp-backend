@@ -1244,6 +1244,8 @@ export async function getEmployeeAttendanceProfile(req, res) {
                 id: row.id,
                 title: pendingRequestTitle(row.appliedKey, row.kind),
                 subtitle: pendingRequestSubtitle(row),
+                appliedKey: row.appliedKey || '',
+                dateLabel: formatDayMonthYear(row.requestedAtKey),
                 badge: daysAgoLabel(row.requestedAtKey, todayKey),
                 daysAgo: daysAgoCount(row.requestedAtKey, todayKey),
             }));
@@ -1257,6 +1259,8 @@ export async function getEmployeeAttendanceProfile(req, res) {
                 subtitle: [bill.utilityType, formatMonthYear(String(bill.billMonth || '').trim())]
                     .filter(Boolean)
                     .join(' - ') || 'Utility bill',
+                appliedKey: 'utility',
+                dateLabel: formatDayMonthYear(createdKey),
                 badge: daysAgoLabel(createdKey, todayKey),
                 daysAgo: daysAgoCount(createdKey, todayKey),
             });
@@ -1267,15 +1271,20 @@ export async function getEmployeeAttendanceProfile(req, res) {
         })
             .sort({ createdAt: -1 })
             .limit(30)
-            .select('kind assetType description requesterName createdAt')
+            .select('kind assetType description requesterName requestedDate createdAt')
             .lean();
         const workTasks = (workTaskRows || []).map((row) => {
             const createdKey = toDateKey(row.createdAt);
+            const dueKey = /^\d{4}-\d{2}-\d{2}/.test(String(row.requestedDate || ''))
+                ? String(row.requestedDate).slice(0, 10)
+                : '';
             return {
                 id: String(row._id),
                 title: hubRequestDisplayLabel(row.kind, row.assetType),
                 subtitle: String(row.description || '').trim(),
                 requesterName: String(row.requesterName || '').trim(),
+                taskType: hubRequestDisplayLabel(row.kind, row.assetType),
+                dueDate: dueKey ? formatDayMonthYear(dueKey) : '',
                 badge: daysAgoLabel(createdKey, todayKey),
                 kind: row.kind || '',
             };

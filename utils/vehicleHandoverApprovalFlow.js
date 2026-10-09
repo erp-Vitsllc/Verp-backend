@@ -15,6 +15,7 @@ import { pickEffectiveEmail } from './resolveEmployeeEmail.js';
 import { normalizeS3Key } from './s3Upload.js';
 import { handoverRequiresHrApproval } from './vehicleAccessoriesListSync.js';
 import { canLoginThroughAnyChannel, loadLoginThroughForCheck } from './loginThrough.js';
+import { assignmentInboxFieldsForActor } from './assignmentRequestNotice.js';
 
 export const HANDOVER_FLOW_STAGES = {
     TARGET: 'target',
@@ -654,8 +655,9 @@ export function assigneeHasCompanyEmail(emp) {
     return !!(emp?.companyEmail && String(emp.companyEmail).trim().length > 0);
 }
 
+/** Vehicle assignee approves when they can sign in on Web or App. Company email is not required. */
 export async function assigneeCanSelfAcknowledgeFleetHandover(emp) {
-    if (!emp || !assigneeHasCompanyEmail(emp)) return false;
+    if (!emp) return false;
     return employeeHasActivePortalUser(emp);
 }
 
@@ -944,6 +946,10 @@ export async function upsertHandoverDashboardAction({
     subjectEmpId,
 }) {
     if (!actor?._id) return;
+    const inboxFields = await assignmentInboxFieldsForActor(actor, {
+        extra2: stageLabel,
+        extra3: buildHandoverDashboardExtra3(asset._id, historyId, { viewerRole: 'actor' }),
+    });
     await DashboardAction.findOneAndUpdate(
         {
             requestId: asset._id,
@@ -962,8 +968,8 @@ export async function upsertHandoverDashboardAction({
                 ? `${assigner.firstName || ''} ${assigner.lastName || ''}`.trim() || 'System'
                 : 'System',
             extra1: `${asset.assetId} — ${asset.name || ''}`,
-            extra2: stageLabel,
-            extra3: buildHandoverDashboardExtra3(asset._id, historyId, { viewerRole: 'actor' }),
+            extra2: inboxFields.extra2,
+            extra3: inboxFields.extra3,
             status: 'Pending',
         },
         { upsert: true, new: true, setDefaultsOnInsert: true },
@@ -1195,6 +1201,7 @@ export async function notifyHandoverStageEmail({
         detailsPath,
         stageLabel,
         dedupeEvent: historyId ? `handover-${historyId}` : '',
+        allowReporteeFallback: false,
     }).catch(() => null);
 }
 

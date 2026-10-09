@@ -588,8 +588,8 @@ function emptyDayStats(totalStaff = 0) {
         compOffLeave: 0,
         earlyGo: 0,
         halfDay: 0,
-        // No marks yet — calendar shows total staff only until attendance is recorded.
-        notMarked: 0,
+        // Nobody is marked yet, so the whole roster is not marked.
+        notMarked: totalStaff,
         holiday: 0,
         weeklyOff: 0,
         isWeeklyOff: false,
@@ -599,7 +599,7 @@ function emptyDayStats(totalStaff = 0) {
         siteTotal: 0,
         totalPresent: 0,
         absentAuthorized: 0,
-        absentUnauthorized: 0,
+        absentUnauthorized: totalStaff,
     };
 }
 
@@ -677,6 +677,55 @@ function buildDayStatsFromRecords(records, totalStaff = 0, { isWeeklyOffDay = fa
         // Same value as notMarked — unauthorized and not marked are one category.
         absentUnauthorized: isWeeklyOffDay ? 0 : notMarked,
     };
+}
+
+function attendanceListPerson(emp, row, date) {
+    const fromEmp = [emp?.firstName, emp?.lastName].filter(Boolean).join(' ').trim();
+    return {
+        employeeMongoId: String(row?.employeeMongoId || emp?._id || ''),
+        employeeId: String(row?.employeeId || emp?.employeeId || ''),
+        name: String(row?.employeeName || fromEmp || 'Employee').trim(),
+        date,
+    };
+}
+
+const HEADER_LEAVE_KEYS = new Set(['on_leave', 'authorized_leave', 'sick_leave', 'compoff_leave']);
+const HEADER_ABSENT_KEYS = new Set(['not_marked', 'unauthorized_leave', 'absent', '']);
+
+/** Names behind each header row, using the same buckets as the counts. */
+function headerPeopleForDay({ roster, dayRecords, peopleById, dateKey, isWeeklyOffDay }) {
+    const present = [];
+    const late = [];
+    const leave = [];
+    const missed = [];
+    const absent = [];
+    const seen = new Set();
+    for (const row of dayRecords || []) {
+        const id = String(row?.employeeMongoId || '');
+        if (!id) continue;
+        seen.add(id);
+        const person = attendanceListPerson(peopleById.get(id), row, dateKey);
+        const key = String(row?.statusKey || '').trim();
+        if (key === 'on_office') present.push(person);
+        else if (key === 'late_arrived') late.push(person);
+        else if (HEADER_LEAVE_KEYS.has(key)) leave.push(person);
+        else if (key === 'mispunch') missed.push(person);
+        else if (!isWeeklyOffDay && HEADER_ABSENT_KEYS.has(key)) absent.push(person);
+    }
+    const total = [];
+    for (const id of roster || []) {
+        const person = attendanceListPerson(peopleById.get(id), null, dateKey);
+        total.push(person);
+        if (!isWeeklyOffDay && !seen.has(id)) absent.push(person);
+    }
+    const byName = (a, b) => String(a.name).localeCompare(String(b.name));
+    present.sort(byName);
+    absent.sort(byName);
+    late.sort(byName);
+    leave.sort(byName);
+    missed.sort(byName);
+    total.sort(byName);
+    return { present, absent, late, leave, missed, total };
 }
 
 function resolveStaffTypeFilter(raw) {
@@ -837,6 +886,7 @@ export async function getAttendanceCalendarSummary(req, res) {
         const fromQuery = String(req.query.from || '').trim();
         const toQuery = String(req.query.to || '').trim();
         const staffType = resolveStaffTypeFilter(req.query.staffType);
+        const includePeople = String(req.query.includePeople || '') === '1';
 
         let from;
         let to;
@@ -871,49 +921,69 @@ export async function getAttendanceCalendarSummary(req, res) {
         const [employeeRows, storedRecords, workingTime] = await Promise.all([
             EmployeeBasic.find({
                 profileStatus: 'active',
+                status: { $ne: 'Left User' },
+                employeeId: { $ne: 'VEGA-HR-0000' },
                 ...REAL_EMPLOYEE_MONGO_FILTER,
             })
-                .select('_id employeeId staffType firstName lastName')
+                .select('_id employeeId staffType firstName lastName status')
                 .lean(),
             Attendance.find({ date: { $gte: from, $lte: to } }).lean(),
             loadWorkingTimeDoc(),
         ]);
+        const people = (employeeRows || []).filter(
+            (emp) => !isCompanyShellEmployee(emp) && String(emp.employeeId || '').trim() !== 'VEGA-HR-0000',
+        );
         const coverIndex = await loadLeaveCoverIndex({
             from,
             to,
-            employees: (employeeRows || []).filter((emp) => !isCompanyShellEmployee(emp)),
+            employees: people,
         });
         const records = applyLeaveCoverIndex(storedRecords, coverIndex);
-        const processingStartById = await loadEnrolledLeaveVisibilityByMongoId(
-            (employeeRows || []).filter((emp) => !isCompanyShellEmployee(emp)),
-        );
+        const processingStartById = await loadEnrolledLeaveVisibilityByMongoId(people);
+        // Same people as Mark Attendance: enrolled, and that month is open. Others are not staff for the day.
+        const enrolledPeople = people.filter((emp) => processingStartById.has(String(emp._id)));
+        const peopleById = new Map(enrolledPeople.map((emp) => [String(emp._id), emp]));
 
         const idsByGroup = new Map();
-        for (const emp of employeeRows || []) {
-            if (isCompanyShellEmployee(emp)) continue;
+        for (const emp of enrolledPeople) {
             const key = normalizeStaffType(emp.staffType);
             if (!idsByGroup.has(key)) idsByGroup.set(key, []);
             idsByGroup.get(key).push(String(emp._id));
         }
 
+        const anchorMonth = (to < getDubaiDateKey() ? to : getDubaiDateKey()).slice(0, 7);
+        const rosterIdsForMonth = (monthKey, group) =>
+            enrolledPeople
+                .filter((emp) => {
+                    if (group && normalizeStaffType(emp.staffType) !== group) return false;
+                    const start = processingStartById.get(String(emp._id));
+                    return Boolean(start) && isSalaryMonthOpen(monthKey, start);
+                })
+                .map((emp) => String(emp._id));
+
         const groupCounts = {};
         let totalStaffAll = 0;
-        for (const [key, ids] of idsByGroup) {
-            groupCounts[key] = ids.length;
-            totalStaffAll += ids.length;
+        const groups = new Set([...idsByGroup.keys(), ...(staffType ? [staffType] : [])]);
+        for (const key of groups) {
+            const count = rosterIdsForMonth(anchorMonth, key).length;
+            groupCounts[key] = count;
+            totalStaffAll += count;
         }
-        if (staffType && groupCounts[staffType] == null) groupCounts[staffType] = 0;
+        if (!staffType) {
+            totalStaffAll = rosterIdsForMonth(anchorMonth, null).length;
+        }
 
         const selectedIds = staffType
             ? idsByGroup.get(staffType) || []
             : [...idsByGroup.values()].flat();
-        const totalStaff = selectedIds.length;
-        const staffIdSet = staffType ? new Set(selectedIds) : null;
+        const totalStaff = rosterIdsForMonth(anchorMonth, staffType).length;
+        const staffIdSet = new Set(selectedIds);
         const scheduleWeek = getWeekForStaffType(workingTime, staffType);
 
         const byDate = new Map();
         for (const row of records) {
-            if (staffIdSet && !staffIdSet.has(String(row?.employeeMongoId || ''))) continue;
+            const employeeId = String(row?.employeeMongoId || '');
+            if (!staffIdSet.has(employeeId)) continue;
             const key = String(row?.date || '').trim();
             if (!isValidDateKey(key)) continue;
             if (!byDate.has(key)) byDate.set(key, []);
@@ -925,17 +995,12 @@ export async function getAttendanceCalendarSummary(req, res) {
         const end = new Date(`${to}T12:00:00.000Z`);
         for (let cursor = start; cursor <= end; cursor.setUTCDate(cursor.getUTCDate() + 1)) {
             const dateKey = cursor.toISOString().slice(0, 10);
-            const roster = new Set(
-                selectedIds.filter((id) => {
-                    const startDate = processingStartById.get(id);
-                    return !startDate || dateKey >= startDate;
-                }),
-            );
+            const roster = new Set(rosterIdsForMonth(dateKey.slice(0, 7), staffType));
             const dayRecords = [];
             for (const row of byDate.get(dateKey) || []) {
                 const id = String(row?.employeeMongoId || '');
+                if (!roster.has(id)) continue;
                 if (!keepAttendanceForProcessingStart(row, processingStartById.get(id) || '')) continue;
-                if (!roster.has(id)) roster.add(id);
                 dayRecords.push(row);
             }
             const dayStaff = roster.size;
@@ -965,6 +1030,16 @@ export async function getAttendanceCalendarSummary(req, res) {
                 stats.siteTotal = dayStaff;
                 stats.officePresent = 0;
                 stats.officeTotal = 0;
+            }
+
+            if (includePeople) {
+                stats.people = headerPeopleForDay({
+                    roster,
+                    dayRecords,
+                    peopleById,
+                    dateKey,
+                    isWeeklyOffDay,
+                });
             }
 
             days[dateKey] = stats;
@@ -1361,6 +1436,7 @@ export async function getMyAttendanceMonth(req, res) {
             employee: employeePayload,
             contactGate,
             offWeekdays,
+            scheduleWeek,
             workingTime: {
                 site: workingTime.site,
                 office: workingTime.office,
@@ -2876,9 +2952,22 @@ export async function requestAttendanceLeave(req, res) {
         const reason = String(req.body?.reason || '').trim();
         const attachmentName = String(req.body?.attachmentName || '').trim();
         const isLateArrival = requestedStatusKey === 'late_arrived';
-        const needsAttachment = requestedStatusKey === 'sick_leave' || requestedStatusKey === 'on_leave';
-        const requestTimeIn = isLateArrival ? normalizeClockHHmm(req.body?.timeIn) : '';
-        const requestTimeOut = isLateArrival ? normalizeClockHHmm(req.body?.timeOut) : '';
+        const usesDayPart = isLateArrival || requestedStatusKey === 'authorized_leave';
+        const requestedPart = String(req.body?.dayPart || 'full').trim();
+        const dayPart =
+            usesDayPart && (requestedPart === 'half' || requestedPart === 'quarter')
+                ? requestedPart
+                : usesDayPart
+                  ? 'full'
+                  : '';
+        const session =
+            dayPart === 'half' || dayPart === 'quarter'
+                ? String(req.body?.session || '').trim().toLowerCase() === 'pm'
+                    ? 'pm'
+                    : String(req.body?.session || '').trim().toLowerCase() === 'am'
+                      ? 'am'
+                      : ''
+                : '';
 
         if (!isValidDateKey(date)) {
             return res.status(400).json({ message: 'A valid date (yyyy-MM-dd) is required.' });
@@ -2891,14 +2980,8 @@ export async function requestAttendanceLeave(req, res) {
         if (!reason) {
             return res.status(400).json({ message: 'Reason is required.' });
         }
-        if (needsAttachment && !attachmentName) {
-            return res.status(400).json({ message: 'A document is required.' });
-        }
-        if (isLateArrival && (!requestTimeIn || !requestTimeOut)) {
-            return res.status(400).json({ message: 'Check-in time and check-out time are required.' });
-        }
-        if (isLateArrival && requestTimeOut <= requestTimeIn) {
-            return res.status(400).json({ message: 'Check-out time must be after check-in time.' });
+        if ((dayPart === 'half' || dayPart === 'quarter') && !session) {
+            return res.status(400).json({ message: 'Choose AM or PM for a half day or quarter day.' });
         }
 
         const todayKey = getDubaiDateKey();
@@ -2956,6 +3039,23 @@ export async function requestAttendanceLeave(req, res) {
             }
         }
 
+        let partialLeave = null;
+        if (dayPart === 'half' || dayPart === 'quarter') {
+            const workingTime = await loadWorkingTimeDoc();
+            const scheduleWeek = getWeekForStaffType(workingTime, employee.staffType);
+            partialLeave = describePartialLeave({
+                week: scheduleWeek,
+                dateKey: date,
+                dayPart,
+                session,
+            });
+            if (!partialLeave) {
+                return res.status(400).json({
+                    message: 'This working day has no hours for a half day or quarter day.',
+                });
+            }
+        }
+
         let resolvedStatusKey = requestedStatusKey;
         if (requestedStatusKey === 'sick_leave') {
             const overflowMap = await resolveSickOverflowStatuses(employee, [date]);
@@ -2982,10 +3082,12 @@ export async function requestAttendanceLeave(req, res) {
                     : 'Converted from sick leave after the allowance from last annual leave was used'
                 : reason;
         record.leaveRequestKind = isLateArrival ? 'past_late' : 'leave';
-        record.leaveRequestDayPart = '';
-        record.leaveRequestTimeIn = requestTimeIn;
-        record.leaveRequestTimeOut = requestTimeOut;
-        record.attachmentName = attachmentName || (needsAttachment ? '' : record.attachmentName || '');
+        record.leaveRequestDayPart = dayPart;
+        record.leaveRequestSession = session;
+        record.leaveDayFraction = dayPart ? partialLeavePortion(dayPart) : 0;
+        record.leaveRequestTimeIn = partialLeave ? partialLeave.workStart || '' : '';
+        record.leaveRequestTimeOut = partialLeave ? partialLeave.workEnd || '' : '';
+        record.attachmentName = attachmentName || record.attachmentName || '';
         record.leaveRequestStatus = 'pending';
         record.leaveRequestedAt = new Date();
         record.leaveDecidedAt = null;

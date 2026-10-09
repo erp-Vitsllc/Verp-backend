@@ -260,6 +260,21 @@ export const applyLeavePackToCustodian = (item, { hodEmployee, assetControllerEm
     return item.onLeavePackedTo;
 };
 
+/** True once the on-leave end date is before today. The end date itself is still inside the leave. */
+export const isLeaveDurationComplete = (item, today = new Date()) => {
+    if (!isLeaveActive(item) || !item?.onLeaveEndDate) return false;
+    const end = new Date(item.onLeaveEndDate);
+    const now = new Date(today);
+    if (Number.isNaN(end.getTime())) return false;
+    end.setHours(0, 0, 0, 0);
+    now.setHours(0, 0, 0, 0);
+    return end.getTime() < now.getTime();
+};
+
+/** Tools bell copy after leave ends. */
+export const toolsLeaveCompleteBellText = (assetId) =>
+    `${String(assetId || '').trim() || 'Tool'} is complete leave take action`;
+
 /** After leave window expires: return asset to controller unassigned pool. */
 export const applyLeaveExpiredAutoUnassign = (item) => {
     if (!item) return false;

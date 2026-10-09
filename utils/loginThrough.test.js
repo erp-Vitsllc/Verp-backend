@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 import mongoose from 'mongoose';
 import {
+    assigneeAcceptChannel,
     canLoginThroughAnyChannel,
     loginThroughFlagsAreLoaded,
 } from './loginThrough.js';
@@ -42,5 +43,19 @@ describe('loginThroughFlagsAreLoaded', () => {
         const source = { loginThrough: { portalApp: false, web: false } };
         assert.equal(loginThroughFlagsAreLoaded(source), true);
         assert.equal(canLoginThroughAnyChannel(source), false);
+    });
+});
+
+describe('assigneeAcceptChannel', () => {
+    it('uses web when web is on, even if app is also on', () => {
+        assert.equal(assigneeAcceptChannel({ loginThrough: { portalApp: true, web: true } }), 'web');
+    });
+
+    it('uses the app when web is off and app is on', () => {
+        assert.equal(assigneeAcceptChannel({ loginThrough: { portalApp: true, web: false } }), 'app');
+    });
+
+    it('returns null when neither channel is on', () => {
+        assert.equal(assigneeAcceptChannel({ loginThrough: { portalApp: false, web: false } }), null);
     });
 });

@@ -10,6 +10,7 @@ import {
 } from "../../utils/loanApprovedEditAuth.js";
 import { assertLoanEmployeeEligibility } from "../../utils/loanEligibilityValidation.js";
 import { assertSameTypeRequestAllowed } from "../../utils/loanRepaymentGate.js";
+import { rememberSentEmail } from "../../utils/emailDispatch.js";
 
 export const updateLoanDetails = async (req, res) => {
     const { id } = req.params;
@@ -401,6 +402,15 @@ export const updateLoanDetails = async (req, res) => {
                                 to: reporteeEmail,
                                 subject,
                                 html
+                            });
+                            await rememberSentEmail({
+                                from: `"VeRP Portal" <${emailUser}>`,
+                                to: [reporteeEmail],
+                                subject,
+                                html,
+                                recordId: String(savedLoan?._id || loan?._id || ''),
+                                module: "Loan",
+                                emailType: "Loan updated",
                             });
                         }
                     }

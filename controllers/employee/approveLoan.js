@@ -11,6 +11,7 @@ import { getCompleteEmployee } from "../../services/employeeService.js";
 import { resolveEmployeeEmail, getFallbackEmailNote, addEmployeeEmailToSet } from "../../utils/resolveEmployeeEmail.js";
 import { LOAN_PENDING_PAYMENT_STATUS } from "../../utils/loanStatusConstants.js";
 import { runAfterResponse } from "../../utils/runAfterResponse.js";
+import { rememberSentEmail } from "../../utils/emailDispatch.js";
 
 export const approveLoan = async (req, res) => {
     try {
@@ -603,6 +604,15 @@ export const approveLoan = async (req, res) => {
                         html: htmlContent
                     };
                     await transporter.sendMail(mailOptions);
+                    await rememberSentEmail({
+                        from: mailOptions.from,
+                        to: mailOptions.to,
+                        subject: mailOptions.subject,
+                        html: mailOptions.html,
+                        recordId: String(loan._id),
+                        module: "Loan",
+                        emailType: "Loan next approver",
+                    });
                 } catch (emailErr) {
                     console.error("Next Approver Email Error:", emailErr);
                 }
@@ -736,6 +746,16 @@ export const approveLoan = async (req, res) => {
                             }
 
                             await transporter.sendMail(mailOptions);
+                            await rememberSentEmail({
+                                from: mailOptions.from,
+                                to: mailOptions.to,
+                                cc: mailOptions.cc,
+                                subject: mailOptions.subject,
+                                html: mailOptions.html,
+                                recordId: String(loan._id),
+                                module: "Loan",
+                                emailType: "Loan approved",
+                            });
                             console.log(`[ApproveLoan] Success email sent to ${toRecipients.length} TO and ${ccRecipients.length} CC recipients.`);
                         }
                     }
@@ -758,11 +778,8 @@ export const approveLoan = async (req, res) => {
                                 ? `${applicant.firstName || ''} ${applicant.lastName || ''}`.trim()
                                 : loan.applicantName || 'Employee';
                             const payUrl = `${baseUrl}/HRM/LoanAndAdvance/${typeSlug}-${loan._id}`;
-                            await transporter.sendMail({
-                                from: `"VeRP Notification" <${emailUser}>`,
-                                to: accountsEmail,
-                                subject: `${typeSlug} Approved — Pay to Employee`,
-                                html: `
+                            const accountsSubject = `${typeSlug} Approved — Pay to Employee`;
+                            const accountsHtml = `
                                     <div style="font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; color: #333; line-height: 1.6; max-width: 600px; margin: 0 auto; border: 1px solid #e2e8f0; border-radius: 12px; overflow: hidden;">
                                         <div style="background: linear-gradient(135deg, #0d9488 0%, #0f766e 100%); color: white; padding: 25px; text-align: center;">
                                             <h2 style="margin: 0; font-size: 20px; font-weight: 800;">PAY TO EMPLOYEE</h2>
@@ -792,7 +809,21 @@ export const approveLoan = async (req, res) => {
                                             </p>
                                         </div>
                                     </div>
-                                `,
+                            `;
+                            await transporter.sendMail({
+                                from: `"VeRP Notification" <${emailUser}>`,
+                                to: accountsEmail,
+                                subject: accountsSubject,
+                                html: accountsHtml,
+                            });
+                            await rememberSentEmail({
+                                from: `"VeRP Notification" <${emailUser}>`,
+                                to: [accountsEmail],
+                                subject: accountsSubject,
+                                html: accountsHtml,
+                                recordId: String(loan._id),
+                                module: "Loan",
+                                emailType: "Loan pay employee",
                             });
                             console.log(
                                 `[ApproveLoan] Pay-to-employee email sent to Accounts (${accountsEmail}).`,
@@ -870,6 +901,15 @@ export const approveLoan = async (req, res) => {
                                 `
                             };
                             await transporter.sendMail(mailOptions);
+                            await rememberSentEmail({
+                                from: mailOptions.from,
+                                to: mailOptions.to,
+                                subject: mailOptions.subject,
+                                html: mailOptions.html,
+                                recordId: String(loan._id),
+                                module: "Loan",
+                                emailType: "Loan rejected",
+                            });
                             console.log(`[ApproveLoan] Rejection email sent to ${recipientEmails.size} recipients`);
                         }
                     }

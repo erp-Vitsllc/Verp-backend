@@ -4,6 +4,7 @@ import TaskManagerTask from "../../models/TaskManagerTask.js";
 import { getDepartmentHOD } from "../../utils/getDepartmentHOD.js";
 import { uploadDocumentToS3 } from "../../utils/s3Upload.js";
 import { emailFrontendUrl } from "../../utils/resolveFrontendBaseUrl.js";
+import { findEmailsForTask } from "../../utils/emailDispatch.js";
 import {
     displayStatus,
     taskCategory as categoryFromRequestType,
@@ -139,7 +140,13 @@ async function notifyParties(task, { notifyKind, subject, html }) {
     const to = [...new Set([assigneeEmail, requesterEmail].map((item) => String(item || "").trim()).filter(Boolean))];
     if (!to.length) return result;
     try {
-        const sent = await sendTaskActivityEmail({ to, subject, html });
+        const sent = await sendTaskActivityEmail({
+            to,
+            subject,
+            html,
+            recordId: String(task?.sourceDashboardActionId || task?._id || ""),
+            emailType: notifyKind === "comment" ? "Task comment" : "Task update",
+        });
         result.emailSent = Boolean(sent.sent);
         if (result.emailSent) {
             result.assigneeNotified = Boolean(assigneeEmail);
@@ -196,6 +203,8 @@ async function notifyWorkUpdateAudience(task, { text, authorName, mentionIds, ac
         const sent = await sendTaskActivityEmail({
             to,
             subject: `Task Updated: ${task.taskName || "Task"}`,
+            recordId: String(task?.sourceDashboardActionId || task?._id || ""),
+            emailType: "Work update",
             html: `
                 <p>${escapeHtml(authorName || "Someone")} added a work update.</p>
                 <p><strong>${escapeHtml(task.taskName || "Task")}</strong></p>
@@ -237,6 +246,27 @@ async function loadTarget(taskKey) {
     return task ? { kind: "manual", task, action: null } : null;
 }
 
+function viewerIsCurrentAssignee(viewer, current) {
+    const assigneeId = String(current?.assigneeId || "");
+    if (assigneeId && viewer?.employeeObjectId && assigneeId === String(viewer.employeeObjectId)) return true;
+    if (assigneeId && viewer?.userId && assigneeId === String(viewer.userId)) return true;
+    const code = String(current?.assigneeEmpId || "").trim().toLowerCase();
+    return Boolean(code && viewer?.employeeId && code === String(viewer.employeeId).trim().toLowerCase());
+}
+
+async function nameOfAssignee(current, fallback = "") {
+    const person = isObjectId(current?.assigneeId) ? await findAssignee(current.assigneeId) : null;
+    return personName(person) || String(fallback || "").trim();
+}
+
+function requesterWithAssigner(baseName, assignerName) {
+    const assigner = String(assignerName || "").trim();
+    const base = String(baseName || "").trim().replace(/\s*\([^)]*\)\s*$/, "").trim();
+    if (!assigner) return base;
+    if (!base || base.toLowerCase() === assigner.toLowerCase()) return assigner;
+    return `${base} (${assigner})`;
+}
+
 function assigneeOf(target) {
     if (target.kind === "manual") {
         return {
@@ -266,12 +296,20 @@ async function buildDetail(target, viewer) {
         ? moduleForText(task.taskName, task.description, task.taskType)
         : moduleForRequestType(action.requestType, `${action.extra1 || ""} ${action.extra2 || ""}`);
     const cardAssignee = contactCard(assigneeEmp);
-    if (!cardAssignee.name) cardAssignee.name = manual ? task.assigneeName : action.subjectName || "Unassigned";
+        if (!cardAssignee.name) cardAssignee.name = task?.assigneeName || "Unassigned";
     const cardRequester = contactCard(requester);
     if (!cardRequester.name) cardRequester.name = requesterName;
 
     const { assigneeId: currentAssigneeId, assigneeEmpId } = assigneeOf(target);
     const workflowLocked = !manual && action?.requestType !== "Task Manager";
+    const taskTitle = String(task?.taskName || action?.extra1 || "").trim();
+    const focusMatch = taskTitle.match(/expiry follow-up required:\s*(.+?)(?:\s*\(exp:|$)/i);
+    const broadRecord = /expiry|reminder/i.test(String(action?.requestType || ""));
+    const emails = await findEmailsForTask({
+        ids: [action?._id, action?.requestId, task?._id, task?.sourceDashboardActionId],
+        prefixes: broadRecord ? [action?.requestId] : [],
+        focus: focusMatch ? focusMatch[1].trim() : "",
+    });
 
     return {
         actionId: manual ? `manual-${task._id}` : String(action._id),
@@ -296,10 +334,14 @@ async function buildDetail(target, viewer) {
         ),
         taskName: (task?.taskName || action?.extra1 || "Task").trim(),
         description: task?.description || (manual ? "" : action?.extra2 || ""),
-        taskCategory: displayTaskType(task?.taskType) || categoryFromRequestType(action?.requestType),
+        taskCategory: manual
+            ? (displayTaskType(task?.taskType) || "General Task")
+            : categoryFromRequestType(action?.requestType, action?.extra2 || ""),
         displayStatus: detailDisplayStatus(task, action, manual),
         requestType: manual ? displayTaskType(task.taskType) : action.requestType,
-        priority: (displayTaskType(task?.taskType) || categoryFromRequestType(action?.requestType)) === "System Task"
+        priority: (manual
+            ? (displayTaskType(task?.taskType) || "General Task")
+            : categoryFromRequestType(action?.requestType, action?.extra2 || "")) === "System Task"
             ? "High"
             : (task?.priority || "Medium"),
         status: task?.status || action?.status || "Pending",
@@ -322,6 +364,7 @@ async function buildDetail(target, viewer) {
         comments: [...(task?.comments || [])].sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt)),
         updates: [...(task?.updates || [])].sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt)),
         history: task?.history || [],
+        emails,
         reminders: task?.reminders || { dueDate: true, overdue: false },
         notifications: {
             workUpdate: task?.notifications?.workUpdate !== false,
@@ -413,6 +456,10 @@ export const updateTaskManagerTask = async (req, res) => {
         }
 
         const assigneeName = personName(assignee) || assignee.employeeId || "Unassigned";
+        const ownerReassigned = assigneeChanged && viewerIsCurrentAssignee(viewer, previous);
+        const assignerName = ownerReassigned
+            ? await nameOfAssignee(previous, target.kind === "manual" ? target.task?.assigneeName : target.task?.assigneeName || viewer.name)
+            : "";
         let saved;
         if (target.kind === "manual") {
             const task = target.task;
@@ -423,6 +470,7 @@ export const updateTaskManagerTask = async (req, res) => {
             task.assignee = assignee._id;
             task.assigneeEmpId = assignee.employeeId || "";
             task.assigneeName = assigneeName;
+            if (assignerName) task.requestedByName = requesterWithAssigner(task.requestedByName, assignerName);
             task.completionDate = completionDate;
             if (storedFiles.length) task.attachments = [...(task.attachments || []), ...storedFiles];
             task.history = task.history || [];
@@ -454,6 +502,9 @@ export const updateTaskManagerTask = async (req, res) => {
             overlay.assignee = assignee._id;
             overlay.assigneeEmpId = assignee.employeeId || "";
             overlay.assigneeName = assigneeName;
+            if (assignerName) {
+                overlay.requestedByName = requesterWithAssigner(action.requestedByName || overlay.requestedByName, assignerName);
+            }
             overlay.completionDate = completionDate;
             if (storedFiles.length) overlay.attachments = [...(overlay.attachments || []), ...storedFiles];
             overlay.history = overlay.history || [];
@@ -462,7 +513,6 @@ export const updateTaskManagerTask = async (req, res) => {
             action.extra1 = taskName;
             action.assignedTo = assignee._id;
             action.assignedToEmpId = assignee.employeeId || "";
-            action.subjectName = assigneeName;
             await action.save();
         }
 
@@ -476,6 +526,7 @@ export const updateTaskManagerTask = async (req, res) => {
                     reason: "The task was updated and assigned to you.",
                     modulePath: destination.path,
                     requesterName: saved.requestedByName,
+                    recordId: String(target.action?._id || saved?._id || ""),
                 });
             } catch (mailError) {
                 console.error("Task edit reassignment email failed:", mailError);
@@ -522,6 +573,13 @@ export const reassignTaskManagerTask = async (req, res) => {
         if (!assignee) return res.status(400).json({ message: "Selected assignee was not found." });
         const assigneeName = personName(assignee) || assignee.employeeId || "Unassigned";
         const detail = `Reassigned to ${assigneeName}. ${reason}`;
+        const ownerReassigned = viewerIsCurrentAssignee(viewer, current);
+        const assignerName = ownerReassigned
+            ? await nameOfAssignee(
+                current,
+                target.kind === "manual" ? target.task?.assigneeName : target.task?.assigneeName || viewer.name,
+            )
+            : "";
 
         let taskName = "";
         let requesterName = "";
@@ -532,7 +590,7 @@ export const reassignTaskManagerTask = async (req, res) => {
             task.assignee = assignee._id;
             task.assigneeEmpId = assignee.employeeId || "";
             task.assigneeName = assigneeName;
-            task.requestedByName = viewer.name || task.requestedByName;
+            if (assignerName) task.requestedByName = requesterWithAssigner(task.requestedByName, assignerName);
             task.history = task.history || [];
             task.history.push(historyEntry("Reassigned", detail, viewer.name));
             await pushWorkUpdate(task, {
@@ -551,7 +609,6 @@ export const reassignTaskManagerTask = async (req, res) => {
             const action = target.action;
             action.assignedTo = assignee._id;
             action.assignedToEmpId = assignee.employeeId || "";
-            action.subjectName = assigneeName || action.subjectName;
             await action.save();
             let overlay = target.task;
             if (!overlay) {
@@ -569,7 +626,9 @@ export const reassignTaskManagerTask = async (req, res) => {
             overlay.assignee = assignee._id;
             overlay.assigneeEmpId = assignee.employeeId || "";
             overlay.assigneeName = assigneeName;
-            overlay.requestedByName = viewer.name || overlay.requestedByName || action.requestedByName || "";
+            if (assignerName) {
+                overlay.requestedByName = requesterWithAssigner(action.requestedByName || overlay.requestedByName, assignerName);
+            }
             overlay.history = overlay.history || [];
             overlay.history.push(historyEntry("Reassigned", detail, viewer.name));
             await pushWorkUpdate(overlay, {
@@ -581,7 +640,7 @@ export const reassignTaskManagerTask = async (req, res) => {
             });
             await overlay.save();
             taskName = overlay.taskName || action.extra1 || action.requestType;
-            requesterName = action.requestedByName || "";
+            requesterName = overlay.requestedByName || action.requestedByName || "";
             modulePath = moduleForRequestType(action.requestType, `${action.extra1 || ""} ${action.extra2 || ""}`).path;
         }
 
@@ -595,6 +654,7 @@ export const reassignTaskManagerTask = async (req, res) => {
                     reason,
                     modulePath,
                     requesterName,
+                    recordId: String(target.action?._id || target.task?._id || ""),
                 });
                 emailSent = Boolean(result.sent);
             } catch (mailError) {
@@ -611,6 +671,7 @@ export const reassignTaskManagerTask = async (req, res) => {
                         reason: `${assigneeName} is now assigned. ${reason}`,
                         modulePath,
                         requesterName,
+                        recordId: String(target.action?._id || target.task?._id || ""),
                     });
                 } catch (mailError) {
                     console.error("Requester reassignment email failed:", mailError);
@@ -1080,6 +1141,7 @@ export const decideTaskManagerWorkflow = async (req, res) => {
                         reason: `${current.title} was approved. This step is now with you.`,
                         modulePath: workflow.modulePath,
                         requesterName: task.requestedByName,
+                        recordId: String(task._id || ""),
                     });
                 } catch (mailError) {
                     console.error("Workflow approval email failed:", mailError);

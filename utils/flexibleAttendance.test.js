@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 import {
+    approvedOtRemainder,
     flexibleOtFieldsFromDuration,
     manualTimeOutDate,
     mergeFlexibleOtState,
@@ -91,6 +92,18 @@ describe('mergeFlexibleOtState', () => {
         );
         assert.equal(next.changed, false);
         assert.equal(next.flexibleOtStatus, undefined);
+    });
+});
+
+describe('approvedOtRemainder', () => {
+    it('keeps overtime when the hours are 10 or less', () => {
+        assert.equal(approvedOtRemainder(10), 10);
+        assert.equal(approvedOtRemainder(8.5), 8.5);
+    });
+
+    it('uses the full overtime for the next day when the hours are more than 10', () => {
+        assert.equal(approvedOtRemainder(10.5), 0);
+        assert.equal(approvedOtRemainder(15), 0);
     });
 });
 

@@ -74,7 +74,9 @@ export async function notifyAssetHandoverTransferEmails({
             const hasCompany = !!(
                 String(assignee.companyEmail || '').trim() || String(assignee.workEmail || '').trim()
             );
-            if (!hasCompany) pushRecipient(reportee, 'target_reportee');
+            const { resolveAssigneeAcceptChannel } = await import('./assignmentRequestNotice.js');
+            const canAccept = await resolveAssigneeAcceptChannel(assignee);
+            if (!hasCompany && !canAccept) pushRecipient(reportee, 'target_reportee');
         }
     }
 
@@ -98,6 +100,7 @@ export async function notifyAssetHandoverTransferEmails({
                 attachments,
                 notificationContext: 'transfer',
                 transferRecipientRole: role === 'target_reportee' ? 'target_reportee' : role,
+                allowReporteeFallback: role !== 'target',
             });
             if (ok) sent += 1;
         } catch (mailErr) {

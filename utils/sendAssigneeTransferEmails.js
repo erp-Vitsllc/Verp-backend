@@ -79,6 +79,7 @@ export async function sendAssigneeTransferRequestEmails({
                 notificationContext: 'transfer',
                 transferRecipientRole: role === 'hod_' ? 'hod' : role,
                 pendingAssignment: isTarget,
+                allowReporteeFallback: !isTarget,
             });
             if (ok) sent += 1;
         } catch (e) {

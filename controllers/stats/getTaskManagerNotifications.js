@@ -56,18 +56,33 @@ function personName(record) {
     return [record.firstName, record.lastName].filter(Boolean).join(" ").trim();
 }
 
-export function taskCategory(requestType) {
+const GENERAL_REQUEST_TYPES = new Set([
+    "employee salary request",
+    "employee certificate request",
+    "employee asset request",
+]);
+
+function isGeneralHubRequest(requestType, extra = "") {
+    const type = String(requestType || "").trim().toLowerCase();
+    if (GENERAL_REQUEST_TYPES.has(type)) return true;
+    const label = String(extra || "").trim().toLowerCase();
+    return type === "employee asset request" && /^assets\b/.test(label);
+}
+
+/** One approval step, created by the system (expiry and the same kind of reminder). */
+function isSingleStepSystemTask(requestType) {
     const type = String(requestType || "");
-    if (/reminder|expiry|incomplete|not renew|probation|card deleted|value missing|overdue/i.test(type)) {
-        return "System Task";
-    }
-    if (/certificate|utility|early salary|salary request|employee asset|employee vehicle|employee utility|employee certificate|asset request|tool/i.test(type)) {
-        return "General Task";
-    }
-    if (/approval|leave|fine|loan|reward|payment|notice|activation|inspection|disposition|assignment|transfer|service/i.test(type)) {
-        return "Workflow Task";
-    }
-    if (/request/i.test(type)) return "General Task";
+    return /expiry|not renew|card deleted|value missing|asset overdue|profile incomplete|payment reminder|fuel reminder/i.test(type);
+}
+
+/**
+ * System Task: system-created, one approval step (expiry and similar reminders).
+ * Workflow Task: more than one approval step or approver, whether the system or a person started it.
+ * General Task: only Early Salary, Salary Certificate, and Assets from the dashboard request row.
+ */
+export function taskCategory(requestType, extra = "") {
+    if (isGeneralHubRequest(requestType, extra)) return "General Task";
+    if (isSingleStepSystemTask(requestType)) return "System Task";
     return "Workflow Task";
 }
 
@@ -80,6 +95,34 @@ function canDeleteTask(viewer, { manual, requestedByName, requestedByUserId }) {
     const owner = String(requestedByName || "").trim().toLowerCase();
     const name = String(viewer?.name || "").trim().toLowerCase();
     return Boolean(owner && name && owner === name);
+}
+
+function taskBelongsToViewer(task, viewer) {
+    const ids = [viewer?.employeeObjectId, viewer?.userId].map((value) => String(value || "")).filter(Boolean);
+    if (task?.assigneeId && ids.includes(String(task.assigneeId))) return true;
+    if (
+        task?.assigneeEmpId
+        && viewer?.employeeId
+        && String(task.assigneeEmpId).trim().toLowerCase() === String(viewer.employeeId).trim().toLowerCase()
+    ) {
+        return true;
+    }
+    const name = String(viewer?.name || "").trim().toLowerCase();
+    if (!name) return false;
+    return [task?.assigneeName, task?.requesterName]
+        .map((value) => String(value || "").trim().toLowerCase())
+        .includes(name);
+}
+
+function summarizeTasks(list) {
+    const summary = { total: list.length, pending: 0, pendingDue: 0, completed: 0, totalChange: 0, pendingChange: 0, pendingDueChange: 0, completedChange: 0 };
+    for (const task of list) {
+        const status = task.displayStatus;
+        if (status === "Pending" || status === "On Hold" || status === "In Progress") summary.pending += 1;
+        else if (status === "Pending Due") summary.pendingDue += 1;
+        else if (status === "Completed") summary.completed += 1;
+    }
+    return summary;
 }
 
 export function displayStatus(rawStatus, requestType, requestedKey, todayKey) {
@@ -289,7 +332,7 @@ export const getTaskManagerNotifications = async (req, res) => {
             const assigneeName = personName(assigneeRecord) || overlay?.assigneeName || String(action.assignedToEmpId || "").trim() || "Unassigned";
             const requesterName = String(overlay?.requestedByName || action.requestedByName || "").trim() || "System";
             const destination = moduleForRequestType(action.requestType, `${action.extra1 || ""} ${action.extra2 || ""}`);
-            const category = displayTaskType(overlay?.taskType) || taskCategory(action.requestType);
+            const category = taskCategory(action.requestType, action.extra2 || "");
             const priority = category === "System Task" ? "High" : (overlay?.priority || priorityFor(status, action.requestType));
             const requestMonth = monthKeyFromDateKey(requestedKey);
             const completedMonth = monthKeyFromDateKey(dubaiDateKey(action.actionedDate || requestedAt));
@@ -462,15 +505,21 @@ export const getTaskManagerNotifications = async (req, res) => {
             return bTime - aTime;
         });
 
+        const visibleTasks = viewer.superUser
+            ? tasks
+            : tasks.filter((task) => taskBelongsToViewer(task, viewer));
+        const visibleSummary = viewer.superUser ? null : summarizeTasks(visibleTasks);
+
         return res.status(200).json({
-            summary: {
+            canSeeAllTasks: Boolean(viewer.superUser),
+            summary: visibleSummary || {
                 ...summary,
                 totalChange: percentChange(monthCounts.total.current, monthCounts.total.previous),
                 pendingChange: percentChange(monthCounts.pending.current, monthCounts.pending.previous),
                 pendingDueChange: percentChange(monthCounts.pendingDue.current, monthCounts.pendingDue.previous),
                 completedChange: percentChange(monthCounts.completed.current, monthCounts.completed.previous),
             },
-            tasks,
+            tasks: visibleTasks,
         });
     } catch (error) {
         console.error("Task Manager notifications error:", error);

@@ -1,5 +1,6 @@
 import EmployeeBasic from "../../models/EmployeeBasic.js";
 import User from "../../models/User.js";
+import { isReqUserSystemSuperUser } from "../../utils/systemSuperUser.js";
 
 /**
  * Get Employee Hierarchy
@@ -7,6 +8,7 @@ import User from "../../models/User.js";
  * (same people who can open a dashboard). Each entry includes `depth` relative
  * to the logged-in user. primaryReportee is re-pointed past any non-user
  * ancestors so the Team Performance tree stays connected.
+ * The system super user receives every portal employee, not only direct reportees.
  */
 export const getHierarchy = async (req, res) => {
     try {
@@ -17,8 +19,17 @@ export const getHierarchy = async (req, res) => {
             $or: [{ employeeId: currentUser.employeeId }, { companyEmail: currentUser.companyEmail }],
         }).select("_id firstName lastName employeeId designation department profilePicture");
 
+        if (await isReqUserSystemSuperUser(currentUser)) {
+            const hierarchy = await hierarchyForSuperUser(manager);
+            return res.status(200).json({
+                manager,
+                hierarchy,
+                scope: "company",
+            });
+        }
+
         if (!manager) {
-            return res.status(200).json({ hierarchy: [] });
+            return res.status(200).json({ hierarchy: [], scope: "team" });
         }
 
         const rows = await EmployeeBasic.aggregate([
@@ -122,9 +133,59 @@ export const getHierarchy = async (req, res) => {
         return res.status(200).json({
             manager,
             hierarchy,
+            scope: "team",
         });
     } catch (error) {
         console.error("Get Hierarchy Error:", error);
         res.status(500).json({ message: "Failed to fetch hierarchy" });
     }
 };
+
+async function hierarchyForSuperUser(manager) {
+    const employees = await EmployeeBasic.find({
+        employeeId: { $nin: ["", "VEGA-HR-0000"] },
+        status: { $ne: "Left User" },
+    })
+        .select("_id firstName lastName employeeId designation department profilePicture primaryReportee")
+        .lean();
+
+    const empIds = [
+        ...new Set(employees.map((row) => String(row.employeeId || "").trim()).filter(Boolean)),
+    ];
+    const usersWithAccounts = empIds.length
+        ? await User.find({
+              employeeId: { $in: empIds },
+              status: { $nin: ["Inactive", "Suspended"] },
+              enablePortalAccess: { $ne: false },
+          })
+              .select("employeeId")
+              .lean()
+        : [];
+    const accountEmpIds = new Set(
+        usersWithAccounts.map((user) => String(user.employeeId || "").trim()).filter(Boolean),
+    );
+
+    const managerId = manager?._id ? String(manager._id) : "";
+    const seenEmpIds = new Set();
+    const hierarchy = [];
+    for (const row of employees) {
+        const empId = String(row.employeeId || "").trim();
+        if (!empId || !accountEmpIds.has(empId) || seenEmpIds.has(empId)) continue;
+        if (managerId && String(row._id) === managerId) continue;
+        seenEmpIds.add(empId);
+        hierarchy.push({
+            _id: row._id,
+            firstName: row.firstName,
+            lastName: row.lastName,
+            employeeId: row.employeeId,
+            designation: row.designation,
+            department: row.department,
+            profilePicture: row.profilePicture,
+            depth: 0,
+            primaryReportee: manager?._id || null,
+            hasUserAccount: true,
+        });
+    }
+    hierarchy.sort((a, b) => String(a.firstName || "").localeCompare(String(b.firstName || "")));
+    return hierarchy;
+}

@@ -14,6 +14,7 @@ import {
     primaryVisaFromDetails,
 } from "../../utils/loanEligibilityValidation.js";
 import { assertSameTypeRequestAllowed } from "../../utils/loanRepaymentGate.js";
+import { rememberSentEmail } from "../../utils/emailDispatch.js";
 
 
 /**
@@ -405,6 +406,15 @@ export const requestLoan = async (req, res) => {
                     }
 
                     await transporter.sendMail(mailOptions);
+                    await rememberSentEmail({
+                        from: mailOptions.from,
+                        to: [reporteeEmail],
+                        subject: mailOptions.subject,
+                        html: mailOptions.html,
+                        recordId: String(savedLoan._id),
+                        module: "Loan",
+                        emailType: "Loan submitted",
+                    });
                     console.log(`[Loan] Email sent to ${reporteeEmail}`);
                 }
             }

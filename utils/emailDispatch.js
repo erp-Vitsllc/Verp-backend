@@ -76,14 +76,24 @@ export async function shouldSendErpEmail(dedupeKey, { reminderWindowMs = 0 } = {
     return Date.now() - sentAt >= reminderWindowMs;
 }
 
+const STORED_HTML_LIMIT = 100000;
+
+export function clipStoredEmailHtml(html) {
+    const text = String(html || '');
+    if (text.length <= STORED_HTML_LIMIT) return text;
+    return `${text.slice(0, STORED_HTML_LIMIT)}<!-- truncated -->`;
+}
+
 export async function recordErpEmailSent({
     dedupeKey,
     module = '',
     emailType = '',
     recordId = '',
+    from = '',
     to = [],
     cc = [],
     subject = '',
+    html = '',
     metadata = {},
 }) {
     const key = String(dedupeKey || '').trim();
@@ -97,9 +107,11 @@ export async function recordErpEmailSent({
                     module,
                     emailType,
                     recordId: String(recordId || ''),
+                    from: String(from || ''),
                     to: normalizeRecipientList(to),
                     cc: normalizeRecipientList(cc),
                     subject: String(subject || ''),
+                    html: clipStoredEmailHtml(html),
                     sentAt: new Date(),
                     metadata,
                 },
@@ -110,6 +122,84 @@ export async function recordErpEmailSent({
         if (err?.code === 11000) return;
         console.warn('[emailDispatch] record failed:', err?.message || err);
     }
+}
+
+/** Keep a copy of an email that was already sent, so the task page can show it. */
+export async function rememberSentEmail({
+    from = '',
+    to = [],
+    cc = [],
+    subject = '',
+    html = '',
+    recordId = '',
+    module = '',
+    emailType = '',
+} = {}) {
+    const key = buildEmailDedupeKey([
+        'task-mail',
+        module || emailType || 'mail',
+        recordId,
+        subject,
+        normalizeRecipientList(to).join(','),
+        Date.now(),
+    ]);
+    await recordErpEmailSent({
+        dedupeKey: key,
+        module,
+        emailType: emailType || module,
+        recordId,
+        from,
+        to,
+        cc,
+        subject,
+        html,
+        metadata: { shownOnTask: true },
+    });
+}
+
+function escapeEmailId(value) {
+    return String(value || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+/** Emails already sent for this task's record. Expiry tasks keep only the matching document. */
+export async function findEmailsForTask({ ids = [], prefixes = [], focus = '' } = {}) {
+    const exact = [...new Set(ids.map((value) => String(value || '').trim()).filter(Boolean))];
+    const starts = [...new Set(prefixes.map((value) => String(value || '').trim()).filter(Boolean))];
+    if (!exact.length && !starts.length) return [];
+
+    const or = [];
+    if (exact.length) or.push({ recordId: { $in: exact } });
+    for (const prefix of starts) {
+        or.push({ recordId: new RegExp(`^${escapeEmailId(prefix)}:`, 'i') });
+    }
+
+    let rows = await EmailNotificationLog.find({ $or: or })
+        .sort({ sentAt: -1 })
+        .limit(40)
+        .select('from to cc subject html sentAt emailType module recordId')
+        .lean();
+
+    const needle = String(focus || '').trim().toLowerCase();
+    if (needle) {
+        const slug = needle.replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
+        const narrowed = rows.filter((row) => {
+            const hay = `${row.subject || ''} ${row.recordId || ''} ${row.emailType || ''} ${row.html || ''}`.toLowerCase();
+            return hay.includes(needle) || (slug.length > 2 && hay.includes(slug));
+        });
+        if (narrowed.length) rows = narrowed;
+        else if (starts.length) rows = rows.filter((row) => exact.includes(String(row.recordId || '')));
+    }
+
+    return rows.map((row) => ({
+        id: String(row._id),
+        from: row.from || '',
+        to: Array.isArray(row.to) ? row.to : [],
+        cc: Array.isArray(row.cc) ? row.cc : [],
+        subject: row.subject || row.emailType || 'Email',
+        html: row.html || '',
+        sentAt: row.sentAt || row.createdAt || null,
+        emailType: row.emailType || row.module || '',
+    }));
 }
 
 /**
@@ -178,9 +268,11 @@ export async function sendErpEmail({
             module,
             emailType,
             recordId,
+            from,
             to: toList,
             cc: ccList,
             subject: finalSubject,
+            html,
             metadata,
         });
     }

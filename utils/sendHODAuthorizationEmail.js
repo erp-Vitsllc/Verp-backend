@@ -1,4 +1,5 @@
 import nodemailer from 'nodemailer';
+import { rememberSentEmail } from './emailDispatch.js';
 import { resolveFrontendBaseUrl, emailFrontendUrl } from './resolveFrontendBaseUrl.js';
 
 /**
@@ -101,11 +102,21 @@ export const sendHODAuthorizationEmail = async (type, item, hod, requester) => {
             </div>
         `;
 
+        const subject = `Action Required: Authorize ${type} - ${subjectId}`;
         await transporter.sendMail({
             fromName: requester.name,
             to: hEmail,
-            subject: `Action Required: Authorize ${type} - ${subjectId}`,
+            subject,
             html: htmlContent
+        });
+        await rememberSentEmail({
+            from: emailUser,
+            to: [hEmail],
+            subject,
+            html: htmlContent,
+            recordId: String(item?._id || ''),
+            module: type,
+            emailType: `${type} authorization`,
         });
 
         console.log(`[HODEmail] Email sent to ${hEmail} for ${type} ${subjectId}`);

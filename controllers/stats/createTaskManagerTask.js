@@ -160,6 +160,8 @@ export const createTaskManagerTask = async (req, res) => {
                     to: [assigneeEmail],
                     subject: `Task Updated: ${created.taskName}`,
                     html: `<p>Task created and assigned to you.</p><p><strong>${created.taskName}</strong></p>`,
+                    recordId: String(created._id),
+                    emailType: "Task created",
                 });
                 if (sent.sent) {
                     created.updates[0].emailSent = true;

@@ -1,4 +1,5 @@
 import nodemailer from "nodemailer";
+import { rememberSentEmail } from "./emailDispatch.js";
 import DashboardAction from "../models/DashboardAction.js";
 import EmployeeBasic from "../models/EmployeeBasic.js";
 import EmployeeContact from "../models/EmployeeContact.js";
@@ -204,7 +205,7 @@ function mailTransport() {
     };
 }
 
-export async function sendTaskReassignedEmail({ toEmp, taskName, taskNumber, reason, modulePath, requesterName }) {
+export async function sendTaskReassignedEmail({ toEmp, taskName, taskNumber, reason, modulePath, requesterName, recordId = "" }) {
     const mail = mailTransport();
     const resolved = await resolveEmployeeEmailWithReporteeLoaded(toEmp);
     const to = resolved?.email;
@@ -218,32 +219,57 @@ export async function sendTaskReassignedEmail({ toEmp, taskName, taskNumber, rea
             .replace(/</g, "&lt;")
             .replace(/>/g, "&gt;");
     const who = escapeHtml(personName(toEmp) || "there");
-    await mail.transporter.sendMail({
-        from: mail.from,
-        to,
-        subject: `Task reassigned to you: ${taskName || taskNumber || "Task"}`,
-        html: `
+    const subject = `Task reassigned to you: ${taskName || taskNumber || "Task"}`;
+    const html = `
             <p>Hello ${who},</p>
             <p>This task has been reassigned to you.</p>
             <p><strong>${escapeHtml(taskNumber || "Task")}</strong> — ${escapeHtml(taskName || "Task")}</p>
             ${reason ? `<p><strong>Reason:</strong> ${escapeHtml(reason)}</p>` : ""}
             ${requesterName ? `<p><strong>Requested by:</strong> ${escapeHtml(requesterName)}</p>` : ""}
             <p><a href="${escapeHtml(link)}">Open the task</a></p>
-        `,
+        `;
+    await mail.transporter.sendMail({
+        from: mail.from,
+        to,
+        subject,
+        html,
     });
+    if (recordId) {
+        await rememberSentEmail({
+            from: mail.from,
+            to: [to],
+            subject,
+            html,
+            recordId,
+            module: "Task Manager",
+            emailType: "Task reassigned",
+        });
+    }
     return { sent: true, to };
 }
 
-export async function sendTaskActivityEmail({ to = [], subject, html }) {
+export async function sendTaskActivityEmail({ to = [], subject, html, recordId = "", emailType = "Task update" }) {
     const mail = mailTransport();
     const recipients = [...new Set(to.map((item) => String(item || "").trim()).filter(Boolean))];
     if (!mail || !recipients.length) return { sent: false, to: [] };
+    const mailSubject = subject || "Task update";
     await mail.transporter.sendMail({
         from: mail.from,
         to: recipients.join(", "),
-        subject: subject || "Task update",
+        subject: mailSubject,
         html,
     });
+    if (recordId) {
+        await rememberSentEmail({
+            from: mail.from,
+            to: recipients,
+            subject: mailSubject,
+            html,
+            recordId,
+            module: "Task Manager",
+            emailType,
+        });
+    }
     return { sent: true, to: recipients };
 }
 

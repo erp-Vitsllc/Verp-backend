@@ -176,9 +176,10 @@ export function shiftIcons({ date, timeIn, timeOut, timeOutDate }) {
     return { sun: true, moon: false };
 }
 
+/** More than 10 hours becomes the next day's Present. Those hours are not leftover overtime. */
 export function approvedOtRemainder(approvedHours) {
     const approved = Number(approvedHours) || 0;
-    if (approved >= 9) return Math.round((approved - 9) * 100) / 100;
+    if (approved > 10) return 0;
     return Math.round(Math.max(0, approved) * 100) / 100;
 }
 

@@ -33,11 +33,12 @@ async function actorIsFlowchartHr(actor) {
 
 async function approveFlexibleOvertimeRecord(record, { approvedHours, reason, confirmNextDay }) {
     const approved = roundHours(approvedHours);
-    if (approved >= 9 && !confirmNextDay) {
+    const nextDay = approved > 10;
+    if (nextDay && !confirmNextDay) {
         return {
             status: 409,
             body: {
-                message: 'Approving 9 hours or more marks the next day as Present.',
+                message: 'More than 10 overtime hours marks the next day Present (On time). None of these hours stay as overtime.',
                 needsNextDayConfirm: true,
             },
         };
@@ -46,7 +47,7 @@ async function approveFlexibleOvertimeRecord(record, { approvedHours, reason, co
     record.flexibleOtStatus = 'approved';
     record.flexibleOtApprovedHours = approved;
     if (reason != null) record.flexibleOtReason = reason;
-    if (approved >= 9) {
+    if (nextDay) {
         const nextDate = addDaysKey(record.date, 1);
         const existingNext = await Attendance.findOne({
             date: nextDate,
@@ -69,7 +70,7 @@ async function approveFlexibleOvertimeRecord(record, { approvedHours, reason, co
                         statusLabel: 'Present',
                         timeIn: 'OT',
                         timeOut: 'OT',
-                        reason: 'Present from approved overtime (9 hr)',
+                        reason: 'Present (On time) from overtime',
                         flexibleFromOtDate: record.date,
                         flexibleWorkedHours: 9,
                         punchSource: 'manual',
@@ -87,7 +88,7 @@ async function approveFlexibleOvertimeRecord(record, { approvedHours, reason, co
         body: {
             record,
             displayOtHours: approvedOtRemainder(approved),
-            nextDayPresent: approved >= 9,
+            nextDayPresent: nextDay,
         },
     };
 }

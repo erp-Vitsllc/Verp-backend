@@ -49,10 +49,9 @@ const findActiveUserForEmployee = async (emp) => {
         .catch(() => null);
 };
 
-/** Leave / AC-return: employee can approve only if they can log in AND have a company email. */
+/** Leave / return: employee approves when they can sign in on Web or App. Company email is not required. */
 export const assigneeCanSelfApproveOwnerTransfer = async (emp) => {
     if (!emp) return false;
-    if (!assigneeHasCompanyEmailOnRecord(emp)) return false;
     const linkedUser = await findActiveUserForEmployee(emp);
     if (!linkedUser) return false;
     const source = await loadLoginThroughForCheck(emp);
@@ -70,7 +69,7 @@ const loadOwnerActionApproverDoc = async (empRef) => {
 
 /**
  * When Asset Controller sends Leave / End of Services / Return to the holder:
- * holder with login + company email approves; otherwise primary reportee approves.
+ * holder with Web or App approves; primary reportee approves only when the holder cannot sign in.
  */
 export const resolveOwnerTransferApprover = async (ownerEmp) => {
     const ownerId = ownerEmp?._id || ownerEmp;
@@ -481,9 +480,8 @@ export const buildPendingActionWaitingDisplay = (asset, designatedAssetControlle
                 return pack(name, 'reportee', reporteeId || waitingId);
             }
             if (showingAc) {
-                const noEmail = !assigneeHasCompanyEmailOnRecord(assignee);
                 const noPortal = !canLoginThroughAnyChannel(assignee);
-                if ((noEmail || noPortal) && reporteeName) {
+                if (noPortal && reporteeName) {
                     return pack(reporteeName, 'reportee', reporteeId);
                 }
                 if (assigneeName) return pack(assigneeName, 'employee', assigneeId);

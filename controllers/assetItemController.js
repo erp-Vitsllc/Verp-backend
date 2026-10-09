@@ -57,6 +57,7 @@ import {
 } from '../utils/sendVehicleHandoverLifecycleMessages.js';
 import { allocateNextServiceReqNo } from '../utils/assetServiceReqNo.js';
 import { canLoginThroughAnyChannel, loadLoginThroughForCheck } from '../utils/loginThrough.js';
+import { assignmentInboxFieldsForActor } from '../utils/assignmentRequestNotice.js';
 import {
     buildInitialHandoverEscalationMeta,
     markHandoverEscalationResolved,
@@ -186,6 +187,7 @@ import {
     ZERO_ASSET_VALUE_TRANSFER_MESSAGE,
     assertAssetHasPositiveValueForTransfer,
     assertAssetNotOnLeaveForTransfer,
+    isLeaveDurationComplete,
 } from '../utils/assetOperationalFlags.js';
 import { sendParkingReassignAcceptedEmail } from '../utils/sendParkingReassignAcceptedEmail.js';
 import { sendParkingExtensionEmail } from '../utils/sendAssetParkingNotifications.js';
@@ -708,9 +710,10 @@ const buildAssetActionApprovalHandoverAttachments = async (req, assets) => {
 };
 
 /**
- * Can the assignee Accept in ERP themselves?
+ * Can the assignee Accept themselves?
  * Active User + Web or App on → assignee. Otherwise primary reportee.
- * Company email only chooses the inbox address; it does not choose who Accepts.
+ * A missing company email does not move Accept to the reportee.
+ * Web accepts on the web. App-only accepts from the app notification.
  */
 const assigneeCanSelfAcknowledgeAssignment = async (emp) => {
     if (!emp) return false;
@@ -857,8 +860,8 @@ const applyMainAssetLossDamageAccessoryDisposition = async (asset, fineData, req
 
 /**
  * Employee assignment: assignee keeps `assignedTo`; accept task goes to assignee or primary reportee.
- * - Company email + User account → request, notification, Waiting for = assignee
- * - No user account (or no company email) → request, notification, Waiting for = primary reportee
+ * - Active user with Web or App → request and Waiting for = assignee (web, else app notification)
+ * - No user account and neither Web nor App → request and Waiting for = primary reportee
  * When assigner === designated acceptor (e.g. AC is also HOD / primary reportee) and assignee cannot
  * self-acknowledge, skip the redundant pending step — asset is directly Assigned to the employee.
  */
@@ -996,7 +999,7 @@ const resolvePendingAssignmentAckMeta = async (asset) => {
 
 /**
  * Re-route existing Pending "Asset Assignment" Accept tasks onto the correct actor:
- * company email + user account → assignee; otherwise → primary reportee.
+ * Web or App → assignee; otherwise → primary reportee.
  * Updates actionRequiredBy, inbox row, and emails the newly correct person when healed.
  */
 export const healMisroutedAssignmentInboxTasks = async () => {
@@ -1204,6 +1207,7 @@ export const healMisroutedAssignmentInboxTasks = async () => {
                         isBulk: true,
                         assetCount: bulkAssetIds.length || 1,
                         bulkAssignmentGroupId: bulkGroupId,
+                        allowReporteeFallback: false,
                     }).catch(() => null);
                 }
                 continue;
@@ -1252,6 +1256,9 @@ export const healMisroutedAssignmentInboxTasks = async () => {
                 );
             } else {
                 const assignee = asset.assignedTo;
+                const recreated = await assignmentInboxFieldsForActor(healed, {
+                    extra2: asset.assignmentType || 'Permanent',
+                });
                 await DashboardAction.findOneAndUpdate(
                     {
                         requestId: asset._id,
@@ -1266,7 +1273,8 @@ export const healMisroutedAssignmentInboxTasks = async () => {
                         subjectEmployeeId: assignee?.employeeId,
                         subjectName: `${assignee?.firstName || ''} ${assignee?.lastName || ''}`.trim(),
                         extra1: `${asset.assetId || ''} — ${asset.name || ''}`.trim(),
-                        extra2: asset.assignmentType || 'Permanent',
+                        extra2: recreated.extra2,
+                        ...(recreated.extra3 ? { extra3: recreated.extra3 } : {}),
                         status: 'Pending',
                     },
                     { upsert: true, new: true, setDefaultsOnInsert: true },
@@ -1280,6 +1288,7 @@ export const healMisroutedAssignmentInboxTasks = async () => {
                     employee: asset.assignedTo,
                     recipient: healed,
                     pendingAssignment: true,
+                    allowReporteeFallback: false,
                 }).catch(() => null);
             }
         }
@@ -1458,8 +1467,8 @@ const notifyLeaveEosOwnerHod = async ({
 // - Admin + Asset Controller: always allowed
 // - Assignee: allowed
 // - Assigner (asset.assignedBy): allowed with full permissions
-// - If assignee has NO `companyEmail` OR no portal/login access: allow primaryReportee as delegate
-// - Pending assignment: whoever is `actionRequiredBy` (assignee or reportee when no company email) may act
+// - If assignee has neither Web nor App: allow primaryReportee as delegate
+// - Pending assignment: whoever is `actionRequiredBy` (assignee, or reportee when they cannot sign in) may act
 // ─────────────────────────────────────────────────────────────────────────────
 const getActorPermissionFlagsForAsset = async (reqUser, asset) => {
     const currentEmpObjectId = reqUser?.employeeObjectId?.toString?.() || null;
@@ -3921,6 +3930,16 @@ export const handleOnLeaveAction = async (req, res) => {
             return res.status(400).json({ message: 'Asset is not on leave (onLeaveActive is false).' });
         }
 
+        const toolsLeaveFinished =
+            action === 'Extend' &&
+            isLeaveDurationComplete(item) &&
+            !isFleetVehicleAssetFields({ plateNumber: item.plateNumber, typeName: item.typeId?.name });
+        if (toolsLeaveFinished) {
+            return res.status(400).json({
+                message: 'Leave is complete and cannot be extended. Reassign the asset to another employee.',
+            });
+        }
+
         // Capture snapshot before mutation
         const snapshotItem = await AssetItem.findById(item._id)
             .populate('categoryId typeId assignedTo assignedBy acceptedBy');
@@ -4166,6 +4185,16 @@ export const bulkHandleOnLeaveAction = async (req, res) => {
                     results.success.push(item._id);
                     if (prevAssignedTo) ownersToRefreshOnDuty.add(String(prevAssignedTo));
                 } else if (action === 'Extend') {
+                    if (
+                        isLeaveDurationComplete(item) &&
+                        !isFleetVehicleAssetFields({ plateNumber: item.plateNumber, typeName: item.typeId?.name })
+                    ) {
+                        results.failed.push({
+                            id: item._id,
+                            message: 'Leave is complete and cannot be extended. Reassign the asset to another employee.',
+                        });
+                        continue;
+                    }
                     const extensionDays = parseInt(req.body.extensionDays, 10);
                     if (!Number.isInteger(extensionDays) || extensionDays <= 0 || extensionDays > 10) {
                         results.failed.push({ id: item._id, message: 'Invalid extension days (1-10 required).' });
@@ -5664,12 +5693,13 @@ export const getAssetItemDetail = async (req, res) => {
                     });
 
                     let expectedId = null;
+                    let fleetActorForHeal = null;
                     if (fleetHeal && handoverFlowHeal?.stage) {
                         if (handoverFlowHeal.stage === 'target') {
-                            const fleetActor = await resolveFleetHandoverFirstActor(assigneeDoc);
+                            fleetActorForHeal = await resolveFleetHandoverFirstActor(assigneeDoc);
                             expectedId =
-                                fleetActor.actorId?._id?.toString?.() ||
-                                fleetActor.actorId?.toString?.() ||
+                                fleetActorForHeal.actorId?._id?.toString?.() ||
+                                fleetActorForHeal.actorId?.toString?.() ||
                                 null;
                         } else if (
                             handoverFlowHeal.stage === 'hod' ||
@@ -5733,15 +5763,27 @@ export const getAssetItemDetail = async (req, res) => {
                             item.actionRequiredBy?.toString?.() ||
                             null;
                         if (currentId !== expectedId) {
+                            const fleetSelf =
+                                fleetHeal &&
+                                handoverFlowHeal?.stage === 'target' &&
+                                fleetActorForHeal?.assigneeCanSelfAcknowledge === true;
                             await AssetItem.updateOne(
                                 { _id: item._id },
                                 {
                                     $set: {
                                         actionRequiredBy: expectedId,
                                         ...(item.assignedToType ? {} : { assignedToType: 'Employee' }),
+                                        ...(fleetSelf
+                                            ? {
+                                                'pendingActionDetails.vehicleHandoverFlow.assigneeCanSelfAcknowledge': true,
+                                            }
+                                            : {}),
                                     },
                                 },
                             );
+                            if (fleetSelf && item.pendingActionDetails?.vehicleHandoverFlow) {
+                                item.pendingActionDetails.vehicleHandoverFlow.assigneeCanSelfAcknowledge = true;
+                            }
                             const healed = await EmployeeBasic.findById(expectedId)
                                 .select('firstName lastName employeeId')
                                 .lean();
@@ -5752,6 +5794,22 @@ export const getAssetItemDetail = async (req, res) => {
                                         empAckDisplayName(healed) || assignmentAckMeta.waitingForName;
                                 }
                             }
+                            const healInboxBase =
+                                fleetHeal && handoverFlowHeal?.historyId
+                                    ? {
+                                        extra2:
+                                            handoverFlowHeal.stage === 'hr' ||
+                                            handoverFlowHeal.stage === 'management'
+                                                ? 'HR Approval'
+                                                : 'Vehicle Handover',
+                                        extra3: buildHandoverDashboardExtra3(
+                                            item._id,
+                                            handoverFlowHeal.historyId,
+                                            { viewerRole: 'actor' },
+                                        ),
+                                    }
+                                    : {};
+                            const healInbox = await assignmentInboxFieldsForActor(healed, healInboxBase);
                             await DashboardAction.findOneAndUpdate(
                                 {
                                     requestId: item._id,
@@ -5769,20 +5827,8 @@ export const getAssetItemDetail = async (req, res) => {
                                 {
                                     assignedTo: expectedId,
                                     assignedToEmpId: healed?.employeeId,
-                                    ...(fleetHeal && handoverFlowHeal?.historyId
-                                        ? {
-                                            extra3: buildHandoverDashboardExtra3(
-                                                item._id,
-                                                handoverFlowHeal.historyId,
-                                                { viewerRole: 'actor' },
-                                            ),
-                                            extra2:
-                                                handoverFlowHeal.stage === 'hr' ||
-                                                    handoverFlowHeal.stage === 'management'
-                                                    ? 'HR Approval'
-                                                    : 'Vehicle Handover',
-                                        }
-                                        : {}),
+                                    ...(healInbox.extra2 ? { extra2: healInbox.extra2 } : {}),
+                                    ...(healInbox.extra3 ? { extra3: healInbox.extra3 } : {}),
                                 },
                             );
                             if (fleetHeal && handoverFlowHeal?.historyId && assignerRef) {
@@ -6846,8 +6892,12 @@ export const assignAssetItem = async (req, res) => {
             (item.assignedTo || item.assignedCompany);
         const isParkingReassignment = false;
 
-        if (isLeaveActive(item)) {
+        const toolsLeaveComplete = !fleetVehicle && isLeaveDurationComplete(item);
+        if (isLeaveActive(item) && !toolsLeaveComplete) {
             return res.status(400).json({ message: ON_LEAVE_TRANSFER_BLOCKED_MESSAGE });
+        }
+        if (toolsLeaveComplete) {
+            clearParkingFlags(item);
         }
 
         const isServiceReassignment =
@@ -7286,6 +7336,10 @@ export const assignAssetItem = async (req, res) => {
 
         await item.save();
 
+        if (toolsLeaveComplete) {
+            await completeOperationalExpiryDashboardTasks(item._id, ['leave']);
+        }
+
         if (
             fleetVehicle &&
             assignedToType === 'Employee' &&
@@ -7376,6 +7430,10 @@ export const assignAssetItem = async (req, res) => {
                                 viewerRole: 'actor',
                             });
                         }
+                        Object.assign(
+                            dashboardPatch,
+                            await assignmentInboxFieldsForActor(actionRecipient, dashboardPatch),
+                        );
                         const dashboardUpdate = { $set: dashboardPatch };
                         // Tools rows must not keep leftover bulk/handover extra3 or Accept cannot close them.
                         if (!dashboardPatch.extra3) {
@@ -7645,8 +7703,7 @@ export const assignAssetItem = async (req, res) => {
                         }).catch(() => null);
                     }
                 } else {
-                    // Pending Accept: email only the actor who must respond
-                    // (assignee if company email + user account; else primary reportee).
+                    // Pending Accept: email the actor only. No company email does not copy the reportee.
                     await sendAssetAssignmentEmail({
                         asset: itemForEmail || item,
                         employee:
@@ -7662,6 +7719,7 @@ export const assignAssetItem = async (req, res) => {
                                 : null,
                         stageLabel: fleetVehicle ? 'Target User / Admin Officer' : null,
                         dedupeEvent: fleetHandoverHistoryId ? `handover-${fleetHandoverHistoryId}` : '',
+                        allowReporteeFallback: assignedToType === 'Employee',
                     });
 
                     if (fleetVehicle && fleetHandoverHistoryId) {
@@ -7979,6 +8037,9 @@ export const bulkAssignAssetItems = async (req, res) => {
                     });
                 } else if (assets.length === 1) {
                     const one = assets[0];
+                    const inboxFields = await assignmentInboxFieldsForActor(dashboardActor, {
+                        extra2: one.assignmentType,
+                    });
                     await DashboardAction.create({
                         assignedTo: actionRequiredBy,
                         assignedToEmpId: dashboardActor?.employeeId,
@@ -7988,7 +8049,8 @@ export const bulkAssignAssetItems = async (req, res) => {
                         subjectName: `${subjectEmp?.firstName || ''} ${subjectEmp?.lastName || ''}`.trim(),
                         requestedByName: `${assigner?.firstName || 'System'} ${assigner?.lastName || ''}`.trim(),
                         extra1: `${one.assetId} - ${one.name} `,
-                        extra2: one.assignmentType,
+                        extra2: inboxFields.extra2,
+                        ...(inboxFields.extra3 ? { extra3: inboxFields.extra3 } : {}),
                         status: 'Pending',
                     });
                 }
@@ -8085,7 +8147,7 @@ export const bulkAssignAssetItems = async (req, res) => {
                         });
                     }
                 } else {
-                    // Pending Accept: email only actionRequiredBy actor (assignee or primary reportee).
+                    // Pending Accept: email the actor only. No company email does not copy the reportee.
                     const emailRecipient = await EmployeeBasic.findById(pendingActionActorId).select(
                         'employeeId firstName lastName companyEmail workEmail personalEmail email primaryReportee',
                     ).populate('primaryReportee', 'firstName lastName employeeId companyEmail workEmail');
@@ -8099,6 +8161,7 @@ export const bulkAssignAssetItems = async (req, res) => {
                         attachments: bulkAssignmentAttachments,
                         bulkAssignmentGroupId: bulkAssignmentGroupId.toString(),
                         pendingAssignment: true,
+                        allowReporteeFallback: false,
                     });
                 }
             }
@@ -8606,7 +8669,7 @@ export const respondToAssignment = async (req, res) => {
             isFleetHandoverHrActor = await isUserActiveInFlowchart(req.user, 'hr');
         }
 
-        // If assignee has NO company email OR NO ERP login access, allow assignee.primaryReportee to act as delegate
+        // Primary reportee may accept only when the assignee cannot sign in on Web or App.
         let isPrimaryReporteeDelegate = false;
         let primaryReportee = null;
         if (
@@ -8615,16 +8678,12 @@ export const respondToAssignment = async (req, res) => {
             item.assignedTo.primaryReportee &&
             !(handoverFlow && handoverFlow.assigneeCanSelfAcknowledge === false)
         ) {
-            // loginThrough decides whether the assignee can act in ERP themselves
             const assigneeHasPortalAccess = await assigneeCanSelfAcknowledgeAssignment(item.assignedTo);
-            const assigneeHasCompanyEmail = !!(
-                item.assignedTo.companyEmail && String(item.assignedTo.companyEmail).trim().length > 0
-            );
             const managerId = item.assignedTo.primaryReportee._id || item.assignedTo.primaryReportee;
             const allowDelegate =
                 managerId &&
                 managerId.toString() === cur &&
-                (assigneeHasPortalAccess === false || !assigneeHasCompanyEmail);
+                assigneeHasPortalAccess === false;
             if (allowDelegate) {
                 isPrimaryReporteeDelegate = true;
                 // Fetch manager details for notifications
@@ -9850,15 +9909,12 @@ export const bulkRespondToAssignment = async (req, res) => {
 
                 let isPrimaryReporteeDelegate = false;
                 if (curBulk && item.assignedToType === 'Employee' && item.assignedTo && item.assignedTo.primaryReportee) {
-                    const assigneeHasCompanyEmail = !!(
-                        item.assignedTo.companyEmail && String(item.assignedTo.companyEmail).trim().length > 0
-                    );
                     const managerId = item.assignedTo.primaryReportee._id || item.assignedTo.primaryReportee;
                     const assigneeHasPortalAccess = await assigneeCanSelfAcknowledgeAssignment(item.assignedTo);
                     const allowDelegate =
                         managerId &&
                         managerId.toString() === curBulk &&
-                        (assigneeHasPortalAccess === false || !assigneeHasCompanyEmail);
+                        assigneeHasPortalAccess === false;
                     if (allowDelegate) isPrimaryReporteeDelegate = true;
                 }
 
@@ -10028,15 +10084,12 @@ const canUserActAsAssigneeForBulkItem = (currentUserStr, item) => {
 
     let isPrimaryReporteeDelegate = false;
     if (!isCompanyPoolAsset && item.assignedTo && item.assignedTo.primaryReportee) {
-        const assigneeHasCompanyEmail = !!(
-            item.assignedTo.companyEmail && String(item.assignedTo.companyEmail).trim().length > 0
-        );
         const managerId = item.assignedTo.primaryReportee._id || item.assignedTo.primaryReportee;
         const assigneeHasPortalAccess = canLoginThroughAnyChannel(item.assignedTo);
         const allowDelegate =
             managerId &&
             managerId.toString() === curBulk &&
-            (assigneeHasPortalAccess === false || !assigneeHasCompanyEmail);
+            assigneeHasPortalAccess === false;
         if (allowDelegate) isPrimaryReporteeDelegate = true;
     }
     return { isAssignee, isPrimaryReporteeDelegate, isDesignatedResponder };
@@ -10134,6 +10187,20 @@ const ensureBulkAssignmentDashboardRow = async ({
     const anchorId = assetIdStrings.find((id) => mongoose.Types.ObjectId.isValid(id));
     if (!anchorId) return null;
 
+    const actor = await EmployeeBasic.findById(actionRequiredBy)
+        .select('employeeId loginThrough')
+        .lean()
+        .catch(() => null);
+    const inboxFields = await assignmentInboxFieldsForActor(actor, {
+        extra2: assignmentType || '',
+        extra3: {
+            isBulkAssignment: true,
+            bulkAssignmentGroupId: gid,
+            bulkAssetIds: assetIdStrings,
+            ...(extraMeta && typeof extraMeta === 'object' ? extraMeta : {}),
+        },
+    });
+
     return DashboardAction.create({
         assignedTo: actionRequiredBy,
         assignedToEmpId: assignedToEmpId || undefined,
@@ -10143,13 +10210,11 @@ const ensureBulkAssignmentDashboardRow = async ({
         subjectName: subjectName || '',
         requestedByName: requestedByName || 'System',
         extra1: extra1 || `Bulk assignment (${assetIdStrings.length} assets)`,
-        extra2: assignmentType || '',
-        extra3: JSON.stringify({
-            isBulkAssignment: true,
-            bulkAssignmentGroupId: gid,
-            bulkAssetIds: assetIdStrings,
-            ...(extraMeta && typeof extraMeta === 'object' ? extraMeta : {}),
-        }),
+        extra2: inboxFields.extra2,
+        extra3:
+            typeof inboxFields.extra3 === 'string'
+                ? inboxFields.extra3
+                : JSON.stringify(inboxFields.extra3),
         status: 'Pending',
     });
 };
@@ -15571,8 +15636,14 @@ export const transferAssigneeAsset = async (req, res) => {
         if (item.status !== 'Assigned' && item.status !== 'Pending') {
             return res.status(400).json({ message: 'Asset must be assigned to transfer the assignee.' });
         }
-        if (isLeaveActive(item)) {
+        const toolsLeaveComplete =
+            isLeaveDurationComplete(item) &&
+            !isFleetVehicleAssetFields({ plateNumber: item.plateNumber, typeName: item.typeId?.name });
+        if (isLeaveActive(item) && !toolsLeaveComplete) {
             return res.status(400).json({ message: ON_LEAVE_TRANSFER_BLOCKED_MESSAGE });
+        }
+        if (toolsLeaveComplete) {
+            clearParkingFlags(item);
         }
         if (item.acceptanceStatus === 'Pending' && item.actionRequiredBy) {
             return res.status(400).json({ message: 'Asset already has a pending assignment. Resolve it before transferring.' });
@@ -15651,6 +15722,10 @@ export const transferAssigneeAsset = async (req, res) => {
         item.negotiationHistory = [];
 
         await item.save();
+
+        if (toolsLeaveComplete) {
+            await completeOperationalExpiryDashboardTasks(item._id, ['leave']);
+        }
 
         const itemForEmail = await AssetItem.findById(item._id).populate('categoryId', 'name').lean();
         let handoverPdf = [];

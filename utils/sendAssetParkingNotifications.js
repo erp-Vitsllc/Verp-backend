@@ -188,6 +188,27 @@ export const sendLeaveAutoUnassignedEmail = async ({ asset, parties = [], packed
     }
 };
 
+/** Email Asset Controller once a tools asset leave period has ended. */
+export const sendToolsLeaveCompleteEmail = async ({ asset, assetController }) => {
+    try {
+        const { email } = resolveEmployeeEmail(assetController);
+        if (!email || !asset) return;
+        const toolNo = escapeHtml(asset.assetId || 'Tool');
+        const name = escapeHtml(asset.name || '');
+        await sendOperationalExpiryMail({
+            to: email,
+            subject: `On Leave complete — ${asset.assetId || 'Tool'}`,
+            html: `<p>Hello <strong>${escapeHtml(assetController?.firstName || 'there')}</strong>,</p>
+                   <p>Leave for <strong>${toolNo}${name ? ` — ${name}` : ''}</strong> is complete.</p>
+                   <p>This leave <strong>cannot be extended</strong>.</p>
+                   <p>You can <strong>reassign</strong> this asset to another employee.</p>
+                   <p><a href="${assetDetailUrl(asset)}">Open asset in VeRP</a></p>`,
+        });
+    } catch (e) {
+        console.error('[sendToolsLeaveCompleteEmail] Non-fatal error:', e?.message || e);
+    }
+};
+
 /** @deprecated Use sendLeaveAutoUnassignedEmail */
 export const sendParkingExpiredEmail = async ({ asset, assignedEmployee, assetController }) => {
     try {

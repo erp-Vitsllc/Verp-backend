@@ -33,6 +33,18 @@ export function canLoginThroughAnyChannel(source) {
 }
 
 /**
+ * Where an assignee accepts assign / reassign / transfer / vehicle handover.
+ * Web wins when both are on. Company email is not part of this choice.
+ * @returns {'web' | 'app' | null}
+ */
+export function assigneeAcceptChannel(source) {
+    const through = normalizeLoginThrough(source);
+    if (through.web) return 'web';
+    if (through.portalApp) return 'app';
+    return null;
+}
+
+/**
  * Mongoose always exposes nested `loginThrough` as an object, even when the
  * query did not select it. Only real booleans mean Web/App was loaded.
  */

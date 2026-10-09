@@ -49,7 +49,11 @@ export async function upsertOperationalExpiryDashboardTask({
     if (!assigneeId || !asset?._id) return false;
     if (!isEmployeeActiveForNotifications(recipient)) return false;
 
-    const extra2 = buildExpiryMessage({ kind, daysLeft, expiryDate });
+    const toolNo = String(asset?.assetId || '').trim() || 'Tool';
+    const leaveComplete = kind === 'leaveComplete';
+    const extra2 = leaveComplete
+        ? 'Leave is complete and cannot be extended. Reassign to another employee.'
+        : buildExpiryMessage({ kind, daysLeft, expiryDate });
     if (!extra2) return false;
 
     const isToday = daysLeft === 0;
@@ -69,8 +73,9 @@ export async function upsertOperationalExpiryDashboardTask({
         extra3: { $regex: `"kind"\\s*:\\s*"${kind}"`, $options: 'i' },
     }).lean();
 
-    const extra1 =
-        kind === 'service'
+    const extra1 = leaveComplete
+        ? `${toolNo} is complete leave take action`
+        : kind === 'service'
             ? isToday
                 ? `Asset Service due today — ${asset.assetId} - ${asset.name}`
                 : `Asset Service overdue — ${asset.assetId} - ${asset.name}`

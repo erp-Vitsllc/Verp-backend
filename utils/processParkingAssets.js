@@ -6,12 +6,14 @@ import { getDepartmentHOD } from './getDepartmentHOD.js';
 import {
     sendParkingReminderEmail,
     sendLeaveAutoUnassignedEmail,
+    sendToolsLeaveCompleteEmail,
 } from './sendAssetParkingNotifications.js';
 import {
     applyLeaveExpiredAutoUnassign,
     onLeaveQueryFilter,
     ON_LEAVE_ADVANCE_NOTICE_DAYS,
 } from './assetOperationalFlags.js';
+import { isFleetVehicleAsset } from './assetApprovalHelpers.js';
 import { upsertOperationalExpiryDashboardTask, completeOperationalExpiryDashboardTasks } from './upsertOperationalExpiryDashboardTask.js';
 
 const startOfDay = (d) => {
@@ -73,7 +75,9 @@ export const processParkingAssets = async () => {
         const parkedAssets = await AssetItem.find({
             ...onLeaveQueryFilter(),
             onLeaveEndDate: { $ne: null },
-        }).populate('assignedTo');
+        })
+            .populate('assignedTo')
+            .populate('typeId', 'name');
 
         const dueLeaveReminders = [];
         const advanceTaskRows = [];
@@ -133,7 +137,58 @@ export const processParkingAssets = async () => {
                 continue;
             }
 
-            // Past end date: auto-unassign to controller pool + email all parties (once).
+            // Tools: after the leave end date, keep the assignment. Email and bell the Asset Controller.
+            // Leave cannot be extended. The controller can reassign the asset to another employee.
+            if (diffDays < 0 && !isFleetVehicleAsset(asset)) {
+                if (!asset.parkingDurationCompleteSentAt) {
+                    await sendToolsLeaveCompleteEmail({ asset, assetController });
+                    await DashboardAction.updateMany(
+                        {
+                            requestId: asset._id,
+                            status: 'Pending',
+                            requestType: 'Asset Leave',
+                            extra3: { $regex: '"kind"\\s*:\\s*"leave"(?!Complete)', $options: 'i' },
+                        },
+                        {
+                            $set: {
+                                status: 'Approved',
+                                actionedDate: new Date(),
+                                comment: 'Leave duration is complete.',
+                            },
+                        },
+                    );
+                    await AssetHistory.create({
+                        assetId: asset._id,
+                        action: 'Comment',
+                        assignedTo: asset.assignedTo?._id || asset.assignedTo || undefined,
+                        performedBy: null,
+                        comments:
+                            'On Leave duration is complete. Leave cannot be extended. Asset stays assigned. Asset Controller can reassign it to another employee.',
+                        date: new Date(),
+                        details: { auto: true, reason: 'ToolsLeaveComplete' },
+                    }).catch(() => null);
+                    asset.parkingDurationCompleteSentAt = new Date();
+                    await asset.save();
+                }
+
+                if (assetController?._id) {
+                    taskHoldersByAsset.set(String(asset._id), new Set([String(assetController._id)]));
+                    await upsertOperationalExpiryDashboardTask({
+                        asset,
+                        recipient: assetController,
+                        requestType: 'Asset Leave',
+                        kind: 'leaveComplete',
+                        expiryDate,
+                        daysLeft: diffDays,
+                        subjectName: ownerLabel,
+                    });
+                } else {
+                    taskHoldersByAsset.set(String(asset._id), new Set());
+                }
+                continue;
+            }
+
+            // Fleet vehicles: past end date, auto-unassign to controller pool + email all parties (once).
             if (diffDays < 0 && !asset.parkingDurationCompleteSentAt) {
                 const prevAssignee = asset.assignedTo?._id || asset.assignedTo;
                 const packedRole = asset.onLeavePackedToRole;
