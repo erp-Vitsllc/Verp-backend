@@ -44,13 +44,8 @@ function dubaiDateKey(value) {
 
 function detailDisplayStatus(task, action, manual) {
     if (manual && task) {
-        if (task.status === "Completed" || task.status === "Cancelled" || task.status === "In Progress") {
-            return task.status;
-        }
-        const dueKey = dubaiDateKey(task.completionDate);
-        const todayKey = dubaiDateKey(new Date());
-        if (dueKey && dueKey <= todayKey) return "Pending Due";
-        return "Pending";
+        if (task.status === "Completed" || task.status === "Cancelled") return task.status;
+        return displayStatus("Pending", "", dubaiDateKey(task.createdAt), dubaiDateKey(new Date()));
     }
     return displayStatus(
         action?.status,

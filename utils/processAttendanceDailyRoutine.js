@@ -314,7 +314,7 @@ async function applyPartialLeaveOutcomes(dateKey) {
         timeIn: { $nin: ['', null] },
         timeOut: { $nin: ['', null] },
     })
-        .select('employeeMongoId date statusKey timeIn timeOut timeOutDate leaveRequestStatus leaveRequestDayPart leaveRequestSession leaveDeductionTimes')
+        .select('employeeMongoId date statusKey timeIn timeOut timeOutDate leaveRequestStatus leaveRequestDayPart leaveRequestSession leaveDeductionTimes hourAdjustStatus')
         .lean();
     if (!rows.length) return 0;
     const employees = await EmployeeBasic.find({

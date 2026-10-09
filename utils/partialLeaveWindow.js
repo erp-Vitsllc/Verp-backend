@@ -147,6 +147,7 @@ const SKIP_PARTIAL_STATUS = new Set([
  */
 export function partialLeaveOutcome(row, week) {
     const key = String(row?.statusKey || '');
+    if (String(row?.hourAdjustStatus || '') === 'approved') return null;
     if (SKIP_PARTIAL_STATUS.has(key)) return null;
     const dateKey = String(row?.date || '');
     const required = requiredMinutes(week, dateKey);

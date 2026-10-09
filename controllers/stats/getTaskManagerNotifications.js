@@ -197,8 +197,8 @@ export function displayStatus(rawStatus, requestType, requestedKey, todayKey) {
     if (!PENDING_STATUSES.has(status)) return status || "Pending";
 
     const age = daysBetween(requestedKey, todayKey);
-    const urgentType = /expiry|overdue|reminder/i.test(String(requestType || ""));
-    if ((urgentType && age >= 0) || age > 3) return "Pending Due";
+    // A pending task stays pending. After 2 days it is also overdue.
+    if (age >= 2) return "Pending Due";
     if (status === "On Hold") return "On Hold";
     return "Pending";
 }
@@ -372,12 +372,13 @@ export const getTaskManagerNotifications = async (req, res) => {
 
             summary.total += 1;
             bump("total", requestMonth);
-            if (status === "Pending" || status === "On Hold") {
+            if (status === "Pending" || status === "On Hold" || status === "Pending Due") {
                 summary.pending += 1;
                 bump("pending", requestMonth);
-            } else if (status === "Pending Due") {
-                summary.pendingDue += 1;
-                bump("pendingDue", requestMonth);
+                if (status === "Pending Due") {
+                    summary.pendingDue += 1;
+                    bump("pendingDue", requestMonth);
+                }
             } else if (status === "Completed") {
                 summary.completed += 1;
                 bump("completed", completedMonth);
@@ -427,15 +428,14 @@ export const getTaskManagerNotifications = async (req, res) => {
             const requestedAt = row.createdAt || null;
             const requestedKey = dubaiDateKey(requestedAt);
             const dueKey = dubaiDateKey(row.completionDate);
+            const open = row.status !== "Completed" && row.status !== "Cancelled";
             const status = row.status === "Completed"
                 ? "Completed"
                 : row.status === "Cancelled"
                     ? "Cancelled"
-                    : row.status === "In Progress"
-                        ? "In Progress"
-                        : dueKey && dueKey <= todayKey
-                            ? "Pending Due"
-                            : "Pending";
+                    : open && daysBetween(requestedKey, todayKey) >= 2
+                        ? "Pending Due"
+                        : "Pending";
             const assignee = byId.get(String(row.assignee || "")) || null;
             const assigneeName = personName(assignee) || row.assigneeName || row.assigneeEmpId || "Unassigned";
             const requesterName = String(row.requestedByName || "").trim() || "System";
@@ -444,12 +444,13 @@ export const getTaskManagerNotifications = async (req, res) => {
 
             summary.total += 1;
             bump("total", requestMonth);
-            if (status === "Pending" || status === "In Progress") {
+            if (status === "Pending" || status === "Pending Due") {
                 summary.pending += 1;
                 bump("pending", requestMonth);
-            } else if (status === "Pending Due") {
-                summary.pendingDue += 1;
-                bump("pendingDue", requestMonth);
+                if (status === "Pending Due") {
+                    summary.pendingDue += 1;
+                    bump("pendingDue", requestMonth);
+                }
             } else if (status === "Completed") {
                 summary.completed += 1;
                 bump("completed", completedMonth);

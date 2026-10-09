@@ -2408,6 +2408,21 @@ export async function checkOutMyAttendance(req, res) {
         }
         existing.checkOutLocation = checkOutLocation;
 
+        if (String(existing.hourAdjustStatus || '') === 'approved') {
+            await existing.save();
+            try {
+                await syncPunchMapTargets(existing);
+            } catch (mapErr) {
+                console.error('[checkOutMyAttendance] punch map sync failed:', mapErr);
+            }
+            return res.status(200).json({
+                message: 'Checked out successfully',
+                date: existing.date,
+                timeOut,
+                record: existing,
+            });
+        }
+
         if (flexible) {
             existing.timeOut = timeOut;
             existing.timeOutDate = date !== existing.date ? date : '';
