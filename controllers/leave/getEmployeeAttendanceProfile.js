@@ -845,7 +845,7 @@ export async function getEmployeeAttendanceProfile(req, res) {
             await Promise.all([
             Attendance.find({ employeeMongoId, date: { $gte: from, $lte: to } })
                 .select(
-                    'date statusKey statusLabel reason timeIn timeOut attachmentName leavePayType leaveDayFraction leaveRequestDayPart leaveDeductionTimes leaveRequestReason leaveRequestStatus requestedStatusKey requestedStatusLabel previousStatusKey leaveRequestKind leaveRequestGroupId leaveRequestFromDate leaveRequestToDate leaveRequestedAt leaveRequestTimeOut',
+                    'date statusKey statusLabel reason timeIn timeOut attachmentName leavePayType leaveDayFraction leaveRequestDayPart leaveRequestSession leaveDeductionTimes leaveRequestReason leaveRequestStatus requestedStatusKey requestedStatusLabel previousStatusKey leaveRequestKind leaveRequestGroupId leaveRequestFromDate leaveRequestToDate leaveRequestedAt leaveRequestTimeOut hourAdjustStatus hourAdjustKind hoursTaken hoursMax hoursApproved',
                 )
                 .sort({ date: -1 })
                 .lean(),

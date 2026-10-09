@@ -29,6 +29,10 @@ import {
     requestFlexibleOvertime,
     decideFlexibleOvertime,
 } from '../controllers/flexibleOtController.js';
+import {
+    requestHourAdjust,
+    decideHourAdjust,
+} from '../controllers/hourAdjustController.js';
 
 const router = express.Router();
 
@@ -57,6 +61,8 @@ router.post(
 );
 router.post('/flexible-ot/request', requestFlexibleOvertime);
 router.post('/flexible-ot/decide', decideFlexibleOvertime);
+router.post('/hour-adjust/request', requestHourAdjust);
+router.post('/hour-adjust/decide', decideHourAdjust);
 router.post('/team/mark', markTeamAttendance);
 
 // Leave-request inbox is scoped to the viewer's reportees (no HR module permission required)

@@ -172,7 +172,7 @@ router.get("/request-loan", (req, res) => {
 });
 
 import { getDashboardStats } from "../controllers/stats/getDashboardStats.js";
-import { getTaskManagerNotifications } from "../controllers/stats/getTaskManagerNotifications.js";
+import { getTaskManagerAssigneeCount, getTaskManagerNotifications } from "../controllers/stats/getTaskManagerNotifications.js";
 import { createTaskManagerTask, getTaskManagerAssignees } from "../controllers/stats/createTaskManagerTask.js";
 import {
     addTaskManagerComment,
@@ -599,6 +599,7 @@ router.get("/dashboard/user-stats", getUserActivityStats);
 
 // Company-wide notification list for Task Manager. Read-only.
 router.get("/task-manager/notifications", getTaskManagerNotifications);
+router.get("/task-manager/assignee-count", getTaskManagerAssigneeCount);
 router.get("/task-manager/assignees", getTaskManagerAssignees);
 router.post("/task-manager/tasks", createTaskManagerTask);
 router.get("/task-manager/tasks/:taskKey", getTaskManagerTask);

@@ -299,7 +299,6 @@ import {
     syncZeroAssetValueNotification,
 } from '../utils/syncZeroAssetValueVehicleNotifications.js';
 import { closeCompletedAssignmentNotificationsForAssets } from '../utils/closeCompletedAssignmentNotifications.js';
-import { listPendingHubInboxItems } from '../utils/employeeHubRequestInbox.js';
 import {
     notifyAdminOfficerOnVehicleServiceCreated,
     healDuplicateAdminVehicleServiceInboxRows,
@@ -21237,13 +21236,6 @@ export const getPendingAssetDashboardInbox = async (req, res) => {
             }
         }
 
-        const hubItems = await listPendingHubInboxItems({
-            assigneeIds: relevantIds,
-            ...(scope === 'vehicle' || scope === 'tools'
-                ? { assetScope: scope }
-                : { kinds: ['assets', 'vehicle', 'utility'] }),
-        });
-        items = [...hubItems, ...items];
         res.json({ count: items.length, items });
     } catch (error) {
         res.status(500).json({ message: 'Failed to load pending asset requests' });

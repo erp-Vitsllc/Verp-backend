@@ -44,7 +44,6 @@ import {
     preferPunchedRows,
     punchTimeSet,
 } from '../utils/attendanceDayLookup.js';
-import { listPendingHubInboxItems } from '../utils/employeeHubRequestInbox.js';
 import { resolveFlowchartHrEmployee } from '../utils/resolveFlowchartHrEmployee.js';
 import { isUserActiveInFlowchart } from '../utils/getDepartmentHOD.js';
 import {
@@ -154,6 +153,7 @@ function leavePayTypeForStatus(statusKey) {
 function presentAuthorizedLeaveRecord(record) {
     if (!record || String(record.statusKey || '').trim() !== 'authorized_leave') return record;
     const raw = String(record.statusLabel || '');
+    if (/\(Approved\)/i.test(raw)) return record;
     const halfAt = raw.indexOf('·');
     return {
         ...record,
@@ -2749,10 +2749,6 @@ export async function getAttendancePendingInbox(req, res) {
             .select('_id')
             .lean();
         const reporteeIds = (reportees || []).map((r) => String(r._id));
-        const hubItems = await listPendingHubInboxItems({
-            assigneeIds: [self._id],
-            kinds: ['salary'],
-        });
         const hr = await getDepartmentHOD('hr').catch(() => null);
         const viewerIsHr = hr && String(hr._id) === String(self._id);
         const otRows = viewerIsHr
@@ -2766,6 +2762,37 @@ export async function getAttendancePendingInbox(req, res) {
             ? await EmployeeBasic.find({ _id: { $in: otEmployeeIds } }).select('staffType').lean()
             : [];
         const otStaffById = new Map((otEmployees || []).map((row) => [String(row._id), normalizeStaffType(row.staffType)]));
+        const hourRows = viewerIsHr
+            ? await Attendance.find({ hourAdjustStatus: 'pending' })
+                .sort({ updatedAt: -1 })
+                .limit(100)
+                .lean()
+            : [];
+        const hourEmployeeIds = [...new Set((hourRows || []).map((row) => String(row.employeeMongoId || '')).filter(Boolean))];
+        const hourEmployees = hourEmployeeIds.length
+            ? await EmployeeBasic.find({ _id: { $in: hourEmployeeIds } }).select('staffType').lean()
+            : [];
+        const hourStaffById = new Map((hourEmployees || []).map((row) => [String(row._id), normalizeStaffType(row.staffType)]));
+        const hourItems = (hourRows || []).map((r) => ({
+            id: String(r._id),
+            dashboardActionId: String(r._id),
+            requestType: 'Hour Approval Request',
+            requestObjectId: String(r._id),
+            date: r.date,
+            employeeMongoId: r.employeeMongoId,
+            employeeId: r.employeeId || '',
+            subjectName: r.employeeName || 'Employee',
+            staffType: hourStaffById.get(String(r.employeeMongoId)) || 'office',
+            leaveRequestKind: 'hour_adjust',
+            timeIn: r.timeIn || '',
+            timeOut: r.timeOut || '',
+            reason: r.hourAdjustReason || '',
+            status: 'Pending',
+            extra1: r.date,
+            extra2: `Hour request ${r.date}: ${r.hoursApproved || 0} hr`,
+            message: `Hour approval for ${r.employeeName || 'employee'} on ${r.date}`,
+        }));
+
         const otItems = (otRows || []).map((r) => ({
             id: String(r._id),
             dashboardActionId: String(r._id),
@@ -2797,8 +2824,8 @@ export async function getAttendancePendingInbox(req, res) {
         if (!reporteeIds.length) {
             return res.status(200).json({
                 message: 'Attendance pending inbox fetched successfully',
-                count: hubItems.length + otItems.length + attendanceTaskItems.length,
-                items: [...hubItems, ...otItems, ...attendanceTaskItems],
+                count: otItems.length + hourItems.length + attendanceTaskItems.length,
+                items: [...otItems, ...hourItems, ...attendanceTaskItems],
             });
         }
 
@@ -2879,8 +2906,8 @@ export async function getAttendancePendingInbox(req, res) {
 
         return res.status(200).json({
             message: 'Attendance pending inbox fetched successfully',
-            count: items.length + hubItems.length + otItems.length + attendanceTaskItems.length,
-            items: [...hubItems, ...otItems, ...items, ...attendanceTaskItems],
+            count: items.length + otItems.length + hourItems.length + attendanceTaskItems.length,
+            items: [...otItems, ...hourItems, ...items, ...attendanceTaskItems],
         });
     } catch (error) {
         console.error('[getAttendancePendingInbox]', error);

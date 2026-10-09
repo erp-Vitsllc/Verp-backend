@@ -8,6 +8,7 @@ import { findEmailsForTask } from "../../utils/emailDispatch.js";
 import {
     displayStatus,
     taskCategory as categoryFromRequestType,
+    taskTitleAndDescription,
     viewerMaySeeAllNotifications,
 } from "./getTaskManagerNotifications.js";
 import {
@@ -332,8 +333,13 @@ async function buildDetail(target, viewer) {
             manual ? "" : action?.requestId,
             manual ? "" : action?.subjectEmployeeId,
         ),
-        taskName: (task?.taskName || action?.extra1 || "Task").trim(),
-        description: task?.description || (manual ? "" : action?.extra2 || ""),
+        ...taskTitleAndDescription({
+            requestType: manual ? task?.taskType : action?.requestType,
+            extra1: manual ? task?.description : action?.extra1,
+            extra2: manual ? "" : action?.extra2,
+            taskName: task?.taskName || action?.extra1,
+            description: task?.description || (manual ? "" : action?.extra2),
+        }),
         taskCategory: manual
             ? (displayTaskType(task?.taskType) || "General Task")
             : categoryFromRequestType(action?.requestType, action?.extra2 || ""),

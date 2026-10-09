@@ -62,6 +62,40 @@ const GENERAL_REQUEST_TYPES = new Set([
     "employee asset request",
 ]);
 
+const GENERAL_TITLES = {
+    "employee salary request": "Early Salary",
+    "employee certificate request": "Salary Certificate",
+    "employee asset request": "Assets",
+};
+
+/** Short title in the header. The written request stays in the description. */
+export function taskTitleAndDescription({ requestType, extra1, extra2, taskName, description } = {}) {
+    const typeKey = String(requestType || "").trim().toLowerCase();
+    const label = String(extra2 || "").trim();
+    const body = String(extra1 || "").trim();
+    const storedName = String(taskName || "").trim();
+    const storedDescription = String(description || "").trim();
+    const general = GENERAL_REQUEST_TYPES.has(typeKey);
+
+    if (!general) {
+        return {
+            taskName: storedName || body || requestType || "Notification",
+            description: storedDescription || label || body,
+        };
+    }
+
+    const shortTitle = label || GENERAL_TITLES[typeKey] || requestType || "Task";
+    const nameIsTheDescription = Boolean(storedName && body && storedName === body);
+    const title = !storedName || nameIsTheDescription ? shortTitle : storedName;
+    const longText = storedDescription && storedDescription !== title
+        ? storedDescription
+        : body;
+    return {
+        taskName: title,
+        description: longText && longText !== title ? longText : "",
+    };
+}
+
 function isGeneralHubRequest(requestType, extra = "") {
     const type = String(requestType || "").trim().toLowerCase();
     if (GENERAL_REQUEST_TYPES.has(type)) return true;
@@ -97,32 +131,62 @@ function canDeleteTask(viewer, { manual, requestedByName, requestedByUserId }) {
     return Boolean(owner && name && owner === name);
 }
 
-function taskBelongsToViewer(task, viewer) {
+function assigneeIsViewer(viewer, assigneeId, assigneeEmpId, assigneeName = "") {
     const ids = [viewer?.employeeObjectId, viewer?.userId].map((value) => String(value || "")).filter(Boolean);
-    if (task?.assigneeId && ids.includes(String(task.assigneeId))) return true;
+    if (assigneeId && ids.includes(String(assigneeId))) return true;
     if (
-        task?.assigneeEmpId
+        assigneeEmpId
         && viewer?.employeeId
-        && String(task.assigneeEmpId).trim().toLowerCase() === String(viewer.employeeId).trim().toLowerCase()
+        && String(assigneeEmpId).trim().toLowerCase() === String(viewer.employeeId).trim().toLowerCase()
     ) {
         return true;
     }
     const name = String(viewer?.name || "").trim().toLowerCase();
-    if (!name) return false;
-    return [task?.assigneeName, task?.requesterName]
-        .map((value) => String(value || "").trim().toLowerCase())
-        .includes(name);
+    const assignee = String(assigneeName || "").trim().toLowerCase();
+    return Boolean(name && assignee && name === assignee);
 }
 
-function summarizeTasks(list) {
-    const summary = { total: list.length, pending: 0, pendingDue: 0, completed: 0, totalChange: 0, pendingChange: 0, pendingDueChange: 0, completedChange: 0 };
-    for (const task of list) {
-        const status = task.displayStatus;
-        if (status === "Pending" || status === "On Hold" || status === "In Progress") summary.pending += 1;
-        else if (status === "Pending Due") summary.pendingDue += 1;
-        else if (status === "Completed") summary.completed += 1;
+function actionDuplicateKey(action) {
+    const type = String(action.requestType || "");
+    const requestId = String(action.requestId || "").trim();
+    const extra = String(action.extra1 || "").trim().toLowerCase().replace(/\s+/g, " ");
+    const subject = String(action.subjectName || action.requestedByName || "").trim().toLowerCase();
+    const assignee = String(action.assignedTo || action.assignedToEmpId || "");
+    if (taskCategory(type) === "System Task") {
+        if (!requestId && !extra) return "";
+        return `system|${type}|${requestId}|${extra}`;
     }
-    return summary;
+    const detail = extra && extra !== type.toLowerCase() ? extra : "";
+    if (detail) return `request|${type}|${subject}|${detail}`;
+    if (subject || assignee) return `request|${type}|${subject}|${assignee}`;
+    if (requestId) return `request|${type}|${requestId}`;
+    return "";
+}
+
+function dedupeOpenActions(actions) {
+    const uniqueActions = [];
+    const seenRequest = new Map();
+    for (const action of actions) {
+        if (action.requestType === "Task Manager") continue;
+        const key = actionDuplicateKey(action);
+        if (!key) {
+            uniqueActions.push(action);
+            continue;
+        }
+        const previous = seenRequest.get(key);
+        if (!previous) {
+            seenRequest.set(key, action);
+            continue;
+        }
+        const openness = (status) => (status === "Pending" || status === "On Hold" ? 0 : 1);
+        const previousTime = new Date(previous.requestedDate || previous.createdAt || 0).getTime();
+        const nextTime = new Date(action.requestedDate || action.createdAt || 0).getTime();
+        const nextIsBetter = openness(action.status) < openness(previous.status)
+            || (openness(action.status) === openness(previous.status) && nextTime >= previousTime);
+        if (nextIsBetter) seenRequest.set(key, action);
+    }
+    uniqueActions.push(...seenRequest.values());
+    return uniqueActions;
 }
 
 export function displayStatus(rawStatus, requestType, requestedKey, todayKey) {
@@ -277,45 +341,7 @@ export const getTaskManagerNotifications = async (req, res) => {
         };
 
         const summary = { total: 0, pending: 0, pendingDue: 0, completed: 0 };
-        const uniqueActions = [];
-        const seenRequest = new Map();
-        const actionDuplicateKey = (action) => {
-            const type = String(action.requestType || "");
-            const requestId = String(action.requestId || "").trim();
-            const extra = String(action.extra1 || "").trim().toLowerCase().replace(/\s+/g, " ");
-            const subject = String(action.subjectName || action.requestedByName || "").trim().toLowerCase();
-            const assignee = String(action.assignedTo || action.assignedToEmpId || "");
-            if (taskCategory(type) === "System Task") {
-                if (!requestId && !extra) return "";
-                return `system|${type}|${requestId}|${extra}`;
-            }
-            const detail = extra && extra !== type.toLowerCase() ? extra : "";
-            // Same workflow item, even when several notification rows were saved for it.
-            if (detail) return `request|${type}|${subject}|${detail}`;
-            if (subject || assignee) return `request|${type}|${subject}|${assignee}`;
-            if (requestId) return `request|${type}|${requestId}`;
-            return "";
-        };
-        for (const action of actions) {
-            if (action.requestType === "Task Manager") continue;
-            const key = actionDuplicateKey(action);
-            if (!key) {
-                uniqueActions.push(action);
-                continue;
-            }
-            const previous = seenRequest.get(key);
-            if (!previous) {
-                seenRequest.set(key, action);
-                continue;
-            }
-            const openness = (status) => (status === "Pending" || status === "On Hold" ? 0 : 1);
-            const previousTime = new Date(previous.requestedDate || previous.createdAt || 0).getTime();
-            const nextTime = new Date(action.requestedDate || action.createdAt || 0).getTime();
-            const nextIsBetter = openness(action.status) < openness(previous.status)
-                || (openness(action.status) === openness(previous.status) && nextTime >= previousTime);
-            if (nextIsBetter) seenRequest.set(key, action);
-        }
-        uniqueActions.push(...seenRequest.values());
+        const uniqueActions = dedupeOpenActions(actions);
 
         const tasks = uniqueActions.map((action) => {
             const requestedAt = action.requestedDate || action.createdAt || null;
@@ -334,6 +360,13 @@ export const getTaskManagerNotifications = async (req, res) => {
             const destination = moduleForRequestType(action.requestType, `${action.extra1 || ""} ${action.extra2 || ""}`);
             const category = taskCategory(action.requestType, action.extra2 || "");
             const priority = category === "System Task" ? "High" : (overlay?.priority || priorityFor(status, action.requestType));
+            const copy = taskTitleAndDescription({
+                requestType: action.requestType,
+                extra1: action.extra1,
+                extra2: action.extra2,
+                taskName: overlay?.taskName,
+                description: overlay?.description,
+            });
             const requestMonth = monthKeyFromDateKey(requestedKey);
             const completedMonth = monthKeyFromDateKey(dubaiDateKey(action.actionedDate || requestedAt));
 
@@ -362,8 +395,8 @@ export const getTaskManagerNotifications = async (req, res) => {
                 taskCategory: category,
                 accessPath: accessPathFor(destination, action.requestId, action.subjectEmployeeId),
                 requestType: action.requestType || "Notification",
-                taskName: overlay?.taskName || String(action.extra1 || "").trim() || action.requestType || "Notification",
-                description: overlay?.description || String(action.extra2 || action.extra1 || "").trim(),
+                taskName: copy.taskName,
+                description: copy.description,
                 requesterName,
                 requesterPhoto: photoForName(requesterName),
                 assigneeId,
@@ -505,24 +538,104 @@ export const getTaskManagerNotifications = async (req, res) => {
             return bTime - aTime;
         });
 
-        const visibleTasks = viewer.superUser
-            ? tasks
-            : tasks.filter((task) => taskBelongsToViewer(task, viewer));
-        const visibleSummary = viewer.superUser ? null : summarizeTasks(visibleTasks);
-
         return res.status(200).json({
-            canSeeAllTasks: Boolean(viewer.superUser),
-            summary: visibleSummary || {
+            canSeeAllTasks: true,
+            summary: {
                 ...summary,
                 totalChange: percentChange(monthCounts.total.current, monthCounts.total.previous),
                 pendingChange: percentChange(monthCounts.pending.current, monthCounts.pending.previous),
                 pendingDueChange: percentChange(monthCounts.pendingDue.current, monthCounts.pendingDue.previous),
                 completedChange: percentChange(monthCounts.completed.current, monthCounts.completed.previous),
             },
-            tasks: visibleTasks,
+            tasks,
         });
     } catch (error) {
         console.error("Task Manager notifications error:", error);
         return res.status(500).json({ message: "Failed to load task manager notifications" });
+    }
+};
+
+const OPEN_MANUAL_STATUSES = new Set(["Pending", "In Progress"]);
+
+/** Open tasks assigned to the logged-in user. This is the Task Manager sidebar badge. */
+export async function countOpenTasksForAssignee(viewer) {
+    const ids = [viewer?.employeeObjectId, viewer?.userId].map((value) => String(value || "")).filter(isObjectId);
+    const code = String(viewer?.employeeId || "").trim();
+    const assigneeOr = [];
+    if (ids.length) assigneeOr.push({ assignedTo: { $in: ids } });
+    if (code) assigneeOr.push({ assignedToEmpId: code });
+
+    const actions = assigneeOr.length
+        ? await DashboardAction.find({
+            status: { $in: ["Pending", "On Hold"] },
+            requestType: { $ne: "Task Manager" },
+            $or: assigneeOr,
+        })
+            .select("requestId requestType status subjectName requestedByName assignedTo assignedToEmpId extra1 requestedDate createdAt")
+            .lean()
+            .maxTimeMS(8000)
+        : [];
+
+    const unique = dedupeOpenActions(actions);
+    const actionIds = unique.map((row) => row._id).filter(Boolean);
+    const overlayOr = [];
+    if (actionIds.length) overlayOr.push({ sourceDashboardActionId: { $in: actionIds } });
+    if (ids.length) overlayOr.push({ assignee: { $in: ids } });
+    if (code) overlayOr.push({ assigneeEmpId: code });
+
+    const overlays = overlayOr.length
+        ? await TaskManagerTask.find({ $or: overlayOr })
+            .select("assignee assigneeEmpId assigneeName sourceDashboardActionId status")
+            .lean()
+            .maxTimeMS(8000)
+        : [];
+
+    const overlayByAction = new Map();
+    let manualOpen = 0;
+    const countedManual = new Set();
+    for (const row of overlays) {
+        if (row.sourceDashboardActionId) {
+            overlayByAction.set(String(row.sourceDashboardActionId), row);
+            continue;
+        }
+        const key = String(row._id);
+        if (countedManual.has(key)) continue;
+        if (!OPEN_MANUAL_STATUSES.has(row.status || "Pending")) continue;
+        if (!assigneeIsViewer(viewer, row.assignee, row.assigneeEmpId, row.assigneeName)) continue;
+        countedManual.add(key);
+        manualOpen += 1;
+    }
+
+    const countedActions = new Set(actionIds.map((id) => String(id)));
+    let actionOpen = 0;
+    for (const action of unique) {
+        const overlay = overlayByAction.get(String(action._id));
+        if (overlay) {
+            if (!OPEN_MANUAL_STATUSES.has(overlay.status || "Pending")) continue;
+            if (!assigneeIsViewer(viewer, overlay.assignee, overlay.assigneeEmpId, overlay.assigneeName)) continue;
+        }
+        actionOpen += 1;
+    }
+
+    for (const row of overlays) {
+        if (!row.sourceDashboardActionId) continue;
+        const sourceId = String(row.sourceDashboardActionId);
+        if (countedActions.has(sourceId)) continue;
+        if (!OPEN_MANUAL_STATUSES.has(row.status || "Pending")) continue;
+        if (!assigneeIsViewer(viewer, row.assignee, row.assigneeEmpId, row.assigneeName)) continue;
+        actionOpen += 1;
+    }
+
+    return actionOpen + manualOpen;
+}
+
+export const getTaskManagerAssigneeCount = async (req, res) => {
+    try {
+        const viewer = await resolveTaskViewer(req);
+        const count = await countOpenTasksForAssignee(viewer);
+        return res.status(200).json({ count });
+    } catch (error) {
+        console.error("Task manager assignee count error:", error);
+        return res.status(500).json({ message: "Failed to count tasks", count: 0 });
     }
 };

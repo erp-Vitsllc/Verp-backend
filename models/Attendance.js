@@ -255,6 +255,18 @@ const attendanceSchema = new mongoose.Schema(
         flexibleOtReason: { type: String, default: '', trim: true },
         flexibleOtNextDayDate: { type: String, default: '', trim: true },
         flexibleFromOtDate: { type: String, default: '', trim: true },
+        /** Hour approval: unauth early go / late / mispunch / leave → approved hours only. */
+        hourAdjustStatus: {
+            type: String,
+            enum: ['', 'pending', 'approved', 'rejected'],
+            default: '',
+            trim: true,
+        },
+        hourAdjustKind: { type: String, default: '', trim: true },
+        hoursTaken: { type: Number, default: 0 },
+        hoursMax: { type: Number, default: 0 },
+        hoursApproved: { type: Number, default: 0 },
+        hourAdjustReason: { type: String, default: '', trim: true },
         markedBy: {
             type: mongoose.Schema.Types.ObjectId,
             ref: 'User',
