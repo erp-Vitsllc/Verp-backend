@@ -74,13 +74,14 @@ export const getUserById = async (req, res) => {
                 date: getDubaiDateKey(),
                 employeeMongoId: String(employee._id),
             })
-                .select("date timeIn timeOut punchSource checkOutSource checkInLocation checkOutLocation statusKey statusLabel")
+                .select("date timeIn timeOut timeOutDate punchSource checkOutSource checkInLocation checkOutLocation statusKey statusLabel")
                 .lean();
             if (rec) {
                 todayAttendance = {
                     date: rec.date,
                     timeIn: rec.timeIn || "",
                     timeOut: rec.timeOut || "",
+                    timeOutDate: rec.timeOutDate || "",
                     punchSource: rec.punchSource || "",
                     checkOutSource: rec.checkOutSource || "",
                     checkInLocation: rec.checkInLocation || null,

@@ -3,6 +3,8 @@ import { describe, it } from 'node:test';
 import {
     approvedOtRemainder,
     flexibleLossHours,
+    flexibleNextDayChoices,
+    isAuthorizedLeaveStatus,
     splitApprovedOvertime,
     flexibleOtFieldsFromDuration,
     manualTimeOutDate,
@@ -166,5 +168,20 @@ describe('flexibleLossHours', () => {
 
     it('is zero when the worked hours cover the day', () => {
         assert.equal(flexibleLossHours({ date: '2026-10-05', flexibleWorkedHours: 10.2 }, week), 0);
+    });
+});
+
+describe('flexibleNextDayChoices', () => {
+    it('offers the next day, this day, and yesterday', () => {
+        assert.deepEqual(flexibleNextDayChoices('2026-10-10'), ['2026-10-11', '2026-10-10', '2026-10-09']);
+    });
+});
+
+describe('isAuthorizedLeaveStatus', () => {
+    it('accepts authorized leave and the Auth label', () => {
+        assert.equal(isAuthorizedLeaveStatus('authorized_leave', 'Authorized Leave'), true);
+        assert.equal(isAuthorizedLeaveStatus('on_office', 'Auth'), true);
+        assert.equal(isAuthorizedLeaveStatus('on_office', 'Auth Leave'), true);
+        assert.equal(isAuthorizedLeaveStatus('on_office', 'Present'), false);
     });
 });

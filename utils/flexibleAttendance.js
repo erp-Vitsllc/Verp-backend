@@ -13,6 +13,21 @@ export function addDaysKey(dateKey, days) {
     return date.toISOString().slice(0, 10);
 }
 
+/** Next day, this day, then yesterday. Next-day present can only land on one of these. */
+export function flexibleNextDayChoices(dateKey) {
+    const date = String(dateKey || '').trim();
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return [];
+    return [addDaysKey(date, 1), date, addDaysKey(date, -1)];
+}
+
+export function isAuthorizedLeaveStatus(statusKey, statusLabel = '') {
+    const key = String(statusKey || '').trim();
+    const label = String(statusLabel || '').trim();
+    if (key === 'authorized_leave') return true;
+    if (/^auth$/i.test(label)) return true;
+    return /auth(?:orized)? leave/i.test(label);
+}
+
 export function requiredHoursForDate(week, dateKey) {
     const dayKey = weekdayKeyFromDateKey(dateKey);
     const day = dayKey ? week?.[dayKey] : null;

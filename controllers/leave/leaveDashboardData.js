@@ -43,6 +43,10 @@ import {
 import { isRequestUserDesignatedFlowchartHr } from '../../utils/isDesignatedFlowchartHr.js';
 import { dateEmployeeReachesWorkingDays, loadCurrentLeaveCycleEligibility } from '../../utils/loadLeaveTicketEntitlement.js';
 import { loadGroupAnnualLeaveCap } from '../../utils/groupAnnualLeaveCap.js';
+import {
+    reopenApprovedLeaveRecords,
+    settleFulfilledLeaveRows,
+} from '../../utils/leaveRequestSettlement.js';
 
 const LEAVE_TRACK_KEYS = [
     'authorized_leave',
@@ -616,7 +620,8 @@ export async function getLeavePendingRequests(req, res) {
                 .maxTimeMS(12000),
         ]);
 
-        const visibleRows = [...(pendingRows || []), ...(decidedRows || [])].filter((row) => {
+        const openRows = await settleFulfilledLeaveRows(pendingRows || []);
+        const visibleRows = [...openRows, ...(decidedRows || [])].filter((row) => {
             if (isCompanyShellEmployee(row.employeeName) || isCompanyShellEmployee(row)) {
                 return false;
             }
@@ -788,7 +793,8 @@ export async function getLeavePendingInbox(req, res) {
                 .limit(800)
                 .lean();
 
-            const leaveRows = (rows || []).filter((row) => {
+            const openRows = await settleFulfilledLeaveRows(rows || []);
+            const leaveRows = openRows.filter((row) => {
                 if (isCompanyShellEmployee(row.employeeName) || isCompanyShellEmployee(row)) {
                     return false;
                 }
@@ -1558,6 +1564,83 @@ export async function applyLeaveRange(req, res) {
         console.error('[applyLeaveRange]', error);
         return res.status(500).json({
             message: error.message || 'Failed to apply leave.',
+        });
+    }
+}
+
+/**
+ * POST /api/Leave/pending-requests/return
+ * Put an approved leave back to a pending request and restore those attendance days.
+ */
+export async function returnLeaveRequest(req, res) {
+    try {
+        if (mongoose.connection.readyState !== 1) {
+            return res.status(503).json({ message: 'Database not connected.' });
+        }
+
+        const hrFlags = await resolveLeaveHrFlags(req);
+        if (!hrFlags.canEdit) {
+            return res.status(403).json({ message: 'Only HR can return a leave to a request.' });
+        }
+
+        const attendanceId = String(req.body?.attendanceId || req.body?.approvalId || '').trim();
+        if (!attendanceId || !mongoose.Types.ObjectId.isValid(attendanceId)) {
+            return res.status(400).json({ message: 'attendanceId is required.' });
+        }
+
+        const group = await loadEditableLeaveGroup(attendanceId);
+        const approved = (group?.records || []).filter(
+            (row) => String(row.leaveRequestStatus || '') === 'approved',
+        );
+        if (!approved.length) {
+            return res.status(404).json({ message: 'No approved leave found to return.' });
+        }
+
+        const reopened = await reopenApprovedLeaveRecords(approved);
+        const seed = reopened[0];
+        const from = seed.leaveRequestFromDate || seed.date;
+        const to = seed.leaveRequestToDate || reopened[reopened.length - 1]?.date || seed.date;
+        const employee = await EmployeeBasic.findById(seed.employeeMongoId)
+            .select('_id employeeId firstName lastName companyEmail workEmail email primaryReportee staffType')
+            .populate('primaryReportee', 'firstName lastName employeeId companyEmail workEmail email')
+            .lean();
+
+        if (employee) {
+            const notifyArgs = {
+                employee,
+                from,
+                to,
+                attendanceId: String(seed._id),
+                groupId: seed.leaveRequestGroupId || group?.groupId || '',
+                requestedLabel: seed.requestedStatusLabel || seed.statusLabel || 'Leave',
+                requestedStatusKey: seed.requestedStatusKey || '',
+                leaveRequestKind: seed.leaveRequestKind || 'leave',
+                reason: seed.leaveRequestReason || '',
+            };
+            try {
+                if (seed.annualLeaveNotEligible) {
+                    await notifyFlowchartHrOfIneligibleAnnualLeave(notifyArgs);
+                } else {
+                    await notifyPrimaryReporteeOfLeaveRequest({
+                        ...notifyArgs,
+                        manager: employee.primaryReportee,
+                    });
+                }
+            } catch (notifyError) {
+                console.warn('[returnLeaveRequest] leave notify failed:', notifyError?.message || notifyError);
+            }
+        }
+
+        return res.status(200).json({
+            message: 'Leave returned to a request. Those attendance days are back, and the request is pending again.',
+            attendanceId: String(seed._id),
+            leaveRequestStatus: 'pending',
+            count: reopened.length,
+        });
+    } catch (error) {
+        console.error('[returnLeaveRequest]', error);
+        return res.status(500).json({
+            message: error.message || 'Failed to return this leave to a request.',
         });
     }
 }

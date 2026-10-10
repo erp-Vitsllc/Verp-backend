@@ -19,6 +19,7 @@ import {
     weekdayKeyFromDateKey,
 } from '../utils/workingTimeHelpers.js';
 import { addDaysKey, evaluateFlexibleDay, flexibleOtFieldsFromDuration, requiredHoursForDate, workedMinutesAcross } from '../utils/flexibleAttendance.js';
+import { settleFulfilledLeaveRequest } from '../utils/leaveRequestSettlement.js';
 import { flexibleOtManualUpdate, refreshFlexibleOtRecords } from '../utils/syncFlexibleOt.js';
 import {
     nonWorkingAttendanceMark,
@@ -1337,6 +1338,11 @@ async function queueOrApplyManualMark(ctx, {
             employeeId,
             employeeName,
         });
+        try {
+            await settleFulfilledLeaveRequest(doc);
+        } catch (settleErr) {
+            console.error('[queueOrApplyManualMark] leave request settle failed:', settleErr);
+        }
         await supersedeOpenAttendanceChanges({
             date,
             employeeMongoId: id,
@@ -3366,6 +3372,11 @@ export async function decideAttendanceChangeRequest(req, res) {
                     employeeId: request.employeeId,
                     employeeName: request.employeeName,
                 });
+        try {
+            await settleFulfilledLeaveRequest(record);
+        } catch (settleErr) {
+            console.error('[decideAttendanceChangeRequest] leave request settle failed:', settleErr);
+        }
         request.stage = 'approved';
         request.decidedByHr = actor._id;
         request.decidedAtHr = new Date();

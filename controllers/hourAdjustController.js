@@ -17,7 +17,7 @@ const APPROVED_LABEL = {
     early_go: 'Early Go (Approved)',
     late_arrived: 'Late Arrival (Approved)',
     mispunch: 'Mispunch (Approved)',
-    authorized_leave: 'Auth Leave (Approved)',
+    authorized_leave: 'Auth',
 };
 
 const STATUS_KEY = {
@@ -127,8 +127,8 @@ export async function requestHourAdjust(req, res) {
         if (!mongoose.Types.ObjectId.isValid(attendanceId)) {
             return res.status(400).json({ message: 'Attendance record is required.' });
         }
-        if (!Number.isFinite(requestedHours) || requestedHours <= 0) {
-            return res.status(400).json({ message: 'Approved hours are required.' });
+        if (!Number.isFinite(requestedHours) || requestedHours < 0) {
+            return res.status(400).json({ message: 'Approved hours cannot be negative.' });
         }
 
         const record = await Attendance.findById(attendanceId);
@@ -147,7 +147,6 @@ export async function requestHourAdjust(req, res) {
         }
         const approvedHours = flexible ? Math.round(requestedHours) : roundHours(requestedHours);
         const max = flexible ? taken : roundHours(taken * UNAUTH_TIMES);
-        if (max <= 0) return res.status(400).json({ message: 'No hours to approve on this day.' });
         if (approvedHours > max + 0.001) {
             return res.status(400).json({ message: `Approved hours cannot be more than ${max}.` });
         }

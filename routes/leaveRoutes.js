@@ -7,6 +7,7 @@ import {
     applyLeaveRange,
     decideLeavePendingRequest,
     removeLeaveRequest,
+    returnLeaveRequest,
     getLeavePendingInbox,
     getLeavePendingRequests,
     getLeaveTeamTrack,
@@ -59,6 +60,11 @@ router.post(
     '/pending-requests/remove',
     checkPermission('hrm_leave', 'view'),
     removeLeaveRequest,
+);
+router.post(
+    '/pending-requests/return',
+    checkPermission('hrm_leave', 'view'),
+    returnLeaveRequest,
 );
 router.post(
     '/apply',
