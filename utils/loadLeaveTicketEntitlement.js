@@ -369,7 +369,7 @@ async function loadLiveAttendanceEligibility({ employee, from, to, staffType }) 
         date: { $gte: periodStart, $lte: periodEnd },
         $or: clauses,
     })
-        .select('date statusKey leaveRequestStatus requestedStatusKey reason timeIn timeOut flexibleOtStatus flexibleOtApprovedHours')
+        .select('date statusKey leaveRequestStatus requestedStatusKey reason timeIn timeOut flexibleOtStatus flexibleOtApprovedHours flexibleOtNextDayDate')
         .lean();
     const live = summarizeAttendanceEligibility(rows, { throughDate: periodEnd });
     const week = getWeekForStaffType(workingTime, staffType);

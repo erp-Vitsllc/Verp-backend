@@ -181,6 +181,7 @@ import {
     decideTaskManagerWorkflow,
     getTaskManagerTask,
     getTaskManagerWorkflow,
+    closeTaskManagerRequest,
     reassignTaskManagerTask,
     updateTaskManagerNotifications,
     updateTaskManagerReminders,
@@ -609,6 +610,7 @@ router.patch("/task-manager/tasks/:taskKey", updateTaskManagerTask);
 router.delete("/task-manager/tasks/:taskKey", deleteTaskManagerTask);
 router.post("/task-manager/tasks/:taskKey/reassign", reassignTaskManagerTask);
 router.post("/task-manager/tasks/:taskKey/status", updateTaskManagerTaskStatus);
+router.post("/task-manager/tasks/:taskKey/close", closeTaskManagerRequest);
 router.post("/task-manager/tasks/:taskKey/comments", addTaskManagerComment);
 router.post("/task-manager/tasks/:taskKey/updates", addTaskManagerUpdate);
 router.patch("/task-manager/tasks/:taskKey/notifications", updateTaskManagerNotifications);

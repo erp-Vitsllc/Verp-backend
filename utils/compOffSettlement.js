@@ -87,7 +87,7 @@ export function compOffActions(row) {
     if (jumped) {
         return { canAdjust: true, canJump: false, canAuthorize: true };
     }
-    return { canAdjust: true, canJump: true, canAuthorize: false };
+    return { canAdjust: true, canJump: false, canAuthorize: false };
 }
 
 /** Weekday extra hours, or flexible overtime after the full present day is removed. Off-day overtime is a present day and is not included. */
@@ -203,7 +203,7 @@ export async function adjustableOvertimeForMonth(employee, monthKey) {
         employeeMongoId: String(employee._id),
         date: { $gte: from, $lte: to },
     })
-        .select('date timeIn timeOut flexibleOtStatus flexibleOtApprovedHours')
+        .select('date timeIn timeOut flexibleOtStatus flexibleOtApprovedHours flexibleOtNextDayDate')
         .lean();
     const gross = adjustableOvertimeHoursFromRows(punches, week);
     const compOffs = await Attendance.find({
@@ -310,8 +310,11 @@ async function selectedCompOff(employeeMongoId, date) {
 
 export async function settleCompOffDay({ employeeMongoId, date, action }) {
     const choice = String(action || '').trim();
-    if (!['adjust', 'jump', 'authorize'].includes(choice)) {
-        return { error: 'Choose adjust, jump, or authorize.', status: 400 };
+    if (choice === 'jump') {
+        return { error: 'Jump to next month is not available.', status: 400 };
+    }
+    if (!['adjust', 'authorize'].includes(choice)) {
+        return { error: 'Choose adjust or authorize.', status: 400 };
     }
     const row = await selectedCompOff(employeeMongoId, date);
     if (!row) return { error: 'This day is not a comp-off leave.', status: 404 };
@@ -352,30 +355,6 @@ export async function settleCompOffDay({ employeeMongoId, date, action }) {
         row.markModified('compOff');
         await row.save();
         return { message: `Comp-off adjusted. Overtime ${before.toFixed(2)} h − ${COMP_OFF_DAY_HOURS} h = ${after.toFixed(2)} h.` };
-    }
-
-    if (choice === 'jump') {
-        if (!actions.canJump) {
-            return { error: 'This comp-off can jump only once.', status: 400 };
-        }
-        const destination = nextMonthKey(chargeMonth);
-        const destinationLocked = await compOffMonthLocked(employee.employeeId, destination);
-        if (destinationLocked) {
-            return { error: `${monthName(destination)} is already closed. ${destinationLocked}`, status: 409 };
-        }
-        row.compOff = {
-            ...(row.compOff?.toObject ? row.compOff.toObject() : row.compOff || {}),
-            state: 'jumped',
-            chargeMonth: destination,
-            jumpCount: 1,
-            otHoursBefore: 0,
-            otHoursDeducted: 0,
-            otHoursAfter: 0,
-            adjustedAt: null,
-        };
-        row.markModified('compOff');
-        await row.save();
-        return { message: `Comp-off moved to ${monthName(destination)}.` };
     }
 
     if (!actions.canAuthorize) {

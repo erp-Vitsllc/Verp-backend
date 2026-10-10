@@ -3,8 +3,13 @@ import mongoose from 'mongoose';
 import Attendance from '../models/Attendance.js';
 import EmployeeBasic from '../models/EmployeeBasic.js';
 import { getDepartmentHOD } from '../utils/getDepartmentHOD.js';
-import { normalizeStaffType } from '../utils/workingTimeHelpers.js';
-import { addDaysKey, approvedOtRemainder } from '../utils/flexibleAttendance.js';
+import { addDaysKey, requiredHoursForDate, splitApprovedOvertime } from '../utils/flexibleAttendance.js';
+import {
+    flexibleHoursPerDay,
+    getWeekForStaffType,
+    loadWorkingTimeDoc,
+    normalizeStaffType,
+} from '../utils/workingTimeHelpers.js';
 import { refreshFlexibleOtRecords } from '../utils/syncFlexibleOt.js';
 import { resolveFrontendBaseUrl } from '../utils/resolveFrontendBaseUrl.js';
 
@@ -31,64 +36,129 @@ async function actorIsFlowchartHr(actor) {
     return Boolean(hr?._id && actor?._id && String(hr._id) === String(actor._id));
 }
 
+async function workingDayHours(record) {
+    const stored = Number(record?.flexibleRequiredHours) || 0;
+    if (stored > 0) return stored;
+    const employee = await EmployeeBasic.findById(record.employeeMongoId).select('staffType').lean();
+    const workingTime = await loadWorkingTimeDoc();
+    const week = getWeekForStaffType(workingTime, normalizeStaffType(employee?.staffType));
+    const required = requiredHoursForDate(week, record.date);
+    if (required > 0) return required;
+    const standard = Number(flexibleHoursPerDay(week)) || 0;
+    return standard > 0 ? standard : 0;
+}
+
+async function revertSyntheticOtDay(employeeMongoId, nextDayDate, sourceDate) {
+    if (!employeeMongoId || !nextDayDate || !sourceDate) return;
+    await Attendance.deleteOne({
+        date: nextDayDate,
+        employeeMongoId,
+        timeIn: 'OT',
+        timeOut: 'OT',
+        flexibleFromOtDate: sourceDate,
+    });
+}
+
 async function approveFlexibleOvertimeRecord(record, { approvedHours, reason, confirmNextDay }) {
     const approved = roundHours(approvedHours);
-    const nextDay = approved > 10;
-    if (nextDay && !confirmNextDay) {
+    const dayHours = await workingDayHours(record);
+    const split = splitApprovedOvertime(approved, dayHours);
+    if (split.nextDay && !confirmNextDay) {
+        const remain = split.remainderHours;
         return {
             status: 409,
             body: {
-                message: 'More than 10 overtime hours marks the next day Present (On time). None of these hours stay as overtime.',
+                message:
+                    remain > 0
+                        ? `Approved hours cover a working day (${split.dayHours} hr). The next day is Present (On time) for that day, and ${remain} hr stays as overtime on the next day.`
+                        : `Approved hours match a working day (${split.dayHours} hr). The next day is Present (On time). None of these hours stay as overtime.`,
                 needsNextDayConfirm: true,
+                dayHours: split.dayHours,
+                remainderHours: remain,
             },
         };
     }
 
+    const previousNext = String(record.flexibleOtNextDayDate || '').trim();
     record.flexibleOtStatus = 'approved';
     record.flexibleOtApprovedHours = approved;
     if (reason != null) record.flexibleOtReason = reason;
-    if (nextDay) {
-        const nextDate = addDaysKey(record.date, 1);
-        const existingNext = await Attendance.findOne({
-            date: nextDate,
-            employeeMongoId: record.employeeMongoId,
-        }).select('timeIn').lean();
-        const nextPunch = String(existingNext?.timeIn || '').trim();
-        if (!nextPunch || nextPunch === 'OT') {
-            const employee = await EmployeeBasic.findById(record.employeeMongoId)
-                .select('employeeId firstName lastName')
-                .lean();
-            await Attendance.findOneAndUpdate(
-                { date: nextDate, employeeMongoId: record.employeeMongoId },
-                {
-                    $set: {
-                        date: nextDate,
-                        employeeMongoId: record.employeeMongoId,
-                        employeeId: employee?.employeeId || record.employeeId || '',
-                        employeeName: record.employeeName || '',
-                        statusKey: 'on_office',
-                        statusLabel: 'Present',
-                        timeIn: 'OT',
-                        timeOut: 'OT',
-                        reason: 'Present (On time) from overtime',
-                        flexibleFromOtDate: record.date,
-                        flexibleWorkedHours: 9,
-                        punchSource: 'manual',
-                        checkOutSource: 'manual',
-                    },
-                },
-                { upsert: true, new: true, setDefaultsOnInsert: true },
-            );
-            record.flexibleOtNextDayDate = nextDate;
-        }
+
+    if (!split.nextDay) {
+        if (previousNext) await revertSyntheticOtDay(record.employeeMongoId, previousNext, record.date);
+        record.flexibleOtNextDayDate = '';
+        await record.save();
+        return {
+            status: 200,
+            body: { record, displayOtHours: approved, nextDayPresent: false },
+        };
     }
+
+    const nextDate = addDaysKey(record.date, 1);
+    if (previousNext && previousNext !== nextDate) {
+        await revertSyntheticOtDay(record.employeeMongoId, previousNext, record.date);
+    }
+    const existingNext = await Attendance.findOne({
+        date: nextDate,
+        employeeMongoId: record.employeeMongoId,
+    })
+        .select('timeIn flexibleFromOtDate')
+        .lean();
+    const nextPunch = String(existingNext?.timeIn || '').trim();
+    const canWrite =
+        !nextPunch || nextPunch === 'OT' || String(existingNext?.flexibleFromOtDate || '') === String(record.date);
+    if (!canWrite) {
+        record.flexibleOtNextDayDate = '';
+        await record.save();
+        return {
+            status: 200,
+            body: {
+                record,
+                displayOtHours: approved,
+                nextDayPresent: false,
+            },
+        };
+    }
+
+    const employee = await EmployeeBasic.findById(record.employeeMongoId)
+        .select('employeeId firstName lastName')
+        .lean();
+    await Attendance.findOneAndUpdate(
+        { date: nextDate, employeeMongoId: record.employeeMongoId },
+        {
+            $set: {
+                date: nextDate,
+                employeeMongoId: record.employeeMongoId,
+                employeeId: employee?.employeeId || record.employeeId || '',
+                employeeName: record.employeeName || '',
+                statusKey: 'on_office',
+                statusLabel: 'Present',
+                timeIn: 'OT',
+                timeOut: 'OT',
+                reason: 'Present (On time) from overtime',
+                flexibleFromOtDate: record.date,
+                flexibleWorkedHours: split.dayHours,
+                flexibleRequiredHours: split.dayHours,
+                flexibleOtHours: split.remainderHours,
+                flexibleOtStatus: '',
+                flexibleOtApprovedHours: 0,
+                flexibleOtReason: '',
+                flexibleOtNextDayDate: '',
+                punchSource: 'manual',
+                checkOutSource: 'manual',
+            },
+        },
+        { upsert: true, new: true, setDefaultsOnInsert: true },
+    );
+    record.flexibleOtNextDayDate = nextDate;
     await record.save();
     return {
         status: 200,
         body: {
             record,
-            displayOtHours: approvedOtRemainder(approved),
-            nextDayPresent: nextDay,
+            displayOtHours: 0,
+            nextDayPresent: true,
+            remainderHours: split.remainderHours,
         },
     };
 }

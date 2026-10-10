@@ -89,6 +89,18 @@ const taskManagerTaskSchema = new mongoose.Schema(
             dueDate: { type: Boolean, default: true },
             overdue: { type: Boolean, default: false },
         },
+        closeRequest: {
+            originalAssigneeId: { type: mongoose.Schema.Types.ObjectId, ref: "EmployeeBasic", default: null },
+            originalAssigneeEmpId: { type: String, default: "" },
+            originalAssigneeName: { type: String, default: "" },
+            requestedAt: { type: Date, default: null },
+            requestedByName: { type: String, default: "" },
+            assigneeNotifiedAt: { type: Date, default: null },
+            closedAt: { type: Date, default: null },
+            closedByName: { type: String, default: "" },
+            requesterNotifiedAt: { type: Date, default: null },
+            requesterChannel: { type: String, default: "" },
+        },
     },
     { timestamps: true },
 );

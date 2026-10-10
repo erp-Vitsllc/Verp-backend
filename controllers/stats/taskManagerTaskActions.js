@@ -1,9 +1,19 @@
 import DashboardAction from "../../models/DashboardAction.js";
+import AssetHistory from "../../models/AssetHistory.js";
+import AssetItem from "../../models/AssetItem.js";
+import Attendance from "../../models/Attendance.js";
 import EmployeeBasic from "../../models/EmployeeBasic.js";
+import EmployeeHubRequest from "../../models/EmployeeHubRequest.js";
+import Fine from "../../models/Fine.js";
+import Loan from "../../models/Loan.js";
+import Reward from "../../models/Reward.js";
 import TaskManagerTask from "../../models/TaskManagerTask.js";
+import { deleteDashboardActionsForVehicleService } from "../../utils/cleanupAssetDashboardActions.js";
 import { getDepartmentHOD } from "../../utils/getDepartmentHOD.js";
 import { uploadDocumentToS3 } from "../../utils/s3Upload.js";
 import { emailFrontendUrl } from "../../utils/resolveFrontendBaseUrl.js";
+import { sendTextMessage } from "../../services/whatsappService.js";
+import { resolveEmployeeWhatsAppPhone } from "../../utils/sendToolsAssetWhatsAppReport.js";
 import { findEmailsForTask } from "../../utils/emailDispatch.js";
 import {
     displayStatus,
@@ -43,8 +53,8 @@ function dubaiDateKey(value) {
 }
 
 function detailDisplayStatus(task, action, manual) {
+    if (task?.status === "Completed" || task?.status === "Cancelled") return task.status;
     if (manual && task) {
-        if (task.status === "Completed" || task.status === "Cancelled") return task.status;
         return displayStatus("Pending", "", dubaiDateKey(task.createdAt), dubaiDateKey(new Date()));
     }
     return displayStatus(
@@ -255,6 +265,112 @@ async function nameOfAssignee(current, fallback = "") {
     return personName(person) || String(fallback || "").trim();
 }
 
+const SILENT_MAIL = {
+    emailSent: false,
+    assigneeNotified: false,
+    requesterNotified: false,
+    assigneeName: "",
+    requesterName: "",
+};
+
+function closeSnapshot(task) {
+    const saved = task?.closeRequest?.toObject ? task.closeRequest.toObject() : (task?.closeRequest || {});
+    return { ...saved };
+}
+
+function rememberOriginalAssignee(task, current, previousName) {
+    if (!task) return;
+    const saved = closeSnapshot(task);
+    if (saved.originalAssigneeId || saved.originalAssigneeName) return;
+    task.closeRequest = {
+        ...saved,
+        originalAssigneeId: isObjectId(current?.assigneeId) ? current.assigneeId : null,
+        originalAssigneeEmpId: current?.assigneeEmpId || "",
+        originalAssigneeName: previousName || "",
+    };
+    task.markModified("closeRequest");
+}
+
+function taskWasReassigned(task) {
+    if (task?.closeRequest?.originalAssigneeName || task?.closeRequest?.originalAssigneeId) return true;
+    return (task?.history || []).some((item) => item?.event === "Reassigned");
+}
+
+function originalAssigneeNameFromHistory(task) {
+    const first = (task?.history || []).find((item) => item?.event === "Reassigned");
+    if (!first) return "";
+    return parseReassignment(first.detail, first.actorName).from || "";
+}
+
+function viewerMatchesEmployee(viewer, employee) {
+    if (!employee) return false;
+    const id = String(employee._id || "");
+    if (id && viewer?.employeeObjectId && id === String(viewer.employeeObjectId)) return true;
+    if (id && viewer?.userId && id === String(viewer.userId)) return true;
+    const code = String(employee.employeeId || "").trim().toLowerCase();
+    if (code && viewer?.employeeId && code === String(viewer.employeeId).trim().toLowerCase()) return true;
+    const viewerName = personBaseName(viewer?.name).toLowerCase();
+    const employeeName = personName(employee).toLowerCase();
+    return Boolean(viewerName && employeeName && viewerName === employeeName);
+}
+
+async function employeeById(id) {
+    if (!isObjectId(id)) return null;
+    return EmployeeBasic.findById(id)
+        .select("firstName lastName employeeId designation companyEmail workEmail profilePicture")
+        .lean();
+}
+
+async function resolveOriginalAssignee(task) {
+    const savedId = task?.closeRequest?.originalAssigneeId;
+    if (isObjectId(savedId)) {
+        const person = await employeeById(savedId);
+        if (person) return person;
+    }
+    const name = personBaseName(task?.closeRequest?.originalAssigneeName) || originalAssigneeNameFromHistory(task);
+    if (!name) return null;
+    return findEmployeeByName(name);
+}
+
+function taskDetailLink(target) {
+    const key = target?.kind === "manual"
+        ? `manual-${target.task?._id || ""}`
+        : String(target?.action?._id || target?.task?._id || "");
+    return `${emailFrontendUrl()}/task-manager/${encodeURIComponent(key)}`;
+}
+
+async function closeFlags(task, viewer, currentAssigneeId, assigneeEmpId) {
+    const reassigned = taskWasReassigned(task);
+    const completed = task?.status === "Completed";
+    const saved = closeSnapshot(task);
+    const requested = Boolean(saved.requestedAt);
+    const notified = Boolean(saved.assigneeNotifiedAt);
+    const closed = Boolean(saved.closedAt);
+    const viewerIsAssignee = viewerIsCurrentAssignee(viewer, {
+        assigneeId: currentAssigneeId,
+        assigneeEmpId,
+    });
+    const original = reassigned ? await resolveOriginalAssignee(task) : null;
+    const viewerIsOriginal = viewerMatchesEmployee(viewer, original);
+    let closeMessage = "";
+    if (closed) {
+        closeMessage = saved.requesterChannel === "whatsapp"
+            ? "The requester was sent one WhatsApp message that this request is completed."
+            : saved.requesterChannel === "email"
+                ? "The requester was emailed that this request is completed."
+                : "This request is closed.";
+    } else if (notified) {
+        closeMessage = `${saved.requestedByName || "The reassigned employee"} completed this task. The assignee can close this request.`;
+    }
+    return {
+        canComplete: Boolean(task) && !completed && task?.status !== "Cancelled" && viewerIsAssignee && reassigned,
+        canRequestClose: completed && reassigned && viewerIsAssignee && !notified && !closed,
+        canFinishClose: completed && requested && !closed && viewerIsOriginal,
+        closeState: closed ? "closed" : notified ? "requested" : "none",
+        closeMessage,
+    };
+}
+
 function requesterWithAssigner(baseName, assignerName) {
     const assigner = String(assignerName || "").trim();
     const base = String(baseName || "").trim().replace(/\s*\([^)]*\)\s*$/, "").trim();
@@ -286,7 +402,7 @@ async function buildDetail(target, viewer) {
     const people = await loadPeopleDetails([assigneeId], [assigneeCode]);
     const { byId, byCode } = peopleIndex(people);
     const assigneeEmp = byId.get(String(assigneeId || "")) || byCode.get(String(assigneeCode || "")) || null;
-    const requesterName = String(task?.requestedByName || action?.requestedByName || "").trim() || "System";
+    const requesterName = personBaseName(task?.requestedByName || action?.requestedByName) || "System";
     const requester = await findEmployeeByName(requesterName);
     const destination = manual
         ? moduleForText(task.taskName, task.description, task.taskType)
@@ -323,11 +439,15 @@ async function buildDetail(target, viewer) {
                     )
             )),
         ),
-        accessPath: accessPathFor(
-            destination,
-            manual ? "" : action?.requestId,
-            manual ? "" : action?.subjectEmployeeId,
-        ),
+        accessPath: (manual
+            ? (displayTaskType(task?.taskType) || "General Task")
+            : categoryFromRequestType(action?.requestType, action?.extra2 || "")) === "General Task"
+            ? ""
+            : accessPathFor(
+                destination,
+                manual ? "" : action?.requestId,
+                manual ? "" : action?.subjectEmployeeId,
+            ),
         ...taskTitleAndDescription({
             requestType: manual ? task?.taskType : action?.requestType,
             extra1: manual ? task?.description : action?.extra1,
@@ -374,6 +494,8 @@ async function buildDetail(target, viewer) {
         department: requester?.department || assigneeEmp?.department || "",
         relatedTo: relatedLabel(destination.module, destination.label),
         lastUpdatedBy: [...(task?.history || [])].reverse().find((item) => item?.actorName)?.actorName || cardAssignee.name || "",
+        handoff: await handoffPeople(task?.history, cardAssignee.name),
+        ...(await closeFlags(task, viewer, currentAssigneeId, assigneeEmpId)),
         module: destination.module,
         moduleLabel: destination.label,
         modulePath: destination.path,
@@ -573,7 +695,11 @@ export const reassignTaskManagerTask = async (req, res) => {
         const assignee = await findAssignee(assigneeId);
         if (!assignee) return res.status(400).json({ message: "Selected assignee was not found." });
         const assigneeName = personName(assignee) || assignee.employeeId || "Unassigned";
-        const detail = `Reassigned to ${assigneeName}. ${reason}`;
+        const previousName = await nameOfAssignee(
+            current,
+            target.kind === "manual" ? target.task?.assigneeName : target.task?.assigneeName || "",
+        );
+        const detail = `Reassigned from ${previousName || "the previous assignee"} to ${assigneeName}. ${reason}`;
         const ownerReassigned = viewerIsCurrentAssignee(viewer, current);
         const assignerName = ownerReassigned
             ? await nameOfAssignee(
@@ -588,6 +714,7 @@ export const reassignTaskManagerTask = async (req, res) => {
 
         if (target.kind === "manual") {
             const task = target.task;
+            rememberOriginalAssignee(task, current, previousName);
             task.assignee = assignee._id;
             task.assigneeEmpId = assignee.employeeId || "";
             task.assigneeName = assigneeName;
@@ -621,9 +748,13 @@ export const reassignTaskManagerTask = async (req, res) => {
                     description: action.extra2 || "",
                     completionDate: action.actionedDate || action.requestedDate || new Date(),
                     requestedByName: action.requestedByName || "",
+                    assignee: current.assigneeId || action.assignedTo,
+                    assigneeEmpId: current.assigneeEmpId || action.assignedToEmpId || "",
+                    assigneeName: previousName || action.subjectName || "",
                     status: "Pending",
                 });
             }
+            rememberOriginalAssignee(overlay, current, previousName);
             overlay.assignee = assignee._id;
             overlay.assigneeEmpId = assignee.employeeId || "";
             overlay.assigneeName = assigneeName;
@@ -699,15 +830,22 @@ export const updateTaskManagerTaskStatus = async (req, res) => {
         if (!(await denyUnlessViewer(req, res))) return;
         const target = await loadTarget(req.params.taskKey);
         if (!target) return res.status(404).json({ message: "Task not found." });
-        if (target.kind === "dashboard" && target.action?.requestType !== "Task Manager") {
+        const status = String(req.body?.status || "").trim();
+        if (!STATUSES.has(status)) return res.status(400).json({ message: "Choose a valid status." });
+        const viewer = await resolveTaskViewer(req);
+        const workflowLocked = target.kind === "dashboard" && target.action?.requestType !== "Task Manager";
+        const current = assigneeOf(target);
+        const completingReassigned = workflowLocked
+            && status === "Completed"
+            && viewerIsCurrentAssignee(viewer, current)
+            && taskWasReassigned(target.task);
+        if (workflowLocked && !completingReassigned) {
             return res.status(400).json({
                 message: "This request is updated on its own page. You can still reassign it here.",
             });
         }
-        const status = String(req.body?.status || "").trim();
-        if (!STATUSES.has(status)) return res.status(400).json({ message: "Choose a valid status." });
-        const viewer = await resolveTaskViewer(req);
-        const task = target.task;
+        const task = target.task || (target.action ? blankOverlay(target.action) : null);
+        if (!task) return res.status(404).json({ message: "Task not found." });
         task.status = status;
         task.history = task.history || [];
         task.history.push(historyEntry("Status", `Status set to ${status}.`, viewer.name));
@@ -719,12 +857,182 @@ export const updateTaskManagerTaskStatus = async (req, res) => {
             text: `Status set to ${status}.`,
         });
         await task.save();
-        await syncManualTaskNotification(task);
+        if (!task.sourceDashboardActionId) await syncManualTaskNotification(task);
         const fresh = await loadTarget(req.params.taskKey);
         return res.status(200).json({ message: "Status updated", task: await buildDetail(fresh, viewer) });
     } catch (error) {
         console.error("Task status error:", error);
         return res.status(500).json({ message: "Failed to update status" });
+    }
+};
+
+export const closeTaskManagerRequest = async (req, res) => {
+    try {
+        if (!(await denyUnlessViewer(req, res))) return;
+        const target = await loadTarget(req.params.taskKey);
+        if (!target) return res.status(404).json({ message: "Task not found." });
+        const step = String(req.body?.step || "").trim().toLowerCase();
+        if (step !== "request" && step !== "finish") {
+            return res.status(400).json({ message: "Choose the close step." });
+        }
+        const viewer = await resolveTaskViewer(req);
+        const task = target.task;
+        if (!task) return res.status(400).json({ message: "Complete the task before closing the request." });
+        if (task.status !== "Completed") {
+            return res.status(400).json({ message: "Mark the task completed before closing the request." });
+        }
+        if (!taskWasReassigned(task)) {
+            return res.status(400).json({ message: "This close step is for a task that was reassigned." });
+        }
+
+        const current = assigneeOf(target);
+        const saved = closeSnapshot(task);
+        const link = taskDetailLink(target);
+        const recordId = String(target.action?._id || task._id || "");
+
+        if (step === "request") {
+            if (!viewerIsCurrentAssignee(viewer, current)) {
+                return res.status(403).json({ message: "Only the reassigned employee can send this close request." });
+            }
+            if (saved.closedAt) return res.status(400).json({ message: "This request is already closed." });
+            if (saved.assigneeNotifiedAt) {
+                return res.status(200).json({
+                    message: "The assignee was already emailed once.",
+                    task: await buildDetail(target, viewer),
+                });
+            }
+            const original = await resolveOriginalAssignee(task);
+            const originalEmail = String(original?.companyEmail || original?.workEmail || "").trim();
+            if (!original || !originalEmail) {
+                return res.status(400).json({ message: "The original assignee has no email address." });
+            }
+            const reassignedName = task.assigneeName || viewer.name || "The reassigned employee";
+            const subject = `${reassignedName} completed this task`;
+            const html = `
+                <p>Hello ${escapeHtml(personName(original) || "there")},</p>
+                <p>${escapeHtml(reassignedName)} completed this task. You can close this request now.</p>
+                <p><strong>${escapeHtml(task.taskName || "Task")}</strong></p>
+                <p><a href="${escapeHtml(link)}">Open the task</a></p>
+            `;
+            const sent = await sendTaskActivityEmail({
+                to: [originalEmail],
+                subject,
+                html,
+                recordId,
+                emailType: "Close request",
+            });
+            if (!sent?.sent) return res.status(500).json({ message: "The assignee email could not be sent." });
+            const next = closeSnapshot(task);
+            task.closeRequest = {
+                ...next,
+                requestedAt: next.requestedAt || new Date(),
+                requestedByName: reassignedName,
+                assigneeNotifiedAt: new Date(),
+            };
+            task.markModified("closeRequest");
+            task.history = task.history || [];
+            task.history.push(historyEntry("Close Request", `${reassignedName} completed this task. ${personName(original)} can close it.`, viewer.name));
+            await pushWorkUpdate(task, {
+                authorName: viewer.name,
+                authorRole: await authorRoleFor(viewer),
+                kind: "Close Request",
+                badge: "Completed",
+                text: `${reassignedName} completed this task. ${personName(original)} can close this request.`,
+            }, SILENT_MAIL);
+            await task.save();
+            const fresh = await loadTarget(req.params.taskKey);
+            return res.status(200).json({
+                message: "The assignee was emailed once to close this request.",
+                task: await buildDetail(fresh, viewer),
+            });
+        }
+
+        const original = await resolveOriginalAssignee(task);
+        if (!viewerMatchesEmployee(viewer, original)) {
+            return res.status(403).json({ message: "Only the original assignee can close this request." });
+        }
+        if (!saved.requestedAt) {
+            return res.status(400).json({ message: "The reassigned employee has not asked you to close this yet." });
+        }
+        if (saved.closedAt || saved.requesterNotifiedAt) {
+            return res.status(200).json({
+                message: "The requester was already told that this request is completed.",
+                task: await buildDetail(target, viewer),
+            });
+        }
+
+        const requester = await findEmployeeByName(personBaseName(task.requestedByName));
+        const companyEmail = String(requester?.companyEmail || "").trim();
+        const requesterName = personName(requester) || personBaseName(task.requestedByName) || "there";
+        let channel = "";
+        if (companyEmail) {
+            const sent = await sendTaskActivityEmail({
+                to: [companyEmail],
+                subject: "Your request is completed",
+                html: `
+                    <p>Hello ${escapeHtml(requesterName)},</p>
+                    <p>Your request is completed.</p>
+                    <p><strong>${escapeHtml(task.taskName || "Task")}</strong></p>
+                    <p><a href="${escapeHtml(link)}">Open the task</a></p>
+                `,
+                recordId,
+                emailType: "Request completed",
+            });
+            if (!sent?.sent) return res.status(500).json({ message: "The requester email could not be sent." });
+            channel = "email";
+        } else {
+            const phone = await resolveEmployeeWhatsAppPhone(requester?.employeeId);
+            if (!phone) {
+                return res.status(400).json({ message: "The requester has no company email and no WhatsApp number." });
+            }
+            const result = await sendTextMessage(
+                phone,
+                `Your request is completed: ${task.taskName || "Task"}. ${link}`,
+                {
+                    source: "auto",
+                    skipPaidChannelCheck: true,
+                    employeeId: requester?.employeeId || "",
+                    contactName: requesterName,
+                },
+            );
+            if (result?.success !== true) {
+                return res.status(500).json({ message: result?.error || "The WhatsApp message could not be sent." });
+            }
+            channel = "whatsapp";
+        }
+
+        const next = closeSnapshot(task);
+        task.closeRequest = {
+            ...next,
+            closedAt: new Date(),
+            closedByName: viewer.name,
+            requesterNotifiedAt: new Date(),
+            requesterChannel: channel,
+        };
+        task.markModified("closeRequest");
+        task.history = task.history || [];
+        const told = channel === "whatsapp"
+            ? `${requesterName} was sent one WhatsApp message that this request is completed.`
+            : `${requesterName} was emailed that this request is completed.`;
+        task.history.push(historyEntry("Request Closed", told, viewer.name));
+        await pushWorkUpdate(task, {
+            authorName: viewer.name,
+            authorRole: await authorRoleFor(viewer),
+            kind: "Request Closed",
+            badge: "Closed",
+            text: told,
+        }, SILENT_MAIL);
+        await task.save();
+        const fresh = await loadTarget(req.params.taskKey);
+        return res.status(200).json({
+            message: channel === "whatsapp"
+                ? "The requester was sent one WhatsApp message."
+                : "The requester was emailed that this request is completed.",
+            task: await buildDetail(fresh, viewer),
+        });
+    } catch (error) {
+        console.error("Close task request error:", error);
+        return res.status(500).json({ message: "Failed to close the request" });
     }
 };
 
@@ -934,6 +1242,57 @@ function stepPerson(emp, fallbackName = "") {
     };
 }
 
+function personBaseName(value) {
+    return String(value || "").trim().replace(/\s*\([^)]*\)\s*$/, "").trim();
+}
+
+function parseReassignment(detail, actorName) {
+    const text = String(detail || "");
+    const fromTo = text.match(/reassigned from\s+(.+?)\s+to\s+(.+?)\./i);
+    if (fromTo) return { from: fromTo[1].trim(), to: fromTo[2].trim() };
+    const toOnly = text.match(/reassigned to\s+(.+?)\./i);
+    return { from: personBaseName(actorName), to: toOnly ? toOnly[1].trim() : "" };
+}
+
+async function handoffPeople(history, currentName) {
+    const events = (Array.isArray(history) ? history : []).filter((item) => item?.event === "Reassigned");
+    const rows = [];
+    const push = (name, role, at) => {
+        const clean = personBaseName(name);
+        if (!clean || clean.toLowerCase() === "system") return;
+        const previous = rows[rows.length - 1];
+        if (previous && previous.name.toLowerCase() === clean.toLowerCase()) return;
+        rows.push({ name: clean, role, at: at || null });
+    };
+    if (!events.length) {
+        push(currentName, "Assignee", null);
+    } else {
+        events.forEach((event, index) => {
+            const hop = parseReassignment(event.detail, event.actorName);
+            if (index === 0) push(hop.from, "Assignee", event.createdAt);
+            push(hop.to, rows.length ? "Reassigned" : "Assignee", event.createdAt);
+        });
+        push(currentName, rows.length ? "Reassigned" : "Assignee", null);
+    }
+    const cache = new Map();
+    const people = [];
+    for (const row of rows) {
+        const key = row.name.toLowerCase();
+        if (!cache.has(key)) cache.set(key, await findEmployeeByName(row.name));
+        const person = stepPerson(cache.get(key), row.name);
+        const card = contactCard(cache.get(key));
+        people.push({
+            ...person,
+            email: card.email || "",
+            role: row.role,
+            at: row.at,
+            current: false,
+        });
+    }
+    if (people.length) people[people.length - 1].current = true;
+    return people;
+}
+
 async function reportingManager(employee) {
     if (!employee?._id) return null;
     const row = await EmployeeBasic.findById(employee._id)
@@ -950,7 +1309,7 @@ async function buildTaskWorkflow(target, viewer) {
     const action = target.action;
     const { assigneeId, assigneeEmpId } = assigneeOf(target);
     const assigneeEmp = await findAssignee(assigneeId);
-    const requesterName = String(task?.requestedByName || action?.requestedByName || "").trim() || "System";
+    const requesterName = personBaseName(task?.requestedByName || action?.requestedByName) || "System";
     const requesterEmp = await findEmployeeByName(requesterName);
     const assigneeName = stepPerson(assigneeEmp, manual ? task?.assigneeName : action?.subjectName || "Unassigned").personName;
     const destination = manual
@@ -982,12 +1341,21 @@ async function buildTaskWorkflow(target, viewer) {
             continue;
         }
         if (key === "assigned") {
-            steps.push({
-                key,
-                title: `Assigned to ${assignee.personName || "Unassigned"}`,
-                detail: `By ${requester.personName || "System"}`,
-                ...assignee,
-                at: requestDate,
+            const handoff = await handoffPeople(task?.history, assignee.personName);
+            const chain = handoff.length ? handoff : [{ ...assignee, role: "Assignee", at: requestDate, current: true }];
+            chain.forEach((person, index) => {
+                const first = index === 0;
+                steps.push({
+                    key: first ? "assigned" : "reassigned",
+                    title: first
+                        ? `Assignee ${person.personName || "Unassigned"}`
+                        : `Reassigned to ${person.personName || "Unassigned"}`,
+                    detail: first
+                        ? `From ${personBaseName(requester.personName) || "Requester"}`
+                        : `Passed from ${chain[index - 1]?.personName || "the previous assignee"}`,
+                    ...person,
+                    at: person.at || requestDate,
+                });
             });
             continue;
         }
@@ -1037,10 +1405,23 @@ async function buildTaskWorkflow(target, viewer) {
     const rejected = raw === "Cancelled" || raw === "Rejected" || raw === "Dismissed";
     const workflowLocked = !manual && action?.requestType !== "Task Manager";
     let current = -1;
-    steps.forEach((step, index) => {
-        if (step.personId && assigneeId && step.personId === String(assigneeId)) current = index;
-    });
-    if (current < 0) current = Math.max(0, steps.findIndex((step) => step.key === "assigned"));
+    for (let index = steps.length - 1; index >= 0; index -= 1) {
+        if (steps[index].current) {
+            current = index;
+            break;
+        }
+    }
+    if (current < 0) {
+        steps.forEach((step, index) => {
+            if (
+                (step.key === "assigned" || step.key === "reassigned")
+                && step.personId
+                && assigneeId
+                && step.personId === String(assigneeId)
+            ) current = index;
+        });
+    }
+    if (current < 0) current = Math.max(0, steps.findIndex((step) => step.key === "assigned" || step.key === "reassigned"));
 
     steps.forEach((step, index) => {
         if (finished) step.status = "Completed";
@@ -1050,7 +1431,7 @@ async function buildTaskWorkflow(target, viewer) {
         if (step.status === "Completed" && step.key !== "created") {
             if (step.key === "done") step.detail = "Completed";
             else if (step.key === "leaveBalance") step.detail = "Updated";
-            else if (step.personName && step.key !== "assigned") step.detail = `By ${step.personName}`;
+            else if (step.personName && step.key !== "assigned" && step.key !== "reassigned") step.detail = `By ${step.personName}`;
         }
         if (step.status === "Not Started" && !step.personName) step.detail = "Pending";
         if (step.status === "Rejected") step.detail = step.personName ? `Rejected by ${step.personName}` : "Rejected";
@@ -1069,11 +1450,15 @@ async function buildTaskWorkflow(target, viewer) {
         module: destination.module,
         moduleLabel: destination.label,
         modulePath: destination.path,
-        accessPath: accessPathFor(
-            destination,
-            manual ? "" : action?.requestId,
-            manual ? "" : action?.subjectEmployeeId,
-        ),
+        accessPath: (manual
+            ? (displayTaskType(task?.taskType) || "General Task")
+            : categoryFromRequestType(action?.requestType, action?.extra2 || "")) === "General Task"
+            ? ""
+            : accessPathFor(
+                destination,
+                manual ? "" : action?.requestId,
+                manual ? "" : action?.subjectEmployeeId,
+            ),
         workflowLocked,
         taskName: (task?.taskName || action?.extra1 || "Task").trim(),
         steps,
@@ -1167,6 +1552,282 @@ export const decideTaskManagerWorkflow = async (req, res) => {
     }
 };
 
+function readActionMeta(value) {
+    if (!value) return {};
+    if (typeof value === "object") return value;
+    try {
+        return JSON.parse(value);
+    } catch {
+        return {};
+    }
+}
+
+const HUB_REQUEST_TYPES = new Set([
+    "Employee Leave Request",
+    "Employee Advance Request",
+    "Employee Loan Request",
+    "Employee Salary Request",
+    "Employee Certificate Request",
+    "Employee Asset Request",
+    "Employee Fine Request",
+    "Employee Vehicle Request",
+    "Employee Utility Request",
+]);
+
+const ASSET_PENDING_TYPES = new Set([
+    "Asset Return",
+    "Asset Transfer",
+    "Asset Leave",
+    "Asset End of Life",
+    "Asset Loss Damage",
+    "Asset Retention",
+    "Asset Accessory",
+    "Asset Accessory Approval",
+    "Asset Accessory Unattach",
+    "Asset Owner On Duty",
+    "Asset On Duty Request",
+    "Vehicle Assignment Photo Review",
+]);
+
+function restoreFromContext(asset, context) {
+    if (!context) return false;
+    if (context.previousStatus) asset.status = context.previousStatus;
+    if (context.previousAssignedTo) asset.assignedTo = context.previousAssignedTo;
+    else if (context.oldAssignedTo && isObjectId(context.oldAssignedTo)) asset.assignedTo = context.oldAssignedTo;
+    if (context.previousAssignedToType) asset.assignedToType = context.previousAssignedToType;
+    if (Object.prototype.hasOwnProperty.call(context, "previousAssignedCompany")) {
+        asset.assignedCompany = context.previousAssignedCompany;
+    }
+    if (Object.prototype.hasOwnProperty.call(context, "previousAcceptanceStatus")) {
+        asset.acceptanceStatus = context.previousAcceptanceStatus;
+    }
+    if (Object.prototype.hasOwnProperty.call(context, "previousAssignedBy")) asset.assignedBy = context.previousAssignedBy;
+    else if (context.oldAssignedBy && isObjectId(context.oldAssignedBy)) asset.assignedBy = context.oldAssignedBy;
+    if (Object.prototype.hasOwnProperty.call(context, "previousAssignmentType")) {
+        asset.assignmentType = context.previousAssignmentType;
+    } else if (Object.prototype.hasOwnProperty.call(context, "oldAssignmentType")) {
+        asset.assignmentType = context.oldAssignmentType;
+    }
+    if (context.previousOwnership) asset.ownership = context.previousOwnership;
+    return Boolean(context.previousStatus || context.previousAssignedTo || context.oldAssignedTo);
+}
+
+function clearAssetAssignment(asset) {
+    asset.assignedTo = null;
+    asset.assignedCompany = null;
+    asset.assignedBy = null;
+    asset.acceptedBy = null;
+    asset.assignedToType = "Employee";
+    asset.assignmentType = null;
+    asset.assignedDays = null;
+    asset.assignedDate = null;
+    asset.temporaryEndDate = null;
+    asset.temporaryReminderSentAt = null;
+    asset.temporaryExpiredSentAt = null;
+    asset.acceptanceStatus = null;
+    asset.actionRequiredBy = null;
+    asset.pendingAction = null;
+    asset.pendingActionDetails = null;
+    asset.negotiationHistory = [];
+    asset.status = "Unassigned";
+    asset.ownership = "Unassigned";
+}
+
+async function undoAssetAssignment(assetId) {
+    if (!isObjectId(assetId)) return;
+    const asset = await AssetItem.findById(assetId);
+    if (!asset) return;
+    const details = asset.pendingActionDetails || {};
+    const restored = restoreFromContext(
+        asset,
+        details.serviceReassignContext || details.parkingReassignContext || null,
+    );
+    if (!restored) clearAssetAssignment(asset);
+    else {
+        asset.pendingAction = null;
+        asset.actionRequiredBy = null;
+        asset.pendingActionDetails = null;
+        asset.acceptanceStatus = asset.acceptanceStatus || "Accepted";
+        if (!asset.status || asset.status === "Pending") asset.status = "Assigned";
+    }
+    await asset.save();
+    await AssetHistory.create({
+        assetId: asset._id,
+        action: restored ? "Restored" : "Unassigned",
+        comments: "Assignment undone because the task was deleted.",
+        date: new Date(),
+    });
+}
+
+async function undoPendingAssetRequest(assetId) {
+    if (!isObjectId(assetId)) return;
+    const asset = await AssetItem.findById(assetId);
+    if (!asset) return;
+    const details = asset.pendingActionDetails || {};
+    const restored = restoreFromContext(asset, details.returnHandoverContext || null);
+    if (!restored && asset.status === "Pending") {
+        asset.status = asset.assignedTo || asset.assignedCompany ? "Assigned" : "Unassigned";
+    }
+    asset.pendingAction = null;
+    asset.actionRequiredBy = null;
+    asset.pendingActionDetails = null;
+    await asset.save();
+    await AssetHistory.create({
+        assetId: asset._id,
+        action: "Restored",
+        comments: "Request undone because the task was deleted.",
+        date: new Date(),
+    });
+}
+
+async function undoLeaveRequest(action) {
+    const meta = readActionMeta(action.extra3);
+    const ids = [action.requestId, meta.attendanceId].map((value) => String(value || "")).filter(isObjectId);
+    const groupIds = [meta.groupId, action.requestId].map((value) => String(value || "").trim()).filter(Boolean);
+    const or = [];
+    if (ids.length) or.push({ _id: { $in: ids } });
+    if (groupIds.length) or.push({ leaveRequestGroupId: { $in: groupIds } });
+    if (!or.length) return;
+    const rows = await Attendance.find({ $or: or });
+    for (const record of rows) {
+        const requestStatus = String(record.leaveRequestStatus || "").trim();
+        if (!requestStatus && !record.leaveRequestGroupId) continue;
+        const prevKey = String(record.previousStatusKey || "not_marked");
+        const hadNoClock = !String(record.timeIn || "").trim();
+        if (hadNoClock && (!prevKey || prevKey === "not_marked")) {
+            await Attendance.deleteOne({ _id: record._id });
+            continue;
+        }
+        record.statusKey = prevKey || "not_marked";
+        record.statusLabel = record.previousStatusLabel || record.statusLabel;
+        record.leaveRequestStatus = "";
+        record.leaveRequestKind = "";
+        record.requestedStatusKey = "";
+        record.requestedStatusLabel = "";
+        record.leaveRequestFromDate = "";
+        record.leaveRequestToDate = "";
+        record.leaveRequestGroupId = "";
+        record.leaveRequestedAt = null;
+        record.leaveDecidedAt = null;
+        record.leaveDecidedBy = null;
+        record.leaveRequestReason = "";
+        record.leaveRequestDayPart = "";
+        record.leaveRequestTimeIn = "";
+        record.leaveRequestTimeOut = "";
+        record.approvalStatus = "";
+        record.leavePayType = "";
+        await record.save();
+    }
+}
+
+async function undoMoneyRequest(Model, requestId, statusField) {
+    if (!isObjectId(requestId)) return;
+    const row = await Model.findById(requestId);
+    if (!row) return;
+    const status = String(row[statusField] || "");
+    if (["Paid", "Approved (Paid)", "Completed", "Active"].includes(status)) return;
+    row[statusField] = "Cancelled";
+    if (row.approvalStatus && !["Paid", "Approved (Paid)"].includes(String(row.approvalStatus))) {
+        row.approvalStatus = "Cancelled";
+    }
+    await row.save();
+}
+
+/** Reverse the request this task started, then drop every related bell. */
+async function undoTaskProcess(action) {
+    const requestType = String(action?.requestType || "");
+    const requestId = action?.requestId;
+    if (requestType === "Asset Assignment" || requestType === "Asset Reassign") {
+        await undoAssetAssignment(requestId);
+        return;
+    }
+    if (ASSET_PENDING_TYPES.has(requestType)) {
+        await undoPendingAssetRequest(requestId);
+        return;
+    }
+    if (HUB_REQUEST_TYPES.has(requestType)) {
+        if (isObjectId(requestId)) await EmployeeHubRequest.deleteOne({ _id: requestId });
+        if (requestType === "Employee Leave Request") await undoLeaveRequest(action);
+        return;
+    }
+    if (requestType === "Attendance Leave Request") {
+        await undoLeaveRequest(action);
+        return;
+    }
+    if (requestType === "Loan") {
+        await undoMoneyRequest(Loan, requestId, "status");
+        return;
+    }
+    if (requestType === "Fine" || requestType === "Group Fine Request") {
+        await undoMoneyRequest(Fine, requestId, "fineStatus");
+        return;
+    }
+    if (requestType === "Reward") {
+        await undoMoneyRequest(Reward, requestId, "rewardStatus");
+    }
+}
+
+/** Drop the task bell and undo the request it started. */
+async function deleteTaskSource(action) {
+    if (!action?._id) return;
+    const requestType = String(action.requestType || "");
+    const requestId = action.requestId;
+    if (requestType === "Vehicle Service Request" && isObjectId(requestId)) {
+        const serviceRecordId = String(readActionMeta(action.extra3).serviceRecordId || "").trim();
+        if (isObjectId(serviceRecordId)) {
+            const asset = await AssetItem.findById(requestId);
+            const service = asset?.services?.id?.(serviceRecordId);
+            if (asset && service) {
+                const previous = String(asset.activeServiceWorkflow?.previousStatus || "").trim();
+                const activeId = String(asset.activeServiceWorkflow?.serviceRecordId || "");
+                service.deleteOne();
+                if (activeId === serviceRecordId) {
+                    asset.activeServiceWorkflow = undefined;
+                    asset.markModified("activeServiceWorkflow");
+                    asset.onServiceActive = false;
+                    if (asset.status === "On Service" && previous) asset.status = previous;
+                }
+                await asset.save();
+            }
+        }
+        const bells = await DashboardAction.find({
+            requestId,
+            requestType: "Vehicle Service Request",
+        }).select("_id extra3").lean();
+        const relatedIds = bells
+            .filter((row) => {
+                if (String(row._id) === String(action._id)) return true;
+                if (!serviceRecordId) return false;
+                return String(readActionMeta(row.extra3).serviceRecordId || "") === serviceRecordId;
+            })
+            .map((row) => row._id);
+        await TaskManagerTask.deleteMany({ sourceDashboardActionId: { $in: relatedIds } });
+        await deleteDashboardActionsForVehicleService(requestId, serviceRecordId);
+        if (relatedIds.length) await DashboardAction.deleteMany({ _id: { $in: relatedIds } });
+        return;
+    }
+
+    await undoTaskProcess(action);
+
+    const ids = [action._id];
+    const title = String(action.extra1 || "").trim();
+    const siblingTypes = requestType === "Asset Assignment" || requestType === "Asset Reassign"
+        ? ["Asset Assignment", "Asset", "Asset Reassign"]
+        : HUB_REQUEST_TYPES.has(requestType)
+            ? [...HUB_REQUEST_TYPES, "Employee Request Resend"]
+            : [requestType];
+    if (requestId && requestType && requestType !== "Task Manager") {
+        const related = await DashboardAction.find({
+            requestId,
+            requestType: { $in: siblingTypes },
+            ...(title && !HUB_REQUEST_TYPES.has(requestType) ? { extra1: title } : {}),
+        }).select("_id").lean();
+        related.forEach((row) => ids.push(row._id));
+    }
+    await TaskManagerTask.deleteMany({ sourceDashboardActionId: { $in: ids } });
+    await DashboardAction.deleteMany({ _id: { $in: ids } });
+}
+
 export const deleteTaskManagerTask = async (req, res) => {
     try {
         if (!(await denyUnlessViewer(req, res))) return;
@@ -1191,12 +1852,14 @@ export const deleteTaskManagerTask = async (req, res) => {
         const task = target.task;
         if (manual && task?._id) {
             await DashboardAction.deleteMany({ requestId: task._id, requestType: "Task Manager" });
+            if (task.sourceDashboardActionId) {
+                const source = await DashboardAction.findById(task.sourceDashboardActionId);
+                if (source) await deleteTaskSource(source);
+            }
             await TaskManagerTask.deleteOne({ _id: task._id });
-        } else if (viewer?.superUser && target.action?._id) {
+        } else if (target.action?._id && (viewer?.superUser || target.action.requestType === "Task Manager")) {
+            await deleteTaskSource(target.action);
             if (task?._id) await TaskManagerTask.deleteOne({ _id: task._id });
-            await DashboardAction.deleteOne({ _id: target.action._id });
-        } else if (target.action?._id && target.action.requestType === "Task Manager") {
-            await DashboardAction.deleteOne({ _id: target.action._id, requestType: "Task Manager" });
         }
         return res.status(200).json({ message: "Task deleted." });
     } catch (error) {

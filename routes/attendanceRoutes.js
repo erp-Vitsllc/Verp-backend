@@ -19,6 +19,7 @@ import {
     requestAttendanceYellow,
     requestAttendanceFuture,
     decideAttendanceLeaveRequest,
+    decideAttendanceChangeRequest,
 } from '../controllers/attendanceController.js';
 import {
     getCompOffMonth,
@@ -68,6 +69,7 @@ router.post('/team/mark', markTeamAttendance);
 // Leave-request inbox is scoped to the viewer's reportees (no HR module permission required)
 router.get('/dashboard/pending-inbox', getAttendancePendingInbox);
 router.post('/dashboard/approve-pending', approveAttendancePending);
+router.post('/change-request/decide', decideAttendanceChangeRequest);
 
 router.get(
     '/mark-roster',

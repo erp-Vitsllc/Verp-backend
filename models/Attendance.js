@@ -274,7 +274,7 @@ const attendanceSchema = new mongoose.Schema(
         },
         /**
          * Comp-off settlement. Empty state means the leave day is still open
-         * in the month of `date`. One jump moves chargeMonth forward once.
+         * in the month of `date`. Older rows may already have jumped once.
          */
         compOff: {
             state: {

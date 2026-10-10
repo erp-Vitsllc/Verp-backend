@@ -34,13 +34,13 @@ const WEEK = {
 };
 
 describe('comp-off settlement', () => {
-    it('names the next month and allows one jump', () => {
+    it('keeps a comp-off that was already moved to another month', () => {
         assert.equal(nextMonthKey('2026-12'), '2027-01');
         assert.equal(monthName('2026-04'), 'April');
         const open = { date: '2026-03-12', statusKey: 'compoff_leave', compOff: {} };
         assert.equal(compOffDisplayLabel(open), 'Comp Off Leave');
         assert.equal(isUnsettledCompOff(open), true);
-        assert.deepEqual(compOffActions(open), { canAdjust: true, canJump: true, canAuthorize: false });
+        assert.deepEqual(compOffActions(open), { canAdjust: true, canJump: false, canAuthorize: false });
 
         const jumped = {
             date: '2026-03-12',

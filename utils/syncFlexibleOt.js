@@ -87,6 +87,9 @@ export async function refreshFlexibleOtRecords(records) {
     const writes = [];
 
     for (const row of list) {
+        const punchIn = String(row?.timeIn || '').trim();
+        const punchOut = String(row?.timeOut || '').trim();
+        if (punchIn === 'OT' || punchOut === 'OT' || String(row?.flexibleFromOtDate || '').trim()) continue;
         const staffType = normalizeStaffType(staffById.get(String(row.employeeMongoId)) || 'office');
         const week = getWeekForStaffType(workingTime, staffType);
         const flexible = isFlexibleTiming(week);

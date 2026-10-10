@@ -346,7 +346,7 @@ export const getTaskManagerNotifications = async (req, res) => {
         const tasks = uniqueActions.map((action) => {
             const requestedAt = action.requestedDate || action.createdAt || null;
             const requestedKey = dubaiDateKey(requestedAt);
-            const status = displayStatus(action.status, action.requestType, requestedKey, todayKey);
+            let status = displayStatus(action.status, action.requestType, requestedKey, todayKey);
             const assignee =
                 byId.get(String(action.assignedTo || "")) ||
                 byCode.get(String(action.assignedToEmpId || "").trim()) ||
@@ -369,10 +369,13 @@ export const getTaskManagerNotifications = async (req, res) => {
             });
             const requestMonth = monthKeyFromDateKey(requestedKey);
             const completedMonth = monthKeyFromDateKey(dubaiDateKey(action.actionedDate || requestedAt));
+            if (overlay?.status === "Completed") status = "Completed";
+            else if (overlay?.status === "Cancelled") status = "Cancelled";
+            else if (overlay?.status === "In Progress") status = "In Progress";
 
             summary.total += 1;
             bump("total", requestMonth);
-            if (status === "Pending" || status === "On Hold" || status === "Pending Due") {
+            if (status === "Pending" || status === "On Hold" || status === "Pending Due" || status === "In Progress") {
                 summary.pending += 1;
                 bump("pending", requestMonth);
                 if (status === "Pending Due") {
@@ -408,6 +411,7 @@ export const getTaskManagerNotifications = async (req, res) => {
                 module: destination.module,
                 moduleLabel: destination.label,
                 modulePath: destination.path,
+                mine: assigneeIsViewer(viewer, assigneeId, assigneeEmpId, assigneeName),
                 displayStatus: status,
                 rawStatus: action.status || "Pending",
                 id: action.requestId ? String(action.requestId) : "",
@@ -487,6 +491,7 @@ export const getTaskManagerNotifications = async (req, res) => {
                 module: destination.module,
                 moduleLabel: destination.label,
                 modulePath: destination.path,
+                mine: assigneeIsViewer(viewer, assigneeId, row.assigneeEmpId, assigneeName),
                 displayStatus: status,
                 rawStatus: row.status || "Pending",
                 id: String(row._id),

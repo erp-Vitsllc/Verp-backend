@@ -22,6 +22,32 @@ export function requiredHoursForDate(week, dateKey) {
     return flexibleHoursPerDay(week);
 }
 
+/** Drop a fraction of an hour. 2.9 hours stays 2. */
+export function wholeHourCount(value) {
+    const hours = Number(value);
+    if (!Number.isFinite(hours) || hours <= 0) return 0;
+    return Math.floor(hours + 1e-9);
+}
+
+/**
+ * Whole hours short of the working-time day.
+ * A block counts only after 60 minutes. 7 hours 45 minutes is 7 hours.
+ */
+export function flexibleLossHours(record, week) {
+    const required = wholeHourCount(requiredHoursForDate(week, record?.date));
+    let worked = Number(record?.flexibleWorkedHours) || 0;
+    if (!(worked > 0)) {
+        const minutes = workedMinutesAcross({
+            date: record?.date,
+            timeIn: record?.timeIn,
+            timeOut: record?.timeOut,
+            timeOutDate: record?.timeOutDate,
+        });
+        worked = Math.max(0, minutes) / 60;
+    }
+    return Math.max(0, required - wholeHourCount(worked));
+}
+
 export function workedMinutesAcross({ date, timeIn, timeOut, timeOutDate }) {
     const start = clockTimeToMinutes(timeIn);
     const end = clockTimeToMinutes(timeOut);
@@ -176,7 +202,33 @@ export function shiftIcons({ date, timeIn, timeOut, timeOutDate }) {
     return { sun: true, moon: false };
 }
 
-/** More than 10 hours becomes the next day's Present. Those hours are not leftover overtime. */
+function roundHourValue(value) {
+    const hours = Number(value);
+    if (!Number.isFinite(hours) || hours < 0) return 0;
+    return Math.round(hours * 100) / 100;
+}
+
+/**
+ * Approved hours that cover one system working day become the next day's Present.
+ * Hours above that day stay as overtime to approve on the next day.
+ * When the working day is unknown, more than 10 hours still covers one 10-hour day.
+ */
+export function splitApprovedOvertime(approvedHours, dayHours) {
+    const approved = roundHourValue(approvedHours);
+    let day = roundHourValue(dayHours);
+    if (!(day > 0)) {
+        if (!(approved > 10)) return { nextDay: false, dayHours: 0, remainderHours: approved };
+        day = 10;
+    }
+    if (approved + 1e-9 < day) return { nextDay: false, dayHours: 0, remainderHours: approved };
+    return {
+        nextDay: true,
+        dayHours: day,
+        remainderHours: Math.max(0, Math.floor(approved - day + 1e-9)),
+    };
+}
+
+/** Hours that stay as overtime on this record. A linked next day consumes this approval. */
 export function approvedOtRemainder(approvedHours) {
     const approved = Number(approvedHours) || 0;
     if (approved > 10) return 0;
@@ -187,6 +239,7 @@ export function summarizeApprovedFlexibleOvertime(rows = []) {
     const overtimeRecords = [];
     let hours = 0;
     for (const row of rows) {
+        if (String(row?.flexibleOtNextDayDate || '').trim()) continue;
         if (String(row?.flexibleOtStatus || '') !== 'approved') continue;
         const remain = approvedOtRemainder(row.flexibleOtApprovedHours);
         if (remain <= 0) continue;

@@ -729,7 +729,7 @@ export async function buildSalarySlipPayload({
                 $or: [{ employeeMongoId: mongoId }, { employeeId: idPattern }],
                 date: { $gte: from, $lte: to },
             })
-                .select('date statusKey reason leavePayType timeIn timeOut flexibleOtStatus flexibleOtApprovedHours')
+                .select('date statusKey reason leavePayType timeIn timeOut flexibleOtStatus flexibleOtApprovedHours flexibleOtNextDayDate')
                 .lean(),
             Holiday.find({ date: { $gte: from, $lte: to } }).select('date appliesTo').lean(),
             Loan.find({
@@ -850,9 +850,11 @@ export async function buildSalarySlipPayload({
 
         const ot = isFlexibleTiming(week)
             ? {
-                hours: String(row.flexibleOtStatus || '') === 'approved'
-                    ? approvedOtRemainder(row.flexibleOtApprovedHours)
-                    : 0,
+                hours:
+                    String(row.flexibleOtStatus || '') === 'approved' &&
+                    !String(row.flexibleOtNextDayDate || '').trim()
+                        ? approvedOtRemainder(row.flexibleOtApprovedHours)
+                        : 0,
                 isOffDay: false,
             }
             : overtimeFromPunch({

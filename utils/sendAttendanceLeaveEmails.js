@@ -140,6 +140,82 @@ export async function sendAttendanceLeaveRequestEmail({
 }
 
 /**
+ * Notify the primary reportee or flowchart HR that an attendance edit is waiting.
+ */
+export async function sendAttendanceChangeRequestEmail({
+    approver,
+    employee,
+    date,
+    requestedByName = '',
+    currentLabel,
+    requestedLabel,
+    timeIn = '',
+    timeOut = '',
+    reason = '',
+    stage = 'pending_reportee',
+    reviewPath = '/HRM/Attendance?bell=1',
+}) {
+    try {
+        const mail = createTransport();
+        const { email: to } = resolveEmployeeEmail(approver || {});
+        if (!mail || !to) {
+            console.warn('[AttendanceChangeEmail] Missing SMTP or approver email.');
+            return;
+        }
+
+        const hrStep = String(stage || '') === 'pending_hr';
+        const approverName = personName(approver);
+        const empName = personName(employee);
+        const base = emailFrontendUrl();
+        const path = String(reviewPath || '/HRM/Attendance?bell=1');
+        const buttonUrl = path.startsWith('http')
+            ? path
+            : `${base}${path.startsWith('/') ? path : `/${path}`}`;
+        const title = hrStep ? 'Attendance Change — HR Approval' : 'Attendance Change Approval';
+        const intro = hrStep
+            ? 'is waiting for your approval. Approving it updates the attendance day.'
+            : 'was submitted and needs your approval. Approving it sends the change to HR. The day stays as it is until HR approves.';
+        const times =
+            timeIn || timeOut
+                ? `<p style="margin:0 0 8px;"><strong>Time:</strong> ${timeIn || '—'} – ${timeOut || '—'}</p>`
+                : '';
+
+        await mail.transporter.sendMail({
+            from: `"VeRP System" <${mail.from}>`,
+            to,
+            subject: `${title}: ${empName} — ${date}`,
+            html: `
+                <div style="font-family:Segoe UI,Tahoma,sans-serif;color:#1e293b;max-width:600px;margin:0 auto;border:1px solid #e2e8f0;border-radius:12px;overflow:hidden;">
+                    <div style="background:#EA3D2F;color:#fff;padding:20px;text-align:center;">
+                        <h1 style="margin:0;font-size:20px;">${title}</h1>
+                    </div>
+                    <div style="padding:24px;">
+                        <p>Dear <strong>${approverName}</strong>,</p>
+                        <p>Attendance for <strong>${empName}</strong> (${employee?.employeeId || '—'}) ${intro}</p>
+                        <div style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:10px;padding:16px;margin:16px 0;">
+                            <p style="margin:0 0 8px;"><strong>Date:</strong> ${date || '—'}</p>
+                            <p style="margin:0 0 8px;"><strong>Changed by:</strong> ${requestedByName || '—'}</p>
+                            <p style="margin:0 0 8px;"><strong>Currently:</strong> ${currentLabel || 'Not marked'}</p>
+                            <p style="margin:0 0 8px;"><strong>Requested:</strong> ${requestedLabel || '—'}</p>
+                            ${times}
+                            ${reason ? `<p style="margin:0;"><strong>Reason:</strong> ${reason}</p>` : ''}
+                        </div>
+                        <p>Open the Attendance bell to approve or reject this change.</p>
+                        <div style="text-align:center;margin-top:24px;">
+                            <a href="${buttonUrl}" style="background:#EA3D2F;color:#fff;text-decoration:none;padding:12px 24px;border-radius:8px;font-weight:600;display:inline-block;">
+                                Open Attendance
+                            </a>
+                        </div>
+                    </div>
+                </div>
+            `,
+        });
+    } catch (err) {
+        console.error('[AttendanceChangeEmail] request email failed:', err?.message || err);
+    }
+}
+
+/**
  * Notify employee of HOD approve/reject on company email.
  */
 export async function sendAttendanceLeaveDecisionEmail({

@@ -2,6 +2,8 @@ import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 import {
     approvedOtRemainder,
+    flexibleLossHours,
+    splitApprovedOvertime,
     flexibleOtFieldsFromDuration,
     manualTimeOutDate,
     mergeFlexibleOtState,
@@ -95,6 +97,32 @@ describe('mergeFlexibleOtState', () => {
     });
 });
 
+describe('splitApprovedOvertime', () => {
+    it('keeps approved hours as overtime when they are shorter than the working day', () => {
+        assert.deepEqual(splitApprovedOvertime(8, 10), {
+            nextDay: false,
+            dayHours: 0,
+            remainderHours: 8,
+        });
+    });
+
+    it('marks the next day present when approved hours equal the working day', () => {
+        assert.deepEqual(splitApprovedOvertime(10, 10), {
+            nextDay: true,
+            dayHours: 10,
+            remainderHours: 0,
+        });
+    });
+
+    it('keeps the hours above the working day as overtime on the next day', () => {
+        assert.deepEqual(splitApprovedOvertime(12, 10), {
+            nextDay: true,
+            dayHours: 10,
+            remainderHours: 2,
+        });
+    });
+});
+
 describe('approvedOtRemainder', () => {
     it('keeps overtime when the hours are 10 or less', () => {
         assert.equal(approvedOtRemainder(10), 10);
@@ -111,5 +139,32 @@ describe('manualTimeOutDate', () => {
     it('treats a later check-out as the same day and an earlier one as the next day', () => {
         assert.equal(manualTimeOutDate('2026-10-05', '09:00', '18:00'), '');
         assert.equal(manualTimeOutDate('2026-10-05', '22:00', '06:00'), '2026-10-06');
+    });
+});
+
+describe('flexibleLossHours', () => {
+    const week = {
+        timingMode: 'flexible',
+        hoursPerDay: 10,
+        monday: { isOffDay: false, workingHours: 10 },
+    };
+
+    it('counts a finished hour only, so 45 minutes does not add an hour', () => {
+        assert.equal(flexibleLossHours({ date: '2026-10-05', flexibleWorkedHours: 7 }, week), 3);
+        assert.equal(flexibleLossHours({ date: '2026-10-05', flexibleWorkedHours: 7.75 }, week), 3);
+    });
+
+    it('uses the punches when worked hours were not stored', () => {
+        assert.equal(
+            flexibleLossHours(
+                { date: '2026-10-05', timeIn: '09:00', timeOut: '16:30', flexibleWorkedHours: 0 },
+                week,
+            ),
+            3,
+        );
+    });
+
+    it('is zero when the worked hours cover the day', () => {
+        assert.equal(flexibleLossHours({ date: '2026-10-05', flexibleWorkedHours: 10.2 }, week), 0);
     });
 });

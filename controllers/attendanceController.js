@@ -85,6 +85,18 @@ import {
     resolveEmployeePayrollPolicy,
     resolveSickOverflowStatuses,
 } from '../utils/employeeLeavePolicy.js';
+import AttendanceChangeRequest from '../models/AttendanceChangeRequest.js';
+import {
+    approvalStageForAttendanceChange,
+    attendanceMarksMatch,
+    closeAttendanceChangeRequest,
+    describeAttendanceSave,
+    forwardAttendanceChangeToHr,
+    loadAttendanceChangeInboxItems,
+    loadPendingAttendanceChanges,
+    submitAttendanceChange,
+    supersedeOpenAttendanceChanges,
+} from '../utils/attendanceChangeApproval.js';
 import {
     applyOverlayCounts,
     applyOverlayCountsToBalances,
@@ -857,12 +869,17 @@ export async function getAttendanceByDate(req, res) {
         const records = applyLeaveCoverIndex(storedRecords, coverIndex).filter(
             (row) => String(row?.date || '') === date,
         );
+        const pendingChanges = await loadPendingAttendanceChanges(date).catch((err) => {
+            console.error('[getAttendanceByDate] pending changes failed:', err);
+            return [];
+        });
         return res.status(200).json({
             message: 'Attendance fetched successfully',
             date,
             records: (records || [])
                 .filter((r) => !isCompanyShellEmployee(r.employeeName))
                 .map(presentAuthorizedLeaveRecord),
+            pendingChanges,
         });
     } catch (error) {
         console.error('[getAttendanceByDate]', error);
@@ -1063,6 +1080,301 @@ export async function getAttendanceCalendarSummary(req, res) {
     }
 }
 
+function previousAttendanceSnapshot(existing) {
+    if (!existing) {
+        return {
+            statusKey: '',
+            statusLabel: 'Not marked',
+            timeIn: '',
+            timeOut: '',
+            reason: '',
+        };
+    }
+    return {
+        statusKey: existing.statusKey || '',
+        statusLabel: existing.statusLabel || 'Not marked',
+        timeIn: existing.timeIn || '',
+        timeOut: existing.timeOut || '',
+        reason: existing.reason || '',
+    };
+}
+
+async function resolveManualMarkPayload({
+    employee,
+    employeeMongoId,
+    date,
+    statusKey,
+    statusLabel,
+    timeIn,
+    timeOut,
+    reason,
+    attachmentName,
+}) {
+    let finalStatusKey = statusKey;
+    let finalStatusLabel =
+        statusKey === 'authorized_leave' ? authorizedLeaveLabel() : statusLabel;
+    let finalReason = String(reason || '').trim();
+    try {
+        const staffType = normalizeStaffType(employee?.staffType);
+        const workingTime = await loadWorkingTimeDoc();
+        const week = getWeekForStaffType(workingTime, staffType);
+        const schedule = getScheduledPunchMinutes(week, date);
+        const resolved = resolveStatusFromPunches({
+            timeIn,
+            timeOut,
+            startMinutes: schedule.startMinutes,
+            endMinutes: schedule.endMinutes,
+            isOffDay: schedule.isOffDay,
+            baseStatusKey: statusKey,
+            baseStatusLabel:
+                statusKey === 'authorized_leave' ? authorizedLeaveLabel() : statusLabel,
+            baseReason: finalReason,
+        });
+        finalStatusKey = resolved.statusKey;
+        finalStatusLabel = resolved.statusLabel;
+        if (resolved.reason !== undefined) finalReason = resolved.reason;
+    } catch (scheduleErr) {
+        console.error('[resolveManualMarkPayload] schedule punch rules failed:', scheduleErr);
+    }
+
+    if (finalStatusKey === 'sick_leave') {
+        const overflowMap = await resolveSickOverflowStatuses(
+            employee || { _id: employeeMongoId },
+            [date],
+        );
+        if (overflowMap.get(date) === 'authorized_leave') {
+            finalStatusKey = 'authorized_leave';
+            finalStatusLabel = authorizedLeaveLabel();
+            finalReason = finalReason
+                ? `${finalReason} · Sick allowance used`
+                : 'Converted from sick leave after the allowance from last annual leave was used';
+        }
+    }
+
+    if (finalStatusKey === 'authorized_leave') {
+        finalStatusLabel = authorizedLeaveLabel();
+    }
+
+    return {
+        statusKey: finalStatusKey,
+        statusLabel: finalStatusLabel,
+        leavePayType: leavePayTypeForStatus(finalStatusKey),
+        timeIn,
+        timeOut,
+        reason: finalReason,
+        attachmentName: String(attachmentName || '').trim(),
+    };
+}
+
+async function commitManualAttendanceMark({
+    employee,
+    employeeMongoId,
+    date,
+    payload,
+    markedBy,
+    employeeId = '',
+    employeeName = '',
+}) {
+    const otUpdate = await flexibleOtManualUpdate({
+        employee: employee || { _id: employeeMongoId, staffType: 'office' },
+        date,
+        timeIn: payload.timeIn,
+        timeOut: payload.timeOut,
+        statusKey: payload.statusKey,
+    });
+    const resolvedName =
+        String(employeeName || '').trim() ||
+        [employee?.firstName, employee?.lastName].filter(Boolean).join(' ').trim();
+    return Attendance.findOneAndUpdate(
+        { date, employeeMongoId },
+        {
+            $set: {
+                date,
+                employeeMongoId,
+                employeeId: String(employeeId || employee?.employeeId || '').trim(),
+                employeeName: resolvedName,
+                statusKey: payload.statusKey,
+                statusLabel: payload.statusLabel,
+                leavePayType: payload.leavePayType,
+                timeIn: payload.timeIn,
+                timeOut: payload.timeOut,
+                reason: payload.reason,
+                attachmentName: payload.attachmentName,
+                approvalStatus: approvalStatusForMark(payload.statusKey),
+                punchSource: 'manual',
+                checkOutSource: payload.timeOut ? 'manual' : '',
+                markedBy,
+                ...otUpdate,
+            },
+            $unset: {
+                checkInLocation: 1,
+                checkOutLocation: 1,
+                ...(payload.statusKey === 'compoff_leave' ? {} : { compOff: 1 }),
+            },
+        },
+        { upsert: true, new: true, setDefaultsOnInsert: true },
+    );
+}
+
+function storedPunchLocation(location) {
+    if (location?.latitude == null || location?.longitude == null) return null;
+    return {
+        latitude: location.latitude,
+        longitude: location.longitude,
+        accuracy: location.accuracy ?? null,
+        label: location.label || '',
+        source: location.source || '',
+    };
+}
+
+async function commitMappedAttendanceChange({ request, markedBy }) {
+    const proposed = request?.proposed || {};
+    const checkInLocation = storedPunchLocation(proposed.checkInLocation);
+    const checkOutLocation = storedPunchLocation(proposed.checkOutLocation);
+    const otUpdate = await flexibleOtManualUpdate({
+        employee: { _id: request.employeeMongoId },
+        date: request.date,
+        timeIn: proposed.timeIn || '',
+        timeOut: proposed.timeOut || '',
+        statusKey: proposed.statusKey || 'not_marked',
+    });
+    const set = {
+        date: request.date,
+        employeeMongoId: request.employeeMongoId,
+        employeeId: request.employeeId || '',
+        employeeName: request.employeeName || '',
+        statusKey: proposed.statusKey || 'not_marked',
+        statusLabel: proposed.statusLabel || 'Not marked',
+        leavePayType: leavePayTypeForStatus(proposed.statusKey),
+        timeIn: proposed.timeIn || '',
+        timeOut: proposed.timeOut || '',
+        reason: proposed.reason || '',
+        punchSource: proposed.punchSource || '',
+        checkOutSource: proposed.checkOutSource || '',
+        approvalStatus: proposed.timeIn ? approvalStatusForMark(proposed.statusKey) : '',
+        punchMappedFromEmployeeMongoId: proposed.punchMappedFromEmployeeMongoId || '',
+        markedBy,
+        ...otUpdate,
+    };
+    if (checkInLocation) set.checkInLocation = checkInLocation;
+    if (checkOutLocation) set.checkOutLocation = checkOutLocation;
+    const unset = {};
+    if (!checkInLocation) unset.checkInLocation = 1;
+    if (!checkOutLocation) unset.checkOutLocation = 1;
+    return Attendance.findOneAndUpdate(
+        { date: request.date, employeeMongoId: request.employeeMongoId },
+        {
+            $set: set,
+            ...(Object.keys(unset).length ? { $unset: unset } : {}),
+        },
+        { upsert: true, new: true, setDefaultsOnInsert: true },
+    );
+}
+
+async function loadChangeApprovalContext(req) {
+    const [actor, actorIsHr, hr] = await Promise.all([
+        resolveLinkedEmployee(req),
+        viewerIsFlowchartHr(req),
+        getDepartmentHOD('hr').catch(() => null),
+    ]);
+    return {
+        actor,
+        actorIsHr,
+        hr: hr?._id ? hr : null,
+    };
+}
+
+const CHANGE_REPORTEE_SELECT = 'firstName lastName employeeId companyEmail workEmail email';
+
+async function queueOrApplyManualMark(ctx, {
+    employee,
+    employeeMongoId,
+    date,
+    statusKey,
+    statusLabel,
+    timeIn,
+    timeOut,
+    reason,
+    attachmentName,
+    markedBy,
+    employeeId = '',
+    employeeName = '',
+}) {
+    const id = String(employee?._id || employeeMongoId || '').trim();
+    const payload = await resolveManualMarkPayload({
+        employee,
+        employeeMongoId: id,
+        date,
+        statusKey,
+        statusLabel,
+        timeIn,
+        timeOut,
+        reason,
+        attachmentName,
+    });
+    const existing = id ? await Attendance.findOne({ date, employeeMongoId: id }).lean() : null;
+
+    if (!ctx.actorIsHr && attendanceMarksMatch(existing, payload)) {
+        return { applied: existing, pending: null };
+    }
+
+    const reporteeRef = employee?.primaryReportee;
+    const reporteeId = reporteeRef?._id || reporteeRef || '';
+    const stage = approvalStageForAttendanceChange({
+        actorIsHr: ctx.actorIsHr,
+        actorId: ctx.actor?._id,
+        reporteeId,
+        hrId: ctx.hr?._id,
+    });
+
+    if (stage === 'apply') {
+        const doc = await commitManualAttendanceMark({
+            employee,
+            employeeMongoId: id,
+            date,
+            payload,
+            markedBy,
+            employeeId,
+            employeeName,
+        });
+        await supersedeOpenAttendanceChanges({
+            date,
+            employeeMongoId: id,
+            actorId: ctx.actor?._id,
+        });
+        return { applied: doc, pending: null };
+    }
+
+    if (!employee?._id) {
+        return { error: 'Employee not found, so this attendance change cannot be sent for approval.' };
+    }
+    if (stage === 'pending_hr' && !ctx.hr?._id) {
+        return { error: 'Flowchart HR is not set, so this attendance change cannot be sent for approval.' };
+    }
+
+    let reportee = null;
+    if (reporteeRef && typeof reporteeRef === 'object' && reporteeRef._id) {
+        reportee = reporteeRef;
+    } else if (reporteeId) {
+        reportee = await EmployeeBasic.findById(reporteeId).select(CHANGE_REPORTEE_SELECT).lean();
+    }
+    if (stage === 'pending_reportee' && !reportee?._id) {
+        return { error: 'This employee has no primary reportee, so the change cannot be sent for approval.' };
+    }
+
+    const pending = await submitAttendanceChange({
+        employee,
+        date,
+        proposed: payload,
+        previous: previousAttendanceSnapshot(existing),
+        stage,
+        actor: ctx.actor,
+        reportee,
+        hr: ctx.hr,
+    });
+    return { applied: null, pending };
+}
+
 /** POST /api/Attendance/mark — upsert one or many marks for a day */
 export async function markAttendance(req, res) {
     try {
@@ -1090,7 +1402,9 @@ export async function markAttendance(req, res) {
         if (windowClosed) return;
 
         const markedBy = req.user?.id || null;
+        const approvalCtx = await loadChangeApprovalContext(req);
         const saved = [];
+        const pending = [];
 
         for (const raw of marks) {
             const employeeMongoId = String(raw?.employeeMongoId || raw?.id || '').trim();
@@ -1108,6 +1422,11 @@ export async function markAttendance(req, res) {
                     date,
                     markedBy,
                 });
+                await supersedeOpenAttendanceChanges({
+                    date,
+                    employeeMongoId,
+                    actorId: approvalCtx.actor?._id,
+                });
                 saved.push(restored);
                 continue;
             }
@@ -1121,111 +1440,40 @@ export async function markAttendance(req, res) {
 
             const timeIn = raw?.timeIn != null && raw.timeIn !== '—' ? String(raw.timeIn).trim() : '';
             const timeOut = raw?.timeOut != null && raw.timeOut !== '—' ? String(raw.timeOut).trim() : '';
-            let reason = String(raw?.reason || '').trim();
-            let leavePayType = '';
+            const reason = String(raw?.reason || '').trim();
+            const markEmployee = await EmployeeBasic.findById(employeeMongoId)
+                .select(
+                    '_id employeeId firstName lastName staffType primaryReportee companyEmail workEmail email',
+                )
+                .populate('primaryReportee', CHANGE_REPORTEE_SELECT)
+                .lean();
 
-            // Apply Flowchart HR Working Time punch rules (grace / early go) when times are set.
-            let finalStatusKey = statusKey;
-            let finalStatusLabel =
-                statusKey === 'authorized_leave' ? authorizedLeaveLabel(leavePayType) : statusLabel;
-            let markEmployee = null;
-            try {
-                markEmployee = await EmployeeBasic.findById(employeeMongoId)
-                    .select('staffType employeeId firstName lastName')
-                    .lean();
-                const staffType = normalizeStaffType(markEmployee?.staffType);
-                const workingTime = await loadWorkingTimeDoc();
-                const week = getWeekForStaffType(workingTime, staffType);
-                const schedule = getScheduledPunchMinutes(week, date);
-                const resolved = resolveStatusFromPunches({
-                    timeIn,
-                    timeOut,
-                    startMinutes: schedule.startMinutes,
-                    endMinutes: schedule.endMinutes,
-                    isOffDay: schedule.isOffDay,
-                    baseStatusKey: statusKey,
-                    baseStatusLabel:
-                        statusKey === 'authorized_leave'
-                            ? authorizedLeaveLabel(leavePayType)
-                            : statusLabel,
-                    baseReason: reason,
-                });
-                finalStatusKey = resolved.statusKey;
-                finalStatusLabel = resolved.statusLabel;
-                if (resolved.reason !== undefined) reason = resolved.reason;
-            } catch (scheduleErr) {
-                console.error('[markAttendance] schedule punch rules failed:', scheduleErr);
-            }
-
-            if (finalStatusKey === 'sick_leave') {
-                if (!markEmployee) {
-                    markEmployee = await EmployeeBasic.findById(employeeMongoId)
-                        .select('staffType employeeId')
-                        .lean();
-                }
-                const overflowMap = await resolveSickOverflowStatuses(
-                    markEmployee || { _id: employeeMongoId },
-                    [date],
-                );
-                if (overflowMap.get(date) === 'authorized_leave') {
-                    finalStatusKey = 'authorized_leave';
-                    leavePayType = '';
-                    finalStatusLabel = authorizedLeaveLabel(leavePayType);
-                    reason = reason
-                        ? `${reason} · Sick allowance used`
-                        : 'Converted from sick leave after the allowance from last annual leave was used';
-                }
-            }
-
-            if (finalStatusKey === 'authorized_leave') {
-                finalStatusLabel = authorizedLeaveLabel(leavePayType);
-            }
-
-            const otUpdate = await flexibleOtManualUpdate({
-                employee: markEmployee || { _id: employeeMongoId, staffType: 'office' },
+            const result = await queueOrApplyManualMark(approvalCtx, {
+                employee: markEmployee,
+                employeeMongoId,
                 date,
+                statusKey,
+                statusLabel,
                 timeIn,
                 timeOut,
-                statusKey: finalStatusKey,
+                reason,
+                attachmentName: String(raw?.attachmentName || '').trim(),
+                markedBy,
+                employeeId: String(raw?.employeeId || raw?.empNo || markEmployee?.employeeId || '').trim(),
+                employeeName: String(raw?.employeeName || raw?.name || '').trim(),
             });
-
-            const doc = await Attendance.findOneAndUpdate(
-                { date, employeeMongoId },
-                {
-                    $set: {
-                        date,
-                        employeeMongoId,
-                        employeeId: String(raw?.employeeId || raw?.empNo || '').trim(),
-                        employeeName: String(raw?.employeeName || raw?.name || '').trim(),
-                        statusKey: finalStatusKey,
-                        statusLabel: finalStatusLabel,
-                        leavePayType: leavePayTypeForStatus(finalStatusKey, leavePayType),
-                        timeIn,
-                        timeOut,
-                        reason,
-                        attachmentName: String(raw?.attachmentName || '').trim(),
-                        approvalStatus: approvalStatusForMark(finalStatusKey),
-                        punchSource: 'manual',
-                        checkOutSource: timeOut ? 'manual' : '',
-                        markedBy,
-                        ...otUpdate,
-                    },
-                    $unset: {
-                        checkInLocation: 1,
-                        checkOutLocation: 1,
-                        ...(finalStatusKey === 'compoff_leave' ? {} : { compOff: 1 }),
-                    },
-                },
-                { upsert: true, new: true, setDefaultsOnInsert: true },
-            );
-
-            saved.push(doc);
+            if (result.error) {
+                return res.status(400).json({ message: result.error });
+            }
+            if (result.applied) saved.push(result.applied);
+            if (result.pending) pending.push(result.pending);
         }
 
         return res.status(200).json({
-            message: 'Attendance saved successfully',
+            message: describeAttendanceSave({ savedCount: saved.length, pending }),
             date,
             records: saved,
+            pending,
         });
     } catch (error) {
         console.error('[markAttendance]', error);
@@ -2260,7 +2508,10 @@ export async function mapAttendanceFromEmployee(req, res) {
         if (windowClosed) return;
 
         const [targetEmp, sourceEmp] = await Promise.all([
-            EmployeeBasic.findById(targetId).select('_id employeeId firstName lastName').lean(),
+            EmployeeBasic.findById(targetId)
+                .select('_id employeeId firstName lastName staffType primaryReportee companyEmail workEmail email')
+                .populate('primaryReportee', CHANGE_REPORTEE_SELECT)
+                .lean(),
             EmployeeBasic.findById(sourceId).select('_id employeeId firstName lastName').lean(),
         ]);
         if (!targetEmp || !sourceEmp) {
@@ -2303,6 +2554,67 @@ export async function mapAttendanceFromEmployee(req, res) {
         if (!checkInLocation) unset.checkInLocation = 1;
         if (!checkOutLocation) unset.checkOutLocation = 1;
 
+        const approvalCtx = await loadChangeApprovalContext(req);
+        const reporteeRef = targetEmp.primaryReportee;
+        const stage = approvalStageForAttendanceChange({
+            actorIsHr: approvalCtx.actorIsHr,
+            actorId: approvalCtx.actor?._id,
+            reporteeId: reporteeRef?._id || reporteeRef || '',
+            hrId: approvalCtx.hr?._id,
+        });
+
+        if (stage !== 'apply') {
+            if (stage === 'pending_hr' && !approvalCtx.hr?._id) {
+                return res.status(400).json({
+                    message: 'Flowchart HR is not set, so this attendance change cannot be sent for approval.',
+                });
+            }
+            let reportee =
+                reporteeRef && typeof reporteeRef === 'object' && reporteeRef._id
+                    ? reporteeRef
+                    : null;
+            if (!reportee && reporteeRef) {
+                reportee = await EmployeeBasic.findById(reporteeRef)
+                    .select(CHANGE_REPORTEE_SELECT)
+                    .lean();
+            }
+            if (stage === 'pending_reportee' && !reportee?._id) {
+                return res.status(400).json({
+                    message: 'This employee has no primary reportee, so the change cannot be sent for approval.',
+                });
+            }
+            const existing = await Attendance.findOne({ date, employeeMongoId: targetId }).lean();
+            const pending = await submitAttendanceChange({
+                employee: targetEmp,
+                date,
+                action: 'map',
+                proposed: {
+                    statusKey: set.statusKey,
+                    statusLabel: set.statusLabel,
+                    leavePayType: leavePayTypeForStatus(set.statusKey),
+                    timeIn: set.timeIn,
+                    timeOut: set.timeOut,
+                    reason: set.reason,
+                    attachmentName: '',
+                    punchSource: set.punchSource,
+                    checkOutSource: set.checkOutSource,
+                    punchMappedFromEmployeeMongoId: sourceId,
+                    checkInLocation: checkInLocation || undefined,
+                    checkOutLocation: checkOutLocation || undefined,
+                },
+                previous: previousAttendanceSnapshot(existing),
+                stage,
+                actor: approvalCtx.actor,
+                reportee,
+                hr: approvalCtx.hr,
+            });
+            return res.status(200).json({
+                message: describeAttendanceSave({ savedCount: 0, pending: [pending] }),
+                date,
+                pending: [pending],
+            });
+        }
+
         const doc = await Attendance.findOneAndUpdate(
             { date, employeeMongoId: targetId },
             {
@@ -2311,6 +2623,11 @@ export async function mapAttendanceFromEmployee(req, res) {
             },
             { upsert: true, new: true, setDefaultsOnInsert: true },
         );
+        await supersedeOpenAttendanceChanges({
+            date,
+            employeeMongoId: targetId,
+            actorId: approvalCtx.actor?._id,
+        });
 
         return res.status(200).json({
             message: hasOut
@@ -2614,9 +2931,10 @@ export async function markTeamAttendance(req, res) {
                 : '';
         const reason = String(req.body?.reason || '').trim();
         const attachmentName = String(req.body?.attachmentName || '').trim();
-        const leavePayType = '';
         const markedBy = req.user?.id || null;
+        const approvalCtx = await loadChangeApprovalContext(req);
         const saved = [];
+        const pending = [];
 
         for (const employeeMongoId of ids) {
             const allowed = await isEmployeeInTeamTree(self._id, employeeMongoId);
@@ -2632,95 +2950,52 @@ export async function markTeamAttendance(req, res) {
                     date,
                     markedBy,
                 });
+                await supersedeOpenAttendanceChanges({
+                    date,
+                    employeeMongoId,
+                    actorId: approvalCtx.actor?._id,
+                });
                 saved.push(restored);
                 continue;
             }
 
             const emp = await EmployeeBasic.findById(employeeMongoId)
-                .select('_id employeeId firstName lastName staffType')
+                .select(
+                    '_id employeeId firstName lastName staffType primaryReportee companyEmail workEmail email',
+                )
+                .populate('primaryReportee', CHANGE_REPORTEE_SELECT)
                 .lean();
             if (!emp) continue;
 
-            let finalStatusKey = statusKey;
-            let finalStatusLabel =
-                statusKey === 'authorized_leave' ? authorizedLeaveLabel(leavePayType) : statusLabel;
-            let finalReason = reason;
-            try {
-                const staffType = normalizeStaffType(emp.staffType);
-                const workingTime = await loadWorkingTimeDoc();
-                const week = getWeekForStaffType(workingTime, staffType);
-                const schedule = getScheduledPunchMinutes(week, date);
-                const resolved = resolveStatusFromPunches({
-                    timeIn,
-                    timeOut,
-                    startMinutes: schedule.startMinutes,
-                    endMinutes: schedule.endMinutes,
-                    isOffDay: schedule.isOffDay,
-                    baseStatusKey: statusKey,
-                    baseStatusLabel:
-                        statusKey === 'authorized_leave'
-                            ? authorizedLeaveLabel(leavePayType)
-                            : statusLabel,
-                    baseReason: reason,
-                });
-                finalStatusKey = resolved.statusKey;
-                finalStatusLabel = resolved.statusLabel;
-                if (resolved.reason !== undefined) finalReason = resolved.reason;
-            } catch (scheduleErr) {
-                console.error('[markTeamAttendance] schedule punch rules failed:', scheduleErr);
-            }
-
-            if (finalStatusKey === 'authorized_leave') {
-                finalStatusLabel = authorizedLeaveLabel(leavePayType);
-            }
-
-            const otUpdate = await flexibleOtManualUpdate({
+            const result = await queueOrApplyManualMark(approvalCtx, {
                 employee: emp,
+                employeeMongoId,
                 date,
+                statusKey,
+                statusLabel,
                 timeIn,
                 timeOut,
-                statusKey: finalStatusKey,
+                reason,
+                attachmentName,
+                markedBy,
+                employeeId: emp.employeeId || '',
+                employeeName: [emp.firstName, emp.lastName].filter(Boolean).join(' ').trim(),
             });
-
-            const doc = await Attendance.findOneAndUpdate(
-                { date, employeeMongoId },
-                {
-                    $set: {
-                        date,
-                        employeeMongoId,
-                        employeeId: String(emp.employeeId || ''),
-                        employeeName: [emp.firstName, emp.lastName].filter(Boolean).join(' ').trim(),
-                        statusKey: finalStatusKey,
-                        statusLabel: finalStatusLabel,
-                        leavePayType: leavePayTypeForStatus(finalStatusKey, leavePayType),
-                        timeIn,
-                        timeOut,
-                        reason: finalReason,
-                        attachmentName,
-                        approvalStatus: approvalStatusForMark(finalStatusKey),
-                        punchSource: 'manual',
-                        checkOutSource: timeOut ? 'manual' : '',
-                        markedBy,
-                        ...otUpdate,
-                    },
-                    $unset: {
-                        checkInLocation: 1,
-                        checkOutLocation: 1,
-                        ...(finalStatusKey === 'compoff_leave' ? {} : { compOff: 1 }),
-                    },
-                },
-                { upsert: true, new: true, setDefaultsOnInsert: true },
-            );
-            saved.push(doc);
+            if (result.error) {
+                return res.status(400).json({ message: result.error });
+            }
+            if (result.applied) saved.push(result.applied);
+            if (result.pending) pending.push(result.pending);
         }
 
         return res.status(200).json({
             message: isClear
                 ? 'Team attendance cleared successfully'
-                : 'Team attendance marked successfully',
+                : describeAttendanceSave({ savedCount: saved.length, pending }),
             date,
             count: saved.length,
             records: saved,
+            pending,
         });
     } catch (error) {
         console.error('[markTeamAttendance]', error);
@@ -2835,12 +3110,17 @@ export async function getAttendancePendingInbox(req, res) {
             buildAssigneeClauses(ctx.relevantIds || [], ctx.employeeIdCode),
             'attendance',
         );
+        const changeItems = await loadAttendanceChangeInboxItems({
+            viewerId: self._id,
+            viewerIsHr,
+            reporteeIds,
+        });
 
         if (!reporteeIds.length) {
             return res.status(200).json({
                 message: 'Attendance pending inbox fetched successfully',
-                count: otItems.length + hourItems.length + attendanceTaskItems.length,
-                items: [...otItems, ...hourItems, ...attendanceTaskItems],
+                count: otItems.length + hourItems.length + attendanceTaskItems.length + changeItems.length,
+                items: [...changeItems, ...otItems, ...hourItems, ...attendanceTaskItems],
             });
         }
 
@@ -2921,8 +3201,8 @@ export async function getAttendancePendingInbox(req, res) {
 
         return res.status(200).json({
             message: 'Attendance pending inbox fetched successfully',
-            count: items.length + otItems.length + hourItems.length + attendanceTaskItems.length,
-            items: [...otItems, ...hourItems, ...items, ...attendanceTaskItems],
+            count: items.length + otItems.length + hourItems.length + attendanceTaskItems.length + changeItems.length,
+            items: [...changeItems, ...otItems, ...hourItems, ...items, ...attendanceTaskItems],
         });
     } catch (error) {
         console.error('[getAttendancePendingInbox]', error);
@@ -2969,6 +3249,135 @@ export async function approveAttendancePending(req, res) {
     } catch (error) {
         console.error('[approveAttendancePending]', error);
         return res.status(500).json({ message: error.message || 'Failed to approve attendance.' });
+    }
+}
+
+/**
+ * POST /api/Attendance/change-request/decide
+ * Primary reportee approval forwards the edit to HR.
+ * HR approval writes the attendance day.
+ * Body: { id, decision: 'approved' | 'rejected' }
+ */
+export async function decideAttendanceChangeRequest(req, res) {
+    try {
+        if (mongoose.connection.readyState !== 1) {
+            return res.status(503).json({ message: 'Database not connected.' });
+        }
+
+        const actor = await resolveLinkedEmployee(req);
+        if (!actor) {
+            return res.status(404).json({ message: 'No linked employee profile found for this user.' });
+        }
+
+        const id = String(req.body?.id || '').trim();
+        const decision = String(req.body?.decision || '').trim().toLowerCase();
+        if (!mongoose.Types.ObjectId.isValid(id)) {
+            return res.status(400).json({ message: 'Attendance change id is required.' });
+        }
+        if (decision !== 'approved' && decision !== 'rejected') {
+            return res.status(400).json({ message: 'Decision must be approved or rejected.' });
+        }
+
+        const request = await AttendanceChangeRequest.findById(id);
+        if (!request || !['pending_reportee', 'pending_hr'].includes(request.stage)) {
+            return res.status(404).json({ message: 'Pending attendance change not found.' });
+        }
+
+        const employee = await EmployeeBasic.findById(request.employeeMongoId)
+            .select('_id employeeId firstName lastName staffType primaryReportee companyEmail workEmail email')
+            .populate('primaryReportee', CHANGE_REPORTEE_SELECT)
+            .lean();
+        const liveReporteeId = employee?.primaryReportee?._id || employee?.primaryReportee || '';
+        const actorIsReportee =
+            String(actor._id) === String(request.reporteeId || '') ||
+            String(actor._id) === String(liveReporteeId || '');
+        const actorIsHr = await viewerIsFlowchartHr(req);
+
+        if (request.stage === 'pending_reportee' && !actorIsReportee) {
+            return res.status(403).json({ message: 'Only the primary reportee can approve this change.' });
+        }
+        if (request.stage === 'pending_hr' && !actorIsHr) {
+            return res.status(403).json({ message: 'Only flowchart HR can approve this change.' });
+        }
+
+        if (decision === 'rejected') {
+            const waitingOnHr = request.stage === 'pending_hr';
+            request.stage = 'rejected';
+            if (waitingOnHr) {
+                request.decidedByHr = actor._id;
+                request.decidedAtHr = new Date();
+            } else {
+                request.decidedByReportee = actor._id;
+                request.decidedAtReportee = new Date();
+            }
+            await request.save();
+            await closeAttendanceChangeRequest(request, { status: 'Rejected', actorId: actor._id });
+            return res.status(200).json({
+                message: 'Attendance change rejected. The day was not updated.',
+            });
+        }
+
+        if (request.stage === 'pending_reportee') {
+            const hr = await getDepartmentHOD('hr').catch(() => null);
+            if (!hr?._id) {
+                return res.status(400).json({
+                    message: 'Flowchart HR is not set, so this change cannot move forward.',
+                });
+            }
+            await forwardAttendanceChangeToHr({
+                request,
+                actor,
+                hr,
+                employee: employee || {
+                    _id: request.employeeMongoId,
+                    employeeId: request.employeeId,
+                    firstName: request.employeeName,
+                },
+            });
+            return res.status(200).json({
+                message: 'Approved. Sent to HR. Attendance stays unchanged until HR approves.',
+            });
+        }
+
+        const payload = {
+            statusKey: request.proposed?.statusKey,
+            statusLabel: request.proposed?.statusLabel,
+            leavePayType: request.proposed?.leavePayType || '',
+            timeIn: request.proposed?.timeIn || '',
+            timeOut: request.proposed?.timeOut || '',
+            reason: request.proposed?.reason || '',
+            attachmentName: request.proposed?.attachmentName || '',
+        };
+        if (!ATTENDANCE_STATUS_KEYS.includes(payload.statusKey) && payload.statusKey !== 'not_marked') {
+            return res.status(400).json({ message: 'This attendance change is no longer valid.' });
+        }
+        const record =
+            request.action === 'map'
+                ? await commitMappedAttendanceChange({
+                    request,
+                    markedBy: req.user?.id || null,
+                })
+                : await commitManualAttendanceMark({
+                    employee,
+                    employeeMongoId: request.employeeMongoId,
+                    date: request.date,
+                    payload,
+                    markedBy: req.user?.id || null,
+                    employeeId: request.employeeId,
+                    employeeName: request.employeeName,
+                });
+        request.stage = 'approved';
+        request.decidedByHr = actor._id;
+        request.decidedAtHr = new Date();
+        await request.save();
+        await closeAttendanceChangeRequest(request, { status: 'Approved', actorId: actor._id });
+        return res.status(200).json({
+            message: 'Attendance change approved.',
+            record,
+        });
+    } catch (error) {
+        console.error('[decideAttendanceChangeRequest]', error);
+        return res.status(500).json({ message: error.message || 'Failed to decide the attendance change.' });
     }
 }
 

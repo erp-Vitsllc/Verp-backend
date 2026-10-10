@@ -2,9 +2,11 @@ import mongoose from 'mongoose';
 import Attendance from '../models/Attendance.js';
 import EmployeeBasic from '../models/EmployeeBasic.js';
 import { getDepartmentHOD } from '../utils/getDepartmentHOD.js';
+import { flexibleLossHours } from '../utils/flexibleAttendance.js';
 import {
     getScheduledPunchMinutes,
     getWeekForStaffType,
+    isFlexibleTiming,
     loadWorkingTimeDoc,
     normalizeStaffType,
 } from '../utils/workingTimeHelpers.js';
@@ -73,6 +75,9 @@ export function hourAdjustKindOf(record) {
 }
 
 function hoursTakenOf(record, week, kind) {
+    if (isFlexibleTiming(week)) {
+        return { taken: flexibleLossHours(record, week), dayHours: 0, flexible: true };
+    }
     const schedule = getScheduledPunchMinutes(week, record?.date);
     const dayHours = schedule?.flexible
         ? (Number(schedule.scheduledMinutes) || 0) / 60
@@ -117,13 +122,14 @@ export async function requestHourAdjust(req, res) {
         if (!actor) return res.status(404).json({ message: 'No linked employee profile found.' });
 
         const attendanceId = String(req.body?.attendanceId || '').trim();
-        const approvedHours = roundHours(req.body?.approvedHours);
+        const requestedHours = Number(req.body?.approvedHours);
         const reason = String(req.body?.reason || '').trim();
         if (!mongoose.Types.ObjectId.isValid(attendanceId)) {
             return res.status(400).json({ message: 'Attendance record is required.' });
         }
-        if (!reason) return res.status(400).json({ message: 'Description is required.' });
-        if (approvedHours <= 0) return res.status(400).json({ message: 'Approved hours are required.' });
+        if (!Number.isFinite(requestedHours) || requestedHours <= 0) {
+            return res.status(400).json({ message: 'Approved hours are required.' });
+        }
 
         const record = await Attendance.findById(attendanceId);
         if (!record) return res.status(404).json({ message: 'Attendance record not found.' });
@@ -134,8 +140,13 @@ export async function requestHourAdjust(req, res) {
         if (!kind) return res.status(400).json({ message: 'This status cannot be sent for hour approval.' });
 
         const week = await weekForRecord(record);
-        const { taken } = hoursTakenOf(record, week, kind);
-        const max = roundHours(taken * UNAUTH_TIMES);
+        const { taken, flexible } = hoursTakenOf(record, week, kind);
+        if (!flexible && !reason) return res.status(400).json({ message: 'Description is required.' });
+        if (flexible && Math.abs(requestedHours - Math.round(requestedHours)) > 0.001) {
+            return res.status(400).json({ message: 'Approved hours must be a whole number.' });
+        }
+        const approvedHours = flexible ? Math.round(requestedHours) : roundHours(requestedHours);
+        const max = flexible ? taken : roundHours(taken * UNAUTH_TIMES);
         if (max <= 0) return res.status(400).json({ message: 'No hours to approve on this day.' });
         if (approvedHours > max + 0.001) {
             return res.status(400).json({ message: `Approved hours cannot be more than ${max}.` });
