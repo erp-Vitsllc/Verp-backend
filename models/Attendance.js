@@ -242,6 +242,46 @@ const attendanceSchema = new mongoose.Schema(
             default: '',
             trim: true,
         },
+        /**
+         * Earlier completed check-in/out pairs for this same day.
+         * timeIn/timeOut stay the latest session so a closed day can be opened again.
+         */
+        punchSessions: {
+            type: [
+                {
+                    timeIn: { type: String, default: '', trim: true },
+                    timeOut: { type: String, default: '', trim: true },
+                    timeOutDate: { type: String, default: '', trim: true },
+                    punchSource: {
+                        type: String,
+                        enum: ['', 'app', 'web', 'manual'],
+                        default: '',
+                        trim: true,
+                    },
+                    checkOutSource: {
+                        type: String,
+                        enum: ['', 'app', 'web', 'manual'],
+                        default: '',
+                        trim: true,
+                    },
+                    checkInLocation: {
+                        latitude: { type: Number, default: null },
+                        longitude: { type: Number, default: null },
+                        accuracy: { type: Number, default: null },
+                        label: { type: String, default: '', trim: true },
+                        source: { type: String, enum: ['', 'app', 'web', 'manual'], default: '', trim: true },
+                    },
+                    checkOutLocation: {
+                        latitude: { type: Number, default: null },
+                        longitude: { type: Number, default: null },
+                        accuracy: { type: Number, default: null },
+                        label: { type: String, default: '', trim: true },
+                        source: { type: String, enum: ['', 'app', 'web', 'manual'], default: '', trim: true },
+                    },
+                },
+            ],
+            default: [],
+        },
         flexibleWorkedHours: { type: Number, default: 0 },
         flexibleRequiredHours: { type: Number, default: 0 },
         flexibleOtHours: { type: Number, default: 0 },

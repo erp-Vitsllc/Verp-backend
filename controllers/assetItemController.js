@@ -14722,6 +14722,10 @@ export const updateAssetServiceDraft = async (req, res) => {
         const isOilServicePending =
             String(service.serviceType || '').trim() === 'Oil Service' &&
             ['draft', 'pending'].includes(String(remarkObj?.requestStatus || '').toLowerCase());
+        const isCarWashOpen =
+            String(service.serviceType || '').trim() === 'Car Wash' &&
+            (['draft', 'pending'].includes(reqStatus) ||
+                (reqStatus === 'submitted' && !zohoBillAccepted));
         const isVehicleServiceTabPending =
             isVehicleServiceTabRequestType(service.serviceType) &&
             ['draft', 'pending'].includes(String(remarkObj?.requestStatus || '').toLowerCase());
@@ -14753,6 +14757,13 @@ export const updateAssetServiceDraft = async (req, res) => {
             if (!allowed) {
                 return res.status(403).json({
                     message: 'Access denied. Sign in to update this service request.',
+                });
+            }
+        } else if (isCarWashOpen) {
+            const allowed = await actorMayCreateOrInitiateVehicleService(req.user);
+            if (!allowed) {
+                return res.status(403).json({
+                    message: 'Access denied. Sign in to update this car wash request.',
                 });
             }
         } else if (!actorFlags.canAct) {

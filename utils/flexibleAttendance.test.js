@@ -2,14 +2,27 @@ import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 import {
     approvedOtRemainder,
+    dayWorkedMinutes,
     flexibleLossHours,
-    flexibleNextDayChoices,
+    isCurrentMonthDate,
     isAuthorizedLeaveStatus,
     splitApprovedOvertime,
     flexibleOtFieldsFromDuration,
     manualTimeOutDate,
     mergeFlexibleOtState,
 } from './flexibleAttendance.js';
+
+describe('dayWorkedMinutes', () => {
+    it('adds an earlier same-day session to the latest check-in and check-out', () => {
+        const minutes = dayWorkedMinutes({
+            date: '2026-10-12',
+            timeIn: '13:00',
+            timeOut: '18:00',
+            punchSessions: [{ timeIn: '09:00', timeOut: '12:00' }],
+        });
+        assert.equal(minutes, 8 * 60);
+    });
+});
 
 describe('flexibleOtFieldsFromDuration', () => {
     it('shows overtime once the required day plus one hour is complete, and counts that hour', () => {
@@ -171,9 +184,12 @@ describe('flexibleLossHours', () => {
     });
 });
 
-describe('flexibleNextDayChoices', () => {
-    it('offers the next day, this day, and yesterday', () => {
-        assert.deepEqual(flexibleNextDayChoices('2026-10-10'), ['2026-10-11', '2026-10-10', '2026-10-09']);
+describe('isCurrentMonthDate', () => {
+    it('accepts any day in the overtime month', () => {
+        assert.equal(isCurrentMonthDate('2026-10-10', '2026-10-01'), true);
+        assert.equal(isCurrentMonthDate('2026-10-10', '2026-10-31'), true);
+        assert.equal(isCurrentMonthDate('2026-10-10', '2026-11-01'), false);
+        assert.equal(isCurrentMonthDate('2026-10-10', ''), false);
     });
 });
 

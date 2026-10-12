@@ -14,11 +14,8 @@ import { isCompanyShellEmployee } from './attendanceEmployeeFilters.js';
 import { resolveEmployeeFinePayableAmount } from './finePayableAmount.js';
 import { getScheduledEmailTimeZone, getZonedParts } from './scheduleDailyAtMidnight.js';
 import {
-    clockTimeToMinutes,
-    getScheduledPunchMinutes,
     getWeekForStaffType,
     holidayAppliesToStaff,
-    isFlexibleTiming,
     loadWorkingTimeDoc,
 } from './workingTimeHelpers.js';
 import { approvedOtRemainder } from './flexibleAttendance.js';
@@ -33,7 +30,7 @@ import {
 import { loadLeaveTicketEntitlement } from './loadLeaveTicketEntitlement.js';
 import { resolveSalarySlipApprovers } from './resolveSalarySlipApprovers.js';
 import { isSalarySlipCycle } from './salarySlipLeaveTicket.js';
-import { partialLeavePortion } from './partialLeaveWindow.js';
+import { partialLeavePortion, punchAttendanceKind } from './partialLeaveWindow.js';
 import {
     keepAttendanceForProcessingStart,
     resolveSalaryProcessingStartDate,
@@ -54,7 +51,6 @@ const APPROVED_FINE_STATUSES = ['Approved', 'Active', 'Paid', 'Completed'];
 const APPROVED_REWARD_STATUSES = ['Approved', 'Approved (Paid)'];
 const PRESENT_KEYS = new Set(['on_office', 'work_from_home', 'late_arrived', 'early_go']);
 const LEAVE_KEYS = new Set(['authorized_leave', 'unauthorized_leave', 'sick_leave', 'on_leave']);
-const OT_MULTIPLIER = 1.25;
 const ONES = ['', 'One', 'Two', 'Three', 'Four', 'Five', 'Six', 'Seven', 'Eight', 'Nine'];
 const TEENS = ['Ten', 'Eleven', 'Twelve', 'Thirteen', 'Fourteen', 'Fifteen', 'Sixteen', 'Seventeen', 'Eighteen', 'Nineteen'];
 const TENS = ['', '', 'Twenty', 'Thirty', 'Forty', 'Fifty', 'Sixty', 'Seventy', 'Eighty', 'Ninety'];
@@ -444,32 +440,6 @@ function structureYearlySalary(entry) {
         }));
 }
 
-function overtimeFromPunch({ timeIn, timeOut, date, week, monthlySalary, isHoliday = false }) {
-    const actualIn = clockTimeToMinutes(timeIn);
-    const actualOut = clockTimeToMinutes(timeOut);
-    if (actualIn == null || actualOut == null || monthlySalary <= 0) {
-        return { amount: 0, hours: 0, isOffDay: false };
-    }
-    let worked = actualOut - actualIn;
-    if (worked <= 0) worked += 24 * 60;
-    const scheduled = getScheduledPunchMinutes(week, date);
-    const offDay = Boolean(scheduled.isOffDay || isHoliday);
-    let scheduledMinutes = 0;
-    if (!offDay) {
-        scheduledMinutes = (scheduled.endMinutes ?? 18 * 60) - (scheduled.startMinutes ?? 9 * 60);
-        if (scheduledMinutes <= 0) scheduledMinutes += 24 * 60;
-    }
-    const otMinutes = offDay ? worked : Math.max(0, worked - scheduledMinutes);
-    if (otMinutes <= 0) return { amount: 0, hours: 0, isOffDay: offDay };
-    const dayHours = (scheduledMinutes > 0 ? scheduledMinutes : 8 * 60) / 60;
-    const hourly = monthlySalary / 30 / dayHours;
-    return {
-        amount: money(hourly * OT_MULTIPLIER * (otMinutes / 60)),
-        hours: otMinutes / 60,
-        isOffDay: offDay,
-    };
-}
-
 function policyTimes(value, fallback) {
     const n = Number(value);
     return Number.isFinite(n) && n >= 0 ? n : fallback;
@@ -729,7 +699,7 @@ export async function buildSalarySlipPayload({
                 $or: [{ employeeMongoId: mongoId }, { employeeId: idPattern }],
                 date: { $gte: from, $lte: to },
             })
-                .select('date statusKey reason leavePayType timeIn timeOut flexibleOtStatus flexibleOtApprovedHours flexibleOtNextDayDate')
+                .select('date statusKey reason leavePayType timeIn timeOut timeOutDate punchSessions flexibleOtStatus flexibleOtApprovedHours flexibleOtNextDayDate')
                 .lean(),
             Holiday.find({ date: { $gte: from, $lte: to } }).select('date appliesTo').lean(),
             Loan.find({
@@ -801,6 +771,11 @@ export async function buildSalarySlipPayload({
             .filter((date) => isDateInSalaryMonth(date, ym)),
     );
 
+    const coveredOtSources = new Set(
+        (attendance || [])
+            .map((row) => String(row?.flexibleFromOtDate || '').trim())
+            .filter(Boolean),
+    );
     let presentDays = 0;
     let workingDayLeaves = 0;
     let authorizedDays = 0;
@@ -831,7 +806,8 @@ export async function buildSalarySlipPayload({
         if (!keepAttendanceForProcessingStart(row, processingStart)) continue;
         countedDates.add(date);
         countedAttendance.push(row);
-        const key = String(row.statusKey || '');
+        const storedKey = String(row.statusKey || '');
+        const key = punchAttendanceKind(row) || storedKey;
         if (key === 'holiday') holidayMarks += 1;
         if (key === 'compoff_leave') compOffDays += 1;
         if (PRESENT_KEYS.has(key)) presentDays += 1;
@@ -848,23 +824,14 @@ export async function buildSalarySlipPayload({
         const punched = Boolean(row.timeIn && row.timeOut);
         if (isHolidayDate && punched) holidaysWorked += 1;
 
-        const ot = isFlexibleTiming(week)
-            ? {
-                hours:
-                    String(row.flexibleOtStatus || '') === 'approved' &&
-                    !String(row.flexibleOtNextDayDate || '').trim()
-                        ? approvedOtRemainder(row.flexibleOtApprovedHours)
-                        : 0,
-                isOffDay: false,
-            }
-            : overtimeFromPunch({
-                timeIn: row.timeIn,
-                timeOut: row.timeOut,
-                date,
-                week,
-                monthlySalary: monthly,
-                isHoliday: isHolidayDate,
-            });
+        const nextDayOt = String(row.flexibleOtNextDayDate || '').trim();
+        const otHoursApproved =
+            String(row.flexibleOtStatus || '') === 'approved' &&
+            !nextDayOt &&
+            !coveredOtSources.has(date)
+                ? approvedOtRemainder(row.flexibleOtApprovedHours)
+                : 0;
+        const ot = { hours: otHoursApproved, isOffDay: false };
         if (ot.hours <= 0) continue;
         if (ot.isOffDay || isHolidayDate) {
             otDays += 1;

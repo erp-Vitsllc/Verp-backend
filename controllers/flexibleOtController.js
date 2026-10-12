@@ -4,7 +4,7 @@ import Attendance from '../models/Attendance.js';
 import EmployeeBasic from '../models/EmployeeBasic.js';
 import { getDepartmentHOD } from '../utils/getDepartmentHOD.js';
 import {
-    flexibleNextDayChoices,
+    isCurrentMonthDate,
     isAuthorizedLeaveStatus,
     requiredHoursForDate,
     splitApprovedOvertime,
@@ -17,6 +17,7 @@ import {
 } from '../utils/workingTimeHelpers.js';
 import { refreshFlexibleOtRecords } from '../utils/syncFlexibleOt.js';
 import { resolveFrontendBaseUrl } from '../utils/resolveFrontendBaseUrl.js';
+import { notifyEmployeeFlexibleOtWhatsApp } from '../utils/sendFlexibleOtWhatsApp.js';
 
 async function resolveActor(req) {
     const select = '_id employeeId firstName lastName companyEmail';
@@ -64,7 +65,7 @@ async function revertSyntheticOtDay(employeeMongoId, nextDayDate, sourceDate) {
     });
 }
 
-async function approveFlexibleOvertimeRecord(record, { approvedHours, reason, confirmNextDay, targetDate }) {
+async function approveFlexibleOvertimeRecord(record, { approvedHours, reason, confirmNextDay, targetDate, actor }) {
     const approved = roundHours(approvedHours);
     const dayHours = await workingDayHours(record);
     const split = splitApprovedOvertime(approved, dayHours);
@@ -73,10 +74,10 @@ async function approveFlexibleOvertimeRecord(record, { approvedHours, reason, co
     let nextDate = '';
     if (placeOnAnotherDay) {
         nextDate = String(targetDate || '').trim();
-        if (!flexibleNextDayChoices(record.date).includes(nextDate)) {
+        if (!isCurrentMonthDate(record.date, nextDate)) {
             return {
                 status: 400,
-                body: { message: 'Choose the next day, this day, or yesterday.' },
+                body: { message: 'Choose an authorized leave day in this month.' },
             };
         }
         const existingNext = await Attendance.findOne({
@@ -102,6 +103,12 @@ async function approveFlexibleOvertimeRecord(record, { approvedHours, reason, co
         if (previousNext) await revertSyntheticOtDay(record.employeeMongoId, previousNext, record.date);
         record.flexibleOtNextDayDate = '';
         await record.save();
+        await notifyEmployeeFlexibleOtWhatsApp({
+            record,
+            nextDayPresent: false,
+            approvedHours: approved,
+            actor,
+        });
         return {
             status: 200,
             body: { record, displayOtHours: approved, nextDayPresent: false },
@@ -151,6 +158,13 @@ async function approveFlexibleOvertimeRecord(record, { approvedHours, reason, co
     );
     record.flexibleOtNextDayDate = nextDate;
     await record.save();
+    await notifyEmployeeFlexibleOtWhatsApp({
+        record,
+        nextDayPresent: true,
+        approvedHours: approved,
+        remainderHours: split.remainderHours,
+        actor,
+    });
     return {
         status: 200,
         body: {
@@ -231,6 +245,7 @@ export async function requestFlexibleOvertime(req, res) {
                 reason,
                 confirmNextDay: req.body?.confirmNextDay === true,
                 targetDate: req.body?.targetDate,
+                actor,
             });
             if (applied.status !== 200) {
                 return res.status(applied.status).json(applied.body);
@@ -305,6 +320,7 @@ export async function decideFlexibleOvertime(req, res) {
             approvedHours: record.flexibleOtApprovedHours,
             confirmNextDay,
             targetDate: req.body?.targetDate,
+            actor,
         });
         if (applied.status !== 200) {
             return res.status(applied.status).json(applied.body);

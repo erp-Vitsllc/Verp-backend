@@ -483,10 +483,8 @@ export async function getLeaveCalendar(req, res) {
                 const emp = resolveEmp(row);
                 if (!emp) return null;
                 const statusKey = String(row.statusKey || '').trim();
-                if (
-                    statusKey === 'unauthorized_leave' &&
-                    scheduledCover.has(`${emp._id}|${row.date}`)
-                ) {
+                const cover = scheduledCover.get(`${emp._id}|${row.date}`);
+                if (statusKey === 'unauthorized_leave' && cover && !cover.isPending) {
                     return null;
                 }
                 return {
@@ -523,7 +521,8 @@ export async function getLeaveCalendar(req, res) {
             if (String(entry.statusKey || '') !== 'unauthorized_leave') continue;
             const dayKey = `${entry.employeeMongoId}|${entry.date}`;
             const history = historicalByDay.get(dayKey);
-            if (scheduledCover.has(dayKey) || SCHEDULED_LEAVE_KEYS.has(String(history?.statusKey || ''))) {
+            const cover = scheduledCover.get(dayKey);
+            if ((cover && !cover.isPending) || SCHEDULED_LEAVE_KEYS.has(String(history?.statusKey || ''))) {
                 approvedEntries.splice(index, 1);
             }
         }

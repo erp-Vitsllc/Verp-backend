@@ -10,6 +10,8 @@ import {
     loadWorkingTimeDoc,
     normalizeStaffType,
 } from '../utils/workingTimeHelpers.js';
+import { punchAttendanceKind } from '../utils/partialLeaveWindow.js';
+import { attendanceApprovalLimitMessageFor } from '../utils/attendanceApprovalAllowance.js';
 
 const UNAUTH_TIMES = 2;
 
@@ -57,20 +59,9 @@ async function actorIsFlowchartHr(actor) {
 }
 
 export function hourAdjustKindOf(record) {
-    const key = String(record?.statusKey || '').trim();
-    const text = `${record?.statusLabel || ''} ${record?.reason || ''}`;
-    const session = String(record?.leaveRequestSession || '').trim();
-    if (key === 'mispunch' || /mispunch/i.test(text)) return 'mispunch';
-    if (key === 'early_go' || (key === 'unauthorized_leave' && (session === 'pm' || /early/i.test(text) || /\(PM\)/i.test(text)))) {
-        return 'early_go';
-    }
-    if (
-        key === 'late_arrived' ||
-        (key === 'unauthorized_leave' && (session === 'am' || /\(AM\)/i.test(text) || /late arrival/i.test(text)))
-    ) {
-        return 'late_arrived';
-    }
-    if (key === 'unauthorized_leave') return 'authorized_leave';
+    const kind = punchAttendanceKind(record);
+    if (kind) return kind;
+    if (String(record?.statusKey || '').trim() === 'unauthorized_leave') return 'authorized_leave';
     return '';
 }
 
@@ -138,6 +129,16 @@ export async function requestHourAdjust(req, res) {
         }
         const kind = hourAdjustKindOf(record);
         if (!kind) return res.status(400).json({ message: 'This status cannot be sent for hour approval.' });
+        if (kind === 'late_arrived' || kind === 'early_go' || kind === 'mispunch') {
+            const limitMessage = await attendanceApprovalLimitMessageFor(
+                { _id: record.employeeMongoId, employeeId: record.employeeId },
+                {
+                    pool: kind === 'mispunch' ? 'mispunch' : 'late',
+                    requestDates: [record.date],
+                },
+            );
+            if (limitMessage) return res.status(400).json({ message: limitMessage });
+        }
 
         const week = await weekForRecord(record);
         const { taken, flexible } = hoursTakenOf(record, week, kind);

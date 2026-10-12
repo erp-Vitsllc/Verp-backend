@@ -18,7 +18,7 @@ import {
     isFlexibleTiming,
     weekdayKeyFromDateKey,
 } from '../utils/workingTimeHelpers.js';
-import { addDaysKey, evaluateFlexibleDay, flexibleOtFieldsFromDuration, requiredHoursForDate, workedMinutesAcross } from '../utils/flexibleAttendance.js';
+import { addDaysKey, dayWorkedMinutes, evaluateFlexibleDay, flexibleOtFieldsFromDuration, requiredHoursForDate } from '../utils/flexibleAttendance.js';
 import { settleFulfilledLeaveRequest } from '../utils/leaveRequestSettlement.js';
 import { flexibleOtManualUpdate, refreshFlexibleOtRecords } from '../utils/syncFlexibleOt.js';
 import {
@@ -27,7 +27,11 @@ import {
     restoreClearedAttendance,
 } from '../utils/attendanceNonWorkingDay.js';
 import { nonHrMarkableDateKeys } from '../utils/nonHrMarkWindow.js';
-import { describePartialLeave, partialLeaveOutcome, partialLeavePortion } from '../utils/partialLeaveWindow.js';
+import { describePartialLeave, partialLeaveOutcome, partialLeavePortion, storedPunchGapPatch } from '../utils/partialLeaveWindow.js';
+import {
+    approvalEventPool,
+    attendanceApprovalLimitMessageFor,
+} from '../utils/attendanceApprovalAllowance.js';
 import { staffTypeMongoClause } from '../utils/workLocationHelpers.js';
 import { getDepartmentHOD } from '../utils/getDepartmentHOD.js';
 import { syncDashboardAction } from '../utils/syncDashboard.js';
@@ -841,6 +845,21 @@ export async function getAttendanceMarkRoster(req, res) {
 }
 
 /** GET /api/Attendance?date=yyyy-MM-dd */
+async function rewriteStoredPunchGaps(rows) {
+    const jobs = [];
+    for (const row of rows || []) {
+        const patch = storedPunchGapPatch(row);
+        if (!patch || !row?._id) continue;
+        Object.assign(row, patch);
+        jobs.push(
+            Attendance.updateOne({ _id: row._id }, { $set: patch }).catch((err) => {
+                console.error('[rewriteStoredPunchGaps]', err?.message || err);
+            }),
+        );
+    }
+    if (jobs.length) await Promise.all(jobs);
+}
+
 export async function getAttendanceByDate(req, res) {
     try {
         if (mongoose.connection.readyState !== 1) {
@@ -870,6 +889,11 @@ export async function getAttendanceByDate(req, res) {
         const records = applyLeaveCoverIndex(storedRecords, coverIndex).filter(
             (row) => String(row?.date || '') === date,
         );
+        try {
+            await rewriteStoredPunchGaps(records);
+        } catch (gapErr) {
+            console.error('[getAttendanceByDate] punch gap rewrite failed:', gapErr);
+        }
         const pendingChanges = await loadPendingAttendanceChanges(date).catch((err) => {
             console.error('[getAttendanceByDate] pending changes failed:', err);
             return [];
@@ -1641,6 +1665,11 @@ export async function getMyAttendanceMonth(req, res) {
         const mergedRecords = applyLeaveCoverIndex(records, coverIndex).map((row) =>
             presentFromOpenPunch(row, todayKey),
         );
+        try {
+            await rewriteStoredPunchGaps(mergedRecords);
+        } catch (gapErr) {
+            console.error('[getMyAttendanceMonth] punch gap rewrite failed:', gapErr);
+        }
         const promoteIds = mergedRecords
             .filter(
                 (row) =>
@@ -2286,7 +2315,7 @@ export async function checkInMyAttendance(req, res) {
             ...employeeAttendanceMatch(employee),
         }).lean();
         const existingPunch = bestDayRecord(dayRows, date);
-        if (punchTimeSet(existingPunch?.timeIn)) {
+        if (punchTimeSet(existingPunch?.timeIn) && !punchTimeSet(existingPunch?.timeOut)) {
             return res.status(400).json({
                 message: 'Already checked in for today.',
                 date,
@@ -2297,9 +2326,14 @@ export async function checkInMyAttendance(req, res) {
         if (await rejectIfNotSalaryEnrolled(res, employee)) return;
         const existing =
             dayRows.find((row) => String(row.employeeMongoId) === employeeMongoId) || existingPunch;
+        const reopening = punchTimeSet(existing?.timeIn) && punchTimeSet(existing?.timeOut);
+        const firstArrival = reopening
+            ? String(existing?.punchSessions?.[0]?.timeIn || existing.timeIn || timeIn).trim()
+            : timeIn;
 
         // Punch-in vs Flowchart HR Working Time (15-minute grace).
         // Flexible groups ignore the clock and keep the session open until checkout.
+        // A closed session, flexible or scheduled, can be checked in again the same day.
         let statusKey = 'on_office';
         let statusLabel = 'Present';
         let reason = '';
@@ -2326,11 +2360,11 @@ export async function checkInMyAttendance(req, res) {
                 }
             } else {
                 const { startMinutes, isOffDay } = getScheduledPunchMinutes(week, date);
-                const actualMinutes = clockTimeToMinutes(timeIn);
+                const actualMinutes = clockTimeToMinutes(firstArrival);
                 if (!isOffDay && startMinutes != null && actualMinutes != null) {
                     const graceLimit = startMinutes + 15;
                     if (actualMinutes > graceLimit) {
-                        const lateMinutes = actualMinutes - graceLimit;
+                        const lateMinutes = actualMinutes - startMinutes;
                         statusKey = 'late_arrived';
                         statusLabel = 'Late Arrival';
                         reason = `${lateMinutes} minute${lateMinutes === 1 ? '' : 's'} late`;
@@ -2373,6 +2407,7 @@ export async function checkInMyAttendance(req, res) {
             statusLabel,
             timeIn,
             timeOut: '',
+            timeOutDate: '',
             reason,
             attachmentName: existing?.attachmentName || '',
             approvalStatus: keepPartialLeave
@@ -2386,11 +2421,23 @@ export async function checkInMyAttendance(req, res) {
 
         // Self check-in is allowed even if HR previously marked leave for the day —
         // checking in means the employee is present and starts the timer.
+        const priorSession = reopening
+            ? {
+                timeIn: String(existing.timeIn || '').trim(),
+                timeOut: String(existing.timeOut || '').trim(),
+                timeOutDate: String(existing.timeOutDate || '').trim(),
+                punchSource: existing.punchSource || '',
+                checkOutSource: existing.checkOutSource || '',
+                checkInLocation: plainPunchLocation(existing.checkInLocation) || undefined,
+                checkOutLocation: plainPunchLocation(existing.checkOutLocation) || undefined,
+            }
+            : null;
         const doc = await Attendance.findOneAndUpdate(
             existing?._id ? { _id: existing._id } : { date, employeeMongoId },
             {
                 $set: checkInSet,
                 $unset: { checkOutLocation: 1 },
+                ...(priorSession ? { $push: { punchSessions: priorSession } } : {}),
             },
             { upsert: !existing?._id, new: true, setDefaultsOnInsert: true },
         );
@@ -2749,11 +2796,12 @@ export async function checkOutMyAttendance(req, res) {
         if (flexible) {
             existing.timeOut = timeOut;
             existing.timeOutDate = date !== existing.date ? date : '';
-            const workedMinutes = workedMinutesAcross({
+            const workedMinutes = dayWorkedMinutes({
                 date: existing.date,
                 timeIn: existing.timeIn,
                 timeOut,
                 timeOutDate: existing.timeOutDate,
+                punchSessions: existing.punchSessions,
             });
             const keepPartial = isApprovedPartialLeave(existing);
             const keptLabel = existing.statusLabel;
@@ -2772,6 +2820,7 @@ export async function checkOutMyAttendance(req, res) {
                 timeOutDate: existing.timeOutDate,
                 requiredHours: result.requiredHours,
                 statusKey: result.statusKey,
+                workedMinutes,
             });
             existing.statusKey = result.statusKey;
             existing.statusLabel = result.statusLabel;
@@ -3491,6 +3540,14 @@ export async function requestAttendanceLeave(req, res) {
             });
         }
 
+        if (isLateArrival) {
+            const limitMessage = await attendanceApprovalLimitMessageFor(employee, {
+                pool: 'late',
+                requestDates: [date],
+            });
+            if (limitMessage) return res.status(400).json({ message: limitMessage });
+        }
+
         if (!isLateArrival) {
             const allowanceError = await checkEmployeeLeaveAllowance(employee, {
                 statusKey: requestedStatusKey,
@@ -3616,7 +3673,7 @@ export async function requestAttendanceYellow(req, res) {
 
         const employee = await EmployeeBasic.findById(self._id)
             .select(
-                '_id employeeId firstName lastName companyEmail workEmail email primaryReportee',
+                '_id employeeId firstName lastName companyEmail workEmail email primaryReportee staffType',
             )
             .populate(
                 'primaryReportee',
@@ -3652,6 +3709,17 @@ export async function requestAttendanceYellow(req, res) {
                 message: 'A request is already pending for this date.',
                 record,
             });
+        }
+
+        const requestPool =
+            approvalEventPool(record, { countOpenPunch: true }) ||
+            (record.timeIn && !record.timeOut ? 'mispunch' : '');
+        if (requestPool) {
+            const limitMessage = await attendanceApprovalLimitMessageFor(employee, {
+                pool: requestPool,
+                requestDates: [date],
+            });
+            if (limitMessage) return res.status(400).json({ message: limitMessage });
         }
 
         const empName =
@@ -3953,6 +4021,14 @@ export async function requestAttendanceFuture(req, res) {
             return res.status(400).json({
                 message: 'This range has no working days — holidays and weekly offs are skipped.',
             });
+        }
+
+        if (kind === 'late_arrived' || kind === 'early_go') {
+            const limitMessage = await attendanceApprovalLimitMessageFor(employee, {
+                pool: 'late',
+                requestDates,
+            });
+            if (limitMessage) return res.status(400).json({ message: limitMessage });
         }
 
         const partialLeave =

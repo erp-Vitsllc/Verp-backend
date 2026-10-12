@@ -83,28 +83,30 @@ describe('attendance leave day cover', () => {
         assert.equal(row.timeIn, '09:00:00');
     });
 
-    it('uses a pending annual request on an unauthorized row', () => {
+    it('keeps unauthorized leave while the request is still pending', () => {
         const [row] = applyLeaveCoverIndex(
             [
                 {
-                    date: '2026-10-02',
+                    date: '2026-10-05',
                     employeeMongoId: 'emp-1',
                     statusKey: 'unauthorized_leave',
                     statusLabel: 'Unauthorized Leave',
                     reason: 'No punch-in or punch-out (auto at midnight)',
                     leaveRequestStatus: 'pending',
-                    requestedStatusKey: 'on_leave',
-                    requestedStatusLabel: 'Annual Leave',
-                    leaveRequestReason: 'Travel',
-                    leaveRequestFromDate: '2026-10-02',
-                    leaveRequestToDate: '2026-10-04',
+                    requestedStatusKey: 'authorized_leave',
+                    requestedStatusLabel: 'Authorized Leave',
+                    leaveRequestReason: 'Convert unauthorized',
+                    leaveRequestFromDate: '2026-10-05',
+                    leaveRequestToDate: '2026-10-06',
                 },
             ],
             new Map(),
         );
-        assert.equal(row.statusKey, 'on_leave');
+        assert.equal(row.statusKey, 'unauthorized_leave');
+        assert.equal(row.statusLabel, 'Unauthorized Leave');
         assert.equal(row.leaveRequestStatus, 'pending');
-        assert.equal(row.reason, 'Travel');
+        assert.equal(row.requestedStatusKey, 'authorized_leave');
+        assert.equal(row.reason, 'No punch-in or punch-out (auto at midnight)');
     });
 
     it('prefers approved attendance leave over salary enrollment', () => {
@@ -117,10 +119,11 @@ describe('attendance leave day cover', () => {
         assert.equal(chosen.source, 'scheduled');
         assert.equal(chosen.statusKey, 'sick_leave');
         const pending = chooseLeaveCover(
-            { ...annualCover, source: 'scheduled', isPending: true },
+            { ...annualCover, source: 'scheduled', isPending: true, statusKey: 'authorized_leave' },
             annualCover,
         );
-        assert.equal(pending.isPending, true);
+        assert.equal(pending.isPending, false);
+        assert.equal(pending.statusKey, 'on_leave');
     });
 
     it('does not replace a weekly off', () => {

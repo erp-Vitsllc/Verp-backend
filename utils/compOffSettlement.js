@@ -3,14 +3,7 @@ import EmployeeBasic from '../models/EmployeeBasic.js';
 import SalaryMonthPayment from '../models/SalaryMonthPayment.js';
 import SalarySlipMonth from '../models/SalarySlipMonth.js';
 import { summarizeApprovedFlexibleOvertime } from './flexibleAttendance.js';
-import {
-    getWeekForStaffType,
-    isFlexibleTiming,
-    loadWorkingTimeDoc,
-    normalizeStaffType,
-    OVERTIME_HOURS_PER_DAY,
-    overtimeHoursFromPunch,
-} from './workingTimeHelpers.js';
+import { OVERTIME_HOURS_PER_DAY } from './workingTimeHelpers.js';
 
 export const COMP_OFF_DAY_HOURS = OVERTIME_HOURS_PER_DAY;
 
@@ -90,27 +83,9 @@ export function compOffActions(row) {
     return { canAdjust: true, canJump: false, canAuthorize: false };
 }
 
-/** Weekday extra hours, or flexible overtime after the full present day is removed. Off-day overtime is a present day and is not included. */
-export function adjustableOvertimeHoursFromRows(rows = [], week) {
-    if (isFlexibleTiming(week)) {
-        return roundHours(summarizeApprovedFlexibleOvertime(rows).hours);
-    }
-    const seen = new Set();
-    let hours = 0;
-    for (const row of Array.isArray(rows) ? rows : []) {
-        const date = String(row?.date || '').trim();
-        if (!date || seen.has(date)) continue;
-        seen.add(date);
-        const ot = overtimeHoursFromPunch({
-            timeIn: row?.timeIn,
-            timeOut: row?.timeOut,
-            date,
-            week,
-        });
-        if (!ot.hours || ot.isOffDay) continue;
-        hours += ot.hours;
-    }
-    return roundHours(hours);
+/** Only HR-approved overtime can be used. Punch extra hours are not overtime until HR approves them. */
+export function adjustableOvertimeHoursFromRows(rows = []) {
+    return roundHours(summarizeApprovedFlexibleOvertime(rows).hours);
 }
 
 export function deductedCompOffHours(rows = [], monthKey = '') {
@@ -197,15 +172,13 @@ export async function adjustableOvertimeForMonth(employee, monthKey) {
         return { hours: 0, deducted: 0, available: 0 };
     }
     const { from, to } = monthBounds(month);
-    const workingTime = await loadWorkingTimeDoc();
-    const week = getWeekForStaffType(workingTime, normalizeStaffType(employee.staffType));
     const punches = await Attendance.find({
         employeeMongoId: String(employee._id),
         date: { $gte: from, $lte: to },
     })
-        .select('date timeIn timeOut flexibleOtStatus flexibleOtApprovedHours flexibleOtNextDayDate')
+        .select('date flexibleOtStatus flexibleOtApprovedHours flexibleOtNextDayDate')
         .lean();
-    const gross = adjustableOvertimeHoursFromRows(punches, week);
+    const gross = adjustableOvertimeHoursFromRows(punches);
     const compOffs = await Attendance.find({
         employeeMongoId: String(employee._id),
         statusKey: 'compoff_leave',

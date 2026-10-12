@@ -353,8 +353,9 @@ export function resolveStatusFromPunches({
         const graceLimit = startMinutes + 15;
         if (actualIn > graceLimit) {
             late = true;
-            // Minutes past grace (09:16 with 09:00 schedule → 1 minute late)
-            lateMinutes = actualIn - graceLimit;
+            // Grace only decides if the day is late. 09:15 is on time.
+            // After that, minutes run from the scheduled start: 09:16 is 16 minutes late.
+            lateMinutes = actualIn - startMinutes;
         }
     }
     if (!isOffDay && endMinutes != null && actualOut != null && actualOut < endMinutes) {

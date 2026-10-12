@@ -141,7 +141,7 @@ export async function processAttendanceDailyRoutine() {
         ]);
         const attendanceOpenFrom = await loadAttendanceOpenStartByMongoId(activeEmployees);
         const coveringLeave = await Attendance.find({
-            leaveRequestStatus: { $in: ['approved', 'pending'] },
+            leaveRequestStatus: 'approved',
             requestedStatusKey: { $in: [...SCHEDULED_LEAVE_REQUEST_KEYS] },
             leaveRequestFromDate: { $lte: yesterdayKey },
             leaveRequestToDate: { $gte: yesterdayKey },
@@ -190,10 +190,7 @@ export async function processAttendanceDailyRoutine() {
             }
             const requestedLeave = String(rec?.requestedStatusKey || '').trim();
             const requestStatus = String(rec?.leaveRequestStatus || '').trim();
-            if (
-                (requestStatus === 'approved' || requestStatus === 'pending') &&
-                SCHEDULED_LEAVE_REQUEST_KEYS.has(requestedLeave)
-            ) {
+            if (requestStatus === 'approved' && SCHEDULED_LEAVE_REQUEST_KEYS.has(requestedLeave)) {
                 continue;
             }
             if (leaveCoveredEmployeeIds.has(employeeMongoId)) {
@@ -314,7 +311,7 @@ async function applyPartialLeaveOutcomes(dateKey) {
         timeIn: { $nin: ['', null] },
         timeOut: { $nin: ['', null] },
     })
-        .select('employeeMongoId date statusKey timeIn timeOut timeOutDate leaveRequestStatus leaveRequestDayPart leaveRequestSession leaveDeductionTimes hourAdjustStatus')
+        .select('employeeMongoId date statusKey statusLabel reason timeIn timeOut timeOutDate leaveRequestStatus leaveRequestDayPart leaveRequestSession leaveDeductionTimes hourAdjustStatus')
         .lean();
     if (!rows.length) return 0;
     const employees = await EmployeeBasic.find({

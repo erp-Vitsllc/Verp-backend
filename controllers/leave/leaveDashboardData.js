@@ -1858,7 +1858,7 @@ export async function getLeaveTeamTrack(req, res) {
             const requestStatus = String(row?.leaveRequestStatus || '').trim();
             if (
                 statusKey === 'unauthorized_leave' &&
-                (requestStatus === 'approved' || requestStatus === 'pending') &&
+                requestStatus === 'approved' &&
                 ['on_leave', 'authorized_leave', 'sick_leave'].includes(requestedKey)
             ) {
                 statusKey = requestedKey;

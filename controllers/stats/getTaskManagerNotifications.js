@@ -11,6 +11,7 @@ import {
     resolveTaskViewer,
     viewerCanReassign,
 } from "../../utils/taskManagerModule.js";
+import { assignTaskNumbers } from "../../utils/taskNumber.js";
 
 const DUBAI_DATE = new Intl.DateTimeFormat("en-CA", {
     timeZone: "Asia/Dubai",
@@ -508,20 +509,7 @@ export const getTaskManagerNotifications = async (req, res) => {
             });
         }
 
-        const numbered = [...tasks].sort((a, b) => {
-            const aTime = new Date(a.requestDate || 0).getTime();
-            const bTime = new Date(b.requestDate || 0).getTime();
-            if (aTime !== bTime) return aTime - bTime;
-            return String(a.actionId).localeCompare(String(b.actionId));
-        });
-        const yearSequence = new Map();
-        for (const task of numbered) {
-            const year = dubaiDateKey(task.requestDate || new Date()).slice(0, 4) || "0000";
-            const next = (yearSequence.get(year) || 0) + 1;
-            yearSequence.set(year, next);
-            const sequence = String(next).padStart(3, "0");
-            task.taskNumber = `task${year.slice(-2)}${sequence}`;
-        }
+        assignTaskNumbers(tasks);
 
         const statusRank = {
             "Pending Due": 0,
@@ -560,6 +548,68 @@ export const getTaskManagerNotifications = async (req, res) => {
         return res.status(500).json({ message: "Failed to load task manager notifications" });
     }
 };
+
+/**
+ * The same TSK-26-count shown in Task Manager, keyed by the request id and the action id.
+ */
+export async function taskNumbersByRecordId(recordIds) {
+    const wanted = [...new Set((recordIds || []).map((id) => String(id || "").trim()).filter(Boolean))];
+    if (!wanted.length) return new Map();
+
+    const [actions, manualRows] = await Promise.all([
+        DashboardAction.find({})
+            .select("requestId requestType status subjectName requestedByName assignedTo assignedToEmpId extra1 requestedDate createdAt")
+            .lean()
+            .maxTimeMS(12000),
+        TaskManagerTask.find({})
+            .select("sourceDashboardActionId createdAt")
+            .lean()
+            .maxTimeMS(8000),
+    ]);
+
+    const unique = dedupeOpenActions(actions || []);
+    const stubs = unique.map((action) => ({
+        actionId: String(action._id),
+        requestDate: action.requestedDate || action.createdAt || null,
+        requestId: String(action.requestId || "").trim(),
+    }));
+    for (const row of manualRows || []) {
+        if (row?.sourceDashboardActionId) continue;
+        stubs.push({
+            actionId: `manual-${row._id}`,
+            requestDate: row.createdAt || null,
+            requestId: String(row._id),
+        });
+    }
+
+    assignTaskNumbers(stubs);
+    const numberByActionId = new Map(stubs.map((task) => [task.actionId, task.taskNumber]));
+    const winnerIdByKey = new Map();
+    for (const action of unique) {
+        const key = actionDuplicateKey(action);
+        if (key) winnerIdByKey.set(key, String(action._id));
+    }
+
+    const byId = new Map();
+    for (const task of stubs) {
+        if (task.requestId) byId.set(task.requestId, task.taskNumber);
+        if (task.actionId) byId.set(task.actionId, task.taskNumber);
+    }
+    for (const action of actions || []) {
+        const requestId = String(action.requestId || "").trim();
+        if (!requestId || byId.has(requestId)) continue;
+        const winnerId = winnerIdByKey.get(actionDuplicateKey(action));
+        const number = winnerId ? numberByActionId.get(winnerId) : "";
+        if (number) byId.set(requestId, number);
+    }
+
+    const found = new Map();
+    for (const id of wanted) {
+        const number = byId.get(id);
+        if (number) found.set(id, number);
+    }
+    return found;
+}
 
 const OPEN_MANUAL_STATUSES = new Set(["Pending", "In Progress"]);
 

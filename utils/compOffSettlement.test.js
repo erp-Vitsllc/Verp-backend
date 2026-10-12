@@ -53,10 +53,22 @@ describe('comp-off settlement', () => {
         assert.equal(isUnsettledCompOff({ ...jumped, statusKey: 'authorized_leave' }), false);
     });
 
-    it('adjusts only from weekday overtime of at least 10 hours', () => {
+    it('adjusts only from HR-approved overtime of at least 10 hours', () => {
         const rows = [
-            { date: '2026-10-02', timeIn: '09:00', timeOut: '04:00' },
-            { date: '2026-10-03', timeIn: '09:00', timeOut: '18:00' },
+            {
+                date: '2026-10-02',
+                timeIn: '09:00',
+                timeOut: '04:00',
+                flexibleOtStatus: 'approved',
+                flexibleOtApprovedHours: 10,
+            },
+            {
+                date: '2026-10-03',
+                timeIn: '09:00',
+                timeOut: '21:00',
+                flexibleOtStatus: 'pending',
+                flexibleOtApprovedHours: 3,
+            },
         ];
         const hours = adjustableOvertimeHoursFromRows(rows, WEEK);
         assert.equal(hours, 10);

@@ -13,11 +13,12 @@ export function addDaysKey(dateKey, days) {
     return date.toISOString().slice(0, 10);
 }
 
-/** Next day, this day, then yesterday. Next-day present can only land on one of these. */
-export function flexibleNextDayChoices(dateKey) {
-    const date = String(dateKey || '').trim();
-    if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return [];
-    return [addDaysKey(date, 1), date, addDaysKey(date, -1)];
+/** Next-day present can land on any day in the same month as the overtime. */
+export function isCurrentMonthDate(sourceDate, targetDate) {
+    const source = String(sourceDate || '').trim();
+    const target = String(targetDate || '').trim();
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(source) || !/^\d{4}-\d{2}-\d{2}$/.test(target)) return false;
+    return source.slice(0, 7) === target.slice(0, 7);
 }
 
 export function isAuthorizedLeaveStatus(statusKey, statusLabel = '') {
@@ -52,15 +53,32 @@ export function flexibleLossHours(record, week) {
     const required = wholeHourCount(requiredHoursForDate(week, record?.date));
     let worked = Number(record?.flexibleWorkedHours) || 0;
     if (!(worked > 0)) {
-        const minutes = workedMinutesAcross({
-            date: record?.date,
-            timeIn: record?.timeIn,
-            timeOut: record?.timeOut,
-            timeOutDate: record?.timeOutDate,
-        });
+        const minutes = dayWorkedMinutes(record);
         worked = Math.max(0, minutes) / 60;
     }
     return Math.max(0, required - wholeHourCount(worked));
+}
+
+/** Completed earlier sessions plus the latest check-in and check-out. */
+export function dayWorkedMinutes(record) {
+    const date = String(record?.date || '').trim();
+    const spans = [
+        ...(Array.isArray(record?.punchSessions) ? record.punchSessions : []),
+        {
+            timeIn: record?.timeIn,
+            timeOut: record?.timeOut,
+            timeOutDate: record?.timeOutDate,
+        },
+    ];
+    return spans.reduce(
+        (sum, span) => sum + workedMinutesAcross({
+            date,
+            timeIn: span?.timeIn,
+            timeOut: span?.timeOut,
+            timeOutDate: span?.timeOutDate,
+        }),
+        0,
+    );
 }
 
 export function workedMinutesAcross({ date, timeIn, timeOut, timeOutDate }) {
@@ -115,6 +133,7 @@ export function flexibleOtFieldsFromDuration({
     requiredHours = 0,
     statusKey = '',
     nonWorking = false,
+    workedMinutes = null,
 } = {}) {
     const cleared = {
         flexibleWorkedHours: 0,
@@ -127,9 +146,11 @@ export function flexibleOtFieldsFromDuration({
     const punches = Boolean(inn && out && inn !== 'OT' && out !== 'OT');
     if (FLEXIBLE_OT_SKIP_KEYS.has(key) || !punches) return cleared;
     // A holiday or weekly off is not a working day, so the time they worked is overtime.
+    const spanMinutes = Number.isFinite(workedMinutes)
+        ? workedMinutes
+        : workedMinutesAcross({ date, timeIn: inn, timeOut: out, timeOutDate });
     if (nonWorking) {
-        const workedMinutes = workedMinutesAcross({ date, timeIn: inn, timeOut: out, timeOutDate });
-        const workedHours = Math.round((Math.max(0, workedMinutes) / 60) * 100) / 100;
+        const workedHours = Math.round((Math.max(0, spanMinutes) / 60) * 100) / 100;
         return {
             flexibleWorkedHours: workedHours,
             flexibleRequiredHours: 0,
@@ -138,7 +159,7 @@ export function flexibleOtFieldsFromDuration({
     }
     if (!isFlexible) return cleared;
     const result = evaluateFlexibleDay({
-        workedMinutes: workedMinutesAcross({ date, timeIn: inn, timeOut: out, timeOutDate }),
+        workedMinutes: spanMinutes,
         requiredHours,
     });
     return {

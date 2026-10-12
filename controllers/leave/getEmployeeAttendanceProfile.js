@@ -10,6 +10,7 @@ import EmployeeSalary from '../../models/EmployeeSalary.js';
 import UtilityBillPayment from '../../models/UtilityBillPayment.js';
 import EmployeeHubRequest from '../../models/EmployeeHubRequest.js';
 import { hubRequestDisplayLabel } from '../../utils/employeeHubRequestTypes.js';
+import { taskNumbersByRecordId } from '../stats/getTaskManagerNotifications.js';
 import { isCompanyShellEmployee } from '../../utils/attendanceEmployeeFilters.js';
 import { resolveEmployeeFinePayableAmount } from '../../utils/finePayableAmount.js';
 import { normalizeStaffTypeKey } from '../../utils/workLocationHelpers.js';
@@ -1273,6 +1274,12 @@ export async function getEmployeeAttendanceProfile(req, res) {
             .limit(30)
             .select('kind assetType description requesterName requestedDate createdAt')
             .lean();
+        let taskNumbers = new Map();
+        try {
+            taskNumbers = await taskNumbersByRecordId((workTaskRows || []).map((row) => row._id));
+        } catch (taskNumberError) {
+            console.error('[getEmployeeAttendanceProfile] task numbers', taskNumberError);
+        }
         const workTasks = (workTaskRows || []).map((row) => {
             const createdKey = toDateKey(row.createdAt);
             const dueKey = /^\d{4}-\d{2}-\d{2}/.test(String(row.requestedDate || ''))
@@ -1280,6 +1287,7 @@ export async function getEmployeeAttendanceProfile(req, res) {
                 : '';
             return {
                 id: String(row._id),
+                taskNumber: taskNumbers.get(String(row._id)) || '',
                 title: hubRequestDisplayLabel(row.kind, row.assetType),
                 subtitle: String(row.description || '').trim(),
                 requesterName: String(row.requesterName || '').trim(),

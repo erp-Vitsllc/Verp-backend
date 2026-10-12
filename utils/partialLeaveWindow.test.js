@@ -51,7 +51,7 @@ describe('partial leave window', () => {
         assert.doesNotMatch(result.message, /AM–/);
     });
 
-    it('marks a half day taken without approval as unauthorized', () => {
+    it('marks a half day taken without approval as late arrival', () => {
         const result = partialLeaveOutcome(
             {
                 date: '2026-10-05',
@@ -61,9 +61,60 @@ describe('partial leave window', () => {
             },
             scheduledWeek,
         );
-        assert.equal(result.statusKey, 'unauthorized_leave');
-        assert.equal(result.leaveRequestDayPart, 'half');
-        assert.equal(result.leaveDayFraction, 0.5);
+        assert.equal(result.statusKey, 'late_arrived');
+        assert.equal(result.statusLabel, 'Late Arrival');
+        assert.equal(result.leaveRequestDayPart, '');
+        assert.equal(result.leaveDayFraction, 0);
+        assert.equal(result.reason, 'Late arrival without approval');
+    });
+
+    it('marks an early punch-out without approval as early go', () => {
+        const result = partialLeaveOutcome(
+            {
+                date: '2026-10-05',
+                statusKey: 'on_office',
+                timeIn: '09:00',
+                timeOut: '13:30',
+            },
+            scheduledWeek,
+        );
+        assert.equal(result.statusKey, 'early_go');
+        assert.equal(result.statusLabel, 'Early Go');
+        assert.equal(result.leaveRequestSession, 'pm');
+    });
+
+    it('rewrites a stored unauthorized quarter day as late arrival', () => {
+        const result = partialLeaveOutcome(
+            {
+                date: '2026-10-10',
+                statusKey: 'unauthorized_leave',
+                statusLabel: 'Unauthorized Quarter Day (AM)',
+                leaveRequestDayPart: 'quarter',
+                leaveRequestSession: 'am',
+                timeIn: '11:30',
+                timeOut: '21:19',
+                reason: 'Unauthorized Quarter Day taken without an approved request',
+            },
+            scheduledWeek,
+        );
+        assert.equal(result.statusKey, 'late_arrived');
+        assert.equal(result.leaveRequestDayPart, '');
+        assert.equal(result.reason, 'Late arrival without approval');
+    });
+
+    it('leaves a full day with no punch as unauthorized leave', () => {
+        const result = partialLeaveOutcome(
+            {
+                date: '2026-10-07',
+                statusKey: 'unauthorized_leave',
+                statusLabel: 'Unauthorized Leave',
+                reason: 'No punch-in or punch-out (auto at midnight)',
+                timeIn: '',
+                timeOut: '',
+            },
+            scheduledWeek,
+        );
+        assert.equal(result, null);
     });
 
     it('doubles an approved quarter day when the punch is outside the window', () => {

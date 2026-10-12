@@ -2,6 +2,7 @@ import express from 'express';
 import { protect } from '../middleware/authMiddleware.js';
 import { checkPermission } from '../middleware/permissionMiddleware.js';
 import { getEmployeeLeaveDirectory, getLeaveCalendar, getLeaveSalaryVisibility, getAnnualLeaveCalendarList } from '../controllers/leaveController.js';
+import { getLeaveGroupCalendars } from '../controllers/leave/getLeaveGroupCalendars.js';
 import {
     getEmployeeAnnualLeaveEligibility,
     applyLeaveRange,
@@ -35,6 +36,11 @@ router.get(
     '/calendar/annual-list',
     checkPermission('hrm_leave', 'view'),
     getAnnualLeaveCalendarList,
+);
+router.get(
+    '/group-calendars',
+    checkPermission('hrm_leave', 'view'),
+    getLeaveGroupCalendars,
 );
 router.get(
     '/salary-visibility',

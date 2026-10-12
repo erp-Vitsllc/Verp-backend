@@ -72,13 +72,12 @@ export function isAbsentAttendanceDay(row) {
 }
 
 function coverRank(cover) {
-    if (!cover) return 0;
-    if (cover.source === 'scheduled' && !cover.isPending) return 3;
-    if (cover.isPending) return 2;
+    if (!cover || cover.isPending) return 0;
+    if (cover.source === 'scheduled') return 3;
     return 1;
 }
 
-/** Approved attendance leave wins, then a pending request, then salary enrollment. */
+/** Approved attendance leave wins over salary enrollment. A pending request does not change the day. */
 export function chooseLeaveCover(current, incoming) {
     if (!incoming) return current || null;
     if (!current) return incoming;
@@ -88,7 +87,8 @@ export function chooseLeaveCover(current, incoming) {
 export function leaveCoverFromAttendanceRow(row) {
     if (!row) return null;
     const requestStatus = String(row.leaveRequestStatus || '').trim();
-    if (requestStatus !== 'approved' && requestStatus !== 'pending') return null;
+    // Pending requests stay as a request. The day status changes only after approval.
+    if (requestStatus !== 'approved') return null;
     const statusKey = String(row.requestedStatusKey || '').trim();
     if (!LEAVE_COVER_KEYS.has(statusKey)) return null;
     return {
@@ -107,7 +107,7 @@ export function leaveCoverFromAttendanceRow(row) {
         leaveRequestToDate: String(row.leaveRequestToDate || row.date || ''),
         reason: cleanReason(row.leaveRequestReason),
         source: 'scheduled',
-        isPending: requestStatus === 'pending',
+        isPending: false,
         historical: false,
     };
 }
@@ -316,7 +316,7 @@ export async function loadLeaveCoverIndex({ from, to, employees } = {}) {
 
     const scheduled = await Attendance.find({
         employeeMongoId: { $in: ids },
-        leaveRequestStatus: { $in: ['approved', 'pending'] },
+        leaveRequestStatus: 'approved',
         requestedStatusKey: { $in: [...LEAVE_COVER_KEYS] },
         leaveRequestFromDate: { $lte: end },
         leaveRequestToDate: { $gte: start },

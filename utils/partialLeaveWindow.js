@@ -11,6 +11,58 @@ export function partialLeavePortion(dayPart) {
     return 1;
 }
 
+/**
+ * Late arrival, early go, and missed punch stay those types.
+ * A quarter or half day taken without approval is still one of those, not unauthorized leave.
+ */
+export function punchAttendanceKind(row) {
+    if (!row) return '';
+    if (String(row.hourAdjustStatus || '') === 'approved' && row.hourAdjustKind) {
+        const approved = String(row.hourAdjustKind);
+        if (approved === 'late_arrived' || approved === 'early_go' || approved === 'mispunch') return approved;
+    }
+    const key = String(row.statusKey || '');
+    const text = `${row.statusLabel || ''} ${row.reason || ''}`;
+    const session = String(row.leaveRequestSession || '').trim();
+    if (key === 'mispunch' || /mispunch/i.test(text)) return 'mispunch';
+    if (key === 'early_go') return 'early_go';
+    if (key === 'late_arrived') return 'late_arrived';
+    if (key !== 'unauthorized_leave') return '';
+    if (session === 'pm' || /\(PM\)/i.test(text) || /early/i.test(text)) return 'early_go';
+    if (session === 'am' || /\(AM\)/i.test(text) || /late/i.test(text)) return 'late_arrived';
+    const punched = Boolean(String(row.timeIn || '').trim() && String(row.timeOut || '').trim());
+    if (punched && /unauthorized (half|quarter) day/i.test(text)) return 'late_arrived';
+    return '';
+}
+
+function punchGapFields(kind, row) {
+    const missed = kind === 'mispunch';
+    const early = kind === 'early_go';
+    const reason = String(row?.reason || '');
+    const autoReason = !reason.trim() || /unauthorized (half|quarter) day/i.test(reason);
+    let nextReason = reason;
+    if (missed) nextReason = autoReason ? 'Missed punch without approval' : reason;
+    else if (autoReason) nextReason = early ? 'Early go without approval' : 'Late arrival without approval';
+    return {
+        statusKey: missed ? 'mispunch' : early ? 'early_go' : 'late_arrived',
+        statusLabel: missed ? 'Mispunch' : early ? 'Early Go' : 'Late Arrival',
+        leaveRequestDayPart: '',
+        leaveRequestSession: missed ? '' : early ? 'pm' : 'am',
+        leaveDayFraction: 0,
+        leaveDeductionTimes: 0,
+        reason: nextReason,
+    };
+}
+
+/** Stored unauthorized leave that is really a late, early, or missed punch. */
+export function storedPunchGapPatch(row) {
+    if (String(row?.hourAdjustStatus || '') === 'approved') return null;
+    if (String(row?.statusKey || '') !== 'unauthorized_leave') return null;
+    const kind = punchAttendanceKind(row);
+    if (!kind) return null;
+    return punchGapFields(kind, row);
+}
+
 export function formatDurationMinutes(minutes) {
     const total = Math.max(0, Math.round(Number(minutes) || 0));
     const hours = Math.floor(total / 60);
@@ -143,11 +195,12 @@ const SKIP_PARTIAL_STATUS = new Set([
 
 /**
  * Approved partial leave punched outside the allowed window doubles that deduction.
- * A half or quarter taken with no approved request becomes unauthorized.
+ * A half or quarter taken with no approved request stays late arrival or early go.
  */
 export function partialLeaveOutcome(row, week) {
     const key = String(row?.statusKey || '');
     if (String(row?.hourAdjustStatus || '') === 'approved') return null;
+    if (key === 'unauthorized_leave') return storedPunchGapPatch(row);
     if (SKIP_PARTIAL_STATUS.has(key)) return null;
     const dateKey = String(row?.date || '');
     const required = requiredMinutes(week, dateKey);
@@ -183,7 +236,7 @@ export function partialLeaveOutcome(row, week) {
         return violated ? { leaveDeductionTimes: 2 } : null;
     }
 
-    if (key === 'authorized_leave' || key === 'unauthorized_leave') return null;
+    if (key === 'authorized_leave') return null;
 
     const schedule = getScheduledPunchMinutes(week, dateKey);
     const grace = 15;
@@ -203,14 +256,5 @@ export function partialLeaveOutcome(row, week) {
     if (gap + grace >= halfAt && halfAt > 0) portion = 'half';
     else if (gap + grace >= quarterAt && quarterAt > 0) portion = 'quarter';
     if (!portion) return null;
-    const label = portion === 'half' ? 'Unauthorized Half Day' : 'Unauthorized Quarter Day';
-    return {
-        statusKey: 'unauthorized_leave',
-        statusLabel: `${label} (${session.toUpperCase()})`,
-        leaveRequestDayPart: portion,
-        leaveRequestSession: session,
-        leaveDayFraction: partialLeavePortion(portion),
-        leaveDeductionTimes: 1,
-        reason: `${label} taken without an approved request`,
-    };
+    return punchGapFields(session === 'pm' ? 'early_go' : 'late_arrived', row);
 }
