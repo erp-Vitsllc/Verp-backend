@@ -99,9 +99,12 @@ import {
     forwardAttendanceChangeToHr,
     loadAttendanceChangeInboxItems,
     loadPendingAttendanceChanges,
+    openAttendanceChangeForEmployee,
     submitAttendanceChange,
     supersedeOpenAttendanceChanges,
 } from '../utils/attendanceChangeApproval.js';
+import { approveFlexibleOvertimeRecord } from './flexibleOtController.js';
+import { applyStoredHourAdjust } from './hourAdjustController.js';
 import {
     applyOverlayCounts,
     applyOverlayCountsToBalances,
@@ -1405,6 +1408,39 @@ async function queueOrApplyManualMark(ctx, {
     return { applied: null, pending };
 }
 
+async function queueOrApplyClear(ctx, { employee, employeeMongoId, date, markedBy }) {
+    const id = String(employee?._id || employeeMongoId || '').trim();
+    if (ctx.actorIsHr) {
+        const restored = await restoreClearedAttendance({
+            employeeMongoId: id,
+            date,
+            markedBy,
+        });
+        await supersedeOpenAttendanceChanges({
+            date,
+            employeeMongoId: id,
+            actorId: ctx.actor?._id,
+        });
+        return { applied: restored, pending: null };
+    }
+    const existing = id ? await Attendance.findOne({ date, employeeMongoId: id }).lean() : null;
+    return openAttendanceChangeForEmployee({
+        employee,
+        date,
+        proposed: {
+            statusKey: 'clear_attendance',
+            statusLabel: 'Clear attendance',
+            timeIn: '',
+            timeOut: '',
+            reason: '',
+        },
+        previous: previousAttendanceSnapshot(existing),
+        actor: ctx.actor,
+        hr: ctx.hr,
+        action: 'clear',
+    });
+}
+
 /** POST /api/Attendance/mark — upsert one or many marks for a day */
 export async function markAttendance(req, res) {
     try {
@@ -1445,19 +1481,24 @@ export async function markAttendance(req, res) {
                 return res.status(400).json({ message: 'employeeMongoId is required for each mark.' });
             }
 
-            // Clear attendance. A holiday or weekly off returns to that status.
+            const markEmployee = await EmployeeBasic.findById(employeeMongoId)
+                .select(
+                    '_id employeeId firstName lastName staffType primaryReportee companyEmail workEmail email',
+                )
+                .populate('primaryReportee', CHANGE_REPORTEE_SELECT)
+                .lean();
+
+            // Clear attendance. A holiday or weekly off returns to that status after approval.
             if (statusKey === 'clear_attendance' || statusKey === 'clear') {
-                const restored = await restoreClearedAttendance({
+                const cleared = await queueOrApplyClear(approvalCtx, {
+                    employee: markEmployee,
                     employeeMongoId,
                     date,
                     markedBy,
                 });
-                await supersedeOpenAttendanceChanges({
-                    date,
-                    employeeMongoId,
-                    actorId: approvalCtx.actor?._id,
-                });
-                saved.push(restored);
+                if (cleared.error) return res.status(400).json({ message: cleared.error });
+                if (cleared.applied) saved.push(cleared.applied);
+                if (cleared.pending) pending.push(cleared.pending);
                 continue;
             }
 
@@ -1471,12 +1512,6 @@ export async function markAttendance(req, res) {
             const timeIn = raw?.timeIn != null && raw.timeIn !== '—' ? String(raw.timeIn).trim() : '';
             const timeOut = raw?.timeOut != null && raw.timeOut !== '—' ? String(raw.timeOut).trim() : '';
             const reason = String(raw?.reason || '').trim();
-            const markEmployee = await EmployeeBasic.findById(employeeMongoId)
-                .select(
-                    '_id employeeId firstName lastName staffType primaryReportee companyEmail workEmail email',
-                )
-                .populate('primaryReportee', CHANGE_REPORTEE_SELECT)
-                .lean();
 
             const result = await queueOrApplyManualMark(approvalCtx, {
                 employee: markEmployee,
@@ -2999,21 +3034,6 @@ export async function markTeamAttendance(req, res) {
                 });
             }
 
-            if (isClear) {
-                const restored = await restoreClearedAttendance({
-                    employeeMongoId,
-                    date,
-                    markedBy,
-                });
-                await supersedeOpenAttendanceChanges({
-                    date,
-                    employeeMongoId,
-                    actorId: approvalCtx.actor?._id,
-                });
-                saved.push(restored);
-                continue;
-            }
-
             const emp = await EmployeeBasic.findById(employeeMongoId)
                 .select(
                     '_id employeeId firstName lastName staffType primaryReportee companyEmail workEmail email',
@@ -3021,6 +3041,19 @@ export async function markTeamAttendance(req, res) {
                 .populate('primaryReportee', CHANGE_REPORTEE_SELECT)
                 .lean();
             if (!emp) continue;
+
+            if (isClear) {
+                const cleared = await queueOrApplyClear(approvalCtx, {
+                    employee: emp,
+                    employeeMongoId,
+                    date,
+                    markedBy,
+                });
+                if (cleared.error) return res.status(400).json({ message: cleared.error });
+                if (cleared.applied) saved.push(cleared.applied);
+                if (cleared.pending) pending.push(cleared.pending);
+                continue;
+            }
 
             const result = await queueOrApplyManualMark(approvalCtx, {
                 employee: emp,
@@ -3044,9 +3077,7 @@ export async function markTeamAttendance(req, res) {
         }
 
         return res.status(200).json({
-            message: isClear
-                ? 'Team attendance cleared successfully'
-                : describeAttendanceSave({ savedCount: saved.length, pending }),
+            message: describeAttendanceSave({ savedCount: saved.length, pending }),
             date,
             count: saved.length,
             records: saved,
@@ -3392,6 +3423,66 @@ export async function decideAttendanceChangeRequest(req, res) {
             return res.status(200).json({
                 message: 'Approved. Sent to HR. Attendance stays unchanged until HR approves.',
             });
+        }
+
+        const finishApproved = async (record) => {
+            request.stage = 'approved';
+            request.decidedByHr = actor._id;
+            request.decidedAtHr = new Date();
+            await request.save();
+            await closeAttendanceChangeRequest(request, { status: 'Approved', actorId: actor._id });
+            return res.status(200).json({
+                message: 'Attendance change approved.',
+                record,
+            });
+        };
+
+        if (request.action === 'clear') {
+            const restored = await restoreClearedAttendance({
+                employeeMongoId: request.employeeMongoId,
+                date: request.date,
+                markedBy: req.user?.id || null,
+            });
+            return finishApproved(restored);
+        }
+
+        if (request.action === 'flexible_ot') {
+            const attendanceId = String(request.proposed?.attendanceId || '').trim();
+            const record = mongoose.Types.ObjectId.isValid(attendanceId)
+                ? await Attendance.findById(attendanceId)
+                : null;
+            if (!record) {
+                return res.status(404).json({ message: 'The overtime day for this request was not found.' });
+            }
+            const applied = await approveFlexibleOvertimeRecord(record, {
+                approvedHours: request.proposed?.flexibleOtApprovedHours,
+                reason: request.proposed?.reason,
+                confirmNextDay: request.proposed?.confirmNextDay === true,
+                targetDate: request.proposed?.targetDate,
+                actor,
+            });
+            if (applied.status !== 200) {
+                return res.status(applied.status).json(applied.body);
+            }
+            return finishApproved(applied.body?.record || record);
+        }
+
+        if (request.action === 'hour_adjust') {
+            const attendanceId = String(request.proposed?.attendanceId || '').trim();
+            const record = mongoose.Types.ObjectId.isValid(attendanceId)
+                ? await Attendance.findById(attendanceId)
+                : null;
+            if (!record) {
+                return res.status(404).json({ message: 'The attendance day for this hour request was not found.' });
+            }
+            try {
+                await applyStoredHourAdjust(record, request.proposed || {});
+            } catch (hourErr) {
+                const status = hourErr.statusCode || 500;
+                if (status >= 500) throw hourErr;
+                return res.status(status).json({ message: hourErr.message || 'Could not approve these hours.' });
+            }
+            return finishApproved(record);
         }
 
         const payload = {

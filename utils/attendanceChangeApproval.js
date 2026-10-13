@@ -1,4 +1,5 @@
 import AttendanceChangeRequest from '../models/AttendanceChangeRequest.js';
+import EmployeeBasic from '../models/EmployeeBasic.js';
 import { syncDashboardAction } from './syncDashboard.js';
 import { sendAttendanceChangeRequestEmail } from './sendAttendanceLeaveEmails.js';
 
@@ -40,7 +41,22 @@ export function attendanceMarksMatch(existing, proposed) {
     );
 }
 
+export function attendanceChangeQueuedMessage(stage) {
+    if (stage === 'pending_reportee') {
+        return 'Sent to the primary reportee. Attendance stays unchanged until HR approves.';
+    }
+    return 'Sent to HR. Attendance stays unchanged until HR approves.';
+}
+
 export function attendanceChangeSummary(request) {
+    const who =
+        request?.stage === 'pending_hr' ? 'Waiting for HR' : 'Waiting for primary reportee';
+    if (request?.action === 'flexible_ot' || request?.action === 'hour_adjust') {
+        const label =
+            request?.proposed?.statusLabel ||
+            (request.action === 'hour_adjust' ? 'Hour approval' : 'Apply OT');
+        return `${label} · ${who}`;
+    }
     const from = request?.previous?.statusLabel || 'Not marked';
     const to =
         request?.action === 'map'
@@ -49,8 +65,6 @@ export function attendanceChangeSummary(request) {
     const timeIn = String(request?.proposed?.timeIn || '').trim();
     const timeOut = String(request?.proposed?.timeOut || '').trim();
     const times = [timeIn, timeOut].filter(Boolean).join(' – ');
-    const who =
-        request?.stage === 'pending_hr' ? 'Waiting for HR' : 'Waiting for primary reportee';
     return `${from} → ${to}${times ? ` (${times})` : ''} · ${who}`;
 }
 
@@ -169,7 +183,7 @@ export async function submitAttendanceChange({
         employeeId: String(employee?.employeeId || ''),
         employeeName: personName(employee),
         stage,
-        action: action === 'map' ? 'map' : 'mark',
+        action: ['map', 'flexible_ot', 'hour_adjust', 'clear'].includes(action) ? action : 'mark',
         proposed,
         previous,
         requestedBy: actor?._id || null,
@@ -214,25 +228,95 @@ export async function submitAttendanceChange({
     };
 }
 
-export async function loadPendingAttendanceChanges(date) {
-    const rows = await AttendanceChangeRequest.find({
-        date,
-        stage: { $in: OPEN_STAGES },
-    })
-        .sort({ updatedAt: -1 })
-        .lean();
-    return (rows || []).map((row) => ({
+const REPORTEE_SELECT = 'firstName lastName employeeId companyEmail workEmail email';
+
+function pendingChangeRow(row) {
+    return {
         id: String(row._id),
+        date: row.date || '',
         employeeMongoId: row.employeeMongoId,
         employeeName: row.employeeName || '',
         stage: row.stage,
+        action: row.action || 'mark',
         statusKey: row.proposed?.statusKey || '',
         statusLabel: row.proposed?.statusLabel || '',
         timeIn: row.proposed?.timeIn || '',
         timeOut: row.proposed?.timeOut || '',
         reason: row.proposed?.reason || '',
         requestedByName: row.requestedByName || '',
-    }));
+        targetDate: row.proposed?.targetDate || '',
+        confirmNextDay: row.proposed?.confirmNextDay === true,
+    };
+}
+
+export async function loadPendingAttendanceChanges(date) {
+    const day = String(date || '').trim();
+    const rows = await AttendanceChangeRequest.find({
+        stage: { $in: OPEN_STAGES },
+        $or: [
+            { date: day },
+            {
+                action: 'flexible_ot',
+                'proposed.confirmNextDay': true,
+                'proposed.targetDate': day,
+            },
+        ],
+    })
+        .sort({ updatedAt: 1 })
+        .lean();
+    return (rows || []).map(pendingChangeRow);
+}
+
+/**
+ * Queue a change for the employee's primary reportee, then HR.
+ * The caller applies the change immediately when the actor is flowchart HR.
+ */
+export async function openAttendanceChangeForEmployee({
+    employee,
+    date,
+    proposed,
+    previous,
+    actor,
+    hr,
+    action = 'mark',
+}) {
+    const reporteeRef = employee?.primaryReportee;
+    const reporteeId = reporteeRef?._id || reporteeRef || '';
+    const stage = approvalStageForAttendanceChange({
+        actorIsHr: false,
+        actorId: actor?._id,
+        reporteeId,
+        hrId: hr?._id,
+    });
+    if (stage === 'pending_hr' && !hr?._id) {
+        return { error: 'Flowchart HR is not set, so this attendance change cannot be sent for approval.' };
+    }
+    if (!employee?._id) {
+        return { error: 'Employee not found, so this attendance change cannot be sent for approval.' };
+    }
+
+    let reportee = null;
+    if (reporteeRef && typeof reporteeRef === 'object' && reporteeRef._id) {
+        reportee = reporteeRef;
+    } else if (reporteeId) {
+        reportee = await EmployeeBasic.findById(reporteeId).select(REPORTEE_SELECT).lean();
+    }
+    if (stage === 'pending_reportee' && !reportee?._id) {
+        return { error: 'This employee has no primary reportee, so the change cannot be sent for approval.' };
+    }
+
+    const pending = await submitAttendanceChange({
+        employee,
+        date,
+        proposed,
+        previous,
+        stage,
+        actor,
+        reportee,
+        hr,
+        action,
+    });
+    return { pending };
 }
 
 export async function loadAttendanceChangeInboxItems({ viewerId, viewerIsHr, reporteeIds }) {
@@ -288,6 +372,9 @@ export async function loadAttendanceChangeInboxItems({ viewerId, viewerIsHr, rep
                 timeIn: row.proposed?.timeIn || '',
                 timeOut: row.proposed?.timeOut || '',
                 reason: row.proposed?.reason || '',
+                action: row.action || 'mark',
+                targetDate: row.proposed?.targetDate || '',
+                confirmNextDay: row.proposed?.confirmNextDay === true,
                 status: 'Pending',
                 extra1: summary,
                 extra2: summary,

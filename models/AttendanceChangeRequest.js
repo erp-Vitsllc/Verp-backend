@@ -26,10 +26,16 @@ const attendanceChangeRequestSchema = new mongoose.Schema(
             default: 'pending_reportee',
             index: true,
         },
-        /** mark = status/time edit. map = copy another employee's punches for this day. */
+        /**
+         * mark = status/time edit.
+         * map = copy another employee's punches for this day.
+         * flexible_ot = apply overtime, or mark a chosen day present from that overtime.
+         * hour_adjust = hour approval.
+         * clear = clear the day back to its baseline.
+         */
         action: {
             type: String,
-            enum: ['mark', 'map'],
+            enum: ['mark', 'map', 'flexible_ot', 'hour_adjust', 'clear'],
             default: 'mark',
         },
         proposed: {
@@ -57,6 +63,14 @@ const attendanceChangeRequestSchema = new mongoose.Schema(
                 label: { type: String, default: '', trim: true },
                 source: { type: String, default: '', trim: true },
             },
+            attendanceId: { type: String, default: '', trim: true },
+            flexibleOtApprovedHours: { type: Number, default: 0 },
+            confirmNextDay: { type: Boolean, default: false },
+            targetDate: { type: String, default: '', trim: true },
+            hourAdjustKind: { type: String, default: '', trim: true },
+            hoursTaken: { type: Number, default: 0 },
+            hoursMax: { type: Number, default: 0 },
+            hoursApproved: { type: Number, default: 0 },
         },
         previous: {
             statusKey: { type: String, default: '', trim: true },

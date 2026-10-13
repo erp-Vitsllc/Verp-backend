@@ -12,6 +12,10 @@ import {
 } from '../utils/workingTimeHelpers.js';
 import { punchAttendanceKind } from '../utils/partialLeaveWindow.js';
 import { attendanceApprovalLimitMessageFor } from '../utils/attendanceApprovalAllowance.js';
+import {
+    attendanceChangeQueuedMessage,
+    openAttendanceChangeForEmployee,
+} from '../utils/attendanceChangeApproval.js';
 
 const UNAUTH_TIMES = 2;
 
@@ -104,6 +108,24 @@ function applyApproved(record, { kind, approvedHours, taken, max, reason }) {
     record.statusLabel = APPROVED_LABEL[kind];
 }
 
+export async function applyStoredHourAdjust(record, proposed = {}) {
+    const kind = proposed.hourAdjustKind || hourAdjustKindOf(record);
+    if (!kind || !STATUS_KEY[kind]) {
+        const error = new Error('This status cannot be approved.');
+        error.statusCode = 400;
+        throw error;
+    }
+    applyApproved(record, {
+        kind,
+        approvedHours: roundHours(proposed.hoursApproved),
+        taken: roundHours(proposed.hoursTaken),
+        max: roundHours(proposed.hoursMax),
+        reason: proposed.reason,
+    });
+    await record.save();
+    return record;
+}
+
 export async function requestHourAdjust(req, res) {
     try {
         if (mongoose.connection.readyState !== 1) {
@@ -159,14 +181,42 @@ export async function requestHourAdjust(req, res) {
             return res.status(200).json({ message: 'Hours approved.', record });
         }
 
-        record.hourAdjustStatus = 'pending';
-        record.hourAdjustKind = kind;
-        record.hoursTaken = taken;
-        record.hoursMax = max;
-        record.hoursApproved = approvedHours;
-        record.hourAdjustReason = reason;
-        await record.save();
-        return res.status(200).json({ message: 'Request sent to HR.', record });
+        const employee = await EmployeeBasic.findById(record.employeeMongoId)
+            .select('_id employeeId firstName lastName primaryReportee companyEmail workEmail email')
+            .populate('primaryReportee', 'firstName lastName employeeId companyEmail workEmail email')
+            .lean();
+        const hr = await getDepartmentHOD('hr').catch(() => null);
+        const queued = await openAttendanceChangeForEmployee({
+            employee,
+            date: record.date,
+            proposed: {
+                statusKey: record.statusKey || '',
+                statusLabel: `Hour approval ${approvedHours} hr`,
+                reason,
+                timeIn: record.timeIn || '',
+                timeOut: record.timeOut || '',
+                attendanceId: String(record._id),
+                hourAdjustKind: kind,
+                hoursTaken: taken,
+                hoursMax: max,
+                hoursApproved: approvedHours,
+            },
+            previous: {
+                statusKey: record.statusKey || '',
+                statusLabel: record.statusLabel || 'Not marked',
+                timeIn: record.timeIn || '',
+                timeOut: record.timeOut || '',
+                reason: record.reason || '',
+            },
+            actor,
+            hr,
+            action: 'hour_adjust',
+        });
+        if (queued.error) return res.status(400).json({ message: queued.error });
+        return res.status(200).json({
+            message: attendanceChangeQueuedMessage(queued.pending?.stage),
+            pending: queued.pending,
+        });
     } catch (error) {
         console.error('[requestHourAdjust]', error);
         return res.status(500).json({ message: error.message || 'Failed to send hour request.' });

@@ -1,8 +1,13 @@
-import nodemailer from 'nodemailer';
 import mongoose from 'mongoose';
 import Attendance from '../models/Attendance.js';
+import AttendanceChangeRequest from '../models/AttendanceChangeRequest.js';
 import EmployeeBasic from '../models/EmployeeBasic.js';
 import { getDepartmentHOD } from '../utils/getDepartmentHOD.js';
+import { hasPermission } from '../services/permissionService.js';
+import {
+    attendanceChangeQueuedMessage,
+    openAttendanceChangeForEmployee,
+} from '../utils/attendanceChangeApproval.js';
 import {
     isCurrentMonthDate,
     isAuthorizedLeaveStatus,
@@ -16,7 +21,6 @@ import {
     normalizeStaffType,
 } from '../utils/workingTimeHelpers.js';
 import { refreshFlexibleOtRecords } from '../utils/syncFlexibleOt.js';
-import { resolveFrontendBaseUrl } from '../utils/resolveFrontendBaseUrl.js';
 import { notifyEmployeeFlexibleOtWhatsApp } from '../utils/sendFlexibleOtWhatsApp.js';
 
 async function resolveActor(req) {
@@ -65,35 +69,57 @@ async function revertSyntheticOtDay(employeeMongoId, nextDayDate, sourceDate) {
     });
 }
 
-async function approveFlexibleOvertimeRecord(record, { approvedHours, reason, confirmNextDay, targetDate, actor }) {
-    const approved = roundHours(approvedHours);
+async function resolveNextDayPlacement(record, { approvedHours, confirmNextDay, targetDate }) {
     const dayHours = await workingDayHours(record);
-    const split = splitApprovedOvertime(approved, dayHours);
-    const previousNext = String(record.flexibleOtNextDayDate || '').trim();
-    const placeOnAnotherDay = Boolean(confirmNextDay && split.nextDay);
-    let nextDate = '';
-    if (placeOnAnotherDay) {
-        nextDate = String(targetDate || '').trim();
-        if (!isCurrentMonthDate(record.date, nextDate)) {
-            return {
+    const split = splitApprovedOvertime(approvedHours, dayHours);
+    if (!confirmNextDay) {
+        return { split, placeOnAnotherDay: false, nextDate: '' };
+    }
+    if (!split.nextDay) {
+        return {
+            error: {
+                status: 400,
+                body: { message: 'Approved hours must cover one working day.' },
+            },
+        };
+    }
+    const nextDate = String(targetDate || '').trim();
+    if (!isCurrentMonthDate(record.date, nextDate)) {
+        return {
+            error: {
                 status: 400,
                 body: { message: 'Choose an authorized leave day in this month.' },
-            };
-        }
-        const existingNext = await Attendance.findOne({
-            date: nextDate,
-            employeeMongoId: record.employeeMongoId,
-        }).lean();
-        const alreadyFromThis =
-            String(existingNext?.flexibleFromOtDate || '') === String(record.date) &&
-            String(existingNext?.timeIn || '').trim() === 'OT';
-        if (!alreadyFromThis && !isAuthorizedLeaveStatus(existingNext?.statusKey, existingNext?.statusLabel)) {
-            return {
+            },
+        };
+    }
+    const existingNext = await Attendance.findOne({
+        date: nextDate,
+        employeeMongoId: record.employeeMongoId,
+    }).lean();
+    const alreadyFromThis =
+        String(existingNext?.flexibleFromOtDate || '') === String(record.date) &&
+        String(existingNext?.timeIn || '').trim() === 'OT';
+    if (!alreadyFromThis && !isAuthorizedLeaveStatus(existingNext?.statusKey, existingNext?.statusLabel)) {
+        return {
+            error: {
                 status: 400,
                 body: { message: 'That day is not authorized leave.' },
-            };
-        }
+            },
+        };
     }
+    return { split, placeOnAnotherDay: true, nextDate };
+}
+
+export async function approveFlexibleOvertimeRecord(record, { approvedHours, reason, confirmNextDay, targetDate, actor }) {
+    const approved = roundHours(approvedHours);
+    const placement = await resolveNextDayPlacement(record, {
+        approvedHours: approved,
+        confirmNextDay: confirmNextDay === true,
+        targetDate,
+    });
+    if (placement.error) return placement.error;
+    const { split, placeOnAnotherDay, nextDate } = placement;
+    const previousNext = String(record.flexibleOtNextDayDate || '').trim();
 
     record.flexibleOtStatus = 'approved';
     record.flexibleOtApprovedHours = approved;
@@ -176,29 +202,14 @@ async function approveFlexibleOvertimeRecord(record, { approvedHours, reason, co
     };
 }
 
-async function sendHrOtEmail({ hr, record, employeeName, approvedHours, reason, req }) {
-    const to = hr?.companyEmail || hr?.workEmail || hr?.email || '';
-    const emailUser = process.env.EMAIL_USER?.trim();
-    const emailPass = process.env.EMAIL_PASS?.trim();
-    if (!to || !emailUser || !emailPass) return;
-    const transporter = nodemailer.createTransport({
-        host: 'smtp.office365.com',
-        port: 587,
-        secure: false,
-        auth: { user: emailUser, pass: emailPass },
-    });
-    const baseUrl = resolveFrontendBaseUrl(req);
-    const staffType = normalizeStaffType(record.staffType || '');
-    const link = `${baseUrl}/HRM/Attendance/mark?date=${record.date}&staffType=${staffType}&otAttendanceId=${record._id}`;
-    await transporter.sendMail({
-        from: emailUser,
-        to,
-        subject: `[Action Required] Overtime request: ${employeeName} ${record.date}`,
-        html: `<p>Hello ${[hr.firstName, hr.lastName].filter(Boolean).join(' ') || 'HR'},</p>
-<p><strong>${employeeName}</strong> has an overtime request for <strong>${record.date}</strong>.</p>
-<p>Approved hours requested: <strong>${approvedHours}</strong><br/>Reason: ${reason}</p>
-<p><a href="${link}">Open Mark Attendance</a></p>`,
-    });
+function previousAttendanceSnapshot(record) {
+    return {
+        statusKey: record?.statusKey || '',
+        statusLabel: record?.statusLabel || 'Not marked',
+        timeIn: record?.timeIn || '',
+        timeOut: record?.timeOut || '',
+        reason: record?.reason || '',
+    };
 }
 
 export async function requestFlexibleOvertime(req, res) {
@@ -229,54 +240,76 @@ export async function requestFlexibleOvertime(req, res) {
         }
 
         const employee = await EmployeeBasic.findById(record.employeeMongoId)
-            .select('primaryReportee staffType firstName lastName')
+            .select('_id employeeId firstName lastName primaryReportee companyEmail workEmail email')
+            .populate('primaryReportee', 'firstName lastName employeeId companyEmail workEmail email')
             .lean();
-        const isReportee = Boolean(employee && String(employee.primaryReportee || '') === String(actor._id));
+        const reporteeId = employee?.primaryReportee?._id || employee?.primaryReportee || '';
+        const isReportee = Boolean(reporteeId && String(reporteeId) === String(actor._id));
         const isHr = await actorIsFlowchartHr(actor);
-        if (!isReportee && !isHr) {
+        const permitted = req.user?.id
+            ? await hasPermission(req.user.id, 'hrm_attendance_ot', 'view')
+            : false;
+        if (!isHr && !isReportee && !permitted) {
             return res.status(403).json({
-                message: 'Only the primary reportee or flowchart HR can use overtime.',
+                message: 'Enable Apply OT and next day present on your permission group to use this.',
             });
+        }
+
+        const confirmNextDay = req.body?.confirmNextDay === true;
+        const targetDate = String(req.body?.targetDate || '').trim();
+        const placement = await resolveNextDayPlacement(record, {
+            approvedHours,
+            confirmNextDay,
+            targetDate,
+        });
+        if (placement.error) {
+            return res.status(placement.error.status).json(placement.error.body);
         }
 
         if (isHr) {
             const applied = await approveFlexibleOvertimeRecord(record, {
                 approvedHours,
                 reason,
-                confirmNextDay: req.body?.confirmNextDay === true,
-                targetDate: req.body?.targetDate,
+                confirmNextDay,
+                targetDate,
                 actor,
             });
             if (applied.status !== 200) {
                 return res.status(applied.status).json(applied.body);
             }
             return res.status(200).json({
-                message: 'Overtime applied.',
+                message: confirmNextDay ? 'Present set on the selected day.' : 'Overtime applied.',
                 ...applied.body,
             });
         }
 
-        record.flexibleOtStatus = 'pending';
-        record.flexibleOtApprovedHours = approvedHours;
-        record.flexibleOtReason = reason;
-        await record.save();
-
         const hr = await getDepartmentHOD('hr').catch(() => null);
-        const employeeName = record.employeeName || [employee.firstName, employee.lastName].filter(Boolean).join(' ');
-        try {
-            await sendHrOtEmail({
-                hr,
-                record: { ...record.toObject(), staffType: employee.staffType },
-                employeeName,
-                approvedHours,
+        const queued = await openAttendanceChangeForEmployee({
+            employee,
+            date: record.date,
+            proposed: {
+                statusKey: record.statusKey || '',
+                statusLabel: confirmNextDay
+                    ? `Next day present on ${targetDate}`
+                    : `Apply OT ${approvedHours} hr`,
                 reason,
-                req,
-            });
-        } catch (mailErr) {
-            console.error('[requestFlexibleOvertime] email failed:', mailErr);
-        }
-
-        return res.status(200).json({ message: 'Overtime request sent to HR.', record });
+                timeIn: record.timeIn || '',
+                timeOut: record.timeOut || '',
+                attendanceId: String(record._id),
+                flexibleOtApprovedHours: approvedHours,
+                confirmNextDay,
+                targetDate: confirmNextDay ? targetDate : '',
+            },
+            previous: previousAttendanceSnapshot(record),
+            actor,
+            hr,
+            action: 'flexible_ot',
+        });
+        if (queued.error) return res.status(400).json({ message: queued.error });
+        return res.status(200).json({
+            message: attendanceChangeQueuedMessage(queued.pending?.stage),
+            pending: queued.pending,
+        });
     } catch (error) {
         console.error('[requestFlexibleOvertime]', error);
         return res.status(500).json({ message: error.message || 'Failed to request overtime.' });
@@ -307,6 +340,18 @@ export async function decideFlexibleOvertime(req, res) {
         const record = await Attendance.findById(attendanceId);
         if (!record || record.flexibleOtStatus !== 'pending') {
             return res.status(404).json({ message: 'Pending overtime request not found.' });
+        }
+        const openChange = await AttendanceChangeRequest.findOne({
+            action: 'flexible_ot',
+            'proposed.attendanceId': attendanceId,
+            stage: { $in: ['pending_reportee', 'pending_hr'] },
+        })
+            .select('_id')
+            .lean();
+        if (openChange) {
+            return res.status(400).json({
+                message: 'Approve the attendance request. The selected day is applied only after HR approval.',
+            });
         }
 
         if (decision === 'rejected') {

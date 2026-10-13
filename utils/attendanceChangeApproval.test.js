@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 import {
     approvalStageForAttendanceChange,
+    attendanceChangeSummary,
     attendanceMarksMatch,
     describeAttendanceSave,
 } from './attendanceChangeApproval.js';
@@ -91,6 +92,23 @@ describe('attendanceMarksMatch', () => {
             ),
             true,
         );
+    });
+});
+
+describe('attendanceChangeSummary', () => {
+    it('keeps a next-day present request on the chosen date', () => {
+        const summary = attendanceChangeSummary({
+            action: 'flexible_ot',
+            stage: 'pending_hr',
+            proposed: {
+                statusLabel: 'Next day present on 2026-10-14',
+                confirmNextDay: true,
+                targetDate: '2026-10-14',
+            },
+        });
+        assert.match(summary, /Next day present on 2026-10-14/);
+        assert.match(summary, /Waiting for HR/);
+        assert.doesNotMatch(summary, /approved ot/i);
     });
 });
 
