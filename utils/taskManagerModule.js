@@ -1,11 +1,14 @@
+import mongoose from "mongoose";
 import nodemailer from "nodemailer";
 import { rememberSentEmail } from "./emailDispatch.js";
 import DashboardAction from "../models/DashboardAction.js";
 import EmployeeBasic from "../models/EmployeeBasic.js";
+import TaskManagerTask from "../models/TaskManagerTask.js";
 import EmployeeContact from "../models/EmployeeContact.js";
 import { emailFrontendUrl } from "./resolveFrontendBaseUrl.js";
 import { resolveEmployeeEmailWithReporteeLoaded } from "./resolveEmployeeEmail.js";
 import { isReqUserSystemSuperUser } from "./systemSuperUser.js";
+import { buildEmployeeExpiryAccessPath } from "./notificationFocusNavigation.js";
 
 const TASK_TYPE_LABELS = new Map([
     ["system", "System Task"],
@@ -88,8 +91,139 @@ export function moduleForRequestType(requestType, extraText = "") {
     return moduleForText(type, extraText);
 }
 
-/** Opens the record behind a task. Falls back to the module list when there is no record id. */
-export function accessPathFor(destination, requestId, subjectEmployeeId) {
+function parseTaskMeta(context) {
+    if (!context) return {};
+    if (typeof context === "string") {
+        try {
+            const parsed = JSON.parse(context);
+            return parsed && typeof parsed === "object" ? parsed : {};
+        } catch {
+            return {};
+        }
+    }
+    if (typeof context !== "object") return {};
+    const raw = context.extra3;
+    let meta = {};
+    if (raw && typeof raw === "object") meta = { ...raw };
+    else if (typeof raw === "string" && raw.trim()) {
+        try {
+            const parsed = JSON.parse(raw);
+            if (parsed && typeof parsed === "object") meta = parsed;
+        } catch {
+            meta = {};
+        }
+    } else if (!raw) {
+        meta = { ...context };
+    }
+    if (context.requestType) meta.requestType = context.requestType;
+    if (context.extra1) meta.extra1 = context.extra1;
+    if (context.extra2) meta.extra2 = context.extra2;
+    return meta;
+}
+
+function appPath(value) {
+    let text = String(value || "").trim();
+    if (!text) return "";
+    if (/^https?:\/\//i.test(text)) {
+        try {
+            const url = new URL(text);
+            text = `${url.pathname}${url.search}`;
+        } catch {
+            return "";
+        }
+    }
+    if (!text.startsWith("/") || text.startsWith("//") || text.includes("..")) return "";
+    return text;
+}
+
+function storedRecordPath(meta) {
+    return ["detailsPath", "reviewPath", "linkPath", "href", "path"]
+        .map((key) => appPath(meta?.[key]))
+        .find(Boolean) || "";
+}
+
+function inferServiceType(...parts) {
+    const blob = parts.filter(Boolean).join(" ").toLowerCase();
+    if (blob.includes("oil service") || blob.includes("oil-service")) return "Oil Service";
+    if (blob.includes("tire change") || blob.includes("tyre")) return "Tire Change";
+    if (blob.includes("mechanical")) return "Mechanical Work";
+    if (blob.includes("body work")) return "Body Work";
+    if (blob.includes("accident")) return "Accident Repair";
+    if (blob.includes("car wash")) return "Car Wash";
+    return "";
+}
+
+/** Exact vehicle service page, not the vehicle profile. */
+function vehicleServicePath(vehicleId, serviceId, serviceType, stored, focus) {
+    const vehicle = String(vehicleId || "").trim();
+    const service = String(serviceId || "").trim();
+    if (!vehicle || !service) return "";
+    const type = String(serviceType || "").trim().toLowerCase();
+    const base = `/HRM/Asset/Vehicle/details/${vehicle}`;
+    const segments = {
+        "oil service": "oil-service",
+        "tire change": "tire-change",
+        "mechanical work": "mechanical-work",
+        "body work": "body-work",
+        "accident repair": "accident-repair",
+    };
+    const segment = segments[type];
+    if (segment) {
+        const built = `${base}/${segment}/${service}`;
+        if (stored === built || stored.startsWith(`${built}?`)) return stored;
+        const focusKey = String(focus || "").trim();
+        return focusKey ? `${built}?focus=${encodeURIComponent(focusKey)}` : built;
+    }
+    if (type === "car wash") {
+        return `${base}?tab=service&carWashServiceId=${encodeURIComponent(service)}`;
+    }
+    if (stored && stored.includes(`/service-requests/details/${vehicle}/${service}`)) return stored;
+    if (type) return `/HRM/Asset/Vehicle/service-requests/details/${vehicle}/${service}`;
+    return "";
+}
+
+function exactRecordPath(meta, requestId, stored) {
+    const requestType = String(meta.requestType || "");
+    const vehicleId = meta.vehicleId || meta.vehicleMongoId || requestId;
+    const serviceId = meta.serviceRecordId || "";
+    const serviceType = meta.serviceType || inferServiceType(requestType, meta.extra1, meta.extra2, stored);
+    const servicePath = vehicleServicePath(vehicleId, serviceId, serviceType, stored, meta.focus);
+    if (servicePath) return servicePath;
+
+    const historyId = String(meta.historyId || "").trim();
+    if (historyId && vehicleId && (meta.vehicleMongoId || meta.vehicleId || /handover|assign|inspection/i.test(requestType))) {
+        const built = `/HRM/Asset/Vehicle/details/${vehicleId}/assign/${historyId}`;
+        if (stored === built || stored.startsWith(`${built}?`)) return stored;
+        return built;
+    }
+
+    if (meta.leaveDashboard || /leave request/i.test(requestType)) {
+        const params = new URLSearchParams();
+        if (meta.from) params.set("from", String(meta.from));
+        if (meta.to) params.set("to", String(meta.to));
+        if (meta.attendanceId) params.set("approvalId", String(meta.attendanceId));
+        const query = params.toString();
+        if (query) return `/HRM/Leave/annual-leave?${query}`;
+    }
+
+    const entryId = String(meta.entryId || "").trim();
+    if (entryId && /utility/i.test(`${requestType} ${stored}`)) {
+        const built = `/HRM/Asset/UtilityBills/details/${encodeURIComponent(entryId)}`;
+        if (stored.startsWith(built)) return stored;
+        return built;
+    }
+
+    return "";
+}
+
+/** Opens the exact record behind a task. Falls back to the module page when there is no record id. */
+export function accessPathFor(destination, requestId, subjectEmployeeId, context = null) {
+    const meta = parseTaskMeta(context);
+    const stored = storedRecordPath(meta);
+    const exact = exactRecordPath(meta, requestId, stored);
+    if (exact) return exact;
+    if (stored && /[a-f0-9]{24}|approvalId=|carWashServiceId=|billId=|focus=/i.test(stored)) return stored;
+
     const id = String(requestId || "").trim();
     const employeeCode = String(subjectEmployeeId || "").trim();
     const moduleName = destination?.module || "";
@@ -99,8 +233,17 @@ export function accessPathFor(destination, requestId, subjectEmployeeId) {
     if (moduleName === "reward" && id) return `/HRM/Reward/${id}`;
     if (moduleName === "vehicle" && id) return `/HRM/Asset/Vehicle/details/${id}`;
     if (moduleName === "tools" && id) return `/HRM/Asset/details/${id}`;
+    const followUp = String(meta.extra1 || "");
+    const expiryTask = /expiry/i.test(String(meta.requestType || "")) || /^expiry follow-up required:/i.test(followUp);
+    if (expiryTask && (moduleName === "employees" || /employee/i.test(String(meta.requestType || "")))) {
+        const fromLabel = String(meta.extra2 || "").match(/\(([^)]+)\)\s*$/);
+        const code = (/^[a-f0-9]{24}$/i.test(employeeCode) ? "" : employeeCode) || fromLabel?.[1] || employeeCode;
+        const sectionPath = buildEmployeeExpiryAccessPath(code, followUp);
+        if (sectionPath) return sectionPath;
+    }
     if (moduleName === "employees" && employeeCode) return `/emp/${encodeURIComponent(employeeCode)}`;
     if (moduleName === "company" && id) return `/Company/${id}`;
+    if (stored) return stored;
     return base;
 }
 
@@ -205,13 +348,236 @@ function mailTransport() {
     };
 }
 
-export async function sendTaskReassignedEmail({ toEmp, taskName, taskNumber, reason, modulePath, requesterName, recordId = "" }) {
+export function taskOpenPath(taskKey) {
+    const key = String(taskKey || "").trim();
+    if (!key) return "/task-manager";
+    return `/task-manager/${encodeURIComponent(key)}`;
+}
+
+function plainCloseRequest(task) {
+    if (!task?.closeRequest) return {};
+    return task.closeRequest.toObject ? task.closeRequest.toObject() : { ...task.closeRequest };
+}
+
+export async function publishReassignmentNotices(task, {
+    watchers = [],
+    reassigneeName,
+    newAssigneeId,
+    taskName,
+    moduleName,
+    taskKey,
+    noticeText = "",
+} = {}) {
+    if (!task) return;
+    const saved = plainCloseRequest(task);
+    const notices = new Map();
+    for (const row of saved.reassignmentNotices || []) {
+        const id = String(row?.employeeId || "");
+        if (!isObjectId(id)) continue;
+        notices.set(id, {
+            employeeId: row.employeeId,
+            empId: row.empId || "",
+            requestId: row.requestId,
+        });
+    }
+    for (const person of watchers) {
+        const id = String(person?.employeeId || "");
+        if (!isObjectId(id) || id === String(newAssigneeId || "")) continue;
+        const existing = notices.get(id);
+        if (!existing) {
+            notices.set(id, {
+                employeeId: person.employeeId,
+                empId: person.empId || "",
+                requestId: new mongoose.Types.ObjectId(),
+            });
+        } else if (person.empId && !existing.empId) {
+            existing.empId = person.empId;
+        }
+    }
+
+    const path = taskOpenPath(taskKey);
+    const messageName = String(reassigneeName || "").trim() || "another employee";
+    const label = String(noticeText || "").trim();
+    const extra3 = JSON.stringify({
+        taskManager: true,
+        reassignedNotice: true,
+        module: String(moduleName || "general"),
+        path,
+        taskPath: path,
+        taskKey: String(taskKey || ""),
+        taskManagerId: String(task._id || ""),
+        reassignedToName: label ? "" : messageName,
+    });
+    const nextNotices = [];
+    for (const [id, row] of notices) {
+        if (!isObjectId(row.requestId)) row.requestId = new mongoose.Types.ObjectId();
+        if (id === String(newAssigneeId || "")) {
+            await DashboardAction.updateMany(
+                { requestId: row.requestId, requestType: "Task Manager" },
+                { status: "Dismissed", actionedDate: new Date() },
+            );
+            continue;
+        }
+        await DashboardAction.findOneAndUpdate(
+            { requestId: row.requestId, requestType: "Task Manager" },
+            {
+                assignedTo: row.employeeId,
+                assignedToEmpId: row.empId || "",
+                requestId: row.requestId,
+                requestType: "Task Manager",
+                status: "Pending",
+                subjectEmployeeId: row.empId || "",
+                subjectName: "",
+                requestedByName: "Task Manager",
+                requestedDate: new Date(),
+                extra1: taskName || "Task",
+                extra2: label || `Reassigned to: ${messageName}`,
+                extra3,
+                actionedDate: null,
+            },
+            { upsert: true, new: true, setDefaultsOnInsert: true },
+        );
+        nextNotices.push({
+            employeeId: row.employeeId,
+            empId: row.empId || "",
+            requestId: row.requestId,
+        });
+    }
+
+    task.closeRequest = {
+        ...saved,
+        reassignmentNotices: nextNotices,
+    };
+    task.markModified("closeRequest");
+    await task.save();
+}
+
+export async function upsertTaskNotice(task, {
+    employeeId,
+    empId = "",
+    taskName,
+    moduleName,
+    taskKey,
+    noticeText,
+} = {}) {
+    if (!task || !isObjectId(employeeId)) return;
+    const saved = plainCloseRequest(task);
+    const notices = (saved.reassignmentNotices || []).map((row) => ({
+        employeeId: row.employeeId,
+        empId: row.empId || "",
+        requestId: row.requestId,
+    }));
+    let row = notices.find((item) => String(item.employeeId || "") === String(employeeId));
+    if (!row) {
+        row = {
+            employeeId,
+            empId: empId || "",
+            requestId: new mongoose.Types.ObjectId(),
+        };
+        notices.push(row);
+    } else if (empId && !row.empId) {
+        row.empId = empId;
+    }
+    if (!isObjectId(row.requestId)) row.requestId = new mongoose.Types.ObjectId();
+    const path = taskOpenPath(taskKey);
+    await DashboardAction.findOneAndUpdate(
+        { requestId: row.requestId, requestType: "Task Manager" },
+        {
+            assignedTo: employeeId,
+            assignedToEmpId: row.empId || "",
+            requestId: row.requestId,
+            requestType: "Task Manager",
+            status: "Pending",
+            subjectEmployeeId: row.empId || "",
+            subjectName: "",
+            requestedByName: "Task Manager",
+            requestedDate: new Date(),
+            extra1: taskName || "Task",
+            extra2: String(noticeText || "").trim() || "Task update",
+            extra3: JSON.stringify({
+                taskManager: true,
+                reassignedNotice: true,
+                module: String(moduleName || "general"),
+                path,
+                taskPath: path,
+                taskKey: String(taskKey || ""),
+                taskManagerId: String(task._id || ""),
+                reassignedToName: "",
+            }),
+            actionedDate: null,
+        },
+        { upsert: true, new: true, setDefaultsOnInsert: true },
+    );
+    task.closeRequest = {
+        ...saved,
+        reassignmentNotices: notices,
+    };
+    task.markModified("closeRequest");
+    await task.save();
+}
+
+export async function promoteDueTaskCompletions() {
+    const due = await TaskManagerTask.find({
+        status: { $nin: ["Completed", "Cancelled"] },
+        "closeRequest.completesAt": { $lte: new Date() },
+    }).limit(100);
+    for (const task of due) {
+        const when = task.closeRequest?.completesAt ? new Date(task.closeRequest.completesAt) : null;
+        if (!when || Number.isNaN(when.getTime()) || when.getTime() > Date.now()) continue;
+        task.status = "Completed";
+        task.history = task.history || [];
+        task.history.push({
+            event: "Completed",
+            detail: "Two days passed after the assignee closed this task. The status is Completed and Reopen Request is disabled.",
+            actorName: "Task Manager",
+            createdAt: new Date(),
+        });
+        task.updates = task.updates || [];
+        task.updates.push({
+            authorName: "Task Manager",
+            authorRole: "",
+            kind: "Completed",
+            badge: "Completed",
+            text: "Two days passed after the close. The status is Completed and Reopen Request is disabled.",
+            emailSent: false,
+            assigneeNotified: false,
+            requesterNotified: false,
+            assigneeName: "",
+            requesterName: "",
+            createdAt: new Date(),
+        });
+        await task.save();
+        await closeReassignmentNotices(task);
+        if (!task.sourceDashboardActionId) await syncManualTaskNotification(task);
+    }
+}
+
+export async function closeReassignmentNotices(task) {
+    const ids = (plainCloseRequest(task).reassignmentNotices || [])
+        .map((row) => row?.requestId)
+        .filter((id) => isObjectId(id));
+    if (!ids.length) return;
+    await DashboardAction.updateMany(
+        { requestId: { $in: ids }, requestType: "Task Manager", status: "Pending" },
+        { status: "Dismissed", actionedDate: new Date() },
+    );
+}
+
+export async function deleteReassignmentNotices(task) {
+    const ids = (plainCloseRequest(task).reassignmentNotices || [])
+        .map((row) => row?.requestId)
+        .filter((id) => isObjectId(id));
+    if (!ids.length) return;
+    await DashboardAction.deleteMany({ requestId: { $in: ids }, requestType: "Task Manager" });
+}
+
+export async function sendTaskReassignedEmail({ toEmp, taskName, taskNumber, reason, modulePath, taskPath = "", requesterName, recordId = "" }) {
     const mail = mailTransport();
     const resolved = await resolveEmployeeEmailWithReporteeLoaded(toEmp);
     const to = resolved?.email;
     if (!mail || !to) return { sent: false };
     const base = emailFrontendUrl();
-    const path = modulePath || "/task-manager";
+    const path = taskPath || modulePath || "/task-manager";
     const link = path.startsWith("http") ? path : `${base}${path.startsWith("/") ? path : `/${path}`}`;
     const escapeHtml = (value) =>
         String(value || "")
@@ -226,7 +592,7 @@ export async function sendTaskReassignedEmail({ toEmp, taskName, taskNumber, rea
             <p><strong>${escapeHtml(taskNumber || "Task")}</strong> — ${escapeHtml(taskName || "Task")}</p>
             ${reason ? `<p><strong>Reason:</strong> ${escapeHtml(reason)}</p>` : ""}
             ${requesterName ? `<p><strong>Requested by:</strong> ${escapeHtml(requesterName)}</p>` : ""}
-            <p><a href="${escapeHtml(link)}">Open the task</a></p>
+            <p><a href="${escapeHtml(link)}">Open Task</a></p>
         `;
     await mail.transporter.sendMail({
         from: mail.from,

@@ -65,3 +65,31 @@ export function buildEmployeePathWithFocus(basePath, label = "") {
     const withoutHash = String(basePath || "").split("#")[0];
     return appendQuery(withoutHash, "focusCard", id);
 }
+
+function employeeExpiryTab(label = "") {
+    const text = extractNotificationLabelText(label).toLowerCase();
+    if (text.includes("contract")) return "work-details";
+    const basicCards = [
+        "passport",
+        "visit visa",
+        "employment visa",
+        "spouse visa",
+        "emirates",
+        "labour",
+        "medical",
+        "driving",
+        "visa",
+    ];
+    if (basicCards.some((item) => text.includes(item))) return "basic";
+    return "documents";
+}
+
+/** Employee profile opened on the expiring document card. */
+export function buildEmployeeExpiryAccessPath(employeeCode, label = "") {
+    const code = String(employeeCode || "").trim();
+    if (!code) return "";
+    const tab = employeeExpiryTab(label);
+    let path = `/emp/${encodeURIComponent(code)}?tab=${encodeURIComponent(tab)}`;
+    if (tab === "documents") path = appendQuery(path, "docStatusTab", "live");
+    return buildEmployeePathWithFocus(path, label);
+}

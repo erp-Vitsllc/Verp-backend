@@ -8,9 +8,7 @@ import Fine from '../../models/Fine.js';
 import AssetItem from '../../models/AssetItem.js';
 import EmployeeSalary from '../../models/EmployeeSalary.js';
 import UtilityBillPayment from '../../models/UtilityBillPayment.js';
-import EmployeeHubRequest from '../../models/EmployeeHubRequest.js';
-import { hubRequestDisplayLabel } from '../../utils/employeeHubRequestTypes.js';
-import { taskNumbersByRecordId } from '../stats/getTaskManagerNotifications.js';
+import { listProfileEmployeeTasks } from '../stats/getTaskManagerNotifications.js';
 import { isCompanyShellEmployee } from '../../utils/attendanceEmployeeFilters.js';
 import { resolveEmployeeFinePayableAmount } from '../../utils/finePayableAmount.js';
 import { normalizeStaffTypeKey } from '../../utils/workLocationHelpers.js';
@@ -1266,37 +1264,13 @@ export async function getEmployeeAttendanceProfile(req, res) {
                 daysAgo: daysAgoCount(createdKey, todayKey),
             });
         }
-        const workTaskRows = await EmployeeHubRequest.find({
-            assignedTo: employeeMongoId,
-            status: 'Pending',
-        })
-            .sort({ createdAt: -1 })
-            .limit(30)
-            .select('kind assetType description requesterName requestedDate createdAt')
-            .lean();
-        let taskNumbers = new Map();
-        try {
-            taskNumbers = await taskNumbersByRecordId((workTaskRows || []).map((row) => row._id));
-        } catch (taskNumberError) {
-            console.error('[getEmployeeAttendanceProfile] task numbers', taskNumberError);
-        }
-        const workTasks = (workTaskRows || []).map((row) => {
-            const createdKey = toDateKey(row.createdAt);
-            const dueKey = /^\d{4}-\d{2}-\d{2}/.test(String(row.requestedDate || ''))
-                ? String(row.requestedDate).slice(0, 10)
-                : '';
-            return {
-                id: String(row._id),
-                taskNumber: taskNumbers.get(String(row._id)) || '',
-                title: hubRequestDisplayLabel(row.kind, row.assetType),
-                subtitle: String(row.description || '').trim(),
-                requesterName: String(row.requesterName || '').trim(),
-                taskType: hubRequestDisplayLabel(row.kind, row.assetType),
-                dueDate: dueKey ? formatDayMonthYear(dueKey) : '',
-                badge: daysAgoLabel(createdKey, todayKey),
-                kind: row.kind || '',
-            };
+        const employeeTasks = await listProfileEmployeeTasks({
+            employeeId: employeeMongoId,
+            employeeCode,
+            employeeName: employeeName(employee),
+            limit: 10,
         });
+        const workTasks = employeeTasks.tasks;
         const rawPhoto = employee.profilePicture || '';
         const profilePicture = rawPhoto.startsWith('data:')
             ? rawPhoto
@@ -1432,7 +1406,7 @@ export async function getEmployeeAttendanceProfile(req, res) {
                 pending: pendingHrRequests,
                 hrPendingCount: pendingHrRequests.length,
                 workTasks,
-                workTaskPendingCount: workTasks.length,
+                workTaskPendingCount: employeeTasks.pendingCount,
                 workflowActiveIndex: pendingHrRequests.length ? 1 : 3,
                 taskAging: taskAgingBuckets(pendingHrRequests),
             },

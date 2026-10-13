@@ -4,6 +4,7 @@ import {
     approvedOtRemainder,
     dayWorkedMinutes,
     flexibleLossHours,
+    flexibleMissedPayFraction,
     isCurrentMonthDate,
     isAuthorizedLeaveStatus,
     splitApprovedOvertime,
@@ -181,6 +182,19 @@ describe('flexibleLossHours', () => {
 
     it('is zero when the worked hours cover the day', () => {
         assert.equal(flexibleLossHours({ date: '2026-10-05', flexibleWorkedHours: 10.2 }, week), 0);
+    });
+
+    it('turns two missed hours on a ten-hour day into two tenths of a day', () => {
+        const record = { date: '2026-10-05', statusKey: 'late_arrived', flexibleWorkedHours: 8 };
+        assert.equal(flexibleMissedPayFraction(record, week), 0.2);
+        assert.equal(
+            flexibleMissedPayFraction(
+                { ...record, statusKey: 'early_go', hourAdjustStatus: 'approved', hoursApproved: 1 },
+                week,
+            ),
+            0.1,
+        );
+        assert.equal(flexibleMissedPayFraction({ ...record, statusKey: 'on_office' }, week), 0);
     });
 });
 

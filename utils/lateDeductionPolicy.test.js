@@ -151,4 +151,35 @@ describe('late in/out combined events', () => {
         assert.equal(summary.lateOut.count, 0);
         assert.equal(summary.lateOut.dayFraction, 0);
     });
+
+    it('deducts only the missed hours for a flexible group', () => {
+        const week = {
+            timingMode: 'flexible',
+            hoursPerDay: 10,
+            monday: { isOffDay: false, workingHours: 10 },
+            tuesday: { isOffDay: false, workingHours: 10 },
+        };
+        const policy = {
+            lateInRules: [{ minutes: 15, events: 0, deduct: 'full' }],
+            extraLateRules: [
+                { title: 'Late in', minutes: 30, events: 0, deduct: 'full' },
+                { title: 'Late Out', minutes: 30, events: 0, deduct: 'full' },
+            ],
+            unauthorizedLeaveDeductionDays: 2,
+        };
+        const summary = lateInOutSummary(
+            [
+                { date: '2026-10-05', statusKey: 'late_arrived', flexibleWorkedHours: 8 },
+                { date: '2026-10-06', statusKey: 'early_go', flexibleWorkedHours: 8 },
+            ],
+            policy,
+            week,
+        );
+        assert.equal(summary.flexibleHourly, true);
+        assert.equal(summary.lateIn.count, 1);
+        assert.equal(summary.lateIn.dayFraction, 0.2);
+        assert.equal(summary.lateOut.count, 1);
+        assert.equal(summary.lateOut.dayFraction, 0.2);
+        assert.equal(summary.extra.length, 0);
+    });
 });

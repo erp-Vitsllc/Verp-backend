@@ -8,7 +8,8 @@ import {
 } from '../../utils/attendanceEmployeeFilters.js';
 import { preferPunchedRows } from '../../utils/attendanceDayLookup.js';
 import { applyLeaveCoverIndex, loadLeaveCoverIndex } from '../../utils/attendanceLeaveDayCover.js';
-import { calendarDaysForEmployee } from '../../utils/leaveGroupCalendarDays.js';
+import { calendarDaysForEmployee, calendarStatusKey } from '../../utils/leaveGroupCalendarDays.js';
+import EmployeeSalary from '../../models/EmployeeSalary.js';
 import { loadEnrolledLeaveVisibilityByMongoId } from '../../utils/leaveSalaryVisibility.js';
 import { getScheduledEmailTimeZone, getZonedParts } from '../../utils/scheduleDailyAtMidnight.js';
 import {
@@ -48,6 +49,36 @@ function laterDate(left, right) {
     return dates[dates.length - 1] || '';
 }
 
+function slimGroupAttendanceRecord(row, todayKey) {
+    if (!row) return null;
+    return {
+        date: row.date,
+        statusKey: calendarStatusKey(row, todayKey) || row.statusKey || '',
+        statusLabel: row.statusLabel || '',
+        timeIn: row.timeIn || '',
+        timeOut: row.timeOut || '',
+        timeOutDate: row.timeOutDate || '',
+        checkInLocation: row.checkInLocation || null,
+        checkOutLocation: row.checkOutLocation || null,
+        reason: row.reason || '',
+        leaveRequestReason: row.leaveRequestReason || '',
+        hourAdjustReason: row.hourAdjustReason || '',
+        flexibleOtReason: row.flexibleOtReason || '',
+        hourAdjustStatus: row.hourAdjustStatus || '',
+        leaveRequestStatus: row.leaveRequestStatus || '',
+        flexibleOtStatus: row.flexibleOtStatus || '',
+        approvalStatus: row.approvalStatus || '',
+        hoursApproved: row.hoursApproved,
+        hoursTaken: row.hoursTaken,
+        flexibleWorkedHours: row.flexibleWorkedHours,
+        flexibleRequiredHours: row.flexibleRequiredHours,
+        flexibleFromOtDate: row.flexibleFromOtDate || '',
+        flexibleOtNextDayDate: row.flexibleOtNextDayDate || '',
+        compOff: row.compOff || null,
+        leavePayType: row.leavePayType || '',
+    };
+}
+
 function monthWindow(month) {
     if (!/^\d{4}-\d{2}$/.test(month)) return null;
     const year = Number(month.slice(0, 4));
@@ -69,6 +100,7 @@ export async function getLeaveGroupCalendars(req, res) {
         }
 
         const staffTypeRaw = String(req.query.staffType || '').trim();
+        const detail = String(req.query.detail || '') === '1';
         if (!staffTypeRaw) {
             return res.status(400).json({ message: 'A group is required.' });
         }
@@ -102,7 +134,7 @@ export async function getLeaveGroupCalendars(req, res) {
         const codes = people.map((emp) => String(emp.employeeId || '').trim()).filter(Boolean);
         const mongoByCode = new Map(people.map((emp) => [String(emp.employeeId || '').trim(), String(emp._id)]));
 
-        const [storedRecords, coverIndex, workingTime, holidayRows] = await Promise.all([
+        const [storedRecords, coverIndex, workingTime, holidayRows, salaryRows] = await Promise.all([
             mongoIds.length
                 ? Attendance.find({
                       date: { $gte: window.from, $lte: window.to },
@@ -111,7 +143,9 @@ export async function getLeaveGroupCalendars(req, res) {
                           ...(codes.length ? [{ employeeId: { $in: codes } }] : []),
                       ],
                   })
-                      .select('employeeMongoId employeeId date statusKey timeIn timeOut updatedAt historical')
+                      .select(detail
+                          ? 'employeeMongoId employeeId date statusKey statusLabel timeIn timeOut timeOutDate checkInLocation checkOutLocation reason leaveRequestReason hourAdjustReason flexibleOtReason hourAdjustStatus leaveRequestStatus flexibleOtStatus approvalStatus hoursApproved hoursTaken flexibleWorkedHours flexibleRequiredHours flexibleFromOtDate flexibleOtNextDayDate compOff leavePayType updatedAt historical'
+                          : 'employeeMongoId employeeId date statusKey timeIn timeOut updatedAt historical')
                       .lean()
                       .maxTimeMS(12000)
                 : [],
@@ -121,7 +155,19 @@ export async function getLeaveGroupCalendars(req, res) {
                 .select('date name appliesTo')
                 .lean()
                 .maxTimeMS(8000),
+            detail && codes.length
+                ? EmployeeSalary.find({ employeeId: { $in: codes } })
+                    .select('employeeId monthlySalary totalSalary')
+                    .lean()
+                    .maxTimeMS(8000)
+                : [],
         ]);
+        const salaryByCode = new Map(
+            (salaryRows || []).map((row) => [
+                String(row.employeeId || '').trim(),
+                Number(row.monthlySalary) || Number(row.totalSalary) || 0,
+            ]),
+        );
 
         const owned = [];
         for (const row of storedRecords || []) {
@@ -154,13 +200,18 @@ export async function getLeaveGroupCalendars(req, res) {
             .map((emp) => {
                 const id = String(emp._id);
                 const visibleFrom = laterDate(dateKeyOf(emp.dateOfJoining), visibility.get(id));
+                const rows = coveredByEmployee.get(id) || [];
                 return {
                     id,
                     employeeId: emp.employeeId || '',
                     employeeName: employeeName(emp) || 'Employee',
                     staffType,
                     visibleFrom,
-                    days: calendarDaysForEmployee(coveredByEmployee.get(id) || [], {
+                    ...(detail ? {
+                        monthlySalary: salaryByCode.get(String(emp.employeeId || '').trim()) || 0,
+                        records: rows.map((row) => slimGroupAttendanceRecord(row, today)),
+                    } : {}),
+                    days: calendarDaysForEmployee(rows, {
                         todayKey: today,
                         visibleFrom,
                     }),
@@ -180,6 +231,14 @@ export async function getLeaveGroupCalendars(req, res) {
             today,
             staffType,
             offWeekdays: getOffWeekdayKeys(getWeekForStaffType(workingTime, staffType)),
+            ...(detail ? {
+                scheduleWeek: getWeekForStaffType(workingTime, staffType),
+                workingTime: {
+                    site: workingTime?.site || {},
+                    office: workingTime?.office || {},
+                    extra: workingTime?.extra || {},
+                },
+            } : {}),
             holidays,
             employees,
         });

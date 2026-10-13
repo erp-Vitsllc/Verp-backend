@@ -100,6 +100,23 @@ const taskManagerTaskSchema = new mongoose.Schema(
             closedByName: { type: String, default: "" },
             requesterNotifiedAt: { type: Date, default: null },
             requesterChannel: { type: String, default: "" },
+            reopenedAt: { type: Date, default: null },
+            completionRequestedAt: { type: Date, default: null },
+            completionRequestedById: { type: mongoose.Schema.Types.ObjectId, ref: "EmployeeBasic", default: null },
+            completionRequestedByName: { type: String, default: "" },
+            completionNote: { type: String, default: "" },
+            completionConfirmedAt: { type: Date, default: null },
+            completesAt: { type: Date, default: null },
+            reassignmentNotices: {
+                type: [
+                    {
+                        employeeId: { type: mongoose.Schema.Types.ObjectId, ref: "EmployeeBasic", default: null },
+                        empId: { type: String, default: "" },
+                        requestId: { type: mongoose.Schema.Types.ObjectId, default: null },
+                    },
+                ],
+                default: [],
+            },
         },
     },
     { timestamps: true },

@@ -182,7 +182,11 @@ import {
     getTaskManagerTask,
     getTaskManagerWorkflow,
     closeTaskManagerRequest,
+    confirmTaskCompletion,
     reassignTaskManagerTask,
+    reopenTaskManagerTask,
+    returnTaskManagerTask,
+    submitTaskCompletion,
     updateTaskManagerNotifications,
     updateTaskManagerReminders,
     updateTaskManagerTask,
@@ -609,6 +613,10 @@ router.post("/task-manager/tasks/:taskKey/workflow/decision", decideTaskManagerW
 router.patch("/task-manager/tasks/:taskKey", updateTaskManagerTask);
 router.delete("/task-manager/tasks/:taskKey", deleteTaskManagerTask);
 router.post("/task-manager/tasks/:taskKey/reassign", reassignTaskManagerTask);
+router.post("/task-manager/tasks/:taskKey/return", returnTaskManagerTask);
+router.post("/task-manager/tasks/:taskKey/completion", submitTaskCompletion);
+router.post("/task-manager/tasks/:taskKey/confirm-completion", confirmTaskCompletion);
+router.post("/task-manager/tasks/:taskKey/reopen", reopenTaskManagerTask);
 router.post("/task-manager/tasks/:taskKey/status", updateTaskManagerTaskStatus);
 router.post("/task-manager/tasks/:taskKey/close", closeTaskManagerRequest);
 router.post("/task-manager/tasks/:taskKey/comments", addTaskManagerComment);

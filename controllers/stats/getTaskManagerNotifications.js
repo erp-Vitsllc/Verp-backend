@@ -1,6 +1,7 @@
 import mongoose from "mongoose";
 import DashboardAction from "../../models/DashboardAction.js";
 import EmployeeBasic from "../../models/EmployeeBasic.js";
+import Fine from "../../models/Fine.js";
 import TaskManagerTask from "../../models/TaskManagerTask.js";
 import User from "../../models/User.js";
 import {
@@ -8,6 +9,7 @@ import {
     displayTaskType,
     moduleForRequestType,
     moduleForText,
+    promoteDueTaskCompletions,
     resolveTaskViewer,
     viewerCanReassign,
 } from "../../utils/taskManagerModule.js";
@@ -57,6 +59,44 @@ function personName(record) {
     return [record.firstName, record.lastName].filter(Boolean).join(" ").trim();
 }
 
+function isSystemLabel(name) {
+    const base = String(name || "").trim().replace(/\s*\([^)]*\)\s*$/, "").trim().toLowerCase();
+    return !base || base === "system";
+}
+
+/** Fines store the real creator on the fine. The dashboard row can still say System. */
+export async function sourceRequesterNameMap(actions = []) {
+    const fineIds = [];
+    for (const action of actions) {
+        if (!action || !isSystemLabel(action.requestedByName)) continue;
+        if (!/fine/i.test(String(action.requestType || ""))) continue;
+        const id = String(action.requestId || "");
+        if (isObjectId(id)) fineIds.push(id);
+    }
+    const map = new Map();
+    if (!fineIds.length) return map;
+    const fines = await Fine.find({ _id: { $in: [...new Set(fineIds)] } })
+        .select("createdBy")
+        .populate("createdBy", "name")
+        .lean();
+    for (const fine of fines) {
+        const name = String(fine.createdBy?.name || "").trim();
+        if (!isSystemLabel(name)) map.set(String(fine._id), name);
+    }
+    return map;
+}
+
+export function preferRequesterName(...values) {
+    const names = values.map((value) => String(value || "").trim().replace(/\s*\([^)]*\)\s*$/, "").trim());
+    return names.find((name) => name && name.toLowerCase() !== "system") || names.find(Boolean) || "";
+}
+
+export function displayRequesterName(stored, action, sourceMap) {
+    const name = String(stored || "").trim();
+    if (!isSystemLabel(name)) return name;
+    return sourceMap?.get(String(action?.requestId || "")) || name || "System";
+}
+
 const GENERAL_REQUEST_TYPES = new Set([
     "employee salary request",
     "employee certificate request",
@@ -69,6 +109,10 @@ const GENERAL_TITLES = {
     "employee asset request": "Assets",
 };
 
+function isFollowUpSentence(value) {
+    return /^expiry follow-up required:/i.test(String(value || "").trim());
+}
+
 /** Short title in the header. The written request stays in the description. */
 export function taskTitleAndDescription({ requestType, extra1, extra2, taskName, description } = {}) {
     const typeKey = String(requestType || "").trim().toLowerCase();
@@ -76,6 +120,14 @@ export function taskTitleAndDescription({ requestType, extra1, extra2, taskName,
     const body = String(extra1 || "").trim();
     const storedName = String(taskName || "").trim();
     const storedDescription = String(description || "").trim();
+    const followUp = [body, storedName].find((value) => isFollowUpSentence(value)) || "";
+    if (followUp && (!storedName || isFollowUpSentence(storedName))) {
+        const subject = [label, storedDescription].find((value) => value && !isFollowUpSentence(value)) || "";
+        return {
+            taskName: subject || requestType || "Task",
+            description: followUp,
+        };
+    }
     const general = GENERAL_REQUEST_TYPES.has(typeKey);
 
     if (!general) {
@@ -130,6 +182,18 @@ function canDeleteTask(viewer, { manual, requestedByName, requestedByUserId }) {
     const owner = String(requestedByName || "").trim().toLowerCase();
     const name = String(viewer?.name || "").trim().toLowerCase();
     return Boolean(owner && name && owner === name);
+}
+
+function viewerOwnsOriginal(viewer, row) {
+    const id = String(row?.closeRequest?.originalAssigneeId || "");
+    const ids = [viewer?.employeeObjectId, viewer?.userId].map((value) => String(value || "")).filter(Boolean);
+    if (id && ids.includes(id)) return true;
+    const code = String(row?.closeRequest?.originalAssigneeEmpId || "").trim().toLowerCase();
+    return Boolean(
+        code
+        && viewer?.employeeId
+        && code === String(viewer.employeeId).trim().toLowerCase(),
+    );
 }
 
 function assigneeIsViewer(viewer, assigneeId, assigneeEmpId, assigneeName = "") {
@@ -261,6 +325,7 @@ export const getTaskManagerNotifications = async (req, res) => {
             });
         }
         const viewer = await resolveTaskViewer(req);
+        await promoteDueTaskCompletions();
 
         const actions = await DashboardAction.find({})
             .select(
@@ -319,7 +384,7 @@ export const getTaskManagerNotifications = async (req, res) => {
 
         const manualRows = await TaskManagerTask.find({})
             .select(
-                "taskType priority taskName description assignee assigneeEmpId assigneeName completionDate requestedByName requestedByUserId status createdAt updatedAt sourceDashboardActionId attachments comments history reminders",
+                "taskType priority taskName description assignee assigneeEmpId assigneeName completionDate requestedByName requestedByUserId status createdAt updatedAt sourceDashboardActionId attachments comments history reminders closeRequest",
             )
             .lean()
             .maxTimeMS(10000);
@@ -344,6 +409,7 @@ export const getTaskManagerNotifications = async (req, res) => {
         const summary = { total: 0, pending: 0, pendingDue: 0, completed: 0 };
         const uniqueActions = dedupeOpenActions(actions);
 
+        const sourceRequesters = await sourceRequesterNameMap(uniqueActions);
         const tasks = uniqueActions.map((action) => {
             const requestedAt = action.requestedDate || action.createdAt || null;
             const requestedKey = dubaiDateKey(requestedAt);
@@ -357,7 +423,11 @@ export const getTaskManagerNotifications = async (req, res) => {
             const assigneeEmpId = String(overlay?.assigneeEmpId || action.assignedToEmpId || "").trim();
             const assigneeRecord = byId.get(assigneeId) || byCode.get(assigneeEmpId) || assignee;
             const assigneeName = personName(assigneeRecord) || overlay?.assigneeName || String(action.assignedToEmpId || "").trim() || "Unassigned";
-            const requesterName = String(overlay?.requestedByName || action.requestedByName || "").trim() || "System";
+            const requesterName = displayRequesterName(
+                preferRequesterName(overlay?.requestedByName, action.requestedByName),
+                action,
+                sourceRequesters,
+            );
             const destination = moduleForRequestType(action.requestType, `${action.extra1 || ""} ${action.extra2 || ""}`);
             const category = taskCategory(action.requestType, action.extra2 || "");
             const priority = category === "System Task" ? "High" : (overlay?.priority || priorityFor(status, action.requestType));
@@ -373,6 +443,9 @@ export const getTaskManagerNotifications = async (req, res) => {
             if (overlay?.status === "Completed") status = "Completed";
             else if (overlay?.status === "Cancelled") status = "Cancelled";
             else if (overlay?.status === "In Progress") status = "In Progress";
+            else if (overlay?.status === "Pending" && overlay?.closeRequest?.reopenedAt) {
+                status = displayStatus("Pending", action.requestType, requestedKey, todayKey);
+            }
 
             summary.total += 1;
             bump("total", requestMonth);
@@ -392,13 +465,18 @@ export const getTaskManagerNotifications = async (req, res) => {
                 actionId: String(action._id),
                 manual: false,
                 workflowLocked: action.requestType !== "Task Manager",
-                canReassign: viewerCanReassign(viewer, assigneeId, assigneeEmpId),
+                canReassign: viewerCanReassign(viewer, assigneeId, assigneeEmpId) || viewerOwnsOriginal(viewer, overlay),
                 canDelete: canDeleteTask(viewer, { manual: false, requestedByName: requesterName }),
                 taskNumber: "",
                 requestDate: requestedAt,
                 completionDate: overlay?.completionDate || action.actionedDate || null,
                 taskCategory: category,
-                accessPath: accessPathFor(destination, action.requestId, action.subjectEmployeeId),
+                accessPath: accessPathFor(destination, action.requestId, action.subjectEmployeeId, {
+                    extra1: action.extra1,
+                    extra2: action.extra2,
+                    extra3: action.extra3,
+                    requestType: action.requestType,
+                }),
                 requestType: action.requestType || "Notification",
                 taskName: copy.taskName,
                 description: copy.description,
@@ -468,7 +546,7 @@ export const getTaskManagerNotifications = async (req, res) => {
                 actionId: `manual-${row._id}`,
                 manual: true,
                 workflowLocked: false,
-                canReassign: viewerCanReassign(viewer, assigneeId, row.assigneeEmpId),
+                canReassign: viewerCanReassign(viewer, assigneeId, row.assigneeEmpId) || viewerOwnsOriginal(viewer, row),
                 canDelete: canDeleteTask(viewer, {
                     manual: true,
                     requestedByName: requesterName,
@@ -548,6 +626,198 @@ export const getTaskManagerNotifications = async (req, res) => {
         return res.status(500).json({ message: "Failed to load task manager notifications" });
     }
 };
+
+function escapeRegex(value) {
+    return String(value || "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function personKey(value) {
+    return String(value || "").trim().toLowerCase().replace(/\s+/g, " ");
+}
+
+function profileStatusLabel(status) {
+    const value = String(status || "");
+    if (value === "Completed") return "Completed";
+    if (value === "Pending Due" || value === "Overdue") return "Overdue";
+    if (value === "Cancelled" || value === "Rejected" || value === "Dismissed") return "Closed";
+    return "Pending";
+}
+
+function formatProfileDay(value) {
+    const key = dubaiDateKey(value);
+    if (!key) return "";
+    const [year, month, day] = key.split("-").map(Number);
+    return new Date(Date.UTC(year, month - 1, day)).toLocaleDateString("en-GB", {
+        day: "2-digit",
+        month: "short",
+        year: "numeric",
+        timeZone: "UTC",
+    });
+}
+
+/**
+ * Task Manager rows where this employee is the requester or the assignee.
+ * The employee profile shows a short list; View All uses the same people on the task list.
+ */
+export async function listProfileEmployeeTasks({ employeeId, employeeCode, employeeName, limit = 10 } = {}) {
+    try {
+        const id = String(employeeId || "");
+        const code = String(employeeCode || "").trim();
+        const name = String(employeeName || "").trim();
+        const nameKey = personKey(name);
+        const manualOr = [];
+        const actionOr = [];
+        if (isObjectId(id)) {
+            manualOr.push({ assignee: id });
+            actionOr.push({ assignedTo: id });
+        }
+        if (code) {
+            manualOr.push({ assigneeEmpId: code });
+            actionOr.push({ assignedToEmpId: code });
+        }
+        if (name) {
+            const pattern = new RegExp(`^${name.split(/\s+/).map(escapeRegex).join("\\s+")}$`, "i");
+            manualOr.push({ requestedByName: pattern });
+            actionOr.push({ requestedByName: pattern });
+        }
+        if (!manualOr.length && !actionOr.length) return { tasks: [], pendingCount: 0 };
+
+        const [manualRows, actionRows] = await Promise.all([
+            manualOr.length
+                ? TaskManagerTask.find({ $or: manualOr })
+                    .select("taskType assignee assigneeEmpId assigneeName completionDate requestedByName status createdAt sourceDashboardActionId closeRequest")
+                    .sort({ createdAt: -1 })
+                    .limit(80)
+                    .lean()
+                    .maxTimeMS(8000)
+                : [],
+            actionOr.length
+                ? DashboardAction.find({ $or: actionOr, requestType: { $ne: "Task Manager" } })
+                    .select("assignedTo assignedToEmpId requestId requestType status requestedDate requestedByName extra2 createdAt")
+                    .sort({ createdAt: -1 })
+                    .limit(80)
+                    .lean()
+                    .maxTimeMS(8000)
+                : [],
+        ]);
+
+        const actionById = new Map((actionRows || []).map((row) => [String(row._id), row]));
+        const missingSourceIds = (manualRows || [])
+            .map((row) => String(row.sourceDashboardActionId || ""))
+            .filter((sourceId) => isObjectId(sourceId) && !actionById.has(sourceId));
+        if (missingSourceIds.length) {
+            const extra = await DashboardAction.find({ _id: { $in: missingSourceIds } })
+                .select("assignedTo assignedToEmpId requestId requestType status requestedDate requestedByName extra2 createdAt")
+                .lean()
+                .maxTimeMS(8000);
+            for (const row of extra || []) actionById.set(String(row._id), row);
+        }
+
+        const overlayByAction = new Map();
+        const createdRows = [];
+        for (const row of manualRows || []) {
+            if (row.sourceDashboardActionId) overlayByAction.set(String(row.sourceDashboardActionId), row);
+            else createdRows.push(row);
+        }
+        const overlayIds = [...actionById.keys()].filter((actionId) => !overlayByAction.has(actionId));
+        if (overlayIds.length) {
+            const overlays = await TaskManagerTask.find({ sourceDashboardActionId: { $in: overlayIds } })
+                .select("taskType assignee assigneeEmpId assigneeName completionDate requestedByName status createdAt sourceDashboardActionId closeRequest")
+                .lean()
+                .maxTimeMS(8000);
+            for (const row of overlays || []) overlayByAction.set(String(row.sourceDashboardActionId), row);
+        }
+
+        const todayKey = dubaiDateKey(new Date());
+        const involves = ({ assigneeId, assigneeEmpId, assigneeName, requesterName }) => {
+            if (id && assigneeId && String(assigneeId) === id) return true;
+            if (code && assigneeEmpId && String(assigneeEmpId).trim().toLowerCase() === code.toLowerCase()) return true;
+            if (nameKey && personKey(assigneeName) === nameKey) return true;
+            if (nameKey && personKey(requesterName) === nameKey) return true;
+            return false;
+        };
+
+        const sourceRequesters = await sourceRequesterNameMap([...actionById.values()]);
+        const rows = [];
+        for (const action of dedupeOpenActions([...actionById.values()])) {
+            const overlay = overlayByAction.get(String(action._id));
+            const requestedAt = action.requestedDate || action.createdAt || null;
+            const requestedKey = dubaiDateKey(requestedAt);
+            let status = displayStatus(action.status, action.requestType, requestedKey, todayKey);
+            if (overlay?.status === "Completed") status = "Completed";
+            else if (overlay?.status === "Cancelled") status = "Cancelled";
+            else if (overlay?.status === "In Progress") status = "In Progress";
+            else if (overlay?.status === "Pending" && overlay?.closeRequest?.reopenedAt) {
+                status = displayStatus("Pending", action.requestType, requestedKey, todayKey);
+            }
+            const requesterName = displayRequesterName(
+                preferRequesterName(overlay?.requestedByName, action.requestedByName),
+                action,
+                sourceRequesters,
+            );
+            const assigneeId = String(overlay?.assignee || action.assignedTo || "");
+            const assigneeEmpId = String(overlay?.assigneeEmpId || action.assignedToEmpId || "").trim();
+            const assigneeName = String(overlay?.assigneeName || "").trim();
+            if (!involves({ assigneeId, assigneeEmpId, assigneeName, requesterName })) continue;
+            rows.push({
+                actionId: String(action._id),
+                requestId: String(action.requestId || ""),
+                taskType: taskCategory(action.requestType, action.extra2 || ""),
+                requesterName: requesterName || "System",
+                requestedAt,
+                dueAt: overlay?.completionDate || null,
+                status: profileStatusLabel(status),
+                sortAt: new Date(requestedAt || 0).getTime(),
+            });
+        }
+
+        for (const row of createdRows) {
+            const requestedAt = row.createdAt || null;
+            const requestedKey = dubaiDateKey(requestedAt);
+            const open = row.status !== "Completed" && row.status !== "Cancelled";
+            const status = row.status === "Completed"
+                ? "Completed"
+                : row.status === "Cancelled"
+                    ? "Cancelled"
+                    : open && daysBetween(requestedKey, todayKey) >= 2
+                        ? "Pending Due"
+                        : "Pending";
+            const requesterName = String(row.requestedByName || "").trim() || "System";
+            const assigneeId = String(row.assignee || "");
+            const assigneeEmpId = String(row.assigneeEmpId || "").trim();
+            const assigneeName = String(row.assigneeName || "").trim();
+            if (!involves({ assigneeId, assigneeEmpId, assigneeName, requesterName })) continue;
+            rows.push({
+                actionId: `manual-${row._id}`,
+                requestId: String(row._id),
+                taskType: displayTaskType(row.taskType),
+                requesterName,
+                requestedAt,
+                dueAt: row.completionDate || null,
+                status: profileStatusLabel(status),
+                sortAt: new Date(requestedAt || 0).getTime(),
+            });
+        }
+
+        const numbers = await taskNumbersByRecordId(rows.flatMap((row) => [row.actionId, row.requestId]));
+        const rank = { Overdue: 0, Pending: 1, Completed: 2, Closed: 3 };
+        rows.sort((a, b) => (rank[a.status] ?? 9) - (rank[b.status] ?? 9) || b.sortAt - a.sortAt);
+        const pendingCount = rows.filter((row) => row.status === "Pending" || row.status === "Overdue").length;
+        const tasks = rows.slice(0, Math.max(1, Number(limit) || 10)).map((row) => ({
+            actionId: row.actionId,
+            taskNumber: numbers.get(row.actionId) || numbers.get(row.requestId) || "",
+            taskType: row.taskType || "Workflow Task",
+            requesterName: row.requesterName,
+            requestedDate: formatProfileDay(row.requestedAt),
+            dueDate: formatProfileDay(row.dueAt),
+            status: row.status,
+        }));
+        return { tasks, pendingCount };
+    } catch (error) {
+        console.error("[listProfileEmployeeTasks]", error);
+        return { tasks: [], pendingCount: 0 };
+    }
+}
 
 /**
  * The same TSK-26-count shown in Task Manager, keyed by the request id and the action id.

@@ -1,3 +1,4 @@
+import { flexibleMissedPayFraction } from './flexibleAttendance.js';
 import { clockTimeToMinutes, getScheduledPunchMinutes, isFlexibleTiming } from './workingTimeHelpers.js';
 
 function ruleHasValue(row) {
@@ -209,6 +210,41 @@ export function lateInOutSummary(rows, policy, week) {
     order.in.sort(byMinutes);
     order.out.sort(byMinutes);
     const flexible = isFlexibleTiming(week);
+    if (flexible) {
+        const roundFraction = (value) => Math.round(value * 100) / 100;
+        let lateInCount = 0;
+        let lateOutCount = 0;
+        let lateInFraction = 0;
+        let lateOutFraction = 0;
+        for (const row of rows || []) {
+            const key = String(row?.statusKey || '');
+            const fraction = flexibleMissedPayFraction(row, week);
+            if (key === 'early_go') {
+                lateOutCount += 1;
+                lateOutFraction += fraction;
+            } else if (key === 'late_arrived') {
+                lateInCount += 1;
+                lateInFraction += fraction;
+            }
+        }
+        return {
+            sharedLateIn: 0,
+            sharedLateOut: 0,
+            shared: lateDeductionFromEvents(0, policy),
+            extra: [],
+            flexibleHourly: true,
+            lateIn: {
+                count: lateInCount,
+                sharedCount: 0,
+                dayFraction: roundFraction(lateInFraction),
+            },
+            lateOut: {
+                count: lateOutCount,
+                sharedCount: 0,
+                dayFraction: roundFraction(lateOutFraction),
+            },
+        };
+    }
     const threshold = minutesThresholdOf(sharedLateRule(policy));
     let sharedLateIn = 0;
     let sharedLateOut = 0;

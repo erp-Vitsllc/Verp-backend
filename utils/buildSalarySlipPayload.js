@@ -699,7 +699,7 @@ export async function buildSalarySlipPayload({
                 $or: [{ employeeMongoId: mongoId }, { employeeId: idPattern }],
                 date: { $gte: from, $lte: to },
             })
-                .select('date statusKey reason leavePayType timeIn timeOut timeOutDate punchSessions flexibleOtStatus flexibleOtApprovedHours flexibleOtNextDayDate')
+                .select('date statusKey reason leavePayType timeIn timeOut timeOutDate punchSessions flexibleWorkedHours hourAdjustStatus hoursApproved flexibleOtStatus flexibleOtApprovedHours flexibleOtNextDayDate')
                 .lean(),
             Holiday.find({ date: { $gte: from, $lte: to } }).select('date appliesTo').lean(),
             Loan.find({

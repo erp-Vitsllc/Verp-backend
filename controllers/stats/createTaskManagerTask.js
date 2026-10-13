@@ -59,15 +59,15 @@ export const createTaskManagerTask = async (req, res) => {
         }
 
         const taskType = canonicalTaskType(req.body?.taskType);
-        const priority = taskType === "System Task" ? "High" : String(req.body?.priority || "").trim();
+        const priority = String(req.body?.priority || "").trim();
         const taskName = String(req.body?.taskName || "").trim();
         const description = String(req.body?.description || "").trim();
         const assigneeId = String(req.body?.assigneeId || "").trim();
         const completionDate = parseCompletionDate(req.body?.completionDate);
         const attachments = Array.isArray(req.body?.attachments) ? req.body.attachments : [];
 
-        if (!taskType) {
-            return res.status(400).json({ message: "Choose a task type." });
+        if (taskType !== "General Task") {
+            return res.status(400).json({ message: "Only General Task can be created here." });
         }
         if (!PRIORITIES.has(priority)) {
             return res.status(400).json({ message: "Choose a task priority." });

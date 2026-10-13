@@ -1529,7 +1529,7 @@ export const getSalaryRegister = async (req, res) => {
                 date: { $gte: from, $lte: to },
                 statusKey: { $in: ['late_arrived', 'early_go'] },
             })
-                .select('employeeMongoId date timeIn timeOut statusKey')
+                .select('employeeMongoId date timeIn timeOut timeOutDate punchSessions flexibleWorkedHours hourAdjustStatus hoursApproved statusKey')
                 .lean()
                 .maxTimeMS(15000);
 
@@ -1584,7 +1584,7 @@ export const getSalaryRegister = async (req, res) => {
                 date: { $gte: from, $lte: to },
                 timeIn: { $nin: ['', null] },
             })
-                .select('employeeMongoId date timeIn timeOut statusKey')
+                .select('employeeMongoId date timeIn timeOut timeOutDate punchSessions flexibleWorkedHours hourAdjustStatus hoursApproved statusKey')
                 .lean()
                 .maxTimeMS(15000);
             const punchesByKey = new Map();
