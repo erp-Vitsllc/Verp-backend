@@ -59,18 +59,34 @@ export function flexibleLossHours(record, week) {
     return Math.max(0, required - wholeHourCount(worked));
 }
 
+function exactWorkedHours(record) {
+    let worked = Number(record?.flexibleWorkedHours) || 0;
+    if (!(worked > 0)) {
+        const minutes = dayWorkedMinutes(record);
+        worked = Math.max(0, minutes) / 60;
+    }
+    return worked;
+}
+
+/** Hours actually short, including minutes. 6 hours 15 minutes on a 10-hour day is 3.75. */
+export function flexibleExactLossHours(record, week) {
+    const required = requiredHoursForDate(week, record?.date);
+    if (!(required > 0)) return 0;
+    return Math.max(0, required - exactWorkedHours(record));
+}
+
 /**
  * Flexible time does not use the late-arrival or early-go salary policy.
- * A 10-hour day with 8 hours worked deducts 2/10 of that day's salary.
+ * A 10-hour day with 6 hours 15 minutes worked deducts 3.75/10 of that day's salary.
  */
 export function flexibleMissedPayFraction(record, week) {
     if (!isFlexibleTiming(week)) return 0;
     const key = String(record?.statusKey || '');
     if (key !== 'late_arrived' && key !== 'early_go') return 0;
-    const required = wholeHourCount(requiredHoursForDate(week, record?.date));
+    const required = requiredHoursForDate(week, record?.date);
     if (!(required > 0)) return 0;
     const approved = String(record?.hourAdjustStatus || '') === 'approved';
-    const missed = approved ? Number(record?.hoursApproved) || 0 : flexibleLossHours(record, week);
+    const missed = approved ? Number(record?.hoursApproved) || 0 : flexibleExactLossHours(record, week);
     if (!(missed > 0)) return 0;
     return missed / required;
 }

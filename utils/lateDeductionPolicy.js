@@ -211,7 +211,7 @@ export function lateInOutSummary(rows, policy, week) {
     order.out.sort(byMinutes);
     const flexible = isFlexibleTiming(week);
     if (flexible) {
-        const roundFraction = (value) => Math.round(value * 100) / 100;
+        const roundFraction = (value) => Math.round(value * 1e6) / 1e6;
         let lateInCount = 0;
         let lateOutCount = 0;
         let lateInFraction = 0;

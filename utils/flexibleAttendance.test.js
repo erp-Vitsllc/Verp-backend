@@ -3,6 +3,7 @@ import { describe, it } from 'node:test';
 import {
     approvedOtRemainder,
     dayWorkedMinutes,
+    flexibleExactLossHours,
     flexibleLossHours,
     flexibleMissedPayFraction,
     isCurrentMonthDate,
@@ -195,6 +196,12 @@ describe('flexibleLossHours', () => {
             0.1,
         );
         assert.equal(flexibleMissedPayFraction({ ...record, statusKey: 'on_office' }, week), 0);
+    });
+
+    it('keeps the minutes in the deduction instead of rounding up to the next hour', () => {
+        const record = { date: '2026-10-05', statusKey: 'late_arrived', flexibleWorkedHours: 6.25 };
+        assert.equal(flexibleExactLossHours(record, week), 3.75);
+        assert.equal(flexibleMissedPayFraction(record, week), 0.375);
     });
 });
 
