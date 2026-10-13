@@ -656,8 +656,7 @@ function formatProfileDay(value) {
 }
 
 /**
- * Task Manager rows where this employee is the requester or the assignee.
- * The employee profile shows a short list; View All uses the same people on the task list.
+ * Open tasks assigned to this employee. Tasks they only requested stay on the task list.
  */
 export async function listProfileEmployeeTasks({ employeeId, employeeCode, employeeName, limit = 10 } = {}) {
     try {
@@ -677,14 +676,16 @@ export async function listProfileEmployeeTasks({ employeeId, employeeCode, emplo
         }
         if (name) {
             const pattern = new RegExp(`^${name.split(/\s+/).map(escapeRegex).join("\\s+")}$`, "i");
-            manualOr.push({ requestedByName: pattern });
-            actionOr.push({ requestedByName: pattern });
+            manualOr.push({ assigneeName: pattern });
         }
         if (!manualOr.length && !actionOr.length) return { tasks: [], pendingCount: 0 };
 
         const [manualRows, actionRows] = await Promise.all([
             manualOr.length
-                ? TaskManagerTask.find({ $or: manualOr })
+                ? TaskManagerTask.find({
+                    status: { $in: ["Pending", "In Progress"] },
+                    $or: manualOr,
+                })
                     .select("taskType assignee assigneeEmpId assigneeName completionDate requestedByName status createdAt sourceDashboardActionId closeRequest")
                     .sort({ createdAt: -1 })
                     .limit(80)
@@ -692,7 +693,11 @@ export async function listProfileEmployeeTasks({ employeeId, employeeCode, emplo
                     .maxTimeMS(8000)
                 : [],
             actionOr.length
-                ? DashboardAction.find({ $or: actionOr, requestType: { $ne: "Task Manager" } })
+                ? DashboardAction.find({
+                    status: { $in: ["Pending", "On Hold"] },
+                    requestType: { $ne: "Task Manager" },
+                    $or: actionOr,
+                })
                     .select("assignedTo assignedToEmpId requestId requestType status requestedDate requestedByName extra2 createdAt")
                     .sort({ createdAt: -1 })
                     .limit(80)
@@ -729,11 +734,10 @@ export async function listProfileEmployeeTasks({ employeeId, employeeCode, emplo
         }
 
         const todayKey = dubaiDateKey(new Date());
-        const involves = ({ assigneeId, assigneeEmpId, assigneeName, requesterName }) => {
+        const assignedToEmployee = ({ assigneeId, assigneeEmpId, assigneeName }) => {
             if (id && assigneeId && String(assigneeId) === id) return true;
             if (code && assigneeEmpId && String(assigneeEmpId).trim().toLowerCase() === code.toLowerCase()) return true;
             if (nameKey && personKey(assigneeName) === nameKey) return true;
-            if (nameKey && personKey(requesterName) === nameKey) return true;
             return false;
         };
 
@@ -758,7 +762,7 @@ export async function listProfileEmployeeTasks({ employeeId, employeeCode, emplo
             const assigneeId = String(overlay?.assignee || action.assignedTo || "");
             const assigneeEmpId = String(overlay?.assigneeEmpId || action.assignedToEmpId || "").trim();
             const assigneeName = String(overlay?.assigneeName || "").trim();
-            if (!involves({ assigneeId, assigneeEmpId, assigneeName, requesterName })) continue;
+            if (!assignedToEmployee({ assigneeId, assigneeEmpId, assigneeName })) continue;
             rows.push({
                 actionId: String(action._id),
                 requestId: String(action.requestId || ""),
@@ -786,7 +790,7 @@ export async function listProfileEmployeeTasks({ employeeId, employeeCode, emplo
             const assigneeId = String(row.assignee || "");
             const assigneeEmpId = String(row.assigneeEmpId || "").trim();
             const assigneeName = String(row.assigneeName || "").trim();
-            if (!involves({ assigneeId, assigneeEmpId, assigneeName, requesterName })) continue;
+            if (!assignedToEmployee({ assigneeId, assigneeEmpId, assigneeName })) continue;
             rows.push({
                 actionId: `manual-${row._id}`,
                 requestId: String(row._id),
@@ -799,11 +803,11 @@ export async function listProfileEmployeeTasks({ employeeId, employeeCode, emplo
             });
         }
 
-        const numbers = await taskNumbersByRecordId(rows.flatMap((row) => [row.actionId, row.requestId]));
-        const rank = { Overdue: 0, Pending: 1, Completed: 2, Closed: 3 };
-        rows.sort((a, b) => (rank[a.status] ?? 9) - (rank[b.status] ?? 9) || b.sortAt - a.sortAt);
-        const pendingCount = rows.filter((row) => row.status === "Pending" || row.status === "Overdue").length;
-        const tasks = rows.slice(0, Math.max(1, Number(limit) || 10)).map((row) => ({
+        const openRows = rows.filter((row) => row.status === "Pending" || row.status === "Overdue");
+        const numbers = await taskNumbersByRecordId(openRows.flatMap((row) => [row.actionId, row.requestId]));
+        const rank = { Overdue: 0, Pending: 1 };
+        openRows.sort((a, b) => (rank[a.status] ?? 9) - (rank[b.status] ?? 9) || b.sortAt - a.sortAt);
+        const tasks = openRows.slice(0, Math.max(1, Number(limit) || 10)).map((row) => ({
             actionId: row.actionId,
             taskNumber: numbers.get(row.actionId) || numbers.get(row.requestId) || "",
             taskType: row.taskType || "Workflow Task",
@@ -812,7 +816,7 @@ export async function listProfileEmployeeTasks({ employeeId, employeeCode, emplo
             dueDate: formatProfileDay(row.dueAt),
             status: row.status,
         }));
-        return { tasks, pendingCount };
+        return { tasks, pendingCount: openRows.length };
     } catch (error) {
         console.error("[listProfileEmployeeTasks]", error);
         return { tasks: [], pendingCount: 0 };
