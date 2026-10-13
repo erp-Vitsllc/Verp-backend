@@ -60,12 +60,13 @@ export function flexibleLossHours(record, week) {
 }
 
 function exactWorkedHours(record) {
-    let worked = Number(record?.flexibleWorkedHours) || 0;
-    if (!(worked > 0)) {
-        const minutes = dayWorkedMinutes(record);
-        worked = Math.max(0, minutes) / 60;
-    }
-    return worked;
+    const inn = String(record?.timeIn || '').trim();
+    const out = String(record?.timeOut || '').trim();
+    const punched = Boolean(inn && out && inn !== 'OT' && out !== 'OT');
+    const earlier = Array.isArray(record?.punchSessions)
+        && record.punchSessions.some((span) => span?.timeIn && span?.timeOut);
+    if (punched || earlier) return Math.max(0, dayWorkedMinutes(record)) / 60;
+    return Math.max(0, Number(record?.flexibleWorkedHours) || 0);
 }
 
 /** Hours actually short, including minutes. 6 hours 15 minutes on a 10-hour day is 3.75. */

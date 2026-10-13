@@ -199,7 +199,13 @@ describe('flexibleLossHours', () => {
     });
 
     it('keeps the minutes in the deduction instead of rounding up to the next hour', () => {
-        const record = { date: '2026-10-05', statusKey: 'late_arrived', flexibleWorkedHours: 6.25 };
+        const record = {
+            date: '2026-10-05',
+            statusKey: 'late_arrived',
+            timeIn: '16:50',
+            timeOut: '23:05',
+            flexibleWorkedHours: 6,
+        };
         assert.equal(flexibleExactLossHours(record, week), 3.75);
         assert.equal(flexibleMissedPayFraction(record, week), 0.375);
     });
