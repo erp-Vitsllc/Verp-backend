@@ -5,6 +5,47 @@ export function vehicleServiceActorName(emp) {
     return name || emp?.employeeId || 'you';
 }
 
+function requesterText(value) {
+    return String(value || '').trim().replace(/\s*\([^)]*\)\s*$/, '').trim();
+}
+
+/** Inbox titles such as "Mechanical Work pending with NESMI — Schedule" are not people. */
+export function isVehicleServicePendingTitle(name) {
+    return /\bpending with\b/i.test(requesterText(name));
+}
+
+/** A person who requested the work. System labels and workflow titles are not names. */
+export function personRequesterName(name) {
+    const base = requesterText(name);
+    if (!base || base.toLowerCase() === 'system') return '';
+    if (isVehicleServicePendingTitle(base)) return '';
+    return base;
+}
+
+function remarkObject(service) {
+    if (service?.remark && typeof service.remark === 'object') return service.remark;
+    try {
+        return service?.remark ? JSON.parse(service.remark) : {};
+    } catch {
+        return {};
+    }
+}
+
+/** The employee who created or submitted this service, when that name was stored. */
+export function requesterNameFromService(service) {
+    const remark = remarkObject(service);
+    const fromRemark = personRequesterName(remark.requestedByName) || personRequesterName(remark.createdByName);
+    if (fromRemark) return fromRemark;
+    const requestedBy = service?.requestedBy;
+    if (requestedBy && typeof requestedBy === 'object') {
+        const name = personRequesterName(
+            requestedBy.name || [requestedBy.firstName, requestedBy.lastName].filter(Boolean).join(' '),
+        );
+        if (name) return name;
+    }
+    return '';
+}
+
 export function vehicleServicePendingTitle(serviceType, personName, stage = '') {
     const type = String(serviceType || 'Service').trim() || 'Service';
     const name = String(personName || 'you').trim() || 'you';

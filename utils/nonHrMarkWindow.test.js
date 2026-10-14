@@ -3,23 +3,25 @@ import { describe, it } from 'node:test';
 import { nonHrMarkableDateKeys } from './nonHrMarkWindow.js';
 
 describe('nonHrMarkableDateKeys', () => {
-    it('skips a Sunday holiday so Monday includes Saturday and Friday', () => {
+    it('includes today and the seven previous calendar days', () => {
+        const allowed = nonHrMarkableDateKeys('2026-10-14', []);
+        assert.deepEqual([...allowed], [
+            '2026-10-14',
+            '2026-10-13',
+            '2026-10-12',
+            '2026-10-11',
+            '2026-10-10',
+            '2026-10-09',
+            '2026-10-08',
+            '2026-10-07',
+        ]);
+    });
+
+    it('counts a holiday as one of the seven days', () => {
         const allowed = nonHrMarkableDateKeys('2026-10-05', ['2026-10-04']);
-        assert.deepEqual([...allowed], ['2026-10-05', '2026-10-03', '2026-10-02']);
-    });
-
-    it('uses the three calendar days when no holiday falls in the lookback', () => {
-        const allowed = nonHrMarkableDateKeys('2026-10-03', []);
-        assert.deepEqual([...allowed], ['2026-10-03', '2026-10-02', '2026-10-01']);
-    });
-
-    it('skips consecutive holidays and still keeps today', () => {
-        const allowed = nonHrMarkableDateKeys('2026-10-05', ['2026-10-04', '2026-10-03']);
-        assert.deepEqual([...allowed], ['2026-10-05', '2026-10-02', '2026-10-01']);
-    });
-
-    it('keeps today when today is the holiday', () => {
-        const allowed = nonHrMarkableDateKeys('2026-10-04', ['2026-10-04']);
-        assert.deepEqual([...allowed], ['2026-10-04', '2026-10-03', '2026-10-02']);
+        assert.equal(allowed.has('2026-10-05'), true);
+        assert.equal(allowed.has('2026-10-04'), true);
+        assert.equal(allowed.has('2026-09-28'), true);
+        assert.equal(allowed.has('2026-09-27'), false);
     });
 });

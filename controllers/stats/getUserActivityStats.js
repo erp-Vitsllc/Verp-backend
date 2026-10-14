@@ -11,10 +11,8 @@ import { loadCompaniesForExpiryScanByIds } from "../../services/companyPartition
 import { collectCompanyExpiryDocuments, buildEmployeeManualDocumentExpiryLabel, isArchivedEmployeeManualDoc } from "../../utils/companyExpiryScanUtils.js";
 import { getDaysUntil, isExpiryHrTaskDueForDoc } from "../../utils/documentExpiryReminderStages.js";
 import { buildEmployeeDocumentMap } from "../../utils/processDocumentExpiryReminders.js";
-import { calculateProfileCompletionBackend } from "../../utils/calculateProfileCompletionBackend.js";
-import { getCompleteEmployee } from "../../services/employeeService.js";
 import { isEmployeeActiveForNotifications } from "../../utils/applyEmployeeLeftUserStatus.js";
-import { isEmployeeProfileLiveActive } from "../../utils/employeeDocumentRenewal.js";
+import { collectIncompleteMandatoryProfileItems } from "../../utils/scanIncompleteMandatoryProfiles.js";
 import {
     pendingChangesIncludeLeftUser,
     LEFT_USER_REQUEST_TYPE,
@@ -28,7 +26,6 @@ import {
     buildProfileActivationPendingMessage,
     buildProfileActivationRejectedMessage,
     buildProfileActivationSubmittedOutcomeMessage,
-    buildProfileIncompleteMessage,
     employeeProfileDisplayName,
 } from "../../utils/employeeProfileNotificationMessages.js";
 
@@ -1388,66 +1385,15 @@ export const getUserActivityStats = async (req, res) => {
         });
 
         // 5.1.5 Mandatory card notifications — designated Flowchart HR only (live-active profiles below 100%).
+        // Bulk-load the fields completion needs. getCompleteEmployee() per person also signed every file URL and stalled this response.
         if (isCurrentHrHolder) {
             try {
-                const employeesForScan = await EmployeeBasic.find({})
-                    .select({
-                        _id: 1,
-                        employeeId: 1,
-                        firstName: 1,
-                        lastName: 1,
-                        status: 1,
-                        profileStatus: 1,
-                        profileApprovalStatus: 1,
-                        updatedAt: 1,
-                        createdAt: 1,
-                    })
-                    .lean()
-                    .maxTimeMS(10000);
-
-                const liveActiveEmployees = employeesForScan.filter((emp) => isEmployeeProfileLiveActive(emp));
-                // Higher concurrency — previous batchSize of 5 made user-stats (Request Activity) very slow for HR.
-                const batchSize = 20;
-
-                for (let i = 0; i < liveActiveEmployees.length; i += batchSize) {
-                    const batch = liveActiveEmployees.slice(i, i + batchSize);
-                    await Promise.all(
-                        batch.map(async (emp) => {
-                            const complete = await getCompleteEmployee(emp.employeeId || emp._id);
-                            if (!complete || !isEmployeeProfileLiveActive(complete)) return;
-
-                            const { percentage } = calculateProfileCompletionBackend(complete);
-                            if (!Number.isFinite(percentage) || percentage >= 100) return;
-
-                            const displayName =
-                                `${complete.firstName || emp.firstName || ''} ${complete.lastName || emp.lastName || ''}`.trim() ||
-                                complete.employeeId ||
-                                emp.employeeId ||
-                                'Unknown Employee';
-                            const empKey = complete.employeeId || emp.employeeId || String(emp._id);
-                            const notifId = `${emp._id}_mandatory_cards_incomplete`;
-                            if (seenRequests.has(notifId)) return;
-
-                            activityList.push({
-                                id: emp._id,
-                                type: 'Profile Incomplete',
-                                requestedBy: 'System',
-                                requestedDate: complete.updatedAt || emp.updatedAt || emp.createdAt || new Date(),
-                                actionedDate: null,
-                                status: 'Pending',
-                                extra1: buildProfileIncompleteMessage({
-                                    employeeName: displayName,
-                                    employeeId: empKey,
-                                }),
-                                extra2: buildProfileActivationEntityLine(displayName, empKey),
-                                subjectName: displayName,
-                                extra3: JSON.stringify({ kind: 'mandatory-cards' }),
-                                targetEmployeeId: empKey,
-                                scope: 'inbox',
-                            });
-                            seenRequests.set(notifId, 'Pending');
-                        }),
-                    );
+                const incompleteProfiles = await collectIncompleteMandatoryProfileItems();
+                for (const item of incompleteProfiles) {
+                    const notifId = `${item.id}_mandatory_cards_incomplete`;
+                    if (seenRequests.has(notifId)) continue;
+                    activityList.push(item);
+                    seenRequests.set(notifId, 'Pending');
                 }
             } catch (err) {
                 console.error('[getUserActivityStats] Incomplete profile scan error:', err);

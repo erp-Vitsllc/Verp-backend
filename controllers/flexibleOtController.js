@@ -22,6 +22,7 @@ import {
 } from '../utils/workingTimeHelpers.js';
 import { refreshFlexibleOtRecords } from '../utils/syncFlexibleOt.js';
 import { notifyEmployeeFlexibleOtWhatsApp } from '../utils/sendFlexibleOtWhatsApp.js';
+import { sendAttendanceDirectChangeEmail } from '../utils/sendAttendanceLeaveEmails.js';
 
 async function resolveActor(req) {
     const select = '_id employeeId firstName lastName companyEmail';
@@ -266,7 +267,7 @@ export async function requestFlexibleOvertime(req, res) {
             return res.status(placement.error.status).json(placement.error.body);
         }
 
-        if (isHr) {
+        if (isHr || (confirmNextDay && permitted)) {
             const applied = await approveFlexibleOvertimeRecord(record, {
                 approvedHours,
                 reason,
@@ -277,8 +278,25 @@ export async function requestFlexibleOvertime(req, res) {
             if (applied.status !== 200) {
                 return res.status(applied.status).json(applied.body);
             }
+            if (!isHr && confirmNextDay) {
+                const hr = await getDepartmentHOD('hr').catch(() => null);
+                try {
+                    await sendAttendanceDirectChangeEmail({
+                        recipients: [hr, employee?.primaryReportee].filter(Boolean),
+                        actor,
+                        employee,
+                        date: targetDate || record.date,
+                        previousLabel: 'Authorized leave',
+                        nextLabel: `Present from overtime on ${record.date}`,
+                        reason,
+                    });
+                } catch (mailErr) {
+                    console.error('[requestFlexibleOvertime] notice email failed:', mailErr?.message || mailErr);
+                }
+            }
             return res.status(200).json({
                 message: confirmNextDay ? 'Present set on the selected day.' : 'Overtime applied.',
+                applied: true,
                 ...applied.body,
             });
         }

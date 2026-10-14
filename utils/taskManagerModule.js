@@ -8,7 +8,8 @@ import EmployeeContact from "../models/EmployeeContact.js";
 import { emailFrontendUrl } from "./resolveFrontendBaseUrl.js";
 import { resolveEmployeeEmailWithReporteeLoaded } from "./resolveEmployeeEmail.js";
 import { isReqUserSystemSuperUser } from "./systemSuperUser.js";
-import { buildEmployeeExpiryAccessPath } from "./notificationFocusNavigation.js";
+import { buildEmployeeExpiryAccessPath, buildEmployeePathWithFocus } from "./notificationFocusNavigation.js";
+import { resolveVehicleExpiryFocusCard, resolveVehicleExpiryTab } from "./vehicleExpiryScanUtils.js";
 
 const TASK_TYPE_LABELS = new Map([
     ["system", "System Task"],
@@ -216,35 +217,253 @@ function exactRecordPath(meta, requestId, stored) {
     return "";
 }
 
+function queryHas(path, key) {
+    return new RegExp(`[?&]${key}=`).test(String(path || ""));
+}
+
+function appendQuery(path, key, value) {
+    if (!path || value == null || value === "") return path;
+    if (queryHas(path, key)) return path;
+    const [base, hash = ""] = String(path).split("#");
+    const sep = base.includes("?") ? "&" : "?";
+    const withQuery = `${base}${sep}${encodeURIComponent(key)}=${encodeURIComponent(String(value))}`;
+    return hash ? `${withQuery}#${hash}` : withQuery;
+}
+
+function pathWithoutQuery(path) {
+    return String(path || "").split("?")[0].split("#")[0];
+}
+
+function hasSectionFocus(path) {
+    return /[?&](focusCard|focus|focusCertificate|focusAsset|focusFine|approvalId|blinkEmployee|billId|paymentId)=/i.test(
+        String(path || ""),
+    );
+}
+
+const OWNER_DOC_FOCUS_BY_KEY = {
+    passport: "ownerPassport",
+    emiratesId: "ownerEmiratesId",
+    visitVisa: "ownerVisitVisa",
+    employmentVisa: "ownerEmploymentVisa",
+    spouseVisa: "ownerSpouseVisa",
+    labourCard: "ownerLabourCard",
+    medical: "ownerMedical",
+    drivingLicense: "ownerDrivingLicense",
+    visa: "ownerVisitVisa",
+};
+
+function companyFocusFromLabel(label = "") {
+    const text = String(label || "").replace(/^Expiry follow-up required:\s*/i, "").replace(/\s*\(Exp:\s*[^)]+\)\s*$/i, "").trim();
+    const l = text.toLowerCase();
+    if (!l) return "";
+    if (l.includes("trade license")) return "tradeLicense";
+    if (l.includes("establishment")) return "establishmentCard";
+    if (l.includes("ejari")) return "ejari";
+    if (l.includes("moa")) return "moa";
+    if (l.includes("passport")) return "ownerPassport";
+    if (l.includes("emirates")) return "ownerEmiratesId";
+    if (l.includes("visit visa")) return "ownerVisitVisa";
+    if (l.includes("employment visa")) return "ownerEmploymentVisa";
+    if (l.includes("spouse visa")) return "ownerSpouseVisa";
+    if (l.includes("labour")) return "ownerLabourCard";
+    if (l.includes("medical")) return "ownerMedical";
+    if (l.includes("driving")) return "ownerDrivingLicense";
+    if (l.includes("visa")) return "ownerVisitVisa";
+    if (l.includes("basic detail")) return "basicDetails";
+    return "";
+}
+
+function companyTabForFocus(focusCard, label = "") {
+    const card = String(focusCard || "");
+    if (card === "moa") return "moa";
+    if (card.startsWith("owner")) return "owner";
+    if (["tradeLicense", "establishmentCard", "ejari", "basicDetails"].includes(card)) return "basic";
+    const l = String(label || "").toLowerCase();
+    if (l.includes("certificate") || l.includes("memo") || l.includes("document")) return "others";
+    return card ? "others" : "";
+}
+
+function vehicleFocusFromMeta(meta) {
+    if (meta.focusCard) return String(meta.focusCard);
+    if (meta.vehicleDocType) return resolveVehicleExpiryFocusCard(meta.vehicleDocType);
+    const l = `${meta.extra1 || ""} ${meta.requestType || ""}`.toLowerCase();
+    if (l.includes("insurance")) return "vehicleInsurance";
+    if (l.includes("mulkia") || l.includes("registration")) return "vehicleRegistration";
+    if (l.includes("warranty")) return "vehicleWarranty";
+    if (l.includes("permit")) return "vehiclePermit";
+    if (l.includes("petrol")) return "vehiclePetrol";
+    if (l.includes("toll")) return "vehicleToll";
+    if (l.includes("mortgage")) return "vehicleMortgage";
+    if (l.includes("gear oil") || l.includes("oil service") || l.includes("service due")) return "vehicleService";
+    if (l.includes("profile") || l.includes("activation") || l.includes("inspection")) return "pendingApproval";
+    return "";
+}
+
+function vehicleTabForFocus(meta, focusCard) {
+    if (meta.vehicleTab) return String(meta.vehicleTab);
+    if (meta.vehicleDocType) return resolveVehicleExpiryTab(meta.vehicleDocType);
+    if (focusCard === "vehiclePermit") return "permit";
+    if (focusCard === "vehicleService") return "service";
+    if (["vehiclePetrol", "vehicleToll", "vehicleMortgage"].includes(focusCard)) return "document";
+    if (focusCard) return "basic";
+    return "";
+}
+
+function assetFocusFromMeta(meta) {
+    if (meta.focusCard) return String(meta.focusCard);
+    const type = `${meta.requestType || ""} ${meta.extra1 || ""}`.toLowerCase();
+    if (type.includes("assignment")) return "pendingAssignment";
+    if (type.includes("accessory")) return "accessoryPending";
+    if (type.includes("overdue") || type.includes("on leave") || type.includes("operational")) return "operationalExpiry";
+    if (type.includes("loss") || type.includes("damage") || type.includes("disposition")) return "pendingAction";
+    if (type.includes("approval") || type.includes("activation")) return "pendingApproval";
+    return "";
+}
+
+function ensureEmployeeTab(path, focusCard) {
+    if (!path || queryHas(path, "tab") || !focusCard) return path;
+    const card = String(focusCard);
+    if (["passport", "visa", "emirates-id", "labour-card", "medical-insurance", "driving-license", "basic-details"].includes(card)) {
+        return appendQuery(path, "tab", "basic");
+    }
+    if (card.startsWith("doc-")) {
+        return appendQuery(appendQuery(path, "tab", "documents"), "docStatusTab", "live");
+    }
+    if (card === "bank-details" || card === "salary") return appendQuery(path, "tab", "salary");
+    if (card === "work-details" || card === "digital-signature") return appendQuery(path, "tab", "work-details");
+    if (["personal-details", "permanent-address", "current-address", "emergency-contact"].includes(card)) {
+        return appendQuery(path, "tab", "personal");
+    }
+    return path;
+}
+
+function focusCardFromPath(path) {
+    const match = String(path || "").match(/[?&]focusCard=([^&]+)/);
+    return match ? decodeURIComponent(match[1]) : "";
+}
+
+/** Add the card/row focus query so Open section can scroll and blink that box. */
+function applySectionFocus(path, meta, destination, requestId) {
+    let out = String(path || "");
+    if (!out || out.startsWith("/task-manager")) return out;
+
+    const bare = pathWithoutQuery(out);
+    if (/\/(oil-service|tire-change|mechanical-work|body-work|accident-repair|assign)\//.test(bare)) {
+        if (!queryHas(out, "focus")) {
+            const blob = `${meta.focus || ""} ${meta.extra1 || ""} ${meta.oilStage || ""}`.toLowerCase();
+            const focus = /payment|accounts_payment/.test(blob) ? "payment" : (meta.focus || "record");
+            out = appendQuery(out, "focus", focus);
+        }
+        return out;
+    }
+
+    if (!queryHas(out, "focusCard") && meta.focusCard) out = appendQuery(out, "focusCard", meta.focusCard);
+    if (!queryHas(out, "tab") && meta.vehicleTab) out = appendQuery(out, "tab", meta.vehicleTab);
+    if (!queryHas(out, "tab") && meta.tab) out = appendQuery(out, "tab", meta.tab);
+    if (!queryHas(out, "ownerTab") && meta.ownerTabIndex != null && meta.ownerTabIndex !== "") {
+        out = appendQuery(out, "ownerTab", meta.ownerTabIndex);
+    }
+    if (!queryHas(out, "focusCertificate") && meta.certificateDocumentId) {
+        out = appendQuery(out, "focusCertificate", meta.certificateDocumentId);
+    }
+    if (!queryHas(out, "certSection") && meta.certificateSectionId) {
+        out = appendQuery(out, "certSection", meta.certificateSectionId);
+    }
+    if (!queryHas(out, "billId") && meta.billId) out = appendQuery(out, "billId", meta.billId);
+    if (!queryHas(out, "focusAsset") && meta.focusAsset) out = appendQuery(out, "focusAsset", meta.focusAsset);
+
+    const label = `${meta.extra1 || ""} ${meta.extra2 || ""}`;
+
+    if (/^\/HRM\/Asset\/Vehicle\/details\/[^/]+$/.test(bare) && !queryHas(out, "focusCard")) {
+        const card = vehicleFocusFromMeta(meta);
+        const tab = vehicleTabForFocus(meta, card);
+        if (tab) out = appendQuery(out, "tab", tab);
+        if (card) out = appendQuery(out, "focusCard", card);
+    }
+
+    if (/^\/HRM\/Asset\/details\/[^/]+$/.test(bare) && !queryHas(out, "focusCard")) {
+        const card = assetFocusFromMeta(meta);
+        if (card) out = appendQuery(out, "focusCard", card);
+        if (card === "operationalExpiry" || card.startsWith("accessory")) {
+            out = appendQuery(out, "tab", meta.tab || "document");
+        }
+    }
+
+    if (bare.startsWith("/Company/") && !queryHas(out, "focusCard") && !queryHas(out, "focusCertificate")) {
+        const field = String(meta.ownerDocField || "").trim();
+        const card = OWNER_DOC_FOCUS_BY_KEY[field] || companyFocusFromLabel(label);
+        const tab = companyTabForFocus(card, label);
+        if (tab) out = appendQuery(out, "tab", tab);
+        if (card && card.startsWith("owner") && meta.ownerTabIndex != null && meta.ownerTabIndex !== "") {
+            out = appendQuery(out, "ownerTab", meta.ownerTabIndex);
+        }
+        if (card) out = appendQuery(out, "focusCard", card);
+        if (/certificate/i.test(label)) out = appendQuery(out, "docStatusTab", "certificate");
+        else if (/memo/i.test(label)) out = appendQuery(out, "docStatusTab", "memo");
+    }
+
+    if (/^\/emp\//.test(bare) && !queryHas(out, "focusCard")) {
+        const focused = buildEmployeePathWithFocus(out, meta.extra1 || label);
+        if (focused) out = ensureEmployeeTab(focused, focusCardFromPath(focused));
+    }
+
+    if (!hasSectionFocus(out) && /^\/HRM\/Fine\/[^/]+$/.test(bare)) {
+        out = appendQuery(out, "focusCard", "pendingApproval");
+    }
+    if (!hasSectionFocus(out) && /^\/HRM\/LoanAndAdvance\/[^/]+$/.test(bare)) {
+        out = appendQuery(out, "focusCard", "record");
+    }
+    if (!hasSectionFocus(out) && bare.startsWith("/HRM/Reward/")) {
+        out = appendQuery(out, "focusCard", "record");
+    }
+    if (!queryHas(out, "paymentId") && /\/Accounts\/Payments$/.test(bare)) {
+        const paymentId = meta.paymentId || requestId;
+        if (paymentId) out = appendQuery(out, "paymentId", paymentId);
+    }
+
+    return out;
+}
+
 /** Opens the exact record behind a task. Falls back to the module page when there is no record id. */
 export function accessPathFor(destination, requestId, subjectEmployeeId, context = null) {
     const meta = parseTaskMeta(context);
     const stored = storedRecordPath(meta);
     const exact = exactRecordPath(meta, requestId, stored);
-    if (exact) return exact;
-    if (stored && /[a-f0-9]{24}|approvalId=|carWashServiceId=|billId=|focus=/i.test(stored)) return stored;
-
-    const id = String(requestId || "").trim();
-    const employeeCode = String(subjectEmployeeId || "").trim();
-    const moduleName = destination?.module || "";
-    const base = destination?.path || "/task-manager";
-    if (moduleName === "fine" && id) return `/HRM/Fine/${id}`;
-    if (moduleName === "loan" && id) return `/HRM/LoanAndAdvance/${id}`;
-    if (moduleName === "reward" && id) return `/HRM/Reward/${id}`;
-    if (moduleName === "vehicle" && id) return `/HRM/Asset/Vehicle/details/${id}`;
-    if (moduleName === "tools" && id) return `/HRM/Asset/details/${id}`;
-    const followUp = String(meta.extra1 || "");
-    const expiryTask = /expiry/i.test(String(meta.requestType || "")) || /^expiry follow-up required:/i.test(followUp);
-    if (expiryTask && (moduleName === "employees" || /employee/i.test(String(meta.requestType || "")))) {
-        const fromLabel = String(meta.extra2 || "").match(/\(([^)]+)\)\s*$/);
-        const code = (/^[a-f0-9]{24}$/i.test(employeeCode) ? "" : employeeCode) || fromLabel?.[1] || employeeCode;
-        const sectionPath = buildEmployeeExpiryAccessPath(code, followUp);
-        if (sectionPath) return sectionPath;
+    let path = "";
+    if (exact) path = exact;
+    else if (stored && /[a-f0-9]{24}|approvalId=|carWashServiceId=|billId=|focus=/i.test(stored)) path = stored;
+    else {
+        const id = String(requestId || "").trim();
+        const employeeCode = String(subjectEmployeeId || "").trim();
+        const moduleName = destination?.module || "";
+        const base = destination?.path || "/task-manager";
+        if (moduleName === "fine" && id) path = `/HRM/Fine/${id}`;
+        else if (moduleName === "loan" && id) path = `/HRM/LoanAndAdvance/${id}`;
+        else if (moduleName === "reward" && id) path = `/HRM/Reward/${id}`;
+        else if (moduleName === "vehicle" && id) path = `/HRM/Asset/Vehicle/details/${id}`;
+        else if (moduleName === "tools" && id) path = `/HRM/Asset/details/${id}`;
+        else {
+            const followUp = String(meta.extra1 || "");
+            const expiryTask = /expiry/i.test(String(meta.requestType || "")) || /^expiry follow-up required:/i.test(followUp);
+            if (expiryTask && (moduleName === "employees" || /employee/i.test(String(meta.requestType || "")))) {
+                const fromLabel = String(meta.extra2 || "").match(/\(([^)]+)\)\s*$/);
+                const code = (/^[a-f0-9]{24}$/i.test(employeeCode) ? "" : employeeCode) || fromLabel?.[1] || employeeCode;
+                const sectionPath = buildEmployeeExpiryAccessPath(code, followUp);
+                if (sectionPath) path = sectionPath;
+            }
+            const requestType = String(meta.requestType || "");
+            if (!path && /^document expiry reminder$/i.test(requestType) && id) path = `/Company/${id}`;
+            if (!path && moduleName === "employees" && employeeCode) path = `/emp/${encodeURIComponent(employeeCode)}`;
+            else if (!path && moduleName === "company" && id) path = `/Company/${id}`;
+            else if (!path && /salary/i.test(requestType) && meta.employeeId) {
+                path = `/HRM/Salary/enroll/${encodeURIComponent(String(meta.employeeId))}`;
+            } else if (!path && /salary/i.test(requestType) && meta.monthKey) {
+                path = `/HRM/Salary/${encodeURIComponent(String(meta.monthKey))}`;
+            } else if (!path && stored) path = stored;
+            else if (!path) path = base;
+        }
     }
-    if (moduleName === "employees" && employeeCode) return `/emp/${encodeURIComponent(employeeCode)}`;
-    if (moduleName === "company" && id) return `/Company/${id}`;
-    if (stored) return stored;
-    return base;
+    return applySectionFocus(path, meta, destination, requestId);
 }
 
 export async function resolveTaskViewer(req) {

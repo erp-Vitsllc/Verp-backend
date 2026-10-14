@@ -5,6 +5,8 @@ import { sendVehicleServiceWorkflowEmail } from './sendVehicleServiceWorkflowEma
 import {
     vehicleServicePendingCopy,
     vehicleServiceActorName,
+    personRequesterName,
+    requesterNameFromService,
 } from './vehicleServiceNotificationCopy.js';
 
 function parseDashboardMeta(extra3) {
@@ -159,30 +161,30 @@ export async function refreshAdminOfficerServiceTrack({
         stageLabel,
         { completeTrack: true },
     );
+    const services = Array.isArray(populated?.services)
+        ? populated.services
+        : Array.isArray(asset?.services)
+            ? asset.services
+            : [];
+    const service = services.find((row) => String(row?._id) === String(serviceRecordId)) || null;
     const vsr =
-        String(serviceReqNo || '').trim() ||
-        (() => {
-            try {
-                const services = Array.isArray(populated?.services)
-                    ? populated.services
-                    : Array.isArray(asset?.services)
-                        ? asset.services
-                        : [];
-                const match = services.find((s) => String(s?._id) === String(serviceRecordId));
-                return String(match?.serviceReqNo || '').trim();
-            } catch {
-                return '';
-            }
-        })();
+        String(serviceReqNo || '').trim() || String(service?.serviceReqNo || '').trim();
+    const trackFilter = {
+        requestId: asset._id,
+        assignedTo: adminOfficer._id,
+        requestType: 'Vehicle Service Request',
+        status: 'Pending',
+        extra3,
+    };
+    const existingTrack = await DashboardAction.findOne(trackFilter).select('requestedByName').lean();
+    const resolvedRequester =
+        personRequesterName(existingTrack?.requestedByName)
+        || requesterNameFromService(service)
+        || personRequesterName(requestedByName)
+        || 'System';
 
     await DashboardAction.findOneAndUpdate(
-        {
-            requestId: asset._id,
-            assignedTo: adminOfficer._id,
-            requestType: 'Vehicle Service Request',
-            status: 'Pending',
-            extra3,
-        },
+        trackFilter,
         {
             $set: {
                 assignedTo: adminOfficer._id,
@@ -194,7 +196,7 @@ export async function refreshAdminOfficerServiceTrack({
                 subjectName: subjectEmp
                     ? `${subjectEmp.firstName || ''} ${subjectEmp.lastName || ''}`.trim()
                     : '',
-                requestedByName: requestedByName || adminCopy.actionLabel,
+                requestedByName: resolvedRequester,
                 requestedDate: new Date(),
                 extra1: adminCopy.extra1,
                 extra2: adminCopy.extra2,

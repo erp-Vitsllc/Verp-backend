@@ -38,6 +38,7 @@ import { syncDashboardAction } from '../utils/syncDashboard.js';
 import {
     sendAttendanceLeaveRequestEmail,
     sendAttendanceLeaveDecisionEmail,
+    sendAttendanceDirectChangeEmail,
 } from '../utils/sendAttendanceLeaveEmails.js';
 import {
     isCompanyShellEmployee,
@@ -265,12 +266,12 @@ async function viewerIsFlowchartHr(req) {
 }
 
 const NON_HR_MARK_WINDOW_MESSAGE =
-    'Only the flowchart HR assignee can mark attendance outside today and the two previous days. Holidays are skipped.';
+    'Only the flowchart HR assignee can mark attendance outside today and the seven previous days. Holidays are included.';
 
 /**
  * Flowchart HR may mark any status on any past or future day.
- * Other users may mark any status today and on the two previous days.
- * Holiday dates are skipped and do not count, so the window reaches further back.
+ * Other users may mark any status today and on the seven previous calendar days.
+ * Holidays are included and count as one of those days.
  * @returns {Promise<boolean>} true when the response was already sent
  */
 async function rejectIfMarkWindowClosed(req, res, { date, entries }) {
@@ -1314,6 +1315,35 @@ async function loadChangeApprovalContext(req) {
 
 const CHANGE_REPORTEE_SELECT = 'firstName lastName employeeId companyEmail workEmail email';
 
+async function emailDirectAttendanceChange({
+    actor,
+    hr,
+    employee,
+    date,
+    previousLabel,
+    nextLabel,
+    timeIn,
+    timeOut,
+    reason,
+}) {
+    const reportee = employee?.primaryReportee;
+    try {
+        await sendAttendanceDirectChangeEmail({
+            recipients: [hr, reportee].filter(Boolean),
+            actor,
+            employee,
+            date,
+            previousLabel,
+            nextLabel,
+            timeIn,
+            timeOut,
+            reason,
+        });
+    } catch (err) {
+        console.error('[emailDirectAttendanceChange]', err?.message || err);
+    }
+}
+
 async function queueOrApplyManualMark(ctx, {
     employee,
     employeeMongoId,
@@ -1355,7 +1385,9 @@ async function queueOrApplyManualMark(ctx, {
         hrId: ctx.hr?._id,
     });
 
-    if (stage === 'apply') {
+    // Flowchart HR applies directly. Any other user inside the mark window also applies
+    // immediately. HR and the primary reportee are emailed; they do not approve it.
+    if (stage === 'apply' || !ctx.actorIsHr) {
         const doc = await commitManualAttendanceMark({
             employee,
             employeeMongoId: id,
@@ -1375,6 +1407,19 @@ async function queueOrApplyManualMark(ctx, {
             employeeMongoId: id,
             actorId: ctx.actor?._id,
         });
+        if (!ctx.actorIsHr) {
+            await emailDirectAttendanceChange({
+                actor: ctx.actor,
+                hr: ctx.hr,
+                employee,
+                date,
+                previousLabel: existing?.statusLabel || 'Not marked',
+                nextLabel: payload.statusLabel || statusLabel,
+                timeIn: payload.timeIn || '',
+                timeOut: payload.timeOut || '',
+                reason: payload.reason || reason || '',
+            });
+        }
         return { applied: doc, pending: null };
     }
 

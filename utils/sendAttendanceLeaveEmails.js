@@ -263,3 +263,84 @@ export async function sendAttendanceLeaveDecisionEmail({
         console.error('[AttendanceLeaveEmail] decision email failed:', err?.message || err);
     }
 }
+
+/**
+ * Tell flowchart HR and the primary reportee that a permitted user already changed the day.
+ * This is a notice. It does not ask them to approve.
+ */
+export async function sendAttendanceDirectChangeEmail({
+    recipients = [],
+    actor,
+    employee,
+    date,
+    previousLabel = '',
+    nextLabel = '',
+    timeIn = '',
+    timeOut = '',
+    reason = '',
+}) {
+    try {
+        const mail = createTransport();
+        if (!mail) {
+            console.warn('[AttendanceDirectChangeEmail] Missing SMTP.');
+            return;
+        }
+        const actorEmail = resolveEmployeeEmail(actor || {}).email;
+        const seen = new Set();
+        const targets = [];
+        for (const person of recipients) {
+            const { email } = resolveEmployeeEmail(person || {});
+            const key = String(email || '').trim().toLowerCase();
+            if (!key || seen.has(key)) continue;
+            if (actorEmail && key === String(actorEmail).trim().toLowerCase()) continue;
+            seen.add(key);
+            targets.push({ person, email });
+        }
+        if (!targets.length) return;
+
+        const actorName = personName(actor);
+        const empName = personName(employee);
+        const times =
+            timeIn || timeOut
+                ? `<p style="margin:0 0 8px;"><strong>Time:</strong> ${timeIn || '—'} – ${timeOut || '—'}</p>`
+                : '';
+        const base = emailFrontendUrl();
+        const buttonUrl = `${base}/HRM/Attendance/mark?date=${encodeURIComponent(String(date || ''))}`;
+
+        await Promise.all(
+            targets.map(({ person, email }) =>
+                mail.transporter.sendMail({
+                    from: `"VeRP System" <${mail.from}>`,
+                    to: email,
+                    subject: `Attendance updated: ${empName} — ${date || ''}`,
+                    html: `
+                        <div style="font-family:Segoe UI,Tahoma,sans-serif;color:#1e293b;max-width:600px;margin:0 auto;border:1px solid #e2e8f0;border-radius:12px;overflow:hidden;">
+                            <div style="background:#1B2A4A;color:#fff;padding:20px;text-align:center;">
+                                <h1 style="margin:0;font-size:20px;">Attendance updated</h1>
+                            </div>
+                            <div style="padding:24px;">
+                                <p>Dear <strong>${personName(person)}</strong>,</p>
+                                <p><strong>${actorName}</strong> changed attendance for <strong>${empName}</strong> (${employee?.employeeId || '—'}). The day is already updated.</p>
+                                <div style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:10px;padding:16px;margin:16px 0;">
+                                    <p style="margin:0 0 8px;"><strong>Date:</strong> ${date || '—'}</p>
+                                    <p style="margin:0 0 8px;"><strong>Changed by:</strong> ${actorName}</p>
+                                    <p style="margin:0 0 8px;"><strong>Was:</strong> ${previousLabel || 'Not marked'}</p>
+                                    <p style="margin:0 0 8px;"><strong>Now:</strong> ${nextLabel || '—'}</p>
+                                    ${times}
+                                    ${reason ? `<p style="margin:0;"><strong>Reason:</strong> ${reason}</p>` : ''}
+                                </div>
+                                <div style="text-align:center;margin-top:24px;">
+                                    <a href="${buttonUrl}" style="background:#EA3D2F;color:#fff;text-decoration:none;padding:12px 24px;border-radius:8px;font-weight:600;display:inline-block;">
+                                        Open attendance
+                                    </a>
+                                </div>
+                            </div>
+                        </div>
+                    `,
+                }),
+            ),
+        );
+    } catch (err) {
+        console.error('[AttendanceDirectChangeEmail] notice failed:', err?.message || err);
+    }
+}

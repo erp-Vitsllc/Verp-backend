@@ -16,6 +16,7 @@ import { resolveEmployeeEmail } from './resolveEmployeeEmail.js';
 import {
     vehicleServicePendingCopy,
     vehicleServiceActorName,
+    requesterNameFromService,
 } from './vehicleServiceNotificationCopy.js';
 import {
     applyServiceActiveState,
@@ -1374,13 +1375,16 @@ async function notifyStakeholders({
         );
         // Inbox row first so page-refresh heal/restore sees it before SMTP finishes.
         if (recipient?._id) {
+            const service = (Array.isArray(asset?.services) ? asset.services : []).find(
+                (row) => String(row?._id) === String(serviceRecordId),
+            );
             await syncDashboardAction({
                 requestId: asset._id,
                 requestType: 'Vehicle Service Request',
                 status: 'Pending',
                 assignedTo: recipient._id,
                 subjectEmployee: asset.assignedTo,
-                requestedByName: copy.actionLabel,
+                requestedByName: requesterNameFromService(service) || 'System',
                 extra1: copy.extra1,
                 extra2: copy.extra2,
                 extra3: oilServiceDashboardMeta(asset, serviceRecordId, oilStage),

@@ -1,4 +1,6 @@
+import Company from "../../models/Company.js";
 import DashboardAction from "../../models/DashboardAction.js";
+import Payment from "../../models/Payment.js";
 import AssetHistory from "../../models/AssetHistory.js";
 import AssetItem from "../../models/AssetItem.js";
 import Attendance from "../../models/Attendance.js";
@@ -14,7 +16,14 @@ import { uploadDocumentToS3 } from "../../utils/s3Upload.js";
 import { emailFrontendUrl } from "../../utils/resolveFrontendBaseUrl.js";
 import { sendTextMessage } from "../../services/whatsappService.js";
 import { resolveEmployeeWhatsAppPhone } from "../../utils/sendToolsAssetWhatsAppReport.js";
-import { findEmailsForTask } from "../../utils/emailDispatch.js";
+import {
+    docTypeFromLabel,
+    documentLabelFromExpiryText,
+    emailBelongsToDocumentExpiry,
+    emailBelongsToVehicleService,
+    findEmailsForTask,
+    serviceTypeFromTaskText,
+} from "../../utils/emailDispatch.js";
 import { resolveEmployeeEmailWithReporteeLoaded } from "../../utils/resolveEmployeeEmail.js";
 import {
     displayStatus,
@@ -23,6 +32,8 @@ import {
     preferRequesterName,
     sourceRequesterNameMap,
     taskTitleAndDescription,
+    vehicleDisplayById,
+    vehicleDisplayFor,
     viewerMaySeeAllNotifications,
 } from "./getTaskManagerNotifications.js";
 import {
@@ -524,7 +535,11 @@ async function notifyRequesterTaskClosed(task, target) {
     return { sent: true, channel };
 }
 
-async function closeFlags(task, viewer, currentAssigneeId, assigneeEmpId) {
+function dashboardActionIsClosed(action) {
+    return ["Approved", "Rejected", "Dismissed", "Completed", "Cancelled"].includes(String(action?.status || ""));
+}
+
+async function closeFlags(task, viewer, currentAssigneeId, assigneeEmpId, action = null) {
     const reassigned = taskWasReassigned(task);
     const completed = task?.status === "Completed";
     const saved = closeSnapshot(task);
@@ -538,7 +553,10 @@ async function closeFlags(task, viewer, currentAssigneeId, assigneeEmpId) {
     const original = reassigned ? await resolveOriginalAssignee(task) : null;
     const viewerIsOriginal = viewerMatchesEmployee(viewer, original);
     const cancelled = task?.status === "Cancelled";
-    const open = Boolean(task) && !completed && !cancelled;
+    // A workflow request can be open before anyone edits it, so there is no task row yet.
+    const open = task
+        ? !completed && !cancelled
+        : Boolean(action) && !dashboardActionIsClosed(action);
     const completionPending = Boolean(saved.completionRequestedAt) && !saved.completionConfirmedAt && !completed;
     const closeScheduled = completionWindowOpen(task);
     const requesterViewer = await viewerIsTaskRequester(task, viewer);
@@ -598,6 +616,148 @@ function assigneeOf(target) {
     };
 }
 
+const EMPLOYEE_RECORD_TYPES = new Set([
+    "Employee Document Expiry Reminder",
+    "Employee Document Not Renew",
+    "Profile Activation",
+    "Profile Incomplete",
+    "Probation Change",
+    "Left User Request",
+    "Card Deleted Progress",
+    "Salary Enrollment",
+    "Salary DMF Approval",
+    "Notice Request",
+]);
+
+const COMPANY_RECORD_TYPES = new Set([
+    "Document Expiry Reminder",
+    "Company Activation",
+    "Company Activation Incomplete",
+    "Company Document Not Renew",
+]);
+
+function readMeta(extra3) {
+    if (!extra3) return {};
+    if (typeof extra3 === "object") return extra3;
+    try {
+        const parsed = JSON.parse(String(extra3));
+        return parsed && typeof parsed === "object" ? parsed : {};
+    } catch {
+        return {};
+    }
+}
+
+/** Extra facts from the record this task points at. Missing records stay blank. */
+async function loadTaskSourceFacts(action) {
+    const type = String(action?.requestType || "");
+    const id = String(action?.requestId || "");
+    if (!isObjectId(id)) return {};
+    try {
+        if (type === "Fine" || type === "Group Fine Request") {
+            const fine = await Fine.findById(id)
+                .select("fineType fineAmount description remarks companyDescription assignedEmployees assetId fineStatus")
+                .lean();
+            if (!fine) return {};
+            const people = fine.assignedEmployees || [];
+            return {
+                fineType: fine.fineType || "",
+                amount: fine.fineAmount != null ? fine.fineAmount : "",
+                reason: [fine.description, fine.remarks, fine.companyDescription].filter(Boolean).join(". "),
+                employeeName: people.map((row) => row.employeeName).filter(Boolean).join(", "),
+                employeeId: people.map((row) => row.employeeId).filter(Boolean).join(", "),
+                assetNo: fine.assetId || "",
+                status: fine.fineStatus || "",
+            };
+        }
+        if (type === "Loan" || type === "Employee Loan Request" || type === "Employee Advance Request" || type === "Advance") {
+            const loan = await Loan.findById(id)
+                .select("type amount reason employeeId duration monthStart eligibilityNotes status")
+                .lean();
+            if (!loan) return {};
+            return {
+                loanType: loan.type || "",
+                amount: loan.amount != null ? loan.amount : "",
+                reason: [loan.reason, loan.eligibilityNotes].filter(Boolean).join(". "),
+                employeeId: loan.employeeId || "",
+                duration: loan.duration ? `${loan.duration} months` : "",
+                monthStart: loan.monthStart || "",
+                status: loan.status || "",
+            };
+        }
+        if (type === "Reward") {
+            const reward = await Reward.findById(id)
+                .select("rewardId rewardType amount remarks employeeName employeeId rewardStatus")
+                .lean();
+            if (!reward) return {};
+            return {
+                rewardType: reward.rewardType || "",
+                amount: reward.amount != null ? reward.amount : "",
+                reason: reward.remarks || "",
+                employeeName: reward.employeeName || "",
+                employeeId: reward.employeeId || "",
+                reference: reward.rewardId || "",
+                status: reward.rewardStatus || "",
+            };
+        }
+        if (type === "Payment Approval") {
+            const payment = await Payment.findById(id)
+                .select("paymentId paymentType amount description paidByName status referenceId")
+                .lean();
+            if (!payment) return {};
+            return {
+                paymentType: payment.paymentType || "",
+                amount: payment.amount != null ? payment.amount : "",
+                reason: payment.description || "",
+                employeeName: payment.paidByName || "",
+                reference: payment.paymentId || payment.referenceId || "",
+                status: payment.status || "",
+            };
+        }
+        if (type === "Vehicle Service Request") {
+            const meta = readMeta(action.extra3);
+            const asset = await AssetItem.findById(id)
+                .select("assetId name plateEmirate plateNumber services._id services.serviceReqNo services.serviceType services.description services.currentKm services.paidBy services.value services.workflowSnapshot.stage")
+                .lean();
+            if (!asset) return {};
+            const serviceId = String(meta.serviceRecordId || "");
+            const service = (asset.services || []).find((row) => String(row?._id || "") === serviceId);
+            const plate = [asset.plateEmirate, asset.plateNumber].filter(Boolean).join(" ").trim();
+            return {
+                assetNo: asset.assetId || "",
+                assetName: asset.name || "",
+                vehicleNo: plate || "",
+                serviceNo: service?.serviceReqNo || "",
+                serviceType: service?.serviceType || meta.serviceType || "",
+                stage: service?.workflowSnapshot?.stage || "",
+                currentKm: service?.currentKm ?? "",
+                reason: service?.description || "",
+                status: service?.paidBy ? `Paid by ${service.paidBy}` : "",
+                amount: service?.value != null && service.value !== "" ? service.value : "",
+            };
+        }
+        if (COMPANY_RECORD_TYPES.has(type)) {
+            const company = await Company.findById(id).select("name companyId").lean();
+            if (!company) return {};
+            return { companyName: company.name || "", companyId: company.companyId || "" };
+        }
+        if (EMPLOYEE_RECORD_TYPES.has(type)) {
+            const employee = await EmployeeBasic.findById(id)
+                .select("firstName lastName employeeId department designation")
+                .lean();
+            if (!employee) return {};
+            return {
+                employeeName: [employee.firstName, employee.lastName].filter(Boolean).join(" ").trim(),
+                employeeId: employee.employeeId || "",
+                department: employee.department || "",
+                designation: employee.designation || "",
+            };
+        }
+    } catch (error) {
+        console.error("Task source facts:", error?.message || error);
+    }
+    return {};
+}
+
 async function buildDetail(target, viewer) {
     const manual = target.kind === "manual";
     const task = target.task;
@@ -623,17 +783,73 @@ async function buildDetail(target, viewer) {
     if (!cardRequester.name) cardRequester.name = requesterName;
 
     const { assigneeId: currentAssigneeId, assigneeEmpId } = assigneeOf(target);
+    const vehicles = manual || !action ? new Map() : await vehicleDisplayById([action]);
+    const source = manual || !action ? {} : await loadTaskSourceFacts(action);
     const workflowLocked = !manual && action?.requestType !== "Task Manager";
-    const taskTitle = String(task?.taskName || action?.extra1 || "").trim();
-    const focusMatch = taskTitle.match(/expiry follow-up required:\s*(.+?)(?:\s*\(exp:|$)/i);
-    const broadRecord = /expiry|reminder/i.test(String(action?.requestType || ""));
-    const exactIds = [action?._id, task?._id, task?.sourceDashboardActionId];
+    let mailAction = action;
+    if (!mailAction && isObjectId(task?.sourceDashboardActionId)) {
+        mailAction = await DashboardAction.findById(task.sourceDashboardActionId);
+    }
+    const taskTitle = String(task?.taskName || mailAction?.extra1 || "").trim();
+    const expirySource = [mailAction?.extra1, task?.description, task?.taskName]
+        .map((value) => String(value || "").trim())
+        .find((value) => /expiry follow-up required:/i.test(value)) || "";
+    const docLabel = documentLabelFromExpiryText(expirySource);
+    const mailMeta = readActionMeta(mailAction?.extra3);
+    const docType = String(mailMeta.vehicleDocType || mailMeta.docType || "").trim() || docTypeFromLabel(docLabel);
+    const focusMatch = expirySource.match(/expiry follow-up required:\s*(.+?)(?:\s*[([\{]\s*exp:|$)/i);
+    const requestType = String(mailAction?.requestType || "");
+    const documentExpiry = /document expiry/i.test(requestType) || Boolean(docLabel);
+    const broadRecord = !documentExpiry && /expiry|reminder/i.test(requestType);
+    const vehicleService = requestType === "Vehicle Service Request";
+    const exactIds = [action?._id, mailAction?._id, task?._id, task?.sourceDashboardActionId];
     const taskEmails = await findEmailsForTask({ ids: exactIds });
-    const recordEmails = await findEmailsForTask({
-        ids: [action?.requestId, ...exactIds],
-        prefixes: broadRecord ? [action?.requestId] : [],
-        focus: focusMatch ? focusMatch[1].trim() : "",
-    });
+    let recordEmails = [];
+    if (vehicleService) {
+        const meta = readActionMeta(mailAction?.extra3);
+        const assetId = String(mailAction?.requestId || "").trim();
+        const serviceRecordId = String(meta.serviceRecordId || "").trim();
+        let serviceType = String(meta.serviceType || "").trim() || serviceTypeFromTaskText(`${taskTitle} ${mailAction?.extra1 || ""} ${mailAction?.extra2 || ""}`);
+        let serviceReqNo = "";
+        if (isObjectId(assetId) && serviceRecordId) {
+            const asset = await AssetItem.findById(assetId)
+                .select("services._id services.serviceReqNo services.serviceType")
+                .lean();
+            const service = (asset?.services || []).find((row) => String(row?._id || "") === serviceRecordId);
+            serviceReqNo = String(service?.serviceReqNo || "").trim();
+            if (!serviceType) serviceType = String(service?.serviceType || "").trim();
+        }
+        const candidates = await findEmailsForTask({
+            ids: [assetId, serviceRecordId, serviceReqNo],
+        });
+        recordEmails = candidates.filter((row) => emailBelongsToVehicleService(row, {
+            serviceRecordId,
+            serviceReqNo,
+            serviceType,
+            assetId,
+        }));
+    } else if (documentExpiry) {
+        const recordId = String(mailAction?.requestId || mailMeta.vehicleMongoId || "").trim();
+        const candidates = recordId
+            ? await findEmailsForTask({
+                ids: [recordId],
+                prefixes: [recordId],
+                onlyExpiry: true,
+            })
+            : [];
+        recordEmails = candidates.filter((row) => emailBelongsToDocumentExpiry(row, { docLabel, docType }));
+    } else if (broadRecord) {
+        const focus = focusMatch ? focusMatch[1].trim() : "";
+        recordEmails = await findEmailsForTask({
+            prefixes: focus ? [mailAction?.requestId] : [],
+            focus,
+            requireFocus: true,
+        });
+    } else {
+        recordEmails = await findEmailsForTask({
+            ids: [mailAction?.requestId],
+        });
+    }
     const seenEmail = new Set();
     const emails = [];
     for (const row of [...taskEmails, ...recordEmails]) {
@@ -679,8 +895,16 @@ async function buildDetail(target, viewer) {
             requestType: manual ? task?.taskType : action?.requestType,
             extra1: manual ? task?.description : action?.extra1,
             extra2: manual ? "" : action?.extra2,
-            taskName: task?.taskName || action?.extra1,
+            extra3: manual ? "" : action?.extra3,
+            subjectName: manual ? "" : action?.subjectName,
+            subjectEmployeeId: manual ? "" : action?.subjectEmployeeId,
+            comment: manual ? "" : action?.comment,
+            requestedBy: requesterName,
+            taskName: task?.taskName,
             description: task?.description || (manual ? "" : action?.extra2),
+            manual,
+            source,
+            ...(manual ? {} : vehicleDisplayFor(action, vehicles)),
         }),
         taskCategory: manual
             ? (displayTaskType(task?.taskType) || "General Task")
@@ -722,7 +946,7 @@ async function buildDetail(target, viewer) {
         relatedTo: relatedLabel(destination.module, destination.label),
         lastUpdatedBy: [...(task?.history || [])].reverse().find((item) => item?.actorName)?.actorName || cardAssignee.name || "",
         handoff: await handoffPeople(task?.history, cardAssignee.name),
-        ...(await closeFlags(task, viewer, currentAssigneeId, assigneeEmpId)),
+        ...(await closeFlags(task, viewer, currentAssigneeId, assigneeEmpId, action)),
         module: destination.module,
         moduleLabel: destination.label,
         modulePath: destination.path,

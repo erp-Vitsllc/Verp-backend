@@ -6,7 +6,7 @@ import { sendVehicleServiceWorkflowEmail } from './sendVehicleServiceWorkflowEma
 import { sendVehicleServiceScheduledNotificationEmail } from './sendVehicleServiceScheduledNotificationEmail.js';
 import { sendVehicleServiceCompletedNotificationEmail } from './sendVehicleServiceCompletedNotificationEmail.js';
 import { syncDashboardAction } from './syncDashboard.js';
-import { applyVehicleServiceNotificationCopy } from './vehicleServiceNotificationCopy.js';
+import { applyVehicleServiceNotificationCopy, requesterNameFromService } from './vehicleServiceNotificationCopy.js';
 import { refreshAdminOfficerServiceTrack } from './vehicleServiceAdminOfficerNotification.js';
 import { applyServiceActiveState } from './assetOperationalFlags.js';
 import { getWorkflowContextForService } from './vehicleServiceWorkflowResolve.js';
@@ -162,16 +162,11 @@ async function notifyShopServiceRecipients({
     cc = [],
     pendingStage = '',
 }) {
-    const serviceReqNo = resolveServiceReqNo(
-        (Array.isArray(asset?.services) ? asset.services : []).find(
-            (s) => String(s?._id) === String(serviceRecordId),
-        ),
-        parseRemark(
-            (Array.isArray(asset?.services) ? asset.services : []).find(
-                (s) => String(s?._id) === String(serviceRecordId),
-            ),
-        ),
+    const service = (Array.isArray(asset?.services) ? asset.services : []).find(
+        (s) => String(s?._id) === String(serviceRecordId),
     );
+    const serviceReqNo = resolveServiceReqNo(service, parseRemark(service));
+    const requesterName = requesterNameFromService(service) || 'System';
     for (const recipient of uniqRecipients(recipients)) {
         if (!recipient) continue;
         const copy = await applyVehicleServiceNotificationCopy({
@@ -199,7 +194,7 @@ async function notifyShopServiceRecipients({
                 status: 'Pending',
                 assignedTo: recipient._id,
                 subjectEmployee: asset.assignedTo,
-                requestedByName: copy.actionLabel,
+                requestedByName: requesterName,
                 extra1: copy.extra1,
                 extra2: copy.extra2,
                 extra3: dashboardMeta,
@@ -291,7 +286,6 @@ async function notifyShopServiceScheduled({
             serviceRecordId,
             serviceType: serviceTypeLabel,
             pendingStage: isLiveAlready ? 'On Service' : 'Ready to Service',
-            requestedByName: copy.actionLabel,
             sendEmail: false,
             serviceReqNo: resolveServiceReqNo(service, remark),
         });
@@ -808,7 +802,6 @@ export async function advanceShopServiceToScheduledAfterAccountsApprove(
                 serviceRecordId,
                 serviceType: serviceTypeLabel || 'Service',
                 pendingStage: 'Schedule',
-                requestedByName: adminCopy.actionLabel,
                 sendEmail: true,
                 serviceReqNo: resolveServiceReqNo(service, remark),
                 detailLine: adminCopy.detailLine,
@@ -1412,7 +1405,7 @@ export async function restoreMissingShopMakePaymentNotifications({ assetIds = nu
                     status: 'Pending',
                     assignedTo: accounts._id,
                     subjectEmployee: asset.assignedTo,
-                    requestedByName: copy.actionLabel,
+                    requestedByName: requesterNameFromService(service) || 'System',
                     extra1: copy.extra1,
                     extra2: copy.extra2,
                     extra3: JSON.stringify(meta),

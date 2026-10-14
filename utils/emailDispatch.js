@@ -163,10 +163,144 @@ function escapeEmailId(value) {
     return String(value || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
+const VEHICLE_SERVICE_TYPES = [
+    'Accident Repair',
+    'Mechanical Work',
+    'Tire Change',
+    'Body Work',
+    'Oil Service',
+    'Car Wash',
+    'Taxi Charge',
+];
+
+export function serviceTypeFromTaskText(value) {
+    const text = String(value || '').toLowerCase();
+    return VEHICLE_SERVICE_TYPES.find((type) => text.includes(type.toLowerCase())) || '';
+}
+
+function emailIdentityText(row) {
+    return `${row?.subject || ''} ${row?.emailType || ''} ${row?.module || ''}`.toLowerCase();
+}
+
+/**
+ * A vehicle-service task must not list every email for the vehicle.
+ * Workflow mail is often stored on the asset id, so tire change, oil service,
+ * and document expiry would otherwise appear on the same task.
+ */
+export function emailBelongsToVehicleService(row, { serviceRecordId = '', serviceReqNo = '', serviceType = '', assetId = '' } = {}) {
+    const recordId = String(row?.recordId || '').trim();
+    const identity = emailIdentityText(row);
+    if (/document expiry|expiry reminder|expiry follow-up/.test(identity)) return false;
+
+    if (serviceRecordId && recordId === serviceRecordId) return true;
+    if (serviceReqNo && recordId.toLowerCase() === String(serviceReqNo).trim().toLowerCase()) return true;
+
+    const type = String(serviceType || '').trim().toLowerCase();
+    if (!type || !identity.includes(type)) return false;
+    const subject = String(row?.subject || '').toLowerCase();
+    if (serviceReqNo && /vsr-\d+/i.test(subject) && !subject.includes(String(serviceReqNo).trim().toLowerCase())) {
+        return false;
+    }
+    const mine = identity.indexOf(type);
+    const otherFirst = VEHICLE_SERVICE_TYPES.some((name) => {
+        const key = name.toLowerCase();
+        if (key === type) return false;
+        const at = identity.indexOf(key);
+        return at >= 0 && at < mine;
+    });
+    if (otherFirst) return false;
+    const asset = String(assetId || '').trim();
+    return !recordId || recordId === asset || recordId === serviceRecordId;
+}
+
+const EXPIRY_RECORD_TYPES = [
+    'registration',
+    'insurance',
+    'warranty',
+    'permit',
+    'petrol',
+    'toll',
+    'mortgage',
+    'passport',
+    'visa',
+    'emirates-id',
+    'labour-card',
+    'medical-insurance',
+    'driving-license',
+    'trade-license',
+];
+
+/** "Mulkia (Registration) (Exp: 16/10/2026)" → "Mulkia (Registration)". */
+export function documentLabelFromExpiryText(value) {
+    const raw = String(value || '').trim();
+    const match = raw.match(/expiry follow-up required:\s*(.+)$/i);
+    if (!match) return '';
+    return match[1]
+        .replace(/\s*[([\{]\s*exp:\s*[^)\]\}]+[)\]\}]\s*$/i, '')
+        .replace(/\s+expiry reminder$/i, '')
+        .trim();
+}
+
+export function docTypeFromLabel(label) {
+    const text = String(label || '').toLowerCase();
+    if (!text) return '';
+    if (text.includes('mulkia') || text.includes('registration')) return 'registration';
+    if (text.includes('insurance')) return 'insurance';
+    if (text.includes('warranty')) return 'warranty';
+    if (text.includes('permit')) return 'permit';
+    if (text.includes('petrol')) return 'petrol';
+    if (text.includes('toll')) return 'toll';
+    if (text.includes('mortgage')) return 'mortgage';
+    if (text.includes('passport')) return 'passport';
+    if (text.includes('emirates')) return 'emirates-id';
+    if (text.includes('labour')) return 'labour-card';
+    if (text.includes('medical')) return 'medical-insurance';
+    if (text.includes('driving')) return 'driving-license';
+    if (text.includes('trade license')) return 'trade-license';
+    if (text.includes('visa')) return 'visa';
+    return '';
+}
+
+function recordHasDocType(recordId, docType) {
+    const type = String(docType || '').trim().toLowerCase();
+    if (!type) return false;
+    const parts = String(recordId || '').toLowerCase().split(':').filter(Boolean);
+    if (parts.includes(type)) return true;
+    return parts.join(':').includes(type);
+}
+
+/**
+ * Expiry mail is stored on the vehicle, employee, or company id.
+ * Keep the document this task is about. Service, assignment, and transfer mail stays out.
+ */
+export function emailBelongsToDocumentExpiry(row, { docLabel = '', docType = '' } = {}) {
+    const recordId = String(row?.recordId || '');
+    const identity = emailIdentityText(row);
+    const html = String(row?.html || '').toLowerCase();
+    const expiryMail = /document expiry|expiry reminder|expiry follow-up|documentexpiry/.test(identity)
+        || /document expiry|expiry reminder|expiry follow-up/.test(html);
+    if (!expiryMail) return false;
+
+    const type = String(docType || '').trim().toLowerCase();
+    const segment = EXPIRY_RECORD_TYPES.find((name) => recordHasDocType(recordId, name)) || '';
+    if (type && segment && segment !== type && !segment.startsWith(`${type}:`) && !type.startsWith(`${segment}:`)) {
+        return false;
+    }
+
+    const label = String(docLabel || '').trim().toLowerCase();
+    const hay = `${identity} ${recordId.toLowerCase()} ${html}`;
+    if (label && hay.includes(label)) return true;
+    if (type && recordHasDocType(recordId, type)) return true;
+    if (!segment && type === 'registration' && /\bmulkia\b|\bregistration\b/.test(hay)) return true;
+    return false;
+}
+
 /** Emails already sent for this task's record. Expiry tasks keep only the matching document. */
-export async function findEmailsForTask({ ids = [], prefixes = [], focus = '' } = {}) {
+export async function findEmailsForTask({ ids = [], prefixes = [], focus = '', requireFocus = false, onlyExpiry = false } = {}) {
     const exact = [...new Set(ids.map((value) => String(value || '').trim()).filter(Boolean))];
     const starts = [...new Set(prefixes.map((value) => String(value || '').trim()).filter(Boolean))];
+    const needle = String(focus || '').trim().toLowerCase();
+    if (requireFocus && !needle) return [];
     if (!exact.length && !starts.length) return [];
 
     const or = [];
@@ -175,13 +309,28 @@ export async function findEmailsForTask({ ids = [], prefixes = [], focus = '' } 
         or.push({ recordId: new RegExp(`^${escapeEmailId(prefix)}:`, 'i') });
     }
 
-    let rows = await EmailNotificationLog.find({ $or: or })
+    const recordMatch = { $or: or };
+    const query = onlyExpiry
+        ? {
+            $and: [
+                recordMatch,
+                {
+                    $or: [
+                        { emailType: /expiry/i },
+                        { module: /expiry/i },
+                        { subject: /document expiry|expiry reminder|expiry follow-up/i },
+                    ],
+                },
+            ],
+        }
+        : recordMatch;
+
+    let rows = await EmailNotificationLog.find(query)
         .sort({ sentAt: -1 })
         .limit(40)
         .select('from to cc subject html sentAt emailType module recordId')
         .lean();
 
-    const needle = String(focus || '').trim().toLowerCase();
     if (needle) {
         const slug = needle.replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
         const narrowed = rows.filter((row) => {
@@ -189,6 +338,7 @@ export async function findEmailsForTask({ ids = [], prefixes = [], focus = '' } 
             return hay.includes(needle) || (slug.length > 2 && hay.includes(slug));
         });
         if (narrowed.length) rows = narrowed;
+        else if (requireFocus) rows = [];
         else if (starts.length) rows = rows.filter((row) => exact.includes(String(row.recordId || '')));
     }
 
@@ -203,6 +353,7 @@ export async function findEmailsForTask({ ids = [], prefixes = [], focus = '' } 
         html: row.html || '',
         sentAt: row.sentAt || row.createdAt || null,
         emailType: row.emailType || row.module || '',
+        recordId: row.recordId || '',
     }));
 }
 

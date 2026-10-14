@@ -1,9 +1,15 @@
 import mongoose from "mongoose";
+import AssetItem from "../../models/AssetItem.js";
 import DashboardAction from "../../models/DashboardAction.js";
 import EmployeeBasic from "../../models/EmployeeBasic.js";
 import Fine from "../../models/Fine.js";
 import TaskManagerTask from "../../models/TaskManagerTask.js";
 import User from "../../models/User.js";
+import {
+    isVehicleServicePendingTitle,
+    personRequesterName,
+    requesterNameFromService,
+} from "../../utils/vehicleServiceNotificationCopy.js";
 import {
     accessPathFor,
     displayTaskType,
@@ -14,6 +20,8 @@ import {
     viewerCanReassign,
 } from "../../utils/taskManagerModule.js";
 import { assignTaskNumbers } from "../../utils/taskNumber.js";
+import { formatTaskDisplayName, vehicleRecordId } from "../../utils/taskDisplayName.js";
+import { composeTaskDescription } from "../../utils/taskDetailDescription.js";
 
 const DUBAI_DATE = new Intl.DateTimeFormat("en-CA", {
     timeZone: "Asia/Dubai",
@@ -59,42 +67,119 @@ function personName(record) {
     return [record.firstName, record.lastName].filter(Boolean).join(" ").trim();
 }
 
-function isSystemLabel(name) {
-    const base = String(name || "").trim().replace(/\s*\([^)]*\)\s*$/, "").trim().toLowerCase();
-    return !base || base === "system";
+function cleanRequester(name) {
+    return String(name || "").trim().replace(/\s*\([^)]*\)\s*$/, "").trim();
 }
 
-/** Fines store the real creator on the fine. The dashboard row can still say System. */
+function isPersonRequester(name) {
+    return Boolean(personRequesterName(name));
+}
+
+function dashboardMeta(extra3) {
+    if (!extra3) return null;
+    if (typeof extra3 === "object") return extra3;
+    try {
+        return JSON.parse(String(extra3));
+    } catch {
+        return null;
+    }
+}
+
+function requesterSourceKeys(action) {
+    const requestId = String(action?.requestId || "");
+    if (!requestId) return [];
+    const serviceId = String(dashboardMeta(action?.extra3)?.serviceRecordId || "");
+    const keys = [];
+    if (serviceId) keys.push(`${requestId}:${serviceId}`);
+    keys.push(requestId);
+    return keys;
+}
+
+/**
+ * Fines store the real creator on the fine. Vehicle service rows sometimes store the
+ * workflow title ("Mechanical Work pending with …") instead of the person who requested it.
+ */
 export async function sourceRequesterNameMap(actions = []) {
     const fineIds = [];
+    const vehicleServices = new Map();
     for (const action of actions) {
-        if (!action || !isSystemLabel(action.requestedByName)) continue;
-        if (!/fine/i.test(String(action.requestType || ""))) continue;
+        if (!action || isPersonRequester(action.requestedByName)) continue;
+        const requestType = String(action.requestType || "");
         const id = String(action.requestId || "");
-        if (isObjectId(id)) fineIds.push(id);
+        if (/fine/i.test(requestType) && isObjectId(id)) fineIds.push(id);
+        if (requestType !== "Vehicle Service Request" || !isObjectId(id)) continue;
+        const serviceId = String(dashboardMeta(action.extra3)?.serviceRecordId || "");
+        if (!isObjectId(serviceId)) continue;
+        const services = vehicleServices.get(id) || new Set();
+        services.add(serviceId);
+        vehicleServices.set(id, services);
     }
     const map = new Map();
-    if (!fineIds.length) return map;
-    const fines = await Fine.find({ _id: { $in: [...new Set(fineIds)] } })
-        .select("createdBy")
-        .populate("createdBy", "name")
-        .lean();
-    for (const fine of fines) {
-        const name = String(fine.createdBy?.name || "").trim();
-        if (!isSystemLabel(name)) map.set(String(fine._id), name);
+    if (fineIds.length) {
+        const fines = await Fine.find({ _id: { $in: [...new Set(fineIds)] } })
+            .select("createdBy")
+            .populate("createdBy", "name")
+            .lean();
+        for (const fine of fines) {
+            const name = personRequesterName(fine.createdBy?.name);
+            if (name) map.set(String(fine._id), name);
+        }
+    }
+    if (vehicleServices.size) {
+        const assets = await AssetItem.find({ _id: { $in: [...vehicleServices.keys()] } })
+            .select("services._id services.remark services.requestedBy")
+            .lean();
+        const employeeIds = [];
+        const unresolved = [];
+        for (const asset of assets) {
+            const wanted = vehicleServices.get(String(asset._id));
+            if (!wanted) continue;
+            for (const service of asset.services || []) {
+                const serviceId = String(service?._id || "");
+                if (!wanted.has(serviceId)) continue;
+                const key = `${asset._id}:${serviceId}`;
+                const fromRemark = requesterNameFromService(service);
+                if (fromRemark) {
+                    map.set(key, fromRemark);
+                    continue;
+                }
+                const employeeId = String(service?.requestedBy || "");
+                if (isObjectId(employeeId)) {
+                    employeeIds.push(employeeId);
+                    unresolved.push({ key, employeeId });
+                }
+            }
+        }
+        if (employeeIds.length) {
+            const employees = await EmployeeBasic.find({ _id: { $in: [...new Set(employeeIds)] } })
+                .select("firstName lastName name")
+                .lean();
+            const byId = new Map(employees.map((employee) => [String(employee._id), personName(employee)]));
+            for (const row of unresolved) {
+                const name = personRequesterName(byId.get(row.employeeId));
+                if (name) map.set(row.key, name);
+            }
+        }
     }
     return map;
 }
 
 export function preferRequesterName(...values) {
-    const names = values.map((value) => String(value || "").trim().replace(/\s*\([^)]*\)\s*$/, "").trim());
-    return names.find((name) => name && name.toLowerCase() !== "system") || names.find(Boolean) || "";
+    const names = values.map(cleanRequester);
+    const person = names.find((name) => isPersonRequester(name));
+    if (person) return person;
+    return names.find((name) => name && !isVehicleServicePendingTitle(name)) || "";
 }
 
 export function displayRequesterName(stored, action, sourceMap) {
-    const name = String(stored || "").trim();
-    if (!isSystemLabel(name)) return name;
-    return sourceMap?.get(String(action?.requestId || "")) || name || "System";
+    const name = cleanRequester(stored);
+    if (isPersonRequester(name)) return name;
+    for (const key of requesterSourceKeys(action)) {
+        const found = personRequesterName(sourceMap?.get(key));
+        if (found) return found;
+    }
+    if (name && !isVehicleServicePendingTitle(name)) return name;
+    return "System";
 }
 
 const GENERAL_REQUEST_TYPES = new Set([
@@ -113,40 +198,118 @@ function isFollowUpSentence(value) {
     return /^expiry follow-up required:/i.test(String(value || "").trim());
 }
 
+/** Plate, or the fleet id when the plate is empty. Tools assets stay on asset id and name. */
+export async function vehicleDisplayById(actions = []) {
+    const ids = [...new Set(actions.map((action) => vehicleRecordId(action)).filter(Boolean))];
+    const map = new Map();
+    if (!ids.length) return map;
+    const assets = await AssetItem.find({ _id: { $in: ids } })
+        .select("assetId name plateNumber plateEmirate")
+        .lean();
+    for (const asset of assets) {
+        const plate = [asset.plateEmirate, asset.plateNumber].filter(Boolean).join(" ").trim();
+        const assetId = String(asset.assetId || "").trim();
+        const name = String(asset.name || "").trim();
+        map.set(String(asset._id), {
+            vehicleNo: plate || assetId || name,
+            assetNo: assetId,
+            assetName: name,
+            assetLabel: [assetId, name].filter(Boolean).join(" — "),
+            hasPlate: Boolean(plate),
+        });
+    }
+    return map;
+}
+
+export function vehicleDisplayFor(action, vehicles) {
+    const record = vehicles?.get(vehicleRecordId(action)) || null;
+    return {
+        vehicleNo: record?.vehicleNo || "",
+        assetNo: record?.assetNo || "",
+        assetName: record?.assetName || "",
+        assetLabel: record?.assetLabel || "",
+        hasPlate: Boolean(record?.hasPlate),
+    };
+}
+
 /** Short title in the header. The written request stays in the description. */
-export function taskTitleAndDescription({ requestType, extra1, extra2, taskName, description } = {}) {
+export function taskTitleAndDescription({
+    requestType,
+    extra1,
+    extra2,
+    extra3,
+    subjectName,
+    subjectEmployeeId,
+    comment,
+    requestedBy,
+    taskName,
+    description,
+    vehicleNo,
+    assetNo,
+    assetName,
+    assetLabel,
+    hasPlate,
+    manual,
+    source,
+} = {}) {
     const typeKey = String(requestType || "").trim().toLowerCase();
     const label = String(extra2 || "").trim();
     const body = String(extra1 || "").trim();
     const storedName = String(taskName || "").trim();
     const storedDescription = String(description || "").trim();
     const followUp = [body, storedName].find((value) => isFollowUpSentence(value)) || "";
+    let baseName = "";
+    let baseDescription = "";
     if (followUp && (!storedName || isFollowUpSentence(storedName))) {
         const subject = [label, storedDescription].find((value) => value && !isFollowUpSentence(value)) || "";
-        return {
-            taskName: subject || requestType || "Task",
-            description: followUp,
-        };
+        baseName = subject || requestType || "Task";
+        baseDescription = followUp;
+    } else if (!GENERAL_REQUEST_TYPES.has(typeKey)) {
+        baseName = storedName || body || requestType || "Notification";
+        baseDescription = storedDescription || label || body;
+    } else {
+        const shortTitle = label || GENERAL_TITLES[typeKey] || requestType || "Task";
+        const nameIsTheDescription = Boolean(storedName && body && storedName === body);
+        baseName = !storedName || nameIsTheDescription ? shortTitle : storedName;
+        const longText = storedDescription && storedDescription !== baseName ? storedDescription : body;
+        baseDescription = longText && longText !== baseName ? longText : "";
     }
-    const general = GENERAL_REQUEST_TYPES.has(typeKey);
 
-    if (!general) {
-        return {
-            taskName: storedName || body || requestType || "Notification",
-            description: storedDescription || label || body,
-        };
+    const displayName = formatTaskDisplayName({
+        requestType,
+        extra1,
+        extra2,
+        extra3,
+        subjectName,
+        taskName,
+        vehicleNo,
+        assetLabel,
+        hasPlate,
+        manual,
+    });
+    const nextName = displayName || baseName;
+    let nextDescription = baseDescription;
+    if (nextName !== baseName && baseName && baseName !== nextName) {
+        if (!nextDescription || nextDescription === nextName) nextDescription = baseName;
     }
-
-    const shortTitle = label || GENERAL_TITLES[typeKey] || requestType || "Task";
-    const nameIsTheDescription = Boolean(storedName && body && storedName === body);
-    const title = !storedName || nameIsTheDescription ? shortTitle : storedName;
-    const longText = storedDescription && storedDescription !== title
-        ? storedDescription
-        : body;
-    return {
-        taskName: title,
-        description: longText && longText !== title ? longText : "",
-    };
+    if (nextDescription === nextName) nextDescription = "";
+    const composed = composeTaskDescription({
+        requestType,
+        extra1,
+        extra2,
+        extra3,
+        subjectName,
+        subjectEmployeeId,
+        comment,
+        taskName: nextName,
+        requestedBy,
+        assetNo,
+        assetName,
+        vehicleNo,
+        manual,
+        source,
+    });
+    return { taskName: nextName, description: composed || nextDescription };
 }
 
 function isGeneralHubRequest(requestType, extra = "") {
@@ -410,6 +573,7 @@ export const getTaskManagerNotifications = async (req, res) => {
         const uniqueActions = dedupeOpenActions(actions);
 
         const sourceRequesters = await sourceRequesterNameMap(uniqueActions);
+        const vehicles = await vehicleDisplayById(uniqueActions);
         const tasks = uniqueActions.map((action) => {
             const requestedAt = action.requestedDate || action.createdAt || null;
             const requestedKey = dubaiDateKey(requestedAt);
@@ -435,8 +599,14 @@ export const getTaskManagerNotifications = async (req, res) => {
                 requestType: action.requestType,
                 extra1: action.extra1,
                 extra2: action.extra2,
+                extra3: action.extra3,
+                subjectName: action.subjectName,
+                subjectEmployeeId: action.subjectEmployeeId,
+                comment: action.comment,
+                requestedBy: requesterName,
                 taskName: overlay?.taskName,
                 description: overlay?.description,
+                ...vehicleDisplayFor(action, vehicles),
             });
             const requestMonth = monthKeyFromDateKey(requestedKey);
             const completedMonth = monthKeyFromDateKey(dubaiDateKey(action.actionedDate || requestedAt));
