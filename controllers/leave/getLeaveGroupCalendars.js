@@ -10,6 +10,7 @@ import { preferPunchedRows } from '../../utils/attendanceDayLookup.js';
 import { applyLeaveCoverIndex, loadLeaveCoverIndex } from '../../utils/attendanceLeaveDayCover.js';
 import { calendarDaysForEmployee, calendarStatusKey } from '../../utils/leaveGroupCalendarDays.js';
 import EmployeeSalary from '../../models/EmployeeSalary.js';
+import AttendanceChangeRequest from '../../models/AttendanceChangeRequest.js';
 import { loadEnrolledLeaveVisibilityByMongoId } from '../../utils/leaveSalaryVisibility.js';
 import { getScheduledEmailTimeZone, getZonedParts } from '../../utils/scheduleDailyAtMidnight.js';
 import {
@@ -47,6 +48,24 @@ function laterDate(left, right) {
     const dates = [left, right].filter((value) => /^\d{4}-\d{2}-\d{2}$/.test(String(value || '')));
     dates.sort();
     return dates[dates.length - 1] || '';
+}
+
+function pendingRequestDatesByEmployee(rows, from, to) {
+    const byEmployee = new Map();
+    const add = (employeeId, date) => {
+        const id = String(employeeId || '').trim();
+        const day = String(date || '').trim();
+        if (!id || !/^\d{4}-\d{2}-\d{2}$/.test(day) || day < from || day > to) return;
+        if (!byEmployee.has(id)) byEmployee.set(id, new Set());
+        byEmployee.get(id).add(day);
+    };
+    for (const row of rows || []) {
+        add(row.employeeMongoId, row.date);
+        if (row.action === 'flexible_ot' && row.proposed?.confirmNextDay) {
+            add(row.employeeMongoId, row.proposed?.targetDate);
+        }
+    }
+    return byEmployee;
 }
 
 function slimGroupAttendanceRecord(row, todayKey) {
@@ -134,7 +153,7 @@ export async function getLeaveGroupCalendars(req, res) {
         const codes = people.map((emp) => String(emp.employeeId || '').trim()).filter(Boolean);
         const mongoByCode = new Map(people.map((emp) => [String(emp.employeeId || '').trim(), String(emp._id)]));
 
-        const [storedRecords, coverIndex, workingTime, holidayRows, salaryRows] = await Promise.all([
+        const [storedRecords, coverIndex, workingTime, holidayRows, salaryRows, changeRows] = await Promise.all([
             mongoIds.length
                 ? Attendance.find({
                       date: { $gte: window.from, $lte: window.to },
@@ -158,6 +177,23 @@ export async function getLeaveGroupCalendars(req, res) {
             detail && codes.length
                 ? EmployeeSalary.find({ employeeId: { $in: codes } })
                     .select('employeeId monthlySalary totalSalary')
+                    .lean()
+                    .maxTimeMS(8000)
+                : [],
+            detail && mongoIds.length
+                ? AttendanceChangeRequest.find({
+                      employeeMongoId: { $in: mongoIds },
+                      stage: { $in: ['pending_reportee', 'pending_hr'] },
+                      $or: [
+                          { date: { $gte: window.from, $lte: window.to } },
+                          {
+                              action: 'flexible_ot',
+                              'proposed.confirmNextDay': true,
+                              'proposed.targetDate': { $gte: window.from, $lte: window.to },
+                          },
+                      ],
+                  })
+                    .select('employeeMongoId date action proposed.targetDate proposed.confirmNextDay')
                     .lean()
                     .maxTimeMS(8000)
                 : [],
@@ -188,6 +224,10 @@ export async function getLeaveGroupCalendars(req, res) {
         for (const list of byEmployee.values()) preferred.push(...preferPunchedRows(list));
         const covered = applyLeaveCoverIndex(preferred, coverIndex);
 
+        const pendingByEmployee = detail
+            ? pendingRequestDatesByEmployee(changeRows, window.from, window.to)
+            : new Map();
+
         const coveredByEmployee = new Map();
         for (const row of covered) {
             const id = String(row?.employeeMongoId || '');
@@ -210,6 +250,7 @@ export async function getLeaveGroupCalendars(req, res) {
                     ...(detail ? {
                         monthlySalary: salaryByCode.get(String(emp.employeeId || '').trim()) || 0,
                         records: rows.map((row) => slimGroupAttendanceRecord(row, today)),
+                        pendingRequestDates: [...(pendingByEmployee.get(id) || [])],
                     } : {}),
                     days: calendarDaysForEmployee(rows, {
                         todayKey: today,
