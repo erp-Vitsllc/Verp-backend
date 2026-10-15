@@ -58,6 +58,7 @@ import { processOilServiceOverdue, processOilServiceStartDateActivation, process
 import { processShopServiceStartDateActivation } from "./utils/vehicleShopServiceScheduled.js";
 import { processAssetServiceOverdue } from "./utils/processAssetServiceOverdue.js";
 import { processFleetHandoverEscalation } from "./utils/processFleetHandoverEscalation.js";
+import { processToolsAssignmentAckEscalation } from "./utils/toolsAssignmentAckEscalation.js";
 import { processBirthdayWishes } from "./utils/processBirthdayWishes.js";
 import { scheduleDailyAtMidnight, getScheduledEmailTimeZone } from "./utils/scheduleDailyAtMidnight.js";
 import { setupEmailSubjectTag } from "./utils/setupEmailSubjectTag.js";
@@ -317,6 +318,9 @@ function startScheduledJobs() {
 
     later(75 * 1000, "FleetHandoverEscalation", processFleetHandoverEscalation);
     every(24 * 60 * 60 * 1000, "FleetHandoverEscalation", processFleetHandoverEscalation);
+
+    later(80 * 1000, "ToolsAssignmentAckEscalation", processToolsAssignmentAckEscalation);
+    every(6 * 60 * 60 * 1000, "ToolsAssignmentAckEscalation", processToolsAssignmentAckEscalation);
 
     later(60 * 1000, "AccidentAssets", processAccidentAssets);
     scheduleDailyAtMidnight(() => processAccidentAssets(), { name: "AccidentAssets" });

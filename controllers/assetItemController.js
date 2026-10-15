@@ -11,6 +11,12 @@ import { generatePdf } from '../utils/generatePdf.js';
 import { sendAssetAssignmentEmail } from '../utils/sendAssetAssignmentEmail.js';
 import { isToolsAssetItem, sendToolsHandoverReportWhatsApp } from '../utils/sendToolsAssetWhatsAppReport.js';
 import {
+    attachToolsAssignmentAck,
+    buildToolsAssignmentAckRecord,
+    captureToolsAssignmentPrior,
+    closeToolsAssignmentEscalation,
+} from '../utils/toolsAssignmentAckEscalation.js';
+import {
     advanceFleetHandoverOnAccept,
     buildHandoverAssignDetailsUrl,
     buildHandoverDashboardExtra3,
@@ -7188,6 +7194,8 @@ export const assignAssetItem = async (req, res) => {
                 }
             }
 
+            const toolsAckPrior = fleetVehicle ? null : captureToolsAssignmentPrior(item);
+
             item.assignedToType = 'Employee';
             item.assignedTo = assignedTo;
             item.assignedCompany = null;
@@ -7299,6 +7307,10 @@ export const assignAssetItem = async (req, res) => {
                 } else {
                     item.status = 'Pending';
                 }
+            }
+
+            if (!fleetVehicle && String(item.acceptanceStatus || '') === 'Pending' && toolsAckPrior) {
+                attachToolsAssignmentAck(item, toolsAckPrior);
             }
 
             actionRecipient = actionRecipientDoc;
@@ -7991,6 +8003,7 @@ export const bulkAssignAssetItems = async (req, res) => {
                 }
             }
 
+            const existingForAck = existingItems.find((doc) => String(doc._id) === String(aid));
             const setPayload = {
                 ...updateData,
                 pendingActionDetails: {
@@ -8000,6 +8013,28 @@ export const bulkAssignAssetItems = async (req, res) => {
                         revertToEmployeeId,
                         revertToDisplayName,
                     },
+                    ...(autoAcceptOnAssign
+                        ? {}
+                        : {
+                            toolsAssignmentAck: buildToolsAssignmentAckRecord({
+                                status: existingForAck?.status || 'Unassigned',
+                                acceptanceStatus: 'Pending',
+                                assignedTo: null,
+                                assignedToType: null,
+                                assignedCompany: null,
+                                assignedBy: null,
+                                assignmentType: null,
+                                assignedDays: null,
+                                assignedDate: null,
+                                temporaryEndDate: null,
+                                temporaryReminderSentAt: null,
+                                temporaryExpiredSentAt: null,
+                                ownership: 'Unassigned',
+                                acceptedBy: null,
+                                onLeaveActive: false,
+                                onServiceActive: false,
+                            }),
+                        }),
                 },
             };
 
@@ -9832,6 +9867,11 @@ export const respondToAssignment = async (req, res) => {
         if (req.vehicleHandoverNotify) {
             payload.vehicleHandoverNotify = req.vehicleHandoverNotify;
         }
+        await closeToolsAssignmentEscalation(
+            item._id,
+            currentUser,
+            'Auto-closed: assignment response recorded.',
+        ).catch(() => null);
         res.status(200).json(payload);
     } catch (error) {
         res.status(500).json({ message: 'Server Error' });

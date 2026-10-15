@@ -8,6 +8,7 @@ export const ASSET_DASHBOARD_INBOX_TYPES = [
     'Asset',
     'Asset Approval',
     'Asset Assignment',
+    'Asset Assignment Escalation',
     'Asset Transfer',
     'Asset Loss Damage',
     'Asset End of Life',

@@ -9,6 +9,10 @@ import User from '../models/User.js';
 import { createAssetItem, getAssetItems, getVehicleFleetDashboard, getVehicleFleetServiceRequests, getAllAssignedAssets, getMyAssignedAssetsForReturn, getUnassignedAssetsForEmployee, getCompanyAllocationCoordinatorStatus, getHRCompanyAssets, getOnLeaveAssetsForEmployee, getOnServiceAssetsForEmployee, runAssetServiceOverdueCheck, handleOnLeaveAction, bulkHandleOnLeaveAction, handleOnServiceAction, bulkHandleOnServiceAction, getAssetItemDetail, assignAssetItem, bulkAssignAssetItems, bulkAssignAssetItemsToCompany, downloadHandoverPdf, downloadHistoryHandoverPdf, downloadVehicleHandoverPdf, respondToAssignment, bulkRespondToAssignment, getBulkAssignmentPendingGroup, respondBulkAssignmentGroup, getAssetHistory, getHistoryRecord, deleteVehicleHandoverHistory, uploadHandoverAssessmentPhoto, updateHistoryReceiverAssessment, updateHistoryBodyCondition, updateHistoryHandoverItemFineWaiver, returnAssetItem, updateAssetStatus, addAssetDocument, updateAssetDocument, deleteAssetDocument, addAssetService, deleteAssetService, updateAssetServiceDraft, submitAssetServiceDraft, saveOilServiceDetailsDraftHandler, submitOilServiceDetailsHandler, submitTireChangeGarageHandler, completeTireChangeHandler, updateTireChangeQuoteEmployeeRowsHandler, submitMechanicalWorkGarageHandler, completeMechanicalWorkHandler, updateMechanicalWorkQuoteEmployeeRowsHandler, submitBodyWorkGarageHandler, completeBodyWorkHandler, updateBodyWorkQuoteEmployeeRowsHandler, submitAccidentRepairGarageHandler, completeAccidentRepairHandler, resolveServicePhotoReviewHandler, syncServiceBodyConditionPhotosHandler, retryGarageZohoBillHandler, updateAccidentRepairQuoteEmployeeRowsHandler, updateOilServiceDatesHandler, approveOilAccountsQuoteHandler, updateShopServiceExtendDateHandler, addAssetImage, deleteAssetImage, transferAssetAccessory, manageAccessoryStatus, updateAssetItem, deleteAssetItem, endOfLifeAsset, requestAssetAction, bulkRequestAssetAction, handleAssetActionApproval, finalizeAssetAction, uploadAccessoriesAttachment, requestAccessoryAction, respondAccessoryAction, finalizeAccessoryAction, respondToAssetCreation, bulkRespondToAssetCreation, getBulkAssetDetails, getBulkAssetInventoryForPrint, transferAsset, transferAssigneeAsset, submitDraftForCreationApproval, saveLossDamageFineDraft, getPendingAssetDashboardInbox, deletePendingAssetDashboardInboxItem, getEmployeePreviousAssets } from '../controllers/assetItemController.js';
 import { respondVehicleServiceWorkflow, respondVehicleServiceScheduledPeriod } from '../controllers/vehicleServiceWorkflowController.js';
 import {
+    forceAssignUnacknowledgedToolsAsset,
+    revertUnacknowledgedToolsAssignment,
+} from '../controllers/assetItem/toolsAssignmentAckController.js';
+import {
     listVehicleOilServiceTypes,
     addVehicleOilServiceType,
 } from '../controllers/vehicleOilServiceTypeController.js';
@@ -919,6 +923,8 @@ router.put('/bulk/on-service-action', protect, requireAssetControllerOrAdmin, (r
 router.put('/:id/assign', protect, requireAssetAssignAccess, assignAssetItem);
 router.put('/:id/transfer-assignee', protect, requireAssetControllerOrAdmin, transferAssigneeAsset);
 router.put('/:id/respond', protect, respondToAssignment);
+router.put('/:id/force-assign', protect, forceAssignUnacknowledgedToolsAsset);
+router.put('/:id/revert-pending-assignment', protect, revertUnacknowledgedToolsAssignment);
 router.put('/bulk/respond', protect, bulkRespondToAssignment);
 router.post('/transfer', protect, requireAssetControllerOrAdmin, transferAsset);
 router.put('/bulk/approve-creation', protect, requireAssetControllerOrAdmin, bulkRespondToAssetCreation);
