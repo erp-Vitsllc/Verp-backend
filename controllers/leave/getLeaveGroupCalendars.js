@@ -11,6 +11,8 @@ import { applyLeaveCoverIndex, loadLeaveCoverIndex } from '../../utils/attendanc
 import { calendarDaysForEmployee, calendarStatusKey } from '../../utils/leaveGroupCalendarDays.js';
 import EmployeeSalary from '../../models/EmployeeSalary.js';
 import AttendanceChangeRequest from '../../models/AttendanceChangeRequest.js';
+import { ATTENDANCE_CHANGE_OPEN_STAGES } from '../../utils/attendanceChangeApproval.js';
+import { collectPendingCalendarRequests } from '../../utils/groupCalendarRequests.js';
 import { loadEnrolledLeaveVisibilityByMongoId } from '../../utils/leaveSalaryVisibility.js';
 import { getScheduledEmailTimeZone, getZonedParts } from '../../utils/scheduleDailyAtMidnight.js';
 import {
@@ -48,24 +50,6 @@ function laterDate(left, right) {
     const dates = [left, right].filter((value) => /^\d{4}-\d{2}-\d{2}$/.test(String(value || '')));
     dates.sort();
     return dates[dates.length - 1] || '';
-}
-
-function pendingRequestDatesByEmployee(rows, from, to) {
-    const byEmployee = new Map();
-    const add = (employeeId, date) => {
-        const id = String(employeeId || '').trim();
-        const day = String(date || '').trim();
-        if (!id || !/^\d{4}-\d{2}-\d{2}$/.test(day) || day < from || day > to) return;
-        if (!byEmployee.has(id)) byEmployee.set(id, new Set());
-        byEmployee.get(id).add(day);
-    };
-    for (const row of rows || []) {
-        add(row.employeeMongoId, row.date);
-        if (row.action === 'flexible_ot' && row.proposed?.confirmNextDay) {
-            add(row.employeeMongoId, row.proposed?.targetDate);
-        }
-    }
-    return byEmployee;
 }
 
 function slimGroupAttendanceRecord(row, todayKey) {
@@ -163,7 +147,7 @@ export async function getLeaveGroupCalendars(req, res) {
                       ],
                   })
                       .select(detail
-                          ? 'employeeMongoId employeeId date statusKey statusLabel timeIn timeOut timeOutDate checkInLocation checkOutLocation reason leaveRequestReason hourAdjustReason flexibleOtReason hourAdjustStatus leaveRequestStatus flexibleOtStatus approvalStatus hoursApproved hoursTaken flexibleWorkedHours flexibleRequiredHours flexibleFromOtDate flexibleOtNextDayDate compOff leavePayType updatedAt historical'
+                          ? 'employeeMongoId employeeId employeeName date statusKey statusLabel timeIn timeOut timeOutDate checkInLocation checkOutLocation reason leaveRequestReason hourAdjustReason flexibleOtReason hourAdjustStatus leaveRequestStatus leaveRequestKind requestedStatusKey requestedStatusLabel flexibleOtStatus approvalStatus hoursApproved hoursTaken flexibleWorkedHours flexibleRequiredHours flexibleFromOtDate flexibleOtNextDayDate compOff leavePayType updatedAt historical'
                           : 'employeeMongoId employeeId date statusKey timeIn timeOut updatedAt historical')
                       .lean()
                       .maxTimeMS(12000)
@@ -183,17 +167,10 @@ export async function getLeaveGroupCalendars(req, res) {
             detail && mongoIds.length
                 ? AttendanceChangeRequest.find({
                       employeeMongoId: { $in: mongoIds },
-                      stage: { $in: ['pending_reportee', 'pending_hr'] },
-                      $or: [
-                          { date: { $gte: window.from, $lte: window.to } },
-                          {
-                              action: 'flexible_ot',
-                              'proposed.confirmNextDay': true,
-                              'proposed.targetDate': { $gte: window.from, $lte: window.to },
-                          },
-                      ],
+                      stage: { $in: ATTENDANCE_CHANGE_OPEN_STAGES },
+                      date: { $gte: window.from, $lte: window.to },
                   })
-                    .select('employeeMongoId date action proposed.targetDate proposed.confirmNextDay')
+                    .select('employeeMongoId employeeName date action stage requestedByName proposed.statusLabel proposed.statusKey')
                     .lean()
                     .maxTimeMS(8000)
                 : [],
@@ -225,7 +202,13 @@ export async function getLeaveGroupCalendars(req, res) {
         const covered = applyLeaveCoverIndex(preferred, coverIndex);
 
         const pendingByEmployee = detail
-            ? pendingRequestDatesByEmployee(changeRows, window.from, window.to)
+            ? collectPendingCalendarRequests({
+                attendanceRows: preferred,
+                changeRows,
+                employeeNames: new Map(people.map((emp) => [String(emp._id), employeeName(emp)])),
+                from: window.from,
+                to: window.to,
+            })
             : new Map();
 
         const coveredByEmployee = new Map();
@@ -250,7 +233,7 @@ export async function getLeaveGroupCalendars(req, res) {
                     ...(detail ? {
                         monthlySalary: salaryByCode.get(String(emp.employeeId || '').trim()) || 0,
                         records: rows.map((row) => slimGroupAttendanceRecord(row, today)),
-                        pendingRequestDates: [...(pendingByEmployee.get(id) || [])],
+                        pendingRequests: pendingByEmployee.get(id) || [],
                     } : {}),
                     days: calendarDaysForEmployee(rows, {
                         todayKey: today,

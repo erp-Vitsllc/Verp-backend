@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
-import { describePartialLeave, partialLeaveOutcome } from './partialLeaveWindow.js';
+import { describePartialLeave, leaveListDuration, partialLeaveOutcome } from './partialLeaveWindow.js';
 
 const scheduledWeek = {
     timingMode: 'scheduled',
@@ -131,5 +131,35 @@ describe('partial leave window', () => {
             scheduledWeek,
         );
         assert.equal(result.leaveDeductionTimes, 2);
+    });
+});
+
+describe('leave list duration', () => {
+    it('labels a whole day as full time', () => {
+        assert.deepEqual(
+            leaveListDuration({ date: '2026-10-05', leaveRequestDayPart: 'full' }, scheduledWeek),
+            { hours: null, label: 'Full time' },
+        );
+    });
+
+    it('labels a quarter day with its hours', () => {
+        assert.deepEqual(
+            leaveListDuration(
+                { date: '2026-10-05', leaveRequestDayPart: 'quarter', leaveRequestSession: 'am' },
+                scheduledWeek,
+            ),
+            { hours: 2.25, label: '2 Hours 15 Min' },
+        );
+    });
+
+    it('uses the stored working-day hours for a half day', () => {
+        assert.deepEqual(
+            leaveListDuration({
+                date: '2026-10-05',
+                leaveRequestDayPart: 'half',
+                flexibleRequiredHours: 10,
+            }),
+            { hours: 5, label: '5 Hours' },
+        );
     });
 });

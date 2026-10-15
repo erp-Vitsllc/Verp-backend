@@ -108,6 +108,38 @@ function applyApproved(record, { kind, approvedHours, taken, max, reason }) {
     record.statusLabel = APPROVED_LABEL[kind];
 }
 
+function isFlexibleHourProposal(proposed = {}) {
+    if (proposed?.hourAdjustFlexible === true) return true;
+    const taken = roundHours(proposed?.hoursTaken);
+    const max = roundHours(proposed?.hoursMax);
+    if (max > taken + 0.001) return false;
+    return !String(proposed?.reason || '').trim();
+}
+
+/** Keep an approver's edited hours inside the request that was sent. */
+export function normalizeHourAdjustEdit(proposed = {}, body = {}) {
+    const flexible = isFlexibleHourProposal(proposed);
+    const max = roundHours(proposed?.hoursMax);
+    const hasHours = body?.approvedHours != null && String(body.approvedHours).trim() !== '';
+    const requestedHours = hasHours ? Number(body.approvedHours) : roundHours(proposed?.hoursApproved);
+    const nextReason =
+        body?.hourReason == null
+            ? String(proposed?.reason || '').trim()
+            : String(body.hourReason || '').trim();
+    if (!Number.isFinite(requestedHours) || requestedHours < 0) {
+        return { error: 'Approved hours cannot be negative.' };
+    }
+    if (flexible && Math.abs(requestedHours - Math.round(requestedHours)) > 0.001) {
+        return { error: 'Approved hours must be a whole number.' };
+    }
+    const approvedHours = flexible ? Math.round(requestedHours) : roundHours(requestedHours);
+    if (approvedHours > max + 0.001) {
+        return { error: `Approved hours cannot be more than ${max}.` };
+    }
+    if (!flexible && !nextReason) return { error: 'Description is required.' };
+    return { hoursApproved: approvedHours, reason: flexible ? '' : nextReason };
+}
+
 export async function applyStoredHourAdjust(record, proposed = {}) {
     const kind = proposed.hourAdjustKind || hourAdjustKindOf(record);
     if (!kind || !STATUS_KEY[kind]) {
@@ -182,7 +214,7 @@ export async function requestHourAdjust(req, res) {
         }
 
         const employee = await EmployeeBasic.findById(record.employeeMongoId)
-            .select('_id employeeId firstName lastName primaryReportee companyEmail workEmail email')
+            .select('_id employeeId firstName lastName staffType primaryReportee companyEmail workEmail email')
             .populate('primaryReportee', 'firstName lastName employeeId companyEmail workEmail email')
             .lean();
         const hr = await getDepartmentHOD('hr').catch(() => null);
@@ -200,6 +232,7 @@ export async function requestHourAdjust(req, res) {
                 hoursTaken: taken,
                 hoursMax: max,
                 hoursApproved: approvedHours,
+                hourAdjustFlexible: flexible,
             },
             previous: {
                 statusKey: record.statusKey || '',
@@ -249,19 +282,37 @@ export async function decideHourAdjust(req, res) {
         }
 
         if (decision === 'rejected') {
+            const rejectReason = String(req.body?.rejectReason || '').trim();
+            if (!rejectReason) {
+                return res.status(400).json({ message: 'Reject reason is required.' });
+            }
             record.hourAdjustStatus = 'rejected';
             record.hoursApproved = 0;
+            record.hourAdjustReason = rejectReason;
             await record.save();
             return res.status(200).json({ message: 'Request rejected. Deduction is unchanged.', record });
         }
 
         const kind = record.hourAdjustKind || hourAdjustKindOf(record);
+        const edited = normalizeHourAdjustEdit(
+            {
+                hoursTaken: record.hoursTaken,
+                hoursMax: record.hoursMax,
+                hoursApproved: record.hoursApproved,
+                reason: record.hourAdjustReason,
+            },
+            {
+                approvedHours: req.body?.approvedHours,
+                hourReason: req.body?.hourReason ?? req.body?.reason,
+            },
+        );
+        if (edited.error) return res.status(400).json({ message: edited.error });
         applyApproved(record, {
             kind,
-            approvedHours: roundHours(record.hoursApproved),
+            approvedHours: edited.hoursApproved,
             taken: roundHours(record.hoursTaken),
             max: roundHours(record.hoursMax),
-            reason: record.hourAdjustReason,
+            reason: edited.reason,
         });
         await record.save();
         return res.status(200).json({ message: 'Hours approved.', record });

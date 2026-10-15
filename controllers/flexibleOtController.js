@@ -36,6 +36,15 @@ async function resolveActor(req) {
     return null;
 }
 
+function storedClock(value) {
+    const text = String(value || '').trim();
+    if (/^\d{1,2}:\d{2}$/.test(text)) {
+        const [hour, minute] = text.split(':');
+        return `${hour.padStart(2, '0')}:${minute}:00`;
+    }
+    return text;
+}
+
 function roundHours(value) {
     const hours = Number(value);
     if (!Number.isFinite(hours) || hours < 0) return 0;
@@ -267,7 +276,7 @@ export async function requestFlexibleOvertime(req, res) {
             return res.status(placement.error.status).json(placement.error.body);
         }
 
-        if (isHr || (confirmNextDay && permitted)) {
+        if (confirmNextDay && (isHr || permitted)) {
             const applied = await approveFlexibleOvertimeRecord(record, {
                 approvedHours,
                 reason,
@@ -309,12 +318,13 @@ export async function requestFlexibleOvertime(req, res) {
                 statusKey: record.statusKey || '',
                 statusLabel: confirmNextDay
                     ? `Next day present on ${targetDate}`
-                    : `Apply OT ${approvedHours} hr`,
+                    : `OT Approval ${approvedHours} hr`,
                 reason,
-                timeIn: record.timeIn || '',
-                timeOut: record.timeOut || '',
                 attendanceId: String(record._id),
                 flexibleOtApprovedHours: approvedHours,
+                flexibleOtHours: roundHours(record.flexibleOtHours),
+                timeIn: String(req.body?.timeIn || record.timeIn || '').trim(),
+                timeOut: String(req.body?.timeOut || record.timeOut || '').trim(),
                 confirmNextDay,
                 targetDate: confirmNextDay ? targetDate : '',
             },
@@ -379,8 +389,20 @@ export async function decideFlexibleOvertime(req, res) {
             return res.status(200).json({ message: 'Overtime rejected.', record });
         }
 
+        const editedHours = roundHours(req.body?.approvedHours);
+        const approvedHours = editedHours > 0 ? editedHours : roundHours(record.flexibleOtApprovedHours);
+        if (!(approvedHours > 0)) {
+            return res.status(400).json({ message: 'Approved hours are required.' });
+        }
+        const editedIn = String(req.body?.timeIn || '').trim();
+        const editedOut = String(req.body?.timeOut || '').trim();
+        if (editedIn) record.timeIn = storedClock(editedIn);
+        if (editedOut) record.timeOut = storedClock(editedOut);
+        const editedReason = String(req.body?.reason || '').trim();
+
         const applied = await approveFlexibleOvertimeRecord(record, {
-            approvedHours: record.flexibleOtApprovedHours,
+            approvedHours,
+            reason: editedReason || record.flexibleOtReason,
             confirmNextDay,
             targetDate: req.body?.targetDate,
             actor,

@@ -1,7 +1,9 @@
 import mongoose from 'mongoose';
+import EmployeeBasic from '../models/EmployeeBasic.js';
 import { syncDashboardAction } from './syncDashboard.js';
 import { sendAttendanceLeaveRequestEmail } from './sendAttendanceLeaveEmails.js';
 import { resolveFlowchartHrEmployee } from './resolveFlowchartHrEmployee.js';
+import { LEAVE_STAGE_HR, LEAVE_STAGE_REPORTEE } from './leaveRequestApproval.js';
 
 export const LEAVE_DASHBOARD_REQUEST_TYPE = 'Employee Leave Request';
 
@@ -41,9 +43,20 @@ function personName(person) {
     return [person?.firstName, person?.lastName].filter(Boolean).join(' ').trim() || 'Employee';
 }
 
-export async function notifyPrimaryReporteeOfLeaveRequest({
+async function resolveLeaveReceiver(person) {
+    if (!person) return null;
+    if (person._id && (person.firstName || person.lastName || person.employeeId || person.email)) return person;
+    const id = person._id || person;
+    if (!mongoose.Types.ObjectId.isValid(String(id))) return null;
+    return EmployeeBasic.findById(id)
+        .select('_id employeeId firstName lastName companyEmail workEmail email')
+        .lean();
+}
+
+export async function notifyLeaveRequestApprover({
     employee,
-    manager,
+    approver,
+    stage = LEAVE_STAGE_REPORTEE,
     from,
     to,
     attendanceId,
@@ -54,10 +67,10 @@ export async function notifyPrimaryReporteeOfLeaveRequest({
     reason = '',
     attachmentName = '',
 }) {
-    const reportee = manager || employee?.primaryReportee;
-    if (!reportee?._id) {
-        console.warn('[LeaveNotify] No primary reportee for leave request.');
-        return;
+    const receiver = await resolveLeaveReceiver(approver);
+    if (!receiver?._id) {
+        console.warn('[LeaveNotify] No approver for leave request.');
+        return null;
     }
 
     const start = String(from || '').trim();
@@ -66,11 +79,13 @@ export async function notifyPrimaryReporteeOfLeaveRequest({
     const empName = personName(employee);
     const label = String(requestedLabel || 'Leave').trim() || 'Leave';
     const requestId = leaveDashboardRequestObjectId(groupId, attendanceId);
+    const hrStep = stage === LEAVE_STAGE_HR;
+    const waitingLabel = hrStep ? 'Pending with HR' : 'Pending with primary reportee';
 
     await syncDashboardAction({
         requestId,
         requestType: LEAVE_DASHBOARD_REQUEST_TYPE,
-        assignedTo: reportee._id,
+        assignedTo: receiver._id,
         status: 'Pending',
         subjectEmployee: employee,
         requestedByName: empName,
@@ -85,16 +100,17 @@ export async function notifyPrimaryReporteeOfLeaveRequest({
             leaveRequestKind,
             leaveRequestGroupId: String(groupId || ''),
             leaveDashboard: true,
+            approvalStage: hrStep ? LEAVE_STAGE_HR : LEAVE_STAGE_REPORTEE,
         }),
     });
 
     await sendAttendanceLeaveRequestEmail({
-        manager: reportee,
+        manager: receiver,
         employee,
         date: start,
         dateLabel: rangeLabel,
         requestedLabel: label,
-        currentLabel: 'Pending approval',
+        currentLabel: waitingLabel,
         reason,
         kind: leaveRequestKind,
         attachmentName,
@@ -104,7 +120,17 @@ export async function notifyPrimaryReporteeOfLeaveRequest({
             attendanceId,
         }),
         buttonLabel: 'Open Leave Approval',
-        emailTitle: `${label} Request`,
+        emailTitle: hrStep ? `${label} — HR approval` : `${label} Request`,
+    });
+
+    return receiver;
+}
+
+export async function notifyPrimaryReporteeOfLeaveRequest(payload) {
+    return notifyLeaveRequestApprover({
+        ...payload,
+        approver: payload?.approver || payload?.manager || payload?.employee?.primaryReportee,
+        stage: payload?.stage || LEAVE_STAGE_REPORTEE,
     });
 }
 
@@ -157,6 +183,7 @@ export async function notifyFlowchartHrOfIneligibleAnnualLeave({
             leaveRequestKind,
             leaveRequestGroupId: String(groupId || ''),
             leaveDashboard: true,
+            approvalStage: LEAVE_STAGE_HR,
             annualLeaveNotEligible: true,
         }),
     });

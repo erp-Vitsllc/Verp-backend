@@ -22,6 +22,13 @@ import {
     getZonedParts,
 } from '../utils/scheduleDailyAtMidnight.js';
 import { listActiveWorkLocations, normalizeStaffTypeKey } from '../utils/workLocationHelpers.js';
+import { leaveStatusKeyForCount, nextDayCompOffMatch } from '../utils/flexibleAttendance.js';
+import { leaveListDuration } from '../utils/partialLeaveWindow.js';
+import {
+    getWeekForStaffType,
+    loadWorkingTimeDoc,
+    normalizeStaffType,
+} from '../utils/workingTimeHelpers.js';
 
 const LEAVE_COUNT_KEYS = [
     'authorized_leave',
@@ -224,18 +231,25 @@ export async function getEmployeeLeaveDirectory(req, res) {
             to = `${year}-12-31`;
         }
 
+        const partyMatch = {
+            $or: [
+                { employeeMongoId: { $in: mongoIds } },
+                ...(enrolledCodes.length ? [{ employeeId: { $in: enrolledCodes } }] : []),
+            ],
+        };
         const leaveRows =
             mongoIds.length === 0
                 ? []
                 : await Attendance.find({
-                      $or: [
-                          { employeeMongoId: { $in: mongoIds } },
-                          ...(enrolledCodes.length ? [{ employeeId: { $in: enrolledCodes } }] : []),
+                      $and: [
+                          partyMatch,
+                          { date: { $gte: from, $lte: to } },
+                          {
+                              $or: [{ statusKey: { $in: LEAVE_COUNT_KEYS } }, ...nextDayCompOffMatch().$or],
+                          },
                       ],
-                      date: { $gte: from, $lte: to },
-                      statusKey: { $in: LEAVE_COUNT_KEYS },
                   })
-                      .select('employeeMongoId employeeId date statusKey')
+                      .select('employeeMongoId employeeId date statusKey flexibleFromOtDate timeIn timeOut')
                       .lean()
                       .maxTimeMS(12000);
 
@@ -243,8 +257,9 @@ export async function getEmployeeLeaveDirectory(req, res) {
             employees.map((emp) => [String(emp.employeeId || '').trim(), String(emp._id)]),
         );
         const countsByEmp = {};
+        const countedDays = new Set();
         for (const row of leaveRows || []) {
-            const key = String(row?.statusKey || '').trim();
+            const key = leaveStatusKeyForCount(row);
             if (!LEAVE_COUNT_KEYS.includes(key)) continue;
             if (!isLeaveEntryVisible(row, visibility, visibilityByCode)) continue;
             const id =
@@ -254,6 +269,9 @@ export async function getEmployeeLeaveDirectory(req, res) {
                 mongoByCode.get(String(row.employeeId || '').trim()) ||
                 '';
             if (!id) continue;
+            const dayKey = `${id}|${row.date}`;
+            if (countedDays.has(dayKey)) continue;
+            countedDays.add(dayKey);
             if (!countsByEmp[id]) countsByEmp[id] = {};
             countsByEmp[id][key] = (countsByEmp[id][key] || 0) + 1;
         }
@@ -338,7 +356,7 @@ export async function getLeaveCalendar(req, res) {
             employeeId: { $ne: 'VEGA-HR-0000' },
             ...REAL_EMPLOYEE_MONGO_FILTER,
         })
-            .select('_id employeeId firstName lastName')
+            .select('_id employeeId firstName lastName staffType')
             .lean()
             .maxTimeMS(12000);
 
@@ -474,6 +492,10 @@ export async function getLeaveCalendar(req, res) {
                     leaveRequestGroupId: String(row.leaveRequestGroupId || ''),
                     rangeStart,
                     rangeEnd,
+                    leaveRequestDayPart: row.leaveRequestDayPart || '',
+                    leaveDayFraction: row.leaveDayFraction ?? null,
+                    leaveRequestSession: row.leaveRequestSession || '',
+                    flexibleRequiredHours: Number(row.flexibleRequiredHours) || 0,
                 });
             }
         }
@@ -496,6 +518,10 @@ export async function getLeaveCalendar(req, res) {
                     statusKey: row.statusKey,
                     statusLabel: row.statusLabel || row.statusKey,
                     isPending: false,
+                    leaveRequestDayPart: row.leaveRequestDayPart || '',
+                    leaveDayFraction: row.leaveDayFraction ?? null,
+                    leaveRequestSession: row.leaveRequestSession || '',
+                    flexibleRequiredHours: Number(row.flexibleRequiredHours) || 0,
                 };
             })
             .filter(Boolean);
@@ -548,6 +574,10 @@ export async function getLeaveCalendar(req, res) {
                 leaveRequestGroupId: info.leaveRequestGroupId,
                 rangeStart: info.rangeStart,
                 rangeEnd: info.rangeEnd,
+                leaveRequestDayPart: info.leaveRequestDayPart || '',
+                leaveDayFraction: info.leaveDayFraction ?? null,
+                leaveRequestSession: info.leaveRequestSession || '',
+                flexibleRequiredHours: Number(info.flexibleRequiredHours) || 0,
             });
         }
         for (const row of historicalByDay.values()) {
@@ -567,6 +597,34 @@ export async function getLeaveCalendar(req, res) {
                 source: 'Salary enrollment',
                 leaveRequestKind: 'historical',
             });
+        }
+
+        if (statusKeySet.has('compoff_leave')) {
+            const nextDayRows = await Attendance.find({
+                $and: [{ date: { $gte: from, $lte: to } }, partyFilter, nextDayCompOffMatch()],
+            })
+                .select('employeeMongoId employeeId employeeName date statusKey statusLabel flexibleFromOtDate timeIn timeOut reason')
+                .lean()
+                .maxTimeMS(12000);
+            for (const row of nextDayRows || []) {
+                if (leaveStatusKeyForCount(row) !== 'compoff_leave') continue;
+                const emp = resolveEmp(row);
+                if (!emp) continue;
+                const occupiedKey = `${emp._id}|${row.date}`;
+                if (occupiedLeaveDays.has(occupiedKey)) continue;
+                occupiedLeaveDays.add(occupiedKey);
+                approvedEntries.push({
+                    id: String(row._id || `${row.date}-${emp._id}-compoff_leave`),
+                    date: row.date,
+                    employeeMongoId: String(emp._id),
+                    employeeId: row.employeeId || emp.employeeId || '',
+                    employeeName: row.employeeName || employeeDisplayName(emp),
+                    statusKey: 'compoff_leave',
+                    statusLabel: 'Comp Off Leave',
+                    isPending: false,
+                    reason: String(row.reason || '').trim() || 'Next day attendance',
+                });
+            }
         }
 
         const pendingKeys = new Set();
@@ -601,6 +659,10 @@ export async function getLeaveCalendar(req, res) {
                         statusKey: String(row.requestedStatusKey || 'on_leave'),
                         statusLabel: row.requestedStatusLabel || row.requestedStatusKey || 'Pending Leave',
                         isPending: true,
+                        leaveRequestDayPart: row.leaveRequestDayPart || '',
+                        leaveDayFraction: row.leaveDayFraction ?? null,
+                        leaveRequestSession: row.leaveRequestSession || '',
+                        flexibleRequiredHours: Number(row.flexibleRequiredHours) || 0,
                     });
                 }
 
@@ -611,12 +673,26 @@ export async function getLeaveCalendar(req, res) {
             }
         }
 
+        const workingTime = await loadWorkingTimeDoc().catch(() => null);
         const entries = [...approvedEntries, ...pendingEntries]
             .filter(
                 (entry) =>
                     isHistoricalLeaveEntry(entry) ||
                     isLeaveEntryVisible(entry, visibility, visibilityByCode),
             )
+            .map((entry) => {
+                const employee = employeeMap.get(String(entry.employeeMongoId || '')) || null;
+                const week =
+                    employee && workingTime
+                        ? getWeekForStaffType(workingTime, normalizeStaffType(employee.staffType))
+                        : null;
+                const duration = leaveListDuration(entry, week);
+                return {
+                    ...entry,
+                    durationHours: duration.hours,
+                    durationLabel: duration.label,
+                };
+            })
             .sort(
                 (a, b) => a.date.localeCompare(b.date) || a.employeeName.localeCompare(b.employeeName),
             );

@@ -125,8 +125,8 @@ const attendanceSchema = new mongoose.Schema(
             index: true,
         },
         /**
-         * Employee leave change request (red day → Unauthorized / Authorized / Sick).
-         * Status on the day stays unchanged until primary reportee approves.
+         * Employee request (leave, sick, miss punch, late in, early out).
+         * The day stays unchanged until the primary reportee accepts and HR accepts.
          */
         leaveRequestStatus: {
             type: String,
@@ -231,6 +231,13 @@ const attendanceSchema = new mongoose.Schema(
             type: mongoose.Schema.Types.ObjectId,
             ref: 'EmployeeBasic',
             default: null,
+        },
+        /** Who must accept this pending request: primary reportee, then HR. */
+        leaveApprovalStage: {
+            type: String,
+            enum: ['', 'pending_reportee', 'pending_hr'],
+            default: '',
+            trim: true,
         },
         annualLeaveNotEligible: {
             type: Boolean,

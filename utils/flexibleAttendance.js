@@ -29,6 +29,27 @@ export function isAuthorizedLeaveStatus(statusKey, statusLabel = '') {
     return /auth(?:orized)? leave/i.test(label);
 }
 
+/** Overtime placed onto another day. That day is comp-off leave in leave reports. */
+export function isNextDayCompOffAttendance(row) {
+    if (String(row?.flexibleFromOtDate || '').trim()) return true;
+    const timeIn = String(row?.timeIn || '').trim();
+    const timeOut = String(row?.timeOut || '').trim();
+    return timeIn === 'OT' && timeOut === 'OT';
+}
+
+export function nextDayCompOffMatch() {
+    return {
+        $or: [{ flexibleFromOtDate: { $gt: '' } }, { timeIn: 'OT', timeOut: 'OT' }],
+    };
+}
+
+/** Leave totals treat a next-day present as comp-off, and keep an existing comp-off mark. */
+export function leaveStatusKeyForCount(row) {
+    const stored = String(row?.statusKey || '').trim();
+    if (stored !== 'compoff_leave' && isNextDayCompOffAttendance(row)) return 'compoff_leave';
+    return stored;
+}
+
 export function requiredHoursForDate(week, dateKey) {
     const dayKey = weekdayKeyFromDateKey(dateKey);
     const day = dayKey ? week?.[dayKey] : null;
@@ -142,6 +163,39 @@ const FLEXIBLE_OT_SKIP_KEYS = new Set([
     'clear_attendance',
     'clear',
 ]);
+
+export function isOvertimePunchTime(value) {
+    return String(value || '').trim() === 'OT';
+}
+
+/**
+ * Copy the real check-in and check-out, including a next-day check-out.
+ * A day stored only as OT is not an attendance punch.
+ */
+export function mapPunchWithoutOvertime({ timeIn, timeOut, timeOutDate = '' } = {}) {
+    const inn = String(timeIn || '').trim();
+    const out = String(timeOut || '').trim();
+    if (isOvertimePunchTime(inn)) {
+        return { timeIn: '', timeOut: '', timeOutDate: '', overtimeOnly: true };
+    }
+    if (!inn || clockTimeToMinutes(inn) == null) {
+        return {
+            timeIn: '',
+            timeOut: '',
+            timeOutDate: '',
+            overtimeOnly: isOvertimePunchTime(out),
+        };
+    }
+    if (!out || isOvertimePunchTime(out) || clockTimeToMinutes(out) == null) {
+        return { timeIn: inn, timeOut: '', timeOutDate: '', overtimeOnly: false };
+    }
+    return {
+        timeIn: inn,
+        timeOut: out,
+        timeOutDate: String(timeOutDate || '').trim(),
+        overtimeOnly: false,
+    };
+}
 
 /** Same-day clocks stay on this date. A check-out before check-in is the next day. */
 export function manualTimeOutDate(date, timeIn, timeOut) {

@@ -2,6 +2,7 @@ import mongoose from "mongoose";
 import AssetItem from "../../models/AssetItem.js";
 import DashboardAction from "../../models/DashboardAction.js";
 import EmployeeBasic from "../../models/EmployeeBasic.js";
+import EmployeeHubRequest from "../../models/EmployeeHubRequest.js";
 import Fine from "../../models/Fine.js";
 import TaskManagerTask from "../../models/TaskManagerTask.js";
 import User from "../../models/User.js";
@@ -826,8 +827,95 @@ function formatProfileDay(value) {
 }
 
 /**
- * Open tasks assigned to this employee. Tasks they only requested stay on the task list.
+ * Open tasks for this employee.
+ * A leave task is included when they requested it and when they are the approver.
  */
+const PROFILE_LEAVE_TYPES = new Set(["Employee Leave Request", "Attendance Leave Request"]);
+const PROFILE_ACTION_SELECT = "assignedTo assignedToEmpId requestId requestType status requestedDate requestedByName subjectEmployeeId subjectName extra1 extra2 extra3 createdAt";
+
+function actionMeta(extra3) {
+    try {
+        const parsed = JSON.parse(String(extra3 || ""));
+        return parsed && typeof parsed === "object" ? parsed : {};
+    } catch {
+        return {};
+    }
+}
+
+function dateKeyOrBlank(value) {
+    const text = String(value || "").trim();
+    return /^\d{4}-\d{2}-\d{2}$/.test(text) ? text : "";
+}
+
+function assigneeIdOf(value) {
+    if (!value) return "";
+    if (typeof value === "object") return String(value._id || "");
+    return String(value);
+}
+
+function assigneeNameOf(value) {
+    if (!value || typeof value !== "object") return "";
+    return [value.firstName, value.lastName].filter(Boolean).join(" ").trim();
+}
+
+function leaveRequestedByEmployee(action, { id, code, nameKey }) {
+    if (!PROFILE_LEAVE_TYPES.has(String(action?.requestType || ""))) return false;
+    const subjectId = String(action.subjectEmployeeId || "").trim();
+    if (code && subjectId && subjectId.toLowerCase() === code.toLowerCase()) return true;
+    if (id && subjectId === id) return true;
+    const meta = actionMeta(action.extra3);
+    const mongoIds = [meta.employeeMongoId, meta.requesterMongoId].map((value) => String(value || "").trim());
+    if (id && mongoIds.includes(id)) return true;
+    if (nameKey && personKey(action.subjectName) === nameKey) return true;
+    if (nameKey && personKey(action.requestedByName) === nameKey) return true;
+    return false;
+}
+
+function leaveReviewHref(action) {
+    const meta = actionMeta(action?.extra3);
+    const from = dateKeyOrBlank(meta.from) || dateKeyOrBlank(meta.date) || dateKeyOrBlank(action?.extra1);
+    const to = dateKeyOrBlank(meta.to) || from;
+    const attendanceId = String(meta.attendanceId || "").trim();
+    if (String(action?.requestType || "") === "Attendance Leave Request" && !meta.leaveDashboard) {
+        const params = new URLSearchParams();
+        if (from) params.set("date", from);
+        const employee = String(meta.employeeMongoId || "").trim();
+        if (employee) params.set("blinkEmployee", employee);
+        const requestId = String(attendanceId || action?.requestId || "").trim();
+        if (requestId) params.set("leaveAttendanceId", requestId);
+        const query = params.toString();
+        return query ? `/HRM/Attendance/mark?${query}` : "/HRM/Attendance/mark";
+    }
+    const params = new URLSearchParams();
+    if (from) params.set("from", from);
+    if (to) params.set("to", to);
+    const approvalId = attendanceId || String(action?.requestId || "").trim();
+    if (approvalId) params.set("approvalId", approvalId);
+    const query = params.toString();
+    return query ? `/HRM/Leave/annual-leave?${query}` : "/HRM/Leave/annual-leave";
+}
+
+function leaveCardFromAction(action, ownerName) {
+    const meta = actionMeta(action?.extra3);
+    const from = dateKeyOrBlank(meta.from) || dateKeyOrBlank(meta.date) || dateKeyOrBlank(action?.extra1);
+    const to = dateKeyOrBlank(meta.to) || from;
+    const requestedKey = dateKeyOrBlank(dubaiDateKey(action?.requestedDate || action?.createdAt));
+    return {
+        id: `leave-task-${action._id}`,
+        requestId: String(action.requestId || ""),
+        title: String(action.extra2 || "").trim() || "Leave request",
+        subtitle: from && to && from !== to ? `${from} → ${to}` : from || "Awaiting approval",
+        status: "Approval Pending",
+        owner: String(ownerName || "").trim() || "Approver",
+        fromDate: from,
+        toDate: to,
+        dateKey: requestedKey || from,
+        dateLabel: formatProfileDay(action?.requestedDate || action?.createdAt),
+        href: leaveReviewHref(action),
+        spanAllMonths: true,
+    };
+}
+
 export async function listProfileEmployeeTasks({ employeeId, employeeCode, employeeName, limit = 10 } = {}) {
     try {
         const id = String(employeeId || "");
@@ -848,9 +936,23 @@ export async function listProfileEmployeeTasks({ employeeId, employeeCode, emplo
             const pattern = new RegExp(`^${name.split(/\s+/).map(escapeRegex).join("\\s+")}$`, "i");
             manualOr.push({ assigneeName: pattern });
         }
-        if (!manualOr.length && !actionOr.length) return { tasks: [], pendingCount: 0 };
+        const leaveOr = [];
+        if (isObjectId(id)) {
+            leaveOr.push({ assignedTo: id });
+            leaveOr.push({ subjectEmployeeId: id });
+            leaveOr.push({ extra3: new RegExp(`"(?:employeeMongoId|requesterMongoId)":"${escapeRegex(id)}"`) });
+        }
+        if (code) {
+            leaveOr.push({ assignedToEmpId: code });
+            leaveOr.push({ subjectEmployeeId: code });
+        }
+        const hubOr = [];
+        if (isObjectId(id)) hubOr.push({ requester: id }, { assignedTo: id });
+        if (!manualOr.length && !actionOr.length && !leaveOr.length && !hubOr.length) {
+            return { tasks: [], pendingCount: 0, leaveCards: [] };
+        }
 
-        const [manualRows, actionRows] = await Promise.all([
+        const [manualRows, actionRows, leaveRows, hubRows] = await Promise.all([
             manualOr.length
                 ? TaskManagerTask.find({
                     status: { $in: ["Pending", "In Progress"] },
@@ -868,21 +970,49 @@ export async function listProfileEmployeeTasks({ employeeId, employeeCode, emplo
                     requestType: { $ne: "Task Manager" },
                     $or: actionOr,
                 })
-                    .select("assignedTo assignedToEmpId requestId requestType status requestedDate requestedByName extra2 createdAt")
+                    .select("assignedTo assignedToEmpId requestId requestType status requestedDate requestedByName subjectEmployeeId subjectName extra1 extra2 extra3 createdAt")
                     .sort({ createdAt: -1 })
-                    .limit(80)
+                    .limit(200)
+                    .lean()
+                    .maxTimeMS(8000)
+                : [],
+            leaveOr.length
+                ? DashboardAction.find({
+                    status: { $in: ["Pending", "On Hold"] },
+                    requestType: { $in: [...PROFILE_LEAVE_TYPES] },
+                    $or: leaveOr,
+                })
+                    .select(PROFILE_ACTION_SELECT)
+                    .populate("assignedTo", "firstName lastName employeeId")
+                    .sort({ createdAt: -1 })
+                    .limit(100)
+                    .lean()
+                    .maxTimeMS(8000)
+                : [],
+            hubOr.length
+                ? EmployeeHubRequest.find({
+                    status: "Pending",
+                    kind: "leave",
+                    $or: hubOr,
+                })
+                    .select("description requester requesterName assignedTo createdAt")
+                    .populate("assignedTo", "firstName lastName employeeId")
+                    .populate("requester", "firstName lastName employeeId")
+                    .sort({ createdAt: -1 })
+                    .limit(50)
                     .lean()
                     .maxTimeMS(8000)
                 : [],
         ]);
 
         const actionById = new Map((actionRows || []).map((row) => [String(row._id), row]));
+        for (const row of leaveRows || []) actionById.set(String(row._id), row);
         const missingSourceIds = (manualRows || [])
             .map((row) => String(row.sourceDashboardActionId || ""))
             .filter((sourceId) => isObjectId(sourceId) && !actionById.has(sourceId));
         if (missingSourceIds.length) {
             const extra = await DashboardAction.find({ _id: { $in: missingSourceIds } })
-                .select("assignedTo assignedToEmpId requestId requestType status requestedDate requestedByName extra2 createdAt")
+                .select(PROFILE_ACTION_SELECT)
                 .lean()
                 .maxTimeMS(8000);
             for (const row of extra || []) actionById.set(String(row._id), row);
@@ -929,19 +1059,24 @@ export async function listProfileEmployeeTasks({ employeeId, employeeCode, emplo
                 action,
                 sourceRequesters,
             );
-            const assigneeId = String(overlay?.assignee || action.assignedTo || "");
-            const assigneeEmpId = String(overlay?.assigneeEmpId || action.assignedToEmpId || "").trim();
-            const assigneeName = String(overlay?.assigneeName || "").trim();
-            if (!assignedToEmployee({ assigneeId, assigneeEmpId, assigneeName })) continue;
+            const rawAssignee = action.assignedTo;
+            const assigneeId = String(overlay?.assignee || assigneeIdOf(rawAssignee) || "");
+            const assigneeEmpId = String(overlay?.assigneeEmpId || action.assignedToEmpId || rawAssignee?.employeeId || "").trim();
+            const assigneeName = String(overlay?.assigneeName || assigneeNameOf(rawAssignee) || "").trim();
+            const requesterMatch = leaveRequestedByEmployee(action, { id, code, nameKey });
+            if (!assignedToEmployee({ assigneeId, assigneeEmpId, assigneeName }) && !requesterMatch) continue;
+            const leaveTask = PROFILE_LEAVE_TYPES.has(String(action.requestType || ""));
             rows.push({
                 actionId: String(action._id),
                 requestId: String(action.requestId || ""),
                 taskType: taskCategory(action.requestType, action.extra2 || ""),
                 requesterName: requesterName || "System",
                 requestedAt,
-                dueAt: overlay?.completionDate || null,
+                dueAt: overlay?.completionDate || (leaveTask ? dateKeyOrBlank(actionMeta(action.extra3).to) || null : null),
                 status: profileStatusLabel(status),
                 sortAt: new Date(requestedAt || 0).getTime(),
+                href: leaveTask ? leaveReviewHref(action) : "",
+                leaveCard: leaveTask ? leaveCardFromAction(action, assigneeName) : null,
             });
         }
 
@@ -970,6 +1105,45 @@ export async function listProfileEmployeeTasks({ employeeId, employeeCode, emplo
                 dueAt: row.completionDate || null,
                 status: profileStatusLabel(status),
                 sortAt: new Date(requestedAt || 0).getTime(),
+                href: "",
+                leaveCard: null,
+            });
+        }
+
+        const seenRequestIds = new Set(rows.map((row) => String(row.requestId || "")).filter(Boolean));
+        for (const hub of hubRows || []) {
+            const requestId = String(hub._id || "");
+            if (!requestId || seenRequestIds.has(requestId)) continue;
+            const requesterId = assigneeIdOf(hub.requester);
+            const receiverId = assigneeIdOf(hub.assignedTo);
+            const involved = (id && (requesterId === id || receiverId === id));
+            if (!involved) continue;
+            const action = {
+                _id: hub._id,
+                requestId: hub._id,
+                requestType: "Employee Leave Request",
+                extra2: "Leave request",
+                extra3: JSON.stringify({
+                    leaveDashboard: true,
+                    requesterMongoId: requesterId,
+                    employeeMongoId: requesterId,
+                }),
+                requestedByName: hub.requesterName || assigneeNameOf(hub.requester) || "Employee",
+                requestedDate: hub.createdAt,
+                createdAt: hub.createdAt,
+            };
+            const requestedAt = hub.createdAt || null;
+            rows.push({
+                actionId: `hub-${requestId}`,
+                requestId,
+                taskType: "Workflow Task",
+                requesterName: action.requestedByName,
+                requestedAt,
+                dueAt: null,
+                status: "Pending",
+                sortAt: new Date(requestedAt || 0).getTime(),
+                href: leaveReviewHref(action),
+                leaveCard: leaveCardFromAction(action, assigneeNameOf(hub.assignedTo)),
             });
         }
 
@@ -985,11 +1159,13 @@ export async function listProfileEmployeeTasks({ employeeId, employeeCode, emplo
             requestedDate: formatProfileDay(row.requestedAt),
             dueDate: formatProfileDay(row.dueAt),
             status: row.status,
+            href: row.href || "",
         }));
-        return { tasks, pendingCount: openRows.length };
+        const leaveCards = openRows.map((row) => row.leaveCard).filter(Boolean);
+        return { tasks, pendingCount: openRows.length, leaveCards };
     } catch (error) {
         console.error("[listProfileEmployeeTasks]", error);
-        return { tasks: [], pendingCount: 0 };
+        return { tasks: [], pendingCount: 0, leaveCards: [] };
     }
 }
 

@@ -909,7 +909,8 @@ export const getActiveFlowchartHolderHr = async (req, res) => {
         return res.status(200).json({
             ok: true,
             empObjectId: String(e._id),
-            employeeId: e.employeeId || null
+            employeeId: e.employeeId || null,
+            name: [e.firstName, e.lastName].filter(Boolean).join(' ').trim() || null
         });
     } catch (error) {
         console.error('getActiveFlowchartHolderHr:', error);

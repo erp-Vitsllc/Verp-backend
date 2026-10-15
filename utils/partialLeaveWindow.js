@@ -11,6 +11,46 @@ export function partialLeavePortion(dayPart) {
     return 1;
 }
 
+function hoursDurationLabel(hours) {
+    const totalMinutes = Math.max(0, Math.round((Number(hours) || 0) * 60));
+    const whole = Math.floor(totalMinutes / 60);
+    const mins = totalMinutes % 60;
+    const hourText = `${whole} ${whole === 1 ? 'Hour' : 'Hours'}`;
+    if (!mins) return hourText;
+    return `${hourText} ${mins} Min`;
+}
+
+/** Leave list duration: a whole day is Full time, a partial day is its hours. */
+export function leaveListDuration(row, week) {
+    const part = String(row?.leaveRequestDayPart || '').trim();
+    const stored = Number(row?.leaveDayFraction);
+    const fraction =
+        part === 'half' || part === 'quarter'
+            ? partialLeavePortion(part)
+            : stored > 0 && stored < 1
+              ? stored
+              : 1;
+    if (!(fraction < 1)) return { hours: null, label: 'Full time' };
+
+    const required = Number(row?.flexibleRequiredHours) || 0;
+    let minutes = required > 0 ? Math.round(required * 60 * fraction) : 0;
+    if (!(minutes > 0) && week) {
+        const dayPart = part === 'quarter' || fraction <= 0.25 ? 'quarter' : 'half';
+        const described = describePartialLeave({
+            week,
+            dateKey: row?.date,
+            dayPart,
+            session: row?.leaveRequestSession,
+        });
+        minutes = Number(described?.leaveMinutes) || 0;
+    }
+    if (!(minutes > 0)) {
+        return { hours: null, label: part === 'quarter' || fraction <= 0.25 ? 'Quarter day' : 'Half day' };
+    }
+    const hours = Math.round((minutes / 60) * 100) / 100;
+    return { hours, label: hoursDurationLabel(hours) };
+}
+
 /**
  * Late arrival, early go, and missed punch stay those types.
  * A quarter or half day taken without approval is still one of those, not unauthorized leave.

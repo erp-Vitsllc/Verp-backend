@@ -1,5 +1,6 @@
 import mongoose from 'mongoose';
 import Attendance from '../../models/Attendance.js';
+import AttendanceChangeRequest from '../../models/AttendanceChangeRequest.js';
 import EmployeeBasic from '../../models/EmployeeBasic.js';
 import EmployeePersonal from '../../models/EmployeePersonal.js';
 import Loan from '../../models/Loan.js';
@@ -36,6 +37,7 @@ import {
 } from '../../utils/historicalLeaveAttendanceOverlay.js';
 import { loadCurrentLeaveCycleEligibility } from '../../utils/loadLeaveTicketEntitlement.js';
 import { laterDateKey } from '../../utils/currentLeaveCycle.js';
+import { leaveStatusKeyForCount } from '../../utils/flexibleAttendance.js';
 import {
     keepAttendanceForProcessingStart,
     loadEnrolledLeaveVisibilityByMongoId,
@@ -46,6 +48,9 @@ import {
     rewardIsVisibleToEmployee,
     utilityBillIsVisibleToEmployee,
 } from '../../utils/employeeFinancialVisibility.js';
+import { ATTENDANCE_CHANGE_OPEN_STAGES } from '../../utils/attendanceChangeApproval.js';
+import { buildSalaryPreparationPending } from '../../utils/salaryPreparationPending.js';
+import { getDepartmentHOD } from '../../utils/getDepartmentHOD.js';
 
 const LEAVE_STATUS_KEYS = new Set([
     'on_leave',
@@ -180,7 +185,7 @@ export function buildAttendanceYearCard({
     for (const row of attendanceRecords || []) {
         const date = String(row?.date || '').trim();
         if (!date.startsWith(yearPrefix)) continue;
-        const statusKey = String(row?.statusKey || '').trim();
+        const statusKey = leaveStatusKeyForCount(row);
         if (statusKey === 'on_office') {
             office += 1;
             continue;
@@ -548,45 +553,6 @@ function daysAgoCount(fromKey, todayKey) {
     return Math.max(0, daysBetweenInclusive(fromKey, todayKey) - 1);
 }
 
-function formatShortRange(fromKey, toKey) {
-    if (!/^\d{4}-\d{2}-\d{2}$/.test(fromKey)) return '';
-    const [year, month, fromDay] = fromKey.split('-').map(Number);
-    const monthLabel = new Date(Date.UTC(year, month - 1, fromDay)).toLocaleDateString('en-GB', {
-        month: 'short',
-        timeZone: 'UTC',
-    });
-    if (!toKey || toKey === fromKey || !/^\d{4}-\d{2}-\d{2}$/.test(toKey)) {
-        return `${fromDay} ${monthLabel}`;
-    }
-    const toDay = Number(toKey.slice(8, 10));
-    const days = daysBetweenInclusive(fromKey, toKey);
-    return `${fromDay}-${toDay} ${monthLabel} - ${days} day${days === 1 ? '' : 's'}`;
-}
-
-function pendingRequestTitle(appliedKey, kind) {
-    if (appliedKey === 'on_leave') return 'Annual leave request';
-    if (appliedKey === 'mispunch') return 'Miss punch regularization';
-    if (appliedKey === 'authorized_leave') return 'Authorized leave request';
-    if (appliedKey === 'sick_leave') return 'Sick leave request';
-    if (appliedKey === 'early_go') return 'Early go request';
-    if (appliedKey === 'late_arrived') return 'Late arrival request';
-    if (appliedKey === 'compoff_leave') return 'Comp off request';
-    if (kind === 'yellow') return 'Miss punch regularization';
-    const label = STATUS_LABELS[appliedKey] || 'HR request';
-    return /request$/i.test(label) ? label : `${label} request`;
-}
-
-function pendingRequestSubtitle(row) {
-    if (row.appliedKey === 'mispunch') {
-        const day = formatShortRange(row.fromDate, row.fromDate);
-        return `${day} - Check-out`;
-    }
-    if (row.fromDate && row.toDate && row.fromDate !== row.toDate) {
-        return formatShortRange(row.fromDate, row.toDate);
-    }
-    return formatShortRange(row.fromDate, row.fromDate) || 'Awaiting approval';
-}
-
 function taskAgingBuckets(items) {
     const counts = [0, 0, 0, 0, 0];
     for (const item of items) {
@@ -844,7 +810,7 @@ export async function getEmployeeAttendanceProfile(req, res) {
             await Promise.all([
             Attendance.find({ employeeMongoId, date: { $gte: from, $lte: to } })
                 .select(
-                    'date statusKey statusLabel reason timeIn timeOut attachmentName leavePayType leaveDayFraction leaveRequestDayPart leaveRequestSession leaveDeductionTimes leaveRequestReason leaveRequestStatus requestedStatusKey requestedStatusLabel previousStatusKey leaveRequestKind leaveRequestGroupId leaveRequestFromDate leaveRequestToDate leaveRequestedAt leaveRequestTimeOut hourAdjustStatus hourAdjustKind hoursTaken hoursMax hoursApproved',
+                    'date statusKey statusLabel reason timeIn timeOut flexibleFromOtDate attachmentName leavePayType leaveDayFraction leaveRequestDayPart leaveRequestSession leaveDeductionTimes leaveRequestReason leaveRequestStatus requestedStatusKey requestedStatusLabel previousStatusKey leaveRequestKind leaveRequestGroupId leaveRequestFromDate leaveRequestToDate leaveRequestedAt leaveRequestTimeOut hourAdjustStatus hourAdjustKind hoursTaken hoursMax hoursApproved',
                 )
                 .sort({ date: -1 })
                 .lean(),
@@ -937,12 +903,13 @@ export async function getEmployeeAttendanceProfile(req, res) {
         const events = [];
         const appliedCounts = emptyAppliedCounts();
         const appliedGroups = new Set();
-        const pendingRequestMap = new Map();
         const requestStats = tallyRequestStats(requestRows);
         let lastAnnualLeaveDate = '';
 
         for (const row of attendanceRows) {
-            const key = String(row.statusKey || '').trim();
+            const storedKey = String(row.statusKey || '').trim();
+            const key = leaveStatusKeyForCount(row);
+            const nextDayCompOff = key === 'compoff_leave' && storedKey !== 'compoff_leave';
             if (counts[key] != null) counts[key] += 1;
             if (key === 'authorized_leave') {
                 counts.authorized_leave_unpaid += 1;
@@ -959,42 +926,20 @@ export async function getEmployeeAttendanceProfile(req, res) {
                     appliedGroups.add(groupId);
                     appliedCounts[appliedKey] += 1;
                 }
-                const existing = pendingRequestMap.get(groupId);
-                const fromDate = row.leaveRequestFromDate || row.date;
-                const toDate = row.leaveRequestToDate || row.date;
-                const requestedAtKey = toDateKey(row.leaveRequestedAt) || fromDate || row.date;
-                if (!existing) {
-                    pendingRequestMap.set(groupId, {
-                        id: groupId,
-                        appliedKey,
-                        kind: String(row.leaveRequestKind || ''),
-                        timeOut: String(row.leaveRequestTimeOut || '').trim(),
-                        fromDate,
-                        toDate,
-                        requestedAtKey,
-                    });
-                } else {
-                    if (fromDate && (!existing.fromDate || fromDate < existing.fromDate)) {
-                        existing.fromDate = fromDate;
-                    }
-                    if (toDate && (!existing.toDate || toDate > existing.toDate)) {
-                        existing.toDate = toDate;
-                    }
-                    if (requestedAtKey && requestedAtKey < existing.requestedAtKey) {
-                        existing.requestedAtKey = requestedAtKey;
-                    }
-                }
             }
             if (LEAVE_STATUS_KEYS.has(key)) {
                 events.push({
                     id: `${row.date}-${key}`,
                     date: row.date,
                     statusKey: key,
-                    statusLabel:
-                        key === 'authorized_leave'
-                            ? 'Authorized Leave'
-                            : row.statusLabel || STATUS_LABELS[key] || key,
-                    reason: String(row.reason || row.leaveRequestReason || '').trim(),
+                    statusLabel: nextDayCompOff
+                        ? 'Comp Off Leave'
+                        : key === 'authorized_leave'
+                          ? 'Authorized Leave'
+                          : row.statusLabel || STATUS_LABELS[key] || key,
+                    reason: nextDayCompOff
+                        ? String(row.reason || '').trim() || 'Next day attendance'
+                        : String(row.reason || row.leaveRequestReason || '').trim(),
                     attachmentName: String(row.attachmentName || '').trim(),
                     leavePayType: key === 'authorized_leave' ? 'unpaid' : String(row.leavePayType || '').trim(),
                     timeIn: String(row.timeIn || '').trim(),
@@ -1237,17 +1182,50 @@ export async function getEmployeeAttendanceProfile(req, res) {
         const salary = pickSalary(salaryDoc);
         const increment = pickLatestIncrement(salaryDoc?.salaryHistory);
         const utility = mapUtilityExcess(approvedUtilityBills);
-        const pendingHrRequests = [...pendingRequestMap.values()]
-            .sort((a, b) => String(b.requestedAtKey).localeCompare(String(a.requestedAtKey)))
-            .map((row) => ({
-                id: row.id,
-                title: pendingRequestTitle(row.appliedKey, row.kind),
-                subtitle: pendingRequestSubtitle(row),
-                appliedKey: row.appliedKey || '',
-                dateLabel: formatDayMonthYear(row.requestedAtKey),
-                badge: daysAgoLabel(row.requestedAtKey, todayKey),
-                daysAgo: daysAgoCount(row.requestedAtKey, todayKey),
-            }));
+        const prepParty = employeeCode
+            ? {
+                  $or: [{ employeeMongoId }, { employeeId: employeeCode }],
+              }
+            : { employeeMongoId };
+        const [prepAttendance, prepChanges, hrHod] = await Promise.all([
+            Attendance.find({
+                $and: [
+                    prepParty,
+                    {
+                        $or: [
+                            { leaveRequestStatus: 'pending' },
+                            { hourAdjustStatus: 'pending' },
+                            { flexibleOtStatus: 'pending' },
+                        ],
+                    },
+                ],
+            })
+                .select(
+                    'date employeeMongoId leaveRequestStatus requestedStatusKey leaveRequestKind leaveRequestGroupId leaveRequestFromDate leaveRequestToDate leaveRequestedAt hourAdjustStatus hoursApproved flexibleOtStatus flexibleOtApprovedHours createdAt',
+                )
+                .lean()
+                .maxTimeMS(12000),
+            AttendanceChangeRequest.find({
+                ...prepParty,
+                stage: { $in: ATTENDANCE_CHANGE_OPEN_STAGES },
+            })
+                .select(
+                    'date employeeMongoId stage action proposed previous requestedByName reporteeName hrName staffType createdAt',
+                )
+                .lean()
+                .maxTimeMS(8000),
+            getDepartmentHOD('hr').catch(() => null),
+        ]);
+        const pendingHrRequests = buildSalaryPreparationPending({
+            attendanceRows: prepAttendance,
+            changeRows: prepChanges,
+            reportsTo,
+            hrName: employeeName(hrHod),
+            staffType,
+            todayKey,
+            yearFrom: from,
+            yearTo: to,
+        });
         for (const bill of utilityBills || []) {
             const status = String(bill.status || '');
             if (status !== 'Pending HR' && status !== 'Pending Accounts') continue;
@@ -1268,8 +1246,30 @@ export async function getEmployeeAttendanceProfile(req, res) {
             employeeId: employeeMongoId,
             employeeCode,
             employeeName: employeeName(employee),
-            limit: 10,
+            limit: 200,
         });
+        const seenLeave = new Set(
+            pendingHrRequests.map((row) => `${row.fromDate || ''}|${row.toDate || ''}|${String(row.title || '').toLowerCase()}`),
+        );
+        const extraLeave = [];
+        for (const card of employeeTasks.leaveCards || []) {
+            const requestId = String(card.requestId || '').trim();
+            const sameRequest = requestId && pendingHrRequests.some((row) => {
+                const id = String(row.id || '');
+                return id === `leave-${requestId}` || id === `leave-task-${requestId}`;
+            });
+            const sameDates = card.fromDate && pendingHrRequests.some((row) =>
+                String(row.id || '').startsWith('leave') &&
+                row.fromDate === card.fromDate &&
+                row.toDate === card.toDate,
+            );
+            if (sameRequest || sameDates) continue;
+            const key = `${card.fromDate || ''}|${card.toDate || ''}|${String(card.title || '').toLowerCase()}`;
+            if (seenLeave.has(key)) continue;
+            seenLeave.add(key);
+            extraLeave.push(card);
+        }
+        if (extraLeave.length) pendingHrRequests.unshift(...extraLeave);
         const workTasks = employeeTasks.tasks;
         const rawPhoto = employee.profilePicture || '';
         const profilePicture = rawPhoto.startsWith('data:')

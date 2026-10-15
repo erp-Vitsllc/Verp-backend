@@ -18,9 +18,9 @@ import {
     isFlexibleTiming,
     weekdayKeyFromDateKey,
 } from '../utils/workingTimeHelpers.js';
-import { addDaysKey, dayWorkedMinutes, evaluateFlexibleDay, flexibleOtFieldsFromDuration, requiredHoursForDate } from '../utils/flexibleAttendance.js';
+import { addDaysKey, dayWorkedMinutes, evaluateFlexibleDay, flexibleOtFieldsFromDuration, isOvertimePunchTime, mapPunchWithoutOvertime, requiredHoursForDate } from '../utils/flexibleAttendance.js';
 import { settleFulfilledLeaveRequest } from '../utils/leaveRequestSettlement.js';
-import { flexibleOtManualUpdate, refreshFlexibleOtRecords } from '../utils/syncFlexibleOt.js';
+import { dropMappedOvertime, flexibleOtManualUpdate, refreshFlexibleOtRecords } from '../utils/syncFlexibleOt.js';
 import {
     nonWorkingAttendanceMark,
     repairBlankNonWorkingRows,
@@ -36,7 +36,6 @@ import { staffTypeMongoClause } from '../utils/workLocationHelpers.js';
 import { getDepartmentHOD } from '../utils/getDepartmentHOD.js';
 import { syncDashboardAction } from '../utils/syncDashboard.js';
 import {
-    sendAttendanceLeaveRequestEmail,
     sendAttendanceLeaveDecisionEmail,
     sendAttendanceDirectChangeEmail,
 } from '../utils/sendAttendanceLeaveEmails.js';
@@ -62,8 +61,17 @@ import {
     isLeaveDashboardAttendanceRow,
     LEAVE_DASHBOARD_REQUEST_TYPE,
     leaveDashboardRequestObjectId,
-    notifyPrimaryReporteeOfLeaveRequest,
+    notifyLeaveRequestApprover,
 } from '../utils/notifyLeaveDashboardRequest.js';
+import {
+    inferLeaveApprovalStage,
+    isTwoStepLeaveKind,
+    LEAVE_STAGE_HR,
+    LEAVE_STAGE_REPORTEE,
+    leaveApprovalPersonName,
+    leaveApproverCanDecide,
+    openingLeaveApprovalStage,
+} from '../utils/leaveRequestApproval.js';
 import {
     parsePunchLocation,
     resolvePunchSource,
@@ -95,17 +103,19 @@ import AttendanceChangeRequest from '../models/AttendanceChangeRequest.js';
 import {
     approvalStageForAttendanceChange,
     attendanceMarksMatch,
+    bounceHourAttendanceChange,
     closeAttendanceChangeRequest,
     describeAttendanceSave,
     forwardAttendanceChangeToHr,
     loadAttendanceChangeInboxItems,
     loadPendingAttendanceChanges,
     openAttendanceChangeForEmployee,
+    resubmitHourAttendanceChange,
     submitAttendanceChange,
     supersedeOpenAttendanceChanges,
 } from '../utils/attendanceChangeApproval.js';
 import { approveFlexibleOvertimeRecord } from './flexibleOtController.js';
-import { applyStoredHourAdjust } from './hourAdjustController.js';
+import { applyStoredHourAdjust, normalizeHourAdjustEdit } from './hourAdjustController.js';
 import {
     applyOverlayCounts,
     applyOverlayCountsToBalances,
@@ -247,6 +257,26 @@ function shiftDateKey(dateKey, deltaDays) {
         month: dt.getUTCMonth() + 1,
         day: dt.getUTCDate(),
     });
+}
+
+function leaveRequestSentMessage(stage) {
+    if (stage === LEAVE_STAGE_HR) return 'Request sent to HR for approval.';
+    return 'Request sent to your primary reportee. HR is notified after they accept.';
+}
+
+async function resolveOpeningLeaveApprover(employee) {
+    const hrResolved = await resolveFlowchartHrEmployee();
+    const hrEmployee = hrResolved?.employee || null;
+    const reportee = employee?.primaryReportee || null;
+    const stage = openingLeaveApprovalStage(reportee?._id || reportee, hrEmployee?._id);
+    const approver = stage === LEAVE_STAGE_HR ? hrEmployee : reportee;
+    return {
+        stage,
+        approver,
+        hrEmployee,
+        reportee,
+        hrError: hrResolved?.error ? hrResolved : null,
+    };
 }
 
 async function viewerIsFlowchartHr(req) {
@@ -813,6 +843,25 @@ export async function getAttendanceMarkRoster(req, res) {
             .maxTimeMS(8000);
 
         const activeRows = (rows || []).filter((e) => !isCompanyShellEmployee(e));
+        const reporteeIds = [
+            ...new Set(
+                activeRows
+                    .map((row) => String(row.primaryReportee || '').trim())
+                    .filter((id) => mongoose.Types.ObjectId.isValid(id)),
+            ),
+        ];
+        const reporteeNames = new Map();
+        if (reporteeIds.length) {
+            const people = await EmployeeBasic.find({ _id: { $in: reporteeIds } })
+                .select('firstName lastName')
+                .lean();
+            for (const person of people || []) {
+                reporteeNames.set(
+                    String(person._id),
+                    [person.firstName, person.lastName].filter(Boolean).join(' ').trim(),
+                );
+            }
+        }
         const enrolledFrom = await loadEnrolledLeaveVisibilityByMongoId(activeRows);
         const employees = activeRows
             .filter((e) => {
@@ -829,6 +878,7 @@ export async function getAttendanceMarkRoster(req, res) {
                 name: [e.firstName, e.lastName].filter(Boolean).join(' ').trim(),
                 staffType: normalizeStaffType(e.staffType),
                 primaryReportee: e.primaryReportee ? String(e.primaryReportee) : '',
+                primaryReporteeName: reporteeNames.get(String(e.primaryReportee || '')) || '',
                 profileStatus: e.profileStatus || 'active',
                 status: e.status || '',
             }));
@@ -1238,6 +1288,7 @@ async function commitManualAttendanceMark({
             $unset: {
                 checkInLocation: 1,
                 checkOutLocation: 1,
+                punchMappedFromEmployeeMongoId: 1,
                 ...(payload.statusKey === 'compoff_leave' ? {} : { compOff: 1 }),
             },
         },
@@ -1258,32 +1309,36 @@ function storedPunchLocation(location) {
 
 async function commitMappedAttendanceChange({ request, markedBy }) {
     const proposed = request?.proposed || {};
-    const checkInLocation = storedPunchLocation(proposed.checkInLocation);
-    const checkOutLocation = storedPunchLocation(proposed.checkOutLocation);
-    const otUpdate = await flexibleOtManualUpdate({
-        employee: { _id: request.employeeMongoId },
-        date: request.date,
-        timeIn: proposed.timeIn || '',
-        timeOut: proposed.timeOut || '',
-        statusKey: proposed.statusKey || 'not_marked',
+    const punch = mapPunchWithoutOvertime({
+        timeIn: proposed.timeIn,
+        timeOut: proposed.timeOut,
+        timeOutDate: proposed.timeOutDate,
     });
+    const statusKey = proposed.statusKey || 'on_office';
+    const statusLabel = proposed.statusLabel || 'Present';
+    const checkInLocation = storedPunchLocation(proposed.checkInLocation);
+    const checkOutLocation = punch.timeOut ? storedPunchLocation(proposed.checkOutLocation) : null;
+    const sessions = mappedPunchSessions(proposed.punchSessions);
+    await dropMappedOvertime(request.employeeMongoId, request.date);
     const set = {
         date: request.date,
         employeeMongoId: request.employeeMongoId,
         employeeId: request.employeeId || '',
         employeeName: request.employeeName || '',
-        statusKey: proposed.statusKey || 'not_marked',
-        statusLabel: proposed.statusLabel || 'Not marked',
-        leavePayType: leavePayTypeForStatus(proposed.statusKey),
-        timeIn: proposed.timeIn || '',
-        timeOut: proposed.timeOut || '',
+        statusKey,
+        statusLabel,
+        leavePayType: leavePayTypeForStatus(statusKey),
+        timeIn: punch.timeIn || '',
+        timeOut: punch.timeOut || '',
+        timeOutDate: punch.timeOut ? punch.timeOutDate || '' : '',
+        punchSessions: sessions,
         reason: proposed.reason || '',
-        punchSource: proposed.punchSource || '',
-        checkOutSource: proposed.checkOutSource || '',
-        approvalStatus: proposed.timeIn ? approvalStatusForMark(proposed.statusKey) : '',
+        punchSource: punchChannel(proposed.punchSource) || 'manual',
+        checkOutSource: punch.timeOut ? punchChannel(proposed.checkOutSource) : '',
+        approvalStatus: punch.timeIn ? approvalStatusForMark(statusKey) : '',
         punchMappedFromEmployeeMongoId: proposed.punchMappedFromEmployeeMongoId || '',
         markedBy,
-        ...otUpdate,
+        ...CLEARED_MAPPED_OT,
     };
     if (checkInLocation) set.checkInLocation = checkInLocation;
     if (checkOutLocation) set.checkOutLocation = checkOutLocation;
@@ -2516,7 +2571,7 @@ export async function checkInMyAttendance(req, res) {
             existing?._id ? { _id: existing._id } : { date, employeeMongoId },
             {
                 $set: checkInSet,
-                $unset: { checkOutLocation: 1 },
+                $unset: { checkOutLocation: 1, punchMappedFromEmployeeMongoId: 1 },
                 ...(priorSession ? { $push: { punchSessions: priorSession } } : {}),
             },
             { upsert: !existing?._id, new: true, setDefaultsOnInsert: true },
@@ -2562,11 +2617,95 @@ function employeeFullName(emp) {
     return [emp?.firstName, emp?.lastName].filter(Boolean).join(' ').trim();
 }
 
-/** Copy a later check-in or check-out onto employees mapped from this person for the same date. */
+function punchChannel(value) {
+    const source = String(value || '').trim();
+    return source === 'app' || source === 'web' || source === 'manual' ? source : '';
+}
+
+function mappedPunchSessions(sessions) {
+    return (Array.isArray(sessions) ? sessions : [])
+        .map((session) => {
+            const punch = mapPunchWithoutOvertime({
+                timeIn: session?.timeIn,
+                timeOut: session?.timeOut,
+                timeOutDate: session?.timeOutDate,
+            });
+            if (!punch.timeIn) return null;
+            const checkInLocation = plainPunchLocation(session.checkInLocation);
+            const checkOutLocation = punch.timeOut ? plainPunchLocation(session.checkOutLocation) : null;
+            return {
+                timeIn: punch.timeIn,
+                timeOut: punch.timeOut,
+                timeOutDate: punch.timeOut ? punch.timeOutDate : '',
+                punchSource: punchChannel(session.punchSource),
+                checkOutSource: punch.timeOut ? punchChannel(session.checkOutSource) : '',
+                ...(checkInLocation ? { checkInLocation } : {}),
+                ...(checkOutLocation ? { checkOutLocation } : {}),
+            };
+        })
+        .filter(Boolean);
+}
+
+const CLEARED_MAPPED_OT = {
+    flexibleOtHours: 0,
+    flexibleOtStatus: '',
+    flexibleOtApprovedHours: 0,
+    flexibleOtReason: '',
+    flexibleOtNextDayDate: '',
+    flexibleFromOtDate: '',
+};
+
+function attendanceStatusForMap(sourceRecord) {
+    const sourceStatus = String(sourceRecord?.statusKey || '').trim();
+    if (PRESENCE_STATUS_KEYS.has(sourceStatus)) {
+        return {
+            statusKey: sourceStatus,
+            statusLabel: sourceRecord.statusLabel || 'Present',
+            reason: String(sourceRecord.reason || '').trim(),
+        };
+    }
+    return { statusKey: 'on_office', statusLabel: 'Present', reason: '' };
+}
+
+function applyMappedPunch(target, punch, sourceRecord) {
+    if (!punch?.timeIn) return false;
+    const checkInLocation = plainPunchLocation(sourceRecord.checkInLocation);
+    const checkOutLocation = punch.timeOut ? plainPunchLocation(sourceRecord.checkOutLocation) : null;
+    const status = attendanceStatusForMap(sourceRecord);
+    const sessions = mappedPunchSessions(sourceRecord.punchSessions);
+    const sameTimes =
+        String(target.timeIn || '') === punch.timeIn &&
+        String(target.timeOut || '') === (punch.timeOut || '') &&
+        String(target.timeOutDate || '') === (punch.timeOut ? punch.timeOutDate || '' : '') &&
+        String(target.statusKey || '') === status.statusKey &&
+        Number(target.flexibleOtHours) === 0 &&
+        !String(target.flexibleOtStatus || '').trim() &&
+        !String(target.flexibleOtNextDayDate || '').trim() &&
+        sessions.length === (Array.isArray(target.punchSessions) ? target.punchSessions.length : 0);
+    if (sameTimes) return false;
+
+    target.timeIn = punch.timeIn;
+    target.timeOut = punch.timeOut || '';
+    target.timeOutDate = punch.timeOut ? punch.timeOutDate || '' : '';
+    target.punchSessions = sessions;
+    target.punchSource = punchChannel(sourceRecord.punchSource) || target.punchSource || 'manual';
+    target.checkOutSource = punch.timeOut ? punchChannel(sourceRecord.checkOutSource) : '';
+    target.statusKey = status.statusKey;
+    target.statusLabel = status.statusLabel;
+    target.reason = status.reason;
+    target.approvalStatus = approvalStatusForMark(status.statusKey);
+    if (checkInLocation) target.checkInLocation = checkInLocation;
+    if (punch.timeOut && checkOutLocation) target.checkOutLocation = checkOutLocation;
+    Object.assign(target, CLEARED_MAPPED_OT);
+    return true;
+}
+
+/** Copy a later check-in or check-out onto employees mapped from this person. Overtime is not copied. */
 async function syncPunchMapTargets(sourceRecord) {
     const sourceId = String(sourceRecord?.employeeMongoId || '').trim();
     const date = String(sourceRecord?.date || '').trim();
     if (!sourceId || !isValidDateKey(date)) return;
+    if (isOvertimePunchTime(sourceRecord.timeIn)) return;
 
     const targets = await Attendance.find({
         date,
@@ -2574,37 +2713,15 @@ async function syncPunchMapTargets(sourceRecord) {
     });
     if (!targets.length) return;
 
-    const hasIn = punchTimeSet(sourceRecord.timeIn);
-    const hasOut = punchTimeSet(sourceRecord.timeOut);
-    const checkInLocation = plainPunchLocation(sourceRecord.checkInLocation);
-    const checkOutLocation = plainPunchLocation(sourceRecord.checkOutLocation);
-
     for (const target of targets) {
-        let changed = false;
-        if (hasIn && !punchTimeSet(target.timeIn)) {
-            target.timeIn = String(sourceRecord.timeIn || '').trim();
-            target.punchSource = sourceRecord.punchSource || target.punchSource || '';
-            if (checkInLocation) target.checkInLocation = checkInLocation;
-            changed = true;
-        }
-        if (hasOut) {
-            target.timeOut = String(sourceRecord.timeOut || '').trim();
-            target.checkOutSource = sourceRecord.checkOutSource || '';
-            if (checkOutLocation) target.checkOutLocation = checkOutLocation;
-            changed = true;
-        }
-        if (!changed) continue;
-
-        if (PRESENCE_STATUS_KEYS.has(String(sourceRecord.statusKey || ''))) {
-            target.statusKey = sourceRecord.statusKey;
-            target.statusLabel = sourceRecord.statusLabel || 'Present';
-            target.reason = sourceRecord.reason || '';
-            target.approvalStatus = approvalStatusForMark(target.statusKey);
-        } else if (punchTimeSet(target.timeIn)) {
-            target.statusKey = 'on_office';
-            target.statusLabel = 'Present';
-            target.approvalStatus = approvalStatusForMark('on_office');
-        }
+        const punch = mapPunchWithoutOvertime({
+            timeIn: sourceRecord.timeIn,
+            timeOut: sourceRecord.timeOut,
+            timeOutDate: sourceRecord.timeOutDate,
+        });
+        if (punch.overtimeOnly || !punch.timeIn) continue;
+        if (!applyMappedPunch(target, punch, sourceRecord)) continue;
+        await dropMappedOvertime(target.employeeMongoId, date);
         await target.save();
     }
 }
@@ -2651,34 +2768,50 @@ export async function mapAttendanceFromEmployee(req, res) {
             return res.status(404).json({ message: 'Employee not found.' });
         }
 
-        const sourceRow = await Attendance.findOne({ date, employeeMongoId: sourceId }).lean();
-        const hasIn = punchTimeSet(sourceRow?.timeIn);
-        const hasOut = punchTimeSet(sourceRow?.timeOut);
-        const sourceStatus = String(sourceRow?.statusKey || '').trim();
-        const statusKey =
-            hasIn && PRESENCE_STATUS_KEYS.has(sourceStatus) ? sourceStatus : 'on_office';
-        const statusLabel =
-            hasIn && PRESENCE_STATUS_KEYS.has(sourceStatus)
-                ? sourceRow.statusLabel || 'Present'
-                : 'Present';
+        const sourceRows = await Attendance.find({
+            date,
+            ...employeeAttendanceMatch(sourceEmp),
+        }).lean();
+        const realRows = sourceRows.filter((row) => {
+            const inn = String(row?.timeIn || '').trim();
+            return inn && inn !== 'OT';
+        });
+        const sourceRow = bestDayRecord(realRows.length ? realRows : sourceRows, date);
+        const punch = mapPunchWithoutOvertime({
+            timeIn: sourceRow?.timeIn,
+            timeOut: sourceRow?.timeOut,
+            timeOutDate: sourceRow?.timeOutDate,
+        });
+        if (punch.overtimeOnly) {
+            return res.status(400).json({ message: 'That day is overtime, so it cannot be mapped.' });
+        }
+        if (!punch.timeIn) {
+            return res.status(400).json({ message: 'That employee has no check-in to map.' });
+        }
+        const hasOut = Boolean(punch.timeOut);
+        const status = attendanceStatusForMap(sourceRow);
         const checkInLocation = plainPunchLocation(sourceRow?.checkInLocation);
-        const checkOutLocation = plainPunchLocation(sourceRow?.checkOutLocation);
+        const checkOutLocation = hasOut ? plainPunchLocation(sourceRow?.checkOutLocation) : null;
+        const sessions = mappedPunchSessions(sourceRow?.punchSessions);
 
         const set = {
             date,
             employeeMongoId: targetId,
             employeeId: String(targetEmp.employeeId || '').trim(),
             employeeName: employeeFullName(targetEmp),
-            statusKey: hasIn ? statusKey : 'not_marked',
-            statusLabel: hasIn ? statusLabel : 'Not marked',
-            reason: hasIn ? String(sourceRow?.reason || '').trim() : '',
-            timeIn: hasIn ? String(sourceRow.timeIn).trim() : '',
-            timeOut: hasOut ? String(sourceRow.timeOut).trim() : '',
-            punchSource: hasIn ? sourceRow.punchSource || 'manual' : '',
-            checkOutSource: hasOut ? sourceRow.checkOutSource || '' : '',
-            approvalStatus: hasIn ? approvalStatusForMark(statusKey) : '',
+            statusKey: status.statusKey,
+            statusLabel: status.statusLabel,
+            reason: status.reason,
+            timeIn: punch.timeIn,
+            timeOut: hasOut ? punch.timeOut : '',
+            timeOutDate: hasOut ? punch.timeOutDate || '' : '',
+            punchSessions: sessions,
+            punchSource: punchChannel(sourceRow?.punchSource) || 'manual',
+            checkOutSource: hasOut ? punchChannel(sourceRow?.checkOutSource) : '',
+            approvalStatus: approvalStatusForMark(status.statusKey),
             punchMappedFromEmployeeMongoId: sourceId,
             markedBy: req.user?.id || null,
+            ...CLEARED_MAPPED_OT,
         };
         if (checkInLocation) set.checkInLocation = checkInLocation;
         if (checkOutLocation) set.checkOutLocation = checkOutLocation;
@@ -2727,6 +2860,8 @@ export async function mapAttendanceFromEmployee(req, res) {
                     leavePayType: leavePayTypeForStatus(set.statusKey),
                     timeIn: set.timeIn,
                     timeOut: set.timeOut,
+                    timeOutDate: set.timeOutDate,
+                    punchSessions: sessions,
                     reason: set.reason,
                     attachmentName: '',
                     punchSource: set.punchSource,
@@ -2748,6 +2883,7 @@ export async function mapAttendanceFromEmployee(req, res) {
             });
         }
 
+        await dropMappedOvertime(targetId, date);
         const doc = await Attendance.findOneAndUpdate(
             { date, employeeMongoId: targetId },
             {
@@ -2764,8 +2900,8 @@ export async function mapAttendanceFromEmployee(req, res) {
 
         return res.status(200).json({
             message: hasOut
-                ? 'Check-in, check-out, and location copied for this day.'
-                : 'Check-in and location copied for this day. A later check-out on that employee is copied here too.',
+                ? 'Check-in and check-out copied. Overtime stays with the other employee.'
+                : 'Check-in copied. Their later check-out is copied here too. Overtime is not copied.',
             date,
             record: doc,
         });
@@ -2836,6 +2972,7 @@ export async function checkOutMyAttendance(req, res) {
         }
 
         existing.timeOut = timeOut;
+        existing.punchMappedFromEmployeeMongoId = '';
         existing.markedBy = req.user?.id || existing.markedBy || null;
         const punchSource = resolvePunchSource(req, 'web');
         if (await rejectIfMissingPunchContact(res, employee, punchSource, 'check out')) return;
@@ -3266,7 +3403,7 @@ export async function getAttendancePendingInbox(req, res) {
 
         const items = (rows || [])
             .filter((r) => !isCompanyShellEmployee(r.employeeName) && !isCompanyShellEmployee(r))
-            .filter((r) => !isLeaveDashboardAttendanceRow(r))
+            .filter((r) => !isLeaveDashboardAttendanceRow(r) && !isTwoStepLeaveKind(r.leaveRequestKind))
             .map((r) => {
                 const kind = String(r.leaveRequestKind || '');
                 const isYellow = kind === 'yellow';
@@ -3410,7 +3547,7 @@ export async function decideAttendanceChangeRequest(req, res) {
         }
 
         const request = await AttendanceChangeRequest.findById(id);
-        if (!request || !['pending_reportee', 'pending_hr'].includes(request.stage)) {
+        if (!request || !['pending_reportee', 'pending_hr', 'pending_requester'].includes(request.stage)) {
             return res.status(404).json({ message: 'Pending attendance change not found.' });
         }
 
@@ -3423,12 +3560,42 @@ export async function decideAttendanceChangeRequest(req, res) {
             String(actor._id) === String(request.reporteeId || '') ||
             String(actor._id) === String(liveReporteeId || '');
         const actorIsHr = await viewerIsFlowchartHr(req);
+        const actorIsRequester = String(actor._id) === String(request.requestedBy || '');
 
         if (request.stage === 'pending_reportee' && !actorIsReportee) {
             return res.status(403).json({ message: 'Only the primary reportee can approve this change.' });
         }
         if (request.stage === 'pending_hr' && !actorIsHr) {
             return res.status(403).json({ message: 'Only flowchart HR can approve this change.' });
+        }
+        if (
+            request.stage === 'pending_requester' &&
+            (!['hour_adjust', 'flexible_ot'].includes(request.action) || !actorIsRequester)
+        ) {
+            return res.status(403).json({ message: 'Only the requester can update this request.' });
+        }
+
+        const summaryEmployee = employee || {
+            _id: request.employeeMongoId,
+            employeeId: request.employeeId,
+            firstName: request.employeeName,
+            staffType: request.staffType || '',
+        };
+
+        if (decision === 'rejected' && (request.action === 'hour_adjust' || request.action === 'flexible_ot')) {
+            const rejectReason = String(req.body?.rejectReason || '').trim();
+            if (!rejectReason) {
+                return res.status(400).json({ message: 'Reject reason is required.' });
+            }
+            const bounced = await bounceHourAttendanceChange({
+                request,
+                actor,
+                employee: summaryEmployee,
+                reason: rejectReason,
+                noun: request.action === 'flexible_ot' ? 'OT' : 'hour',
+            });
+            if (bounced.error) return res.status(400).json({ message: bounced.error });
+            return res.status(200).json({ message: bounced.message });
         }
 
         if (decision === 'rejected') {
@@ -3446,6 +3613,62 @@ export async function decideAttendanceChangeRequest(req, res) {
             return res.status(200).json({
                 message: 'Attendance change rejected. The day was not updated.',
             });
+        }
+
+        if (request.action === 'hour_adjust') {
+            const edited = normalizeHourAdjustEdit(request.proposed || {}, {
+                approvedHours: req.body?.approvedHours,
+                hourReason: req.body?.hourReason ?? req.body?.reason,
+            });
+            if (edited.error) return res.status(400).json({ message: edited.error });
+            request.proposed.hoursApproved = edited.hoursApproved;
+            request.proposed.reason = edited.reason;
+            request.proposed.statusLabel = `Hour approval ${edited.hoursApproved} hr`;
+            request.markModified('proposed');
+            request.rejectReason = '';
+            request.rejectedByName = '';
+        }
+
+        const proposed = request.proposed && typeof request.proposed === 'object' ? request.proposed : {};
+        const nextIn = String(req.body?.timeIn || '').trim();
+        const nextOut = String(req.body?.timeOut || '').trim();
+        let proposedChanged = false;
+        if (nextIn) {
+            proposed.timeIn = nextIn;
+            proposedChanged = true;
+        }
+        if (nextOut) {
+            proposed.timeOut = nextOut;
+            proposedChanged = true;
+        }
+        const editedOtHours = Number(req.body?.approvedHours);
+        if (request.action === 'flexible_ot') {
+            const nextReason = String(req.body?.reason || '').trim();
+            if (nextReason) {
+                proposed.reason = nextReason;
+                proposedChanged = true;
+            }
+            if (Number.isFinite(editedOtHours) && editedOtHours > 0) {
+                proposed.flexibleOtApprovedHours = editedOtHours;
+                proposed.statusLabel = `OT Approval ${editedOtHours} hr`;
+                proposedChanged = true;
+            }
+        }
+        if (proposedChanged) {
+            request.proposed = proposed;
+            request.markModified('proposed');
+        }
+
+        if (request.stage === 'pending_requester') {
+            const hr = await getDepartmentHOD('hr').catch(() => null);
+            const sent = await resubmitHourAttendanceChange({
+                request,
+                actor,
+                employee: summaryEmployee,
+                hr,
+            });
+            if (sent.error) return res.status(400).json({ message: sent.error });
+            return res.status(200).json({ message: sent.message });
         }
 
         if (request.stage === 'pending_reportee') {
@@ -3470,14 +3693,14 @@ export async function decideAttendanceChangeRequest(req, res) {
             });
         }
 
-        const finishApproved = async (record) => {
+        const finishApproved = async (record, message = 'Attendance change approved.') => {
             request.stage = 'approved';
             request.decidedByHr = actor._id;
             request.decidedAtHr = new Date();
             await request.save();
             await closeAttendanceChangeRequest(request, { status: 'Approved', actorId: actor._id });
             return res.status(200).json({
-                message: 'Attendance change approved.',
+                message,
                 record,
             });
         };
@@ -3499,6 +3722,10 @@ export async function decideAttendanceChangeRequest(req, res) {
             if (!record) {
                 return res.status(404).json({ message: 'The overtime day for this request was not found.' });
             }
+            const approvedIn = normalizeClockHHmm(request.proposed?.timeIn);
+            const approvedOut = normalizeClockHHmm(request.proposed?.timeOut);
+            if (approvedIn) record.timeIn = `${approvedIn}:00`;
+            if (approvedOut) record.timeOut = `${approvedOut}:00`;
             const applied = await approveFlexibleOvertimeRecord(record, {
                 approvedHours: request.proposed?.flexibleOtApprovedHours,
                 reason: request.proposed?.reason,
@@ -3509,7 +3736,10 @@ export async function decideAttendanceChangeRequest(req, res) {
             if (applied.status !== 200) {
                 return res.status(applied.status).json(applied.body);
             }
-            return finishApproved(applied.body?.record || record);
+            return finishApproved(
+                applied.body?.record || record,
+                'Overtime approved. The employee is notified on WhatsApp.',
+            );
         }
 
         if (request.action === 'hour_adjust') {
@@ -3541,6 +3771,16 @@ export async function decideAttendanceChangeRequest(req, res) {
         };
         if (!ATTENDANCE_STATUS_KEYS.includes(payload.statusKey) && payload.statusKey !== 'not_marked') {
             return res.status(400).json({ message: 'This attendance change is no longer valid.' });
+        }
+        if (request.action === 'map') {
+            const mappedPunch = mapPunchWithoutOvertime({
+                timeIn: request.proposed?.timeIn,
+                timeOut: request.proposed?.timeOut,
+                timeOutDate: request.proposed?.timeOutDate,
+            });
+            if (!mappedPunch.timeIn) {
+                return res.status(400).json({ message: 'That day has no check-in to map.' });
+            }
         }
         const record =
             request.action === 'map'
@@ -3646,9 +3886,13 @@ export async function requestAttendanceLeave(req, res) {
             )
             .lean();
 
-        if (!employee?.primaryReportee?._id) {
+        const opening = await resolveOpeningLeaveApprover(employee);
+        if (!opening.approver?._id) {
             return res.status(400).json({
-                message: 'Primary reportee is required before requesting a leave status change.',
+                message:
+                    opening.stage === LEAVE_STAGE_HR
+                        ? opening.hrError?.message || 'HR is not configured in the Flowchart.'
+                        : 'Primary reportee is required before requesting a leave status change.',
             });
         }
 
@@ -3744,6 +3988,7 @@ export async function requestAttendanceLeave(req, res) {
         record.leaveRequestTimeOut = partialLeave ? partialLeave.workEnd || '' : '';
         record.attachmentName = attachmentName || record.attachmentName || '';
         record.leaveRequestStatus = 'pending';
+        record.leaveApprovalStage = opening.stage;
         record.leaveRequestedAt = new Date();
         record.leaveDecidedAt = null;
         record.leaveDecidedBy = null;
@@ -3751,21 +3996,22 @@ export async function requestAttendanceLeave(req, res) {
         record.employeeName = empName;
         await record.save();
 
-        await notifyPrimaryReporteeOfLeaveRequest({
+        await notifyLeaveRequestApprover({
             employee,
-            manager: employee.primaryReportee,
+            approver: opening.approver,
+            stage: opening.stage,
             from: date,
             to: date,
             attendanceId: record._id,
             requestedLabel: requestedStatusLabel,
             requestedStatusKey: resolvedStatusKey,
-            leaveRequestKind: 'leave',
+            leaveRequestKind: record.leaveRequestKind,
             reason,
             attachmentName,
         });
 
         return res.status(200).json({
-            message: 'Leave request sent to your primary reportee.',
+            message: leaveRequestSentMessage(opening.stage),
             record,
         });
     } catch (error) {
@@ -3817,9 +4063,13 @@ export async function requestAttendanceYellow(req, res) {
             )
             .lean();
 
-        if (!employee?.primaryReportee?._id) {
+        const opening = await resolveOpeningLeaveApprover(employee);
+        if (!opening.approver?._id) {
             return res.status(400).json({
-                message: 'Primary reportee is required before requesting clarification.',
+                message:
+                    opening.stage === LEAVE_STAGE_HR
+                        ? opening.hrError?.message || 'HR is not configured in the Flowchart.'
+                        : 'Primary reportee is required before requesting clarification.',
             });
         }
 
@@ -3874,6 +4124,7 @@ export async function requestAttendanceYellow(req, res) {
         record.leaveRequestKind = 'yellow';
         record.attachmentName = attachmentName || record.attachmentName || '';
         record.leaveRequestStatus = 'pending';
+        record.leaveApprovalStage = opening.stage;
         record.leaveRequestedAt = new Date();
         record.leaveDecidedAt = null;
         record.leaveDecidedBy = null;
@@ -3881,37 +4132,22 @@ export async function requestAttendanceYellow(req, res) {
         record.employeeName = empName;
         await record.save();
 
-        await syncDashboardAction({
-            requestId: record._id,
-            requestType: 'Attendance Leave Request',
-            assignedTo: employee.primaryReportee._id,
-            status: 'Pending',
-            subjectEmployee: employee,
-            requestedByName: empName,
-            extra1: date,
-            extra2: `Clarification: mark as Present (was ${previousStatusLabel})`,
-            extra3: JSON.stringify({
-                attendanceId: String(record._id),
-                employeeMongoId: String(employee._id),
-                date,
-                requestedStatusKey: 'on_office',
-                leaveRequestKind: 'yellow',
-            }),
-        });
-
-        await sendAttendanceLeaveRequestEmail({
-            manager: employee.primaryReportee,
+        await notifyLeaveRequestApprover({
             employee,
-            date,
-            requestedLabel: 'Present',
-            currentLabel: previousStatusLabel,
+            approver: opening.approver,
+            stage: opening.stage,
+            from: date,
+            to: date,
+            attendanceId: record._id,
+            requestedLabel: 'Miss Punch',
+            requestedStatusKey: 'on_office',
+            leaveRequestKind: 'yellow',
             reason,
-            kind: 'yellow',
             attachmentName,
         });
 
         return res.status(200).json({
-            message: 'Clarification request sent to your primary reportee.',
+            message: leaveRequestSentMessage(opening.stage),
             record,
         });
     } catch (error) {
@@ -4075,19 +4311,13 @@ export async function requestAttendanceFuture(req, res) {
             )
             .lean();
 
-        const sendLeaveToHr = kind === 'annual_leave' || kind === 'leave';
-        let leaveApprover = employee?.primaryReportee || null;
-        if (sendLeaveToHr) {
-            const hr = await resolveFlowchartHrEmployee();
-            if (hr.error || !hr.employee?._id) {
-                return res.status(400).json({
-                    message: hr.message || 'HR is not configured in the Flowchart.',
-                });
-            }
-            leaveApprover = hr.employee;
-        } else if (!leaveApprover?._id) {
+        const opening = await resolveOpeningLeaveApprover(employee);
+        if (!opening.approver?._id) {
             return res.status(400).json({
-                message: 'Primary reportee is required before sending this request.',
+                message:
+                    opening.stage === LEAVE_STAGE_HR
+                        ? opening.hrError?.message || 'HR is not configured in the Flowchart.'
+                        : 'Primary reportee is required before sending this request.',
             });
         }
 
@@ -4216,11 +4446,6 @@ export async function requestAttendanceFuture(req, res) {
             dayPart !== 'full' && kind === 'leave'
                 ? dayPartLabel
                 : spec.requestedStatusLabel;
-        const extra2Prefix =
-            dayPart !== 'full' && kind === 'leave'
-                ? `Future ${dayPartLabel}`
-                : spec.extra2Prefix;
-        const durationLabel = `${requestDates.length} day${requestDates.length === 1 ? '' : 's'}`;
         const savedRecords = [];
 
         for (const dateKey of requestDates) {
@@ -4243,6 +4468,7 @@ export async function requestAttendanceFuture(req, res) {
             record.leaveRequestKind = spec.leaveRequestKind;
             record.attachmentName = attachmentName;
             record.leaveRequestStatus = 'pending';
+            record.leaveApprovalStage = opening.stage;
             record.leaveRequestDayPart = dayPart;
             record.leaveRequestSession = session;
             record.leaveDayFraction = partialLeavePortion(dayPart);
@@ -4264,69 +4490,29 @@ export async function requestAttendanceFuture(req, res) {
             await record.save();
             savedRecords.push(record);
 
-            if (!isLeaveDashboardAttendanceRow({ leaveRequestKind: spec.leaveRequestKind, requestedStatusKey: spec.requestedStatusKey })) {
-                await syncDashboardAction({
-                    requestId: record._id,
-                    requestType: 'Attendance Leave Request',
-                    assignedTo: leaveApprover._id,
-                    status: 'Pending',
-                    subjectEmployee: employee,
-                    requestedByName: empName,
-                    extra1: dateKey,
-                    extra2: `${extra2Prefix}: ${rangeLabel} · ${dayPartLabel} · ${durationLabel}`,
-                    extra3: JSON.stringify({
-                        attendanceId: String(record._id),
-                        employeeMongoId: String(employee._id),
-                        date: dateKey,
-                        requestedStatusKey: spec.requestedStatusKey,
-                        leaveRequestKind: spec.leaveRequestKind,
-                        leaveRequestGroupId: groupId,
-                        dayPart,
-                        session,
-                    }),
-                });
-            }
         }
 
-        if (isLeaveDashboardAttendanceRow({
-            leaveRequestKind: spec.leaveRequestKind,
+        const approvalAttendanceId = savedRecords.reduce((min, row) => {
+            const id = String(row?._id || '');
+            return !min || (id && id < min) ? id : min;
+        }, '');
+        await notifyLeaveRequestApprover({
+            employee,
+            approver: opening.approver,
+            stage: opening.stage,
+            from: fromDate,
+            to: toDate,
+            attendanceId: approvalAttendanceId || savedRecords[0]?._id,
+            groupId,
+            requestedLabel: requestedStatusLabel,
             requestedStatusKey: spec.requestedStatusKey,
-        })) {
-            const approvalAttendanceId = savedRecords.reduce((min, row) => {
-                const id = String(row?._id || '');
-                return !min || (id && id < min) ? id : min;
-            }, '');
-            await notifyPrimaryReporteeOfLeaveRequest({
-                employee,
-                manager: leaveApprover,
-                from: fromDate,
-                to: toDate,
-                attendanceId: approvalAttendanceId || savedRecords[0]?._id,
-                groupId,
-                requestedLabel: requestedStatusLabel,
-                requestedStatusKey: spec.requestedStatusKey,
-                leaveRequestKind: spec.leaveRequestKind,
-                reason,
-                attachmentName,
-            });
-        } else {
-            await sendAttendanceLeaveRequestEmail({
-                manager: leaveApprover,
-                employee,
-                date: requestDates[0],
-                dateLabel: rangeLabel,
-                requestedLabel: `${requestedStatusLabel} · ${dayPartLabel}`,
-                currentLabel: 'Upcoming',
-                reason,
-                kind: spec.leaveRequestKind,
-                attachmentName,
-            });
-        }
+            leaveRequestKind: spec.leaveRequestKind,
+            reason,
+            attachmentName,
+        });
 
         return res.status(200).json({
-            message: sendLeaveToHr
-                ? 'Request sent to HR for approval.'
-                : 'Request sent to your primary reportee.',
+            message: leaveRequestSentMessage(opening.stage),
             dates: requestDates,
             record: savedRecords[0],
             records: savedRecords,
@@ -4371,6 +4557,8 @@ export async function decideAttendanceLeaveRequest(req, res) {
             decision,
             approvedStatusKey,
             leavePayType,
+            timeIn: req.body?.timeIn,
+            timeOut: req.body?.timeOut,
             actor: self,
         });
 
@@ -4379,10 +4567,13 @@ export async function decideAttendanceLeaveRequest(req, res) {
         }
 
         return res.status(200).json({
-            message:
-                decision === 'approved'
-                    ? 'Leave request approved.'
-                    : 'Leave request rejected. Previous status kept.',
+            message: result.advanced
+                ? `Accepted. This request is now pending with ${result.pendingWithName || 'HR'}.`
+                : decision === 'approved'
+                  ? 'Leave request approved.'
+                  : 'Leave request rejected. Previous status kept.',
+            advanced: Boolean(result.advanced),
+            pendingWithName: result.pendingWithName || '',
             record: result.record,
         });
     } catch (error) {
@@ -4398,6 +4589,8 @@ export async function decideLeaveRequestInternal({
     decision,
     approvedStatusKey = '',
     leavePayType = '',
+    timeIn = '',
+    timeOut = '',
     actor,
     hrBypass = false,
 }) {
@@ -4415,18 +4608,39 @@ export async function decideLeaveRequestInternal({
         return { ok: false, status: 400, message: 'No pending leave request for this day.' };
     }
 
-    const allowed = hrBypass || (await isEmployeeInTeamTree(actor._id, record.employeeMongoId));
-    if (!allowed) {
-        return {
-            ok: false,
-            status: 403,
-            message: 'You can only decide leave requests for your team.',
-        };
-    }
-
     const subject = await EmployeeBasic.findById(record.employeeMongoId)
         .select('_id employeeId firstName lastName companyEmail workEmail email primaryReportee staffType')
         .lean();
+    const hrResolved = await resolveFlowchartHrEmployee();
+    const hrEmployee = hrResolved?.employee || null;
+    const hrId = hrEmployee?._id ? String(hrEmployee._id) : '';
+    const reporteeId = String(subject?.primaryReportee || '').trim();
+    const stage = inferLeaveApprovalStage(record, { reporteeId, hrId });
+    const actorId = String(actor?._id || '').trim();
+    const canDecide = leaveApproverCanDecide({
+        stage,
+        actorId,
+        reporteeId,
+        hrId,
+    });
+    if (decision === 'updated') {
+        if (!canDecide && hrBypass !== true) {
+            return {
+                ok: false,
+                status: 403,
+                message: 'Only HR or the assigned approver can edit this request.',
+            };
+        }
+    } else if (!canDecide) {
+        return {
+            ok: false,
+            status: 403,
+            message:
+                stage === LEAVE_STAGE_HR
+                    ? 'Only HR can accept or reject this request.'
+                    : 'Only the primary reportee can accept or reject this request.',
+        };
+    }
 
     // Multi-day requests share a group id, so one decision covers every day of the range.
     const groupId = String(record.leaveRequestGroupId || '').trim();
@@ -4439,6 +4653,29 @@ export async function decideLeaveRequestInternal({
         }).sort({ date: 1 });
         const others = siblings.filter((row) => String(row._id) !== String(record._id));
         groupRecords = [record, ...others].sort((a, b) => (a.date < b.date ? -1 : 1));
+    }
+
+    const editedIn = normalizeClockHHmm(timeIn);
+    const editedOut = normalizeClockHHmm(timeOut);
+    if ((decision === 'approved' || decision === 'updated') && (editedIn || editedOut)) {
+        const punchKinds = new Set(['yellow', 'past_late', 'future_late', 'future_early']);
+        for (const groupRecord of groupRecords) {
+            if (editedIn) groupRecord.leaveRequestTimeIn = editedIn;
+            if (editedOut) groupRecord.leaveRequestTimeOut = editedOut;
+            if (punchKinds.has(String(groupRecord.leaveRequestKind || ''))) {
+                if (editedIn) groupRecord.timeIn = `${editedIn}:00`;
+                if (editedOut) groupRecord.timeOut = `${editedOut}:00`;
+            }
+        }
+    }
+    if (decision === 'updated') {
+        if (!editedIn && !editedOut) {
+            return { ok: false, status: 400, message: 'Enter a check-in or check-out time.' };
+        }
+        for (const groupRecord of groupRecords) {
+            await groupRecord.save();
+        }
+        return { ok: true, updated: true, record };
     }
 
     const requestedKey = String(approvedStatusKey || record.requestedStatusKey || '').trim();
@@ -4466,6 +4703,72 @@ export async function decideLeaveRequestInternal({
 
     const requestedLabel =
         record.requestedStatusLabel || leaveStatusLabel(String(record.requestedStatusKey || '').trim());
+
+    if (decision === 'approved' && stage === LEAVE_STAGE_REPORTEE && hrId && hrId !== reporteeId) {
+        if (!hrEmployee?._id) {
+            return { ok: false, status: 400, message: 'HR is not configured in the Flowchart.' };
+        }
+        for (const groupRecord of groupRecords) {
+            const chosen = String(approvedStatusKey || '').trim();
+            if (chosen && chosen !== String(groupRecord.requestedStatusKey || '').trim()) {
+                groupRecord.requestedStatusKey = chosen;
+                const nextLabel = leaveStatusLabel(chosen);
+                if (nextLabel && nextLabel !== chosen) groupRecord.requestedStatusLabel = nextLabel;
+            }
+            groupRecord.leaveApprovalStage = LEAVE_STAGE_HR;
+            await groupRecord.save();
+        }
+        const from = groupRecords[0].leaveRequestFromDate || groupRecords[0].date;
+        const to =
+            groupRecords[groupRecords.length - 1].leaveRequestToDate ||
+            groupRecords[groupRecords.length - 1].date;
+        const approvalAttendanceId = groupRecords.reduce((min, row) => {
+            const id = String(row?._id || '');
+            return !min || (id && id < min) ? id : min;
+        }, '');
+        await syncDashboardAction({
+            requestId: leaveDashboardRequestObjectId(groupId, approvalAttendanceId),
+            requestType: LEAVE_DASHBOARD_REQUEST_TYPE,
+            assignedTo: actor._id,
+            status: 'Approved',
+            subjectEmployee: subject,
+            actionedBy: actor._id,
+            extra1: from,
+            extra2: `${requestedLabel} accepted by primary reportee`,
+        });
+        await syncDashboardAction({
+            requestId: record._id,
+            requestType: 'Attendance Leave Request',
+            assignedTo: actor._id,
+            status: 'Approved',
+            subjectEmployee: subject,
+            actionedBy: actor._id,
+            extra1: from,
+            extra2: requestedLabel,
+        });
+        const pendingWithName = leaveApprovalPersonName(hrEmployee) || 'HR';
+        await notifyLeaveRequestApprover({
+            employee: subject,
+            approver: hrEmployee,
+            stage: LEAVE_STAGE_HR,
+            from,
+            to,
+            attendanceId: approvalAttendanceId,
+            groupId,
+            requestedLabel: groupRecords[0].requestedStatusLabel || requestedLabel,
+            requestedStatusKey: groupRecords[0].requestedStatusKey,
+            leaveRequestKind: groupRecords[0].leaveRequestKind,
+            reason: groupRecords[0].leaveRequestReason || '',
+            attachmentName: groupRecords[0].attachmentName || '',
+        });
+        return {
+            ok: true,
+            advanced: true,
+            pendingWithName,
+            record: groupRecords[0],
+        };
+    }
+
     const dateLabel =
         groupRecords.length > 1
             ? `${groupRecords[0].date} → ${groupRecords[groupRecords.length - 1].date}`
@@ -4538,7 +4841,10 @@ async function syncLeaveDecisionDashboardActions({
         requestType: 'Attendance Leave Request',
     });
 
-    if (isLeaveDashboardAttendanceRow(record) || String(record.leaveRequestKind || '') === 'past_late') {
+    if (
+        isLeaveDashboardAttendanceRow(record) ||
+        isTwoStepLeaveKind(record.leaveRequestKind)
+    ) {
         await syncDashboardAction({
             ...payload,
             requestId: leaveDashboardRequestObjectId(record.leaveRequestGroupId, record._id),
@@ -4678,6 +4984,7 @@ async function applyLeaveDecisionToRecord({
     }
 
     record.leaveRequestStatus = decision;
+    record.leaveApprovalStage = '';
     record.leaveDecidedAt = new Date();
     record.leaveDecidedBy = actor._id;
     await record.save();

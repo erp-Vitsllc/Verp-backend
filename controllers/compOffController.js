@@ -111,6 +111,7 @@ export async function requestCompOffLeave(req, res) {
         record.leaveRequestReason = reason;
         record.leaveRequestKind = 'leave';
         record.leaveRequestStatus = 'pending';
+        record.leaveApprovalStage = 'pending_reportee';
         record.leaveRequestFromDate = date;
         record.leaveRequestToDate = date;
         record.leaveRequestedAt = new Date();

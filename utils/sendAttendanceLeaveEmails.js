@@ -27,6 +27,23 @@ function personName(person) {
     return `${person?.firstName || ''} ${person?.lastName || ''}`.trim() || 'Employee';
 }
 
+function escapeHtml(value) {
+    return String(value || '')
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;');
+}
+
+function withDecisionIntent(path, intent) {
+    const raw = String(path || '').trim();
+    if (!raw) return '';
+    const hashIndex = raw.indexOf('#');
+    const beforeHash = hashIndex >= 0 ? raw.slice(0, hashIndex) : raw;
+    const hash = hashIndex >= 0 ? raw.slice(hashIndex) : '';
+    const join = beforeHash.includes('?') ? '&' : '?';
+    return `${beforeHash}${join}intent=${encodeURIComponent(intent)}${hash}`;
+}
+
 /**
  * Notify primary reportee that an employee requested a leave status change.
  */
@@ -69,7 +86,26 @@ export async function sendAttendanceLeaveRequestEmail({
         const buttonUrl = path.startsWith('http')
             ? path
             : `${base}${path.startsWith('/') ? path : `/${path}`}`;
+        const acceptUrl = withDecisionIntent(buttonUrl, 'approved');
+        const rejectUrl = withDecisionIntent(buttonUrl, 'rejected');
         const actionLabel = String(buttonLabel || '').trim() || 'Open employee attendance';
+        const decisionButtons = String(reviewPath || '').trim()
+            ? `
+                        <div style="text-align:center;margin-top:24px;">
+                            <a href="${acceptUrl}" style="background:#16A34A;color:#fff;text-decoration:none;padding:12px 22px;border-radius:8px;font-weight:600;display:inline-block;margin:0 6px 8px;">
+                                Accept
+                            </a>
+                            <a href="${rejectUrl}" style="background:#DC2626;color:#fff;text-decoration:none;padding:12px 22px;border-radius:8px;font-weight:600;display:inline-block;margin:0 6px 8px;">
+                                Reject
+                            </a>
+                            <p style="margin:8px 0 0;font-size:12px;color:#64748b;">These open the leave card so you can confirm. Only the person this request is pending with can accept or reject it.</p>
+                        </div>`
+            : `
+                        <div style="text-align:center;margin-top:24px;">
+                            <a href="${buttonUrl}" style="background:#EA3D2F;color:#fff;text-decoration:none;padding:12px 24px;border-radius:8px;font-weight:600;display:inline-block;">
+                                ${actionLabel}
+                            </a>
+                        </div>`;
         const shownDate = dateLabel || date;
         const title = String(emailTitle || '').trim()
             ? String(emailTitle).trim()
@@ -125,11 +161,7 @@ export async function sendAttendanceLeaveRequestEmail({
                             ${attachmentName ? `<p style="margin:0;"><strong>Attachment:</strong> ${attachmentName}</p>` : ''}
                         </div>
                         <p>${confirmLine}</p>
-                        <div style="text-align:center;margin-top:24px;">
-                            <a href="${buttonUrl}" style="background:#EA3D2F;color:#fff;text-decoration:none;padding:12px 24px;border-radius:8px;font-weight:600;display:inline-block;">
-                                ${actionLabel}
-                            </a>
-                        </div>
+                        ${decisionButtons}
                     </div>
                 </div>
             `,
@@ -171,6 +203,7 @@ export async function sendAttendanceChangeRequestEmail({
         const buttonUrl = path.startsWith('http')
             ? path
             : `${base}${path.startsWith('/') ? path : `/${path}`}`;
+        const onMarkPage = path.includes('/HRM/Attendance/mark');
         const title = hrStep ? 'Attendance Change — HR Approval' : 'Attendance Change Approval';
         const intro = hrStep
             ? 'is waiting for your approval. Approving it updates the attendance day.'
@@ -200,10 +233,10 @@ export async function sendAttendanceChangeRequestEmail({
                             ${times}
                             ${reason ? `<p style="margin:0;"><strong>Reason:</strong> ${reason}</p>` : ''}
                         </div>
-                        <p>Open the Attendance bell to approve or reject this change.</p>
+                        <p>${onMarkPage ? 'Open Mark Attendance to approve or reject this request.' : 'Open the Attendance bell to approve or reject this change.'}</p>
                         <div style="text-align:center;margin-top:24px;">
                             <a href="${buttonUrl}" style="background:#EA3D2F;color:#fff;text-decoration:none;padding:12px 24px;border-radius:8px;font-weight:600;display:inline-block;">
-                                Open Attendance
+                                Open attendance
                             </a>
                         </div>
                     </div>
@@ -212,6 +245,71 @@ export async function sendAttendanceChangeRequestEmail({
         });
     } catch (err) {
         console.error('[AttendanceChangeEmail] request email failed:', err?.message || err);
+    }
+}
+
+/**
+ * Tell the previous approver that an hour request was rejected and needs action.
+ */
+export async function sendAttendanceChangeRejectedEmail({
+    approver,
+    employee,
+    date,
+    rejectedByName = '',
+    reason = '',
+    requestedLabel = 'Hour approval',
+    requestNoun = 'Hour',
+    reviewPath = '/HRM/Attendance/mark',
+}) {
+    try {
+        const mail = createTransport();
+        const { email: to } = resolveEmployeeEmail(approver || {});
+        if (!mail || !to) {
+            console.warn('[AttendanceChangeEmail] Missing SMTP or approver email for rejection.');
+            return;
+        }
+        const approverName = personName(approver);
+        const empName = personName(employee);
+        const noun = String(requestNoun || 'Hour').trim() || 'Hour';
+        const base = emailFrontendUrl();
+        const path = String(reviewPath || '/HRM/Attendance/mark');
+        const buttonUrl = path.startsWith('http')
+            ? path
+            : `${base}${path.startsWith('/') ? path : `/${path}`}`;
+        const safeReason = escapeHtml(reason);
+        const safeBy = escapeHtml(rejectedByName || 'Approver');
+
+        await mail.transporter.sendMail({
+            from: `"VeRP System" <${mail.from}>`,
+            to,
+            subject: `${noun} request rejected: ${empName} — ${date}`,
+            html: `
+                <div style="font-family:Segoe UI,Tahoma,sans-serif;color:#1e293b;max-width:600px;margin:0 auto;border:1px solid #e2e8f0;border-radius:12px;overflow:hidden;">
+                    <div style="background:#EA3D2F;color:#fff;padding:20px;text-align:center;">
+                        <h1 style="margin:0;font-size:20px;">${escapeHtml(noun)} request rejected</h1>
+                    </div>
+                    <div style="padding:24px;">
+                        <p>Dear <strong>${escapeHtml(approverName)}</strong>,</p>
+                        <p>This request was <strong>rejected</strong> and sent back to you. Reapply it or reject it from your task bar.</p>
+                        <div style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:10px;padding:16px;margin:16px 0;">
+                            <p style="margin:0 0 8px;"><strong>Employee:</strong> ${escapeHtml(empName)} (${escapeHtml(employee?.employeeId || '—')})</p>
+                            <p style="margin:0 0 8px;"><strong>Date:</strong> ${escapeHtml(date || '—')}</p>
+                            <p style="margin:0 0 8px;"><strong>Request:</strong> ${escapeHtml(requestedLabel || 'Hour approval')}</p>
+                            <p style="margin:0 0 8px;"><strong>Rejected by:</strong> ${safeBy}</p>
+                            <p style="margin:0;"><strong>Reason:</strong> ${safeReason || '—'}</p>
+                        </div>
+                        <p>Open the task on your bar. Use Reapply to send it on, or Reject to send it back.</p>
+                        <div style="text-align:center;margin-top:24px;">
+                            <a href="${buttonUrl}" style="background:#EA3D2F;color:#fff;text-decoration:none;padding:12px 24px;border-radius:8px;font-weight:600;display:inline-block;">
+                                Open attendance
+                            </a>
+                        </div>
+                    </div>
+                </div>
+            `,
+        });
+    } catch (err) {
+        console.error('[AttendanceChangeEmail] rejection email failed:', err?.message || err);
     }
 }
 

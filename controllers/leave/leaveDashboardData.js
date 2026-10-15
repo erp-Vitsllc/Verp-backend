@@ -23,6 +23,7 @@ import {
     getZonedParts,
 } from '../../utils/scheduleDailyAtMidnight.js';
 import { listActiveWorkLocations, normalizeStaffTypeKey } from '../../utils/workLocationHelpers.js';
+import { leaveStatusKeyForCount, nextDayCompOffMatch } from '../../utils/flexibleAttendance.js';
 import { decideLeaveRequestInternal } from '../attendanceController.js';
 import { checkEmployeeLeaveAllowance, resolveEmployeePayrollPolicy, resolveSickOverflowStatuses } from '../../utils/employeeLeavePolicy.js';
 import { hasPermission } from '../../services/permissionService.js';
@@ -37,9 +38,17 @@ import { syncDashboardAction } from '../../utils/syncDashboard.js';
 import {
     LEAVE_DASHBOARD_REQUEST_TYPE,
     leaveDashboardRequestObjectId,
-    notifyPrimaryReporteeOfLeaveRequest,
-    notifyFlowchartHrOfIneligibleAnnualLeave,
+    notifyLeaveRequestApprover,
 } from '../../utils/notifyLeaveDashboardRequest.js';
+import { resolveFlowchartHrEmployee } from '../../utils/resolveFlowchartHrEmployee.js';
+import {
+    inferLeaveApprovalStage,
+    LEAVE_STAGE_HR,
+    leaveApprovalPersonName,
+    leaveApproverCanDecide,
+    openingLeaveApprovalStage,
+    TWO_STEP_LEAVE_KINDS,
+} from '../../utils/leaveRequestApproval.js';
 import { isRequestUserDesignatedFlowchartHr } from '../../utils/isDesignatedFlowchartHr.js';
 import { dateEmployeeReachesWorkingDays, loadCurrentLeaveCycleEligibility } from '../../utils/loadLeaveTicketEntitlement.js';
 import { loadGroupAnnualLeaveCap } from '../../utils/groupAnnualLeaveCap.js';
@@ -85,7 +94,7 @@ const LEAVE_TRACK_META = {
     on_leave: { label: 'Annual', fullLabel: 'Annual Leave' },
 };
 
-const PENDING_LEAVE_KINDS = ['leave', 'future_leave', 'future_annual'];
+const PENDING_LEAVE_KINDS = TWO_STEP_LEAVE_KINDS;
 
 const MONTH_LABELS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 
@@ -254,6 +263,15 @@ function monthFourWeekRows(monthKey, todayKey) {
 }
 
 function leaveTypeLabel(record) {
+    const kind = String(record.leaveRequestKind || '').trim();
+    const previous = String(record.previousStatusLabel || '').toLowerCase();
+    if (kind === 'future_early') return 'Early Out';
+    if (kind === 'future_late' || kind === 'past_late') return 'Late In';
+    if (kind === 'yellow') {
+        if (previous.includes('early')) return 'Early Out';
+        if (previous.includes('late')) return 'Late In';
+        return 'Miss Punch';
+    }
     const requested = String(record.requestedStatusLabel || record.statusLabel || '').trim();
     const key = String(record.requestedStatusKey || record.statusKey || '').trim();
     const labels = {
@@ -329,7 +347,10 @@ function groupPendingRows(rows) {
                 statusKey: meta.statusKey,
                 requestedStatusKey: row.requestedStatusKey || row.statusKey || '',
                 leaveRequestKind: row.leaveRequestKind || 'leave',
+                leaveApprovalStage: String(row.leaveApprovalStage || '').trim(),
                 annualLeaveNotEligible: Boolean(row.annualLeaveNotEligible),
+                timeIn: row.leaveRequestTimeIn || row.timeIn || '',
+                timeOut: row.leaveRequestTimeOut || row.timeOut || '',
                 sortAt: row.leaveRequestedAt || row.leaveDecidedAt || row.date || '',
             });
         }
@@ -337,12 +358,20 @@ function groupPendingRows(rows) {
         const group = groups.get(groupKey);
         group.attendanceIds.push(String(row._id));
         if (row.annualLeaveNotEligible) group.annualLeaveNotEligible = true;
+        if (!group.timeIn && (row.leaveRequestTimeIn || row.timeIn)) {
+            group.timeIn = row.leaveRequestTimeIn || row.timeIn || '';
+        }
+        if (!group.timeOut && (row.leaveRequestTimeOut || row.timeOut)) {
+            group.timeOut = row.leaveRequestTimeOut || row.timeOut || '';
+        }
         if (String(row._id) < String(group.id)) {
             group.id = String(row._id);
         }
         if (meta.statusKey === 'pending') {
             group.status = 'Pending';
             group.statusKey = 'pending';
+            group.leaveApprovalStage = String(row.leaveApprovalStage || group.leaveApprovalStage || '').trim();
+            group.leaveRequestKind = row.leaveRequestKind || group.leaveRequestKind;
         }
         const sortAt = row.leaveRequestedAt || row.leaveDecidedAt || '';
         if (sortAt && (!group.sortAt || String(sortAt) > String(group.sortAt))) {
@@ -645,13 +674,55 @@ export async function getLeavePendingRequests(req, res) {
         const reporteeByMongoId = new Map(
             realEmployees.map((emp) => [String(emp._id), String(emp.primaryReportee || '')]),
         );
+        const reporteeIds = [
+            ...new Set(
+                [...reporteeByMongoId.values()].filter((id) => mongoose.Types.ObjectId.isValid(id)),
+            ),
+        ];
+        const [reporteePeople, hrResolved] = await Promise.all([
+            reporteeIds.length
+                ? EmployeeBasic.find({ _id: { $in: reporteeIds } })
+                      .select('firstName lastName')
+                      .lean()
+                : [],
+            resolveFlowchartHrEmployee(),
+        ]);
+        const hrEmployee = hrResolved?.employee || null;
+        const hrId = hrEmployee?._id ? String(hrEmployee._id) : '';
+        const hrName = leaveApprovalPersonName(hrEmployee) || 'HR';
+        const reporteeNameById = new Map(
+            (reporteePeople || []).map((person) => [String(person._id), leaveApprovalPersonName(person)]),
+        );
 
         const items = requestItems
             .map((item) => {
-                const isPrimaryReportee =
-                    Boolean(actorId) && reporteeByMongoId.get(String(item.employeeMongoId)) === actorId;
-                const canDecide = item.statusKey === 'pending' && (isHr || isPrimaryReportee);
-                return { ...item, canDecide, canEdit: hrFlags.canEdit };
+                const reporteeId = reporteeByMongoId.get(String(item.employeeMongoId)) || '';
+                const approvalStage =
+                    item.statusKey === 'pending'
+                        ? inferLeaveApprovalStage(item, { reporteeId, hrId })
+                        : '';
+                const canDecide =
+                    item.statusKey === 'pending' &&
+                    leaveApproverCanDecide({
+                        stage: approvalStage,
+                        actorId,
+                        reporteeId,
+                        hrId,
+                    });
+                const pendingWithName =
+                    approvalStage === LEAVE_STAGE_HR
+                        ? hrName
+                        : approvalStage
+                          ? reporteeNameById.get(reporteeId) || 'Primary reportee'
+                          : '';
+                return {
+                    ...item,
+                    approvalStage,
+                    pendingWithName,
+                    canDecide,
+                    canEdit: Boolean(hrFlags.canEdit || canDecide),
+                    canMaintain: Boolean(hrFlags.canEdit),
+                };
             })
             .sort((a, b) => {
                 const pendingRank = (row) => (row.statusKey === 'pending' ? 0 : 1);
@@ -691,13 +762,7 @@ export async function decideLeavePendingRequest(req, res) {
             return res.status(404).json({ message: 'No linked employee profile found for this user.' });
         }
 
-        const userId = req.user?._id || req.user?.id;
-        const isHr = Boolean(
-            userId &&
-                ((await hasPermission(userId, 'hrm_leave', 'view')) ||
-                    (await hasPermission(userId, 'hrm_leave', 'edit')) ||
-                    (await hasPermission(userId, 'hrm_leave', 'create'))),
-        );
+        const hrFlags = await resolveLeaveHrFlags(req);
 
         const attendanceId = String(req.body?.attendanceId || '').trim();
         const decision = String(req.body?.decision || '').trim().toLowerCase();
@@ -707,7 +772,7 @@ export async function decideLeavePendingRequest(req, res) {
         if (!attendanceId) {
             return res.status(400).json({ message: 'attendanceId is required.' });
         }
-        if (decision !== 'approved' && decision !== 'rejected') {
+        if (decision !== 'approved' && decision !== 'rejected' && decision !== 'updated') {
             return res.status(400).json({ message: 'decision must be approved or rejected.' });
         }
 
@@ -721,8 +786,10 @@ export async function decideLeavePendingRequest(req, res) {
             decision,
             approvedStatusKey: resolvedApprovedKey,
             leavePayType,
+            timeIn: req.body?.timeIn,
+            timeOut: req.body?.timeOut,
             actor,
-            hrBypass: isHr,
+            hrBypass: hrFlags.canEdit,
         });
 
         if (!result.ok) {
@@ -730,10 +797,15 @@ export async function decideLeavePendingRequest(req, res) {
         }
 
         return res.status(200).json({
-            message:
-                decision === 'approved'
-                    ? 'Leave request approved successfully.'
-                    : 'Leave request rejected successfully.',
+            message: result.updated
+                ? 'The request was updated.'
+                : result.advanced
+                ? `Accepted. This request is now pending with ${result.pendingWithName || 'HR'}.`
+                : decision === 'approved'
+                  ? 'Leave request approved successfully.'
+                  : 'Leave request rejected successfully.',
+            advanced: Boolean(result.advanced),
+            pendingWithName: result.pendingWithName || '',
             record: result.record,
         });
     } catch (error) {
@@ -781,13 +853,37 @@ export async function getLeavePendingInbox(req, res) {
             .select('_id')
             .lean();
         const reporteeIds = (reportees || []).map((row) => String(row._id)).filter(Boolean);
+        const hrResolved = await resolveFlowchartHrEmployee();
+        const hrId = hrResolved?.employee?._id ? String(hrResolved.employee._id) : '';
+        const actorIsHr = Boolean(hrId) && String(actor._id) === hrId;
+        const waitingOnActor = [];
+        if (reporteeIds.length) {
+            waitingOnActor.push({
+                employeeMongoId: { $in: reporteeIds },
+                $or: [
+                    { leaveApprovalStage: 'pending_reportee' },
+                    {
+                        leaveApprovalStage: { $in: ['', null] },
+                        leaveRequestKind: { $nin: ['future_leave', 'future_annual'] },
+                    },
+                ],
+            });
+        }
+        if (actorIsHr) {
+            waitingOnActor.push({ leaveApprovalStage: 'pending_hr' });
+            waitingOnActor.push({
+                leaveApprovalStage: { $in: ['', null] },
+                leaveRequestKind: { $in: ['future_leave', 'future_annual'] },
+            });
+        }
 
         let grouped = [];
-        if (reporteeIds.length) {
+        if (waitingOnActor.length) {
             const rows = await Attendance.find({
                 leaveRequestStatus: 'pending',
-                employeeMongoId: { $in: reporteeIds },
+                leaveRequestKind: { $in: PENDING_LEAVE_KINDS },
                 employeeName: { $not: /\(company\)\s*$/i },
+                $or: waitingOnActor,
             })
                 .sort({ leaveRequestedAt: -1, date: -1 })
                 .limit(800)
@@ -798,14 +894,7 @@ export async function getLeavePendingInbox(req, res) {
                 if (isCompanyShellEmployee(row.employeeName) || isCompanyShellEmployee(row)) {
                     return false;
                 }
-                const kind = String(row.leaveRequestKind || '').trim();
-                if (kind === 'yellow' || kind === 'future_late' || kind === 'future_early') {
-                    return false;
-                }
-                return (
-                    PENDING_LEAVE_KINDS.includes(kind) ||
-                    LEAVE_TRACK_KEYS.includes(String(row.requestedStatusKey || '').trim())
-                );
+                return PENDING_LEAVE_KINDS.includes(String(row.leaveRequestKind || '').trim());
             });
             grouped = groupPendingRows(leaveRows).filter((item) => item.statusKey === 'pending');
         }
@@ -842,6 +931,8 @@ export async function getLeavePendingInbox(req, res) {
                     requestedStatusKey: group.requestedStatusKey,
                     leaveRequestKind: group.leaveRequestKind,
                     leaveDashboard: true,
+                    approvalStage: group.leaveApprovalStage || '',
+                    canDecide: true,
                 }),
                 message: summary,
                 requestedDate: group.sortAt || new Date(),
@@ -1039,6 +1130,7 @@ async function revertLeaveAttendanceRecord(record) {
     record.leaveRequestFromDate = '';
     record.leaveRequestToDate = '';
     record.leaveRequestGroupId = '';
+    record.leaveApprovalStage = '';
     record.leaveRequestedAt = null;
     record.leaveDecidedAt = null;
     record.leaveDecidedBy = null;
@@ -1066,6 +1158,7 @@ async function writePendingLeaveDay({
     markedBy,
     reason,
     annualLeaveNotEligible = false,
+    leaveApprovalStage = '',
 }) {
     const employeeName = employeeDisplayName(employee) || 'Employee';
     let record = await Attendance.findOne({
@@ -1096,6 +1189,7 @@ async function writePendingLeaveDay({
     record.requestedStatusLabel = spec.requestedStatusLabel;
     record.leaveRequestKind = spec.kind;
     record.leaveRequestStatus = 'pending';
+    record.leaveApprovalStage = leaveApprovalStage || record.leaveApprovalStage || '';
     record.leaveRequestDayPart = 'full';
     record.leaveRequestTimeIn = '';
     record.leaveRequestTimeOut = '';
@@ -1367,7 +1461,42 @@ export async function applyLeaveRange(req, res) {
                 ),
         );
         if (existingGroup && existingIsSettled && !hrFlags.canEdit) {
-            return res.status(403).json({ message: 'Only HR can edit completed leave.' });
+            const flowchartHr = await isRequestUserDesignatedFlowchartHr(req);
+            if (!flowchartHr) {
+                return res.status(403).json({ message: 'Only HR can edit completed leave.' });
+            }
+        }
+        if (existingGroup && !existingIsSettled && !hrFlags.canEdit) {
+            const actor = await resolveActorEmployee(req);
+            const flowchartHr = await isRequestUserDesignatedFlowchartHr(req);
+            const hrResolvedForEdit = flowchartHr ? null : await resolveFlowchartHrEmployee();
+            const hrIdForEdit = hrResolvedForEdit?.employee?._id
+                ? String(hrResolvedForEdit.employee._id)
+                : '';
+            const reporteeIdForEdit = String(
+                employee?.primaryReportee?._id || employee?.primaryReportee || '',
+            );
+            const seed =
+                (existingGroup.records || []).find(
+                    (row) => String(row.leaveRequestStatus || '') === 'pending',
+                ) || existingGroup.records?.[0];
+            const stage = inferLeaveApprovalStage(seed, {
+                reporteeId: reporteeIdForEdit,
+                hrId: hrIdForEdit,
+            });
+            const allowed =
+                flowchartHr ||
+                leaveApproverCanDecide({
+                    stage,
+                    actorId: actor?._id,
+                    reporteeId: reporteeIdForEdit,
+                    hrId: hrIdForEdit,
+                });
+            if (!allowed) {
+                return res.status(403).json({
+                    message: 'Only HR or the assigned approver can edit this request.',
+                });
+            }
         }
 
         const excludeGroupId = existingGroup?.groupId || '';
@@ -1439,6 +1568,25 @@ export async function applyLeaveRange(req, res) {
         if (spec.requestedStatusKey === 'sick_leave') {
             specByDate = await resolveSickOverflowStatuses(employee, rangeDates, { excludeGroupId });
         }
+        const hrResolved = await resolveFlowchartHrEmployee();
+        const hrEmployee = hrResolved?.employee || null;
+        const reporteeId = String(employee?.primaryReportee?._id || employee?.primaryReportee || '');
+        const hrId = hrEmployee?._id ? String(hrEmployee._id) : '';
+        const pendingSeed = (existingGroup?.records || []).find(
+            (row) => String(row.leaveRequestStatus || '') === 'pending',
+        );
+        const approvalStage = pendingSeed
+            ? inferLeaveApprovalStage(pendingSeed, { reporteeId, hrId })
+            : openingLeaveApprovalStage(reporteeId, hrId);
+        const stageApprover = approvalStage === LEAVE_STAGE_HR ? hrEmployee : employee.primaryReportee;
+        if (!approveNow && !stageApprover?._id) {
+            return res.status(400).json({
+                message:
+                    approvalStage === LEAVE_STAGE_HR
+                        ? hrResolved?.message || 'HR is not configured in the Flowchart.'
+                        : 'Primary reportee is required before requesting leave.',
+            });
+        }
         const saved = [];
 
         for (const dateKey of rangeDates) {
@@ -1458,6 +1606,7 @@ export async function applyLeaveRange(req, res) {
                         ? `${reason} · Sick allowance used`
                         : reason,
                 annualLeaveNotEligible: escalateIneligibleAnnual,
+                leaveApprovalStage: approvalStage,
             });
             saved.push(record);
         }
@@ -1468,45 +1617,33 @@ export async function applyLeaveRange(req, res) {
                 return !min || (id && id < min) ? id : min;
             }, '');
             try {
-                if (escalateIneligibleAnnual) {
-                    await notifyFlowchartHrOfIneligibleAnnualLeave({
-                        employee,
-                        from,
-                        to,
-                        attendanceId: approvalAttendanceId || saved[0]?._id,
-                        groupId,
-                        requestedLabel: spec.requestedStatusLabel,
-                        requestedStatusKey: spec.requestedStatusKey,
-                        leaveRequestKind: spec.kind,
-                        reason,
-                        eligibleDays: annualEligibility.eligibleDays,
-                        requiredDays: annualEligibility.requiredDays,
-                        extraNote: ineligibleNotes.join(' · '),
-                    });
-                } else {
-                    await notifyPrimaryReporteeOfLeaveRequest({
-                        employee,
-                        manager: employee.primaryReportee,
-                        from,
-                        to,
-                        attendanceId: approvalAttendanceId || saved[0]?._id,
-                        groupId,
-                        requestedLabel: spec.requestedStatusLabel,
-                        requestedStatusKey: spec.requestedStatusKey,
-                        leaveRequestKind: spec.kind,
-                        reason,
-                    });
-                }
+                await notifyLeaveRequestApprover({
+                    employee,
+                    approver: stageApprover,
+                    stage: approvalStage,
+                    from,
+                    to,
+                    attendanceId: approvalAttendanceId || saved[0]?._id,
+                    groupId,
+                    requestedLabel: spec.requestedStatusLabel,
+                    requestedStatusKey: spec.requestedStatusKey,
+                    leaveRequestKind: spec.kind,
+                    reason,
+                });
             } catch (notifyError) {
                 console.warn('[applyLeaveRange] leave notify failed:', notifyError?.message || notifyError);
             }
 
+            const pendingWithName =
+                approvalStage === LEAVE_STAGE_HR
+                    ? leaveApprovalPersonName(hrEmployee) || 'HR'
+                    : leaveApprovalPersonName(employee.primaryReportee) || 'Primary reportee';
             return res.status(200).json({
                 message: escalateIneligibleAnnual
-                    ? 'Annual leave sent to HR for review. This employee is not eligible for leave.'
-                    : `${spec.requestedStatusLabel} request submitted for ${dayCount} day${
-                          dayCount === 1 ? '' : 's'
-                      }. Status is Pending.`,
+                    ? `Annual leave sent to ${pendingWithName}. This employee is not eligible for leave.`
+                    : `${spec.requestedStatusLabel} request is pending with ${pendingWithName}.`,
+                approvalStage,
+                pendingWithName,
                 from,
                 to,
                 dayCount,
@@ -1546,16 +1683,20 @@ export async function applyLeaveRange(req, res) {
         }
 
         return res.status(200).json({
-            message: `${spec.requestedStatusLabel} approved for ${dayCount} day${
-                dayCount === 1 ? '' : 's'
-            }.`,
+            message: result.advanced
+                ? `Accepted. This request is now pending with ${result.pendingWithName || 'HR'}.`
+                : `${spec.requestedStatusLabel} approved for ${dayCount} day${
+                      dayCount === 1 ? '' : 's'
+                  }.`,
+            advanced: Boolean(result.advanced),
+            pendingWithName: result.pendingWithName || '',
             from,
             to,
             dayCount,
             statusKey: spec.requestedStatusKey,
             statusLabel: spec.requestedStatusLabel,
             leaveType: spec.leaveType,
-            leaveRequestStatus: 'approved',
+            leaveRequestStatus: result.advanced ? 'pending' : 'approved',
             attendanceId: String(saved[0]._id),
             count: saved.length,
             record: result.record,
@@ -1606,24 +1747,30 @@ export async function returnLeaveRequest(req, res) {
             .lean();
 
         if (employee) {
-            const notifyArgs = {
-                employee,
-                from,
-                to,
-                attendanceId: String(seed._id),
-                groupId: seed.leaveRequestGroupId || group?.groupId || '',
-                requestedLabel: seed.requestedStatusLabel || seed.statusLabel || 'Leave',
-                requestedStatusKey: seed.requestedStatusKey || '',
-                leaveRequestKind: seed.leaveRequestKind || 'leave',
-                reason: seed.leaveRequestReason || '',
-            };
+            const hrResolved = await resolveFlowchartHrEmployee();
+            const hrEmployee = hrResolved?.employee || null;
+            const reporteeId = String(employee.primaryReportee?._id || employee.primaryReportee || '');
+            const hrId = hrEmployee?._id ? String(hrEmployee._id) : '';
+            const approvalStage = openingLeaveApprovalStage(reporteeId, hrId);
+            const approver = approvalStage === LEAVE_STAGE_HR ? hrEmployee : employee.primaryReportee;
+            for (const record of reopened) {
+                record.leaveApprovalStage = approvalStage;
+                await record.save();
+            }
             try {
-                if (seed.annualLeaveNotEligible) {
-                    await notifyFlowchartHrOfIneligibleAnnualLeave(notifyArgs);
-                } else {
-                    await notifyPrimaryReporteeOfLeaveRequest({
-                        ...notifyArgs,
-                        manager: employee.primaryReportee,
+                if (approver?._id) {
+                    await notifyLeaveRequestApprover({
+                        employee,
+                        approver,
+                        stage: approvalStage,
+                        from,
+                        to,
+                        attendanceId: String(seed._id),
+                        groupId: seed.leaveRequestGroupId || group?.groupId || '',
+                        requestedLabel: seed.requestedStatusLabel || seed.statusLabel || 'Leave',
+                        requestedStatusKey: seed.requestedStatusKey || '',
+                        leaveRequestKind: seed.leaveRequestKind || 'leave',
+                        reason: seed.leaveRequestReason || '',
                     });
                 }
             } catch (notifyError) {
@@ -1808,18 +1955,31 @@ export async function getLeaveTeamTrack(req, res) {
         }
         const hasTrackRange = from <= to;
 
+        const trackStatusKeys = trackStatusKeysForLeaveType(req.query.leaveType);
+        const trackStatusKeySet = new Set(trackStatusKeys);
         const leaveRows =
             !hasTrackRange || employeeIds.length === 0
                 ? []
                 : await Attendance.find({
-                      $or: [
-                          { employeeMongoId: { $in: employeeIds } },
-                          ...(enrolledCodes.length ? [{ employeeId: { $in: enrolledCodes } }] : []),
+                      $and: [
+                          {
+                              $or: [
+                                  { employeeMongoId: { $in: employeeIds } },
+                                  ...(enrolledCodes.length ? [{ employeeId: { $in: enrolledCodes } }] : []),
+                              ],
+                          },
+                          { date: { $gte: from, $lte: to } },
+                          {
+                              $or: [
+                                  { statusKey: { $in: trackStatusKeys } },
+                                  ...(trackStatusKeySet.has('compoff_leave') ? nextDayCompOffMatch().$or : []),
+                              ],
+                          },
                       ],
-                      date: { $gte: from, $lte: to },
-                      statusKey: { $in: trackStatusKeysForLeaveType(req.query.leaveType) },
                   })
-                      .select('employeeMongoId employeeId employeeName date statusKey requestedStatusKey leaveRequestStatus')
+                      .select(
+                          'employeeMongoId employeeId employeeName date statusKey requestedStatusKey leaveRequestStatus flexibleFromOtDate timeIn timeOut',
+                      )
                       .lean()
                       .maxTimeMS(12000);
 
@@ -1853,7 +2013,7 @@ export async function getLeaveTeamTrack(req, res) {
 
         const addTrackDay = (row, employee) => {
             const dateKey = String(row?.date || '');
-            let statusKey = String(row?.statusKey || '');
+            let statusKey = leaveStatusKeyForCount(row);
             const requestedKey = String(row?.requestedStatusKey || '').trim();
             const requestStatus = String(row?.leaveRequestStatus || '').trim();
             if (
@@ -1863,6 +2023,7 @@ export async function getLeaveTeamTrack(req, res) {
             ) {
                 statusKey = requestedKey;
             }
+            if (!trackStatusKeySet.has(statusKey)) return;
             if (!dateKey || !statusKey || dateKey > todayKey) return;
             const mongoId = String(row.employeeMongoId || employee?._id || '');
             const code = String(row.employeeId || employee?.employeeId || '').trim();
@@ -1916,7 +2077,6 @@ export async function getLeaveTeamTrack(req, res) {
         }
 
         const historicalProfiles = await loadHistoricalLeaveProfilesByEmployeeId(enrolledCodes);
-        const trackStatusKeys = new Set(trackStatusKeysForLeaveType(req.query.leaveType));
         for (const emp of realEmployees) {
             if (!visibility.has(String(emp._id))) continue;
             const overlayRows = overlayAttendanceRowsForEmployee({
@@ -1924,7 +2084,7 @@ export async function getLeaveTeamTrack(req, res) {
                 employee: emp,
                 from,
                 to,
-                statusKeys: trackStatusKeys,
+                statusKeys: trackStatusKeySet,
             });
             for (const row of overlayRows) {
                 addTrackDay(

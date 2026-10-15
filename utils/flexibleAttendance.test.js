@@ -8,11 +8,59 @@ import {
     flexibleMissedPayFraction,
     isCurrentMonthDate,
     isAuthorizedLeaveStatus,
+    isNextDayCompOffAttendance,
+    leaveStatusKeyForCount,
     splitApprovedOvertime,
     flexibleOtFieldsFromDuration,
     manualTimeOutDate,
+    mapPunchWithoutOvertime,
     mergeFlexibleOtState,
 } from './flexibleAttendance.js';
+
+describe('mapPunchWithoutOvertime', () => {
+    it('copies the real check-in and next-day check-out', () => {
+        const punch = mapPunchWithoutOvertime({
+            timeIn: '08:03:32',
+            timeOut: '07:18:44',
+            timeOutDate: '2026-10-09',
+        });
+        assert.equal(punch.timeIn, '08:03:32');
+        assert.equal(punch.timeOut, '07:18:44');
+        assert.equal(punch.timeOutDate, '2026-10-09');
+        assert.equal(punch.overtimeOnly, false);
+    });
+
+    it('keeps a same-day check-out', () => {
+        const punch = mapPunchWithoutOvertime({
+            timeIn: '08:00',
+            timeOut: '16:00',
+        });
+        assert.equal(punch.timeIn, '08:00');
+        assert.equal(punch.timeOut, '16:00');
+        assert.equal(punch.timeOutDate, '');
+        assert.equal(punch.overtimeOnly, false);
+    });
+
+    it('keeps a real check-in when the check-out is only overtime', () => {
+        const punch = mapPunchWithoutOvertime({
+            timeIn: '08:03',
+            timeOut: 'OT',
+        });
+        assert.equal(punch.timeIn, '08:03');
+        assert.equal(punch.timeOut, '');
+        assert.equal(punch.overtimeOnly, false);
+    });
+
+    it('does not copy a day that is only overtime', () => {
+        const punch = mapPunchWithoutOvertime({
+            timeIn: 'OT',
+            timeOut: 'OT',
+        });
+        assert.equal(punch.timeIn, '');
+        assert.equal(punch.timeOut, '');
+        assert.equal(punch.overtimeOnly, true);
+    });
+});
 
 describe('dayWorkedMinutes', () => {
     it('adds an earlier same-day session to the latest check-in and check-out', () => {
@@ -226,5 +274,30 @@ describe('isAuthorizedLeaveStatus', () => {
         assert.equal(isAuthorizedLeaveStatus('on_office', 'Auth'), true);
         assert.equal(isAuthorizedLeaveStatus('on_office', 'Auth Leave'), true);
         assert.equal(isAuthorizedLeaveStatus('on_office', 'Present'), false);
+    });
+});
+
+describe('next day comp-off attendance', () => {
+    it('counts next-day attendance as comp-off leave', () => {
+        const row = {
+            statusKey: 'on_office',
+            timeIn: 'OT',
+            timeOut: 'OT',
+            flexibleFromOtDate: '2026-10-05',
+        };
+        assert.equal(isNextDayCompOffAttendance(row), true);
+        assert.equal(leaveStatusKeyForCount(row), 'compoff_leave');
+    });
+
+    it('keeps a marked comp-off leave as comp-off leave', () => {
+        const row = { statusKey: 'compoff_leave', timeIn: '', timeOut: '' };
+        assert.equal(isNextDayCompOffAttendance(row), false);
+        assert.equal(leaveStatusKeyForCount(row), 'compoff_leave');
+    });
+
+    it('leaves a normal present day unchanged', () => {
+        const row = { statusKey: 'on_office', timeIn: '08:00', timeOut: '18:00' };
+        assert.equal(isNextDayCompOffAttendance(row), false);
+        assert.equal(leaveStatusKeyForCount(row), 'on_office');
     });
 });

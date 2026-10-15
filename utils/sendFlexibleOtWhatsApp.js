@@ -54,15 +54,15 @@ export function buildFlexibleOtWhatsAppText({
         const presentOn = formatAttendanceNoticeDate(nextDayDate);
         const fromOvertime = workedOn ? ` from your overtime on ${workedOn}` : '';
         const presentLine = presentOn
-            ? `${hello} HR set ${presentOn} as Present${fromOvertime}.`
-            : `${hello} HR set an authorized leave day as Present${fromOvertime}.`;
+            ? `${hello} you got OT. ${presentOn} is Present${fromOvertime}.`
+            : `${hello} you got OT. An authorized leave day is Present${fromOvertime}.`;
         const left = hoursLabel(remainderHours);
         return left ? `${presentLine} Remaining overtime on that day: ${left}.` : presentLine;
     }
     const when = workedOn ? ` for ${workedOn}` : '';
     const hours = hoursLabel(approvedHours);
     const hoursLine = hours ? `: ${hours}` : '';
-    return `${hello} HR set your overtime${when}${hoursLine}.`;
+    return `${hello} you got OT${when}${hoursLine}.`;
 }
 
 function safeLogError(error) {
