@@ -323,6 +323,7 @@ export async function sendAttendanceLeaveDecisionEmail({
     decision,
     requestedLabel,
     finalLabel,
+    rejectReason = '',
 }) {
     try {
         const mail = createTransport();
@@ -337,9 +338,12 @@ export async function sendAttendanceLeaveDecisionEmail({
         const accent = approved ? '#16a34a' : '#EA3D2F';
         const title = approved ? 'Leave Request Approved' : 'Leave Request Rejected';
         const shownDate = dateLabel || date;
+        const why = String(rejectReason || '').trim();
         const body = approved
             ? `Your leave request for <strong>${shownDate}</strong> was <strong>approved</strong>. Status set to <strong>${finalLabel || requestedLabel}</strong>.`
-            : `Your leave request for <strong>${shownDate}</strong> was <strong>rejected</strong>. Status remains <strong>${finalLabel || 'unchanged'}</strong>.`;
+            : `Your leave request for <strong>${shownDate}</strong> was <strong>rejected</strong>. Status remains <strong>${finalLabel || 'unchanged'}</strong>.${
+                  why ? ` Reason: <strong>${escapeHtml(why)}</strong>.` : ''
+              }`;
 
         await mail.transporter.sendMail({
             from: `"VeRP System" <${mail.from}>`,

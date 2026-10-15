@@ -160,6 +160,11 @@ const attendanceSchema = new mongoose.Schema(
             default: '',
             trim: true,
         },
+        leaveRejectReason: {
+            type: String,
+            default: '',
+            trim: true,
+        },
         /** 'leave' = red-day leave change; 'yellow' = late/early/mispunch → Present;
          *  future_* = planned request on an upcoming working day */
         leaveRequestKind: {

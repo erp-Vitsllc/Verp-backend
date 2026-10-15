@@ -788,6 +788,7 @@ export async function decideLeavePendingRequest(req, res) {
             leavePayType,
             timeIn: req.body?.timeIn,
             timeOut: req.body?.timeOut,
+            rejectReason: req.body?.rejectReason || req.body?.reason,
             actor,
             hrBypass: hrFlags.canEdit,
         });
@@ -1249,7 +1250,7 @@ async function loadPendingLeaveGroup(attendanceId) {
     return { ...group, records: pending };
 }
 
-async function markLeaveRecordsRejected(records, actor) {
+async function markLeaveRecordsRejected(records, actor, rejectReason = '') {
     for (const record of records || []) {
         const prevKey = String(record.previousStatusKey || 'not_marked');
         const hadNoClock = !String(record.timeIn || '').trim();
@@ -1261,6 +1262,7 @@ async function markLeaveRecordsRejected(records, actor) {
             record.statusLabel = record.previousStatusLabel || record.statusLabel;
         }
         record.leaveRequestStatus = 'rejected';
+        record.leaveRejectReason = String(rejectReason || '').trim();
         record.leaveDecidedAt = new Date();
         record.leaveDecidedBy = actor?._id || null;
         record.approvalStatus = '';
@@ -1305,6 +1307,10 @@ export async function applyLeaveRange(req, res) {
             String(req.body?.sendToHr || '').trim().toLowerCase() === 'true';
 
         if (shouldReject) {
+            const rejectReason = String(req.body?.rejectReason || req.body?.reason || '').trim();
+            if (!rejectReason) {
+                return res.status(400).json({ message: 'Reject reason is required.' });
+            }
             if (!attendanceId) {
                 return res.status(400).json({ message: 'attendanceId is required to reject leave.' });
             }
@@ -1329,6 +1335,7 @@ export async function applyLeaveRange(req, res) {
                 const result = await decideLeaveRequestInternal({
                     attendanceId: String(pendingSeed._id),
                     decision: 'rejected',
+                    rejectReason,
                     actor,
                     hrBypass: hrFlags.isHr,
                 });
@@ -1336,7 +1343,7 @@ export async function applyLeaveRange(req, res) {
                     return res.status(result.status || 400).json({ message: result.message });
                 }
             } else {
-                await markLeaveRecordsRejected(existingGroup.records, actor);
+                await markLeaveRecordsRejected(existingGroup.records, actor, rejectReason);
                 const seed = existingGroup.records[0];
                 await syncDashboardAction({
                     requestId: leaveDashboardRequestObjectId(seed.leaveRequestGroupId, seed._id),

@@ -37,8 +37,26 @@ function greeting(firstName) {
     return name ? `Hello ${name},` : 'Hello,';
 }
 
+function safeDescription(value) {
+    return String(value || '')
+        .replace(/[\r\n\t]+/g, ' ')
+        .replace(/[<>]/g, '')
+        .replace(/\s+/g, ' ')
+        .trim()
+        .slice(0, 180);
+}
+
+function approvedOtHrsLabel(value) {
+    const hours = Number(value);
+    if (!Number.isFinite(hours) || hours <= 0) return '';
+    const rounded = Math.round(hours * 100) / 100;
+    const shown = Number.isInteger(rounded) ? String(rounded) : String(rounded);
+    return shown === '1' ? '1 hr' : `${shown} hrs`;
+}
+
 /**
- * Short notice only. No phone, employee code, salary, or request reason.
+ * Short notice only. No phone, employee code, or salary.
+ * After HR approves the hours, the apply-OT description is included.
  */
 export function buildFlexibleOtWhatsAppText({
     firstName = '',
@@ -47,6 +65,7 @@ export function buildFlexibleOtWhatsAppText({
     nextDayDate = '',
     approvedHours = 0,
     remainderHours = 0,
+    description = '',
 } = {}) {
     const hello = greeting(firstName);
     const workedOn = formatAttendanceNoticeDate(sourceDate);
@@ -59,10 +78,14 @@ export function buildFlexibleOtWhatsAppText({
         const left = hoursLabel(remainderHours);
         return left ? `${presentLine} Remaining overtime on that day: ${left}.` : presentLine;
     }
-    const when = workedOn ? ` for ${workedOn}` : '';
-    const hours = hoursLabel(approvedHours);
-    const hoursLine = hours ? `: ${hours}` : '';
-    return `${hello} you got OT${when}${hoursLine}.`;
+    const earned = approvedOtHrsLabel(approvedHours);
+    const when = workedOn ? ` on ${workedOn}` : '';
+    const earnedLine = earned
+        ? `${hello} you have earned ${earned} of OT${when}.`
+        : `${hello} you have earned OT${when}.`;
+    const note = safeDescription(description);
+    const detail = note ? ` ${note}.` : '';
+    return `${earnedLine}${detail} Your OT will be adjusted as per your worked hours.`;
 }
 
 function safeLogError(error) {
@@ -118,6 +141,7 @@ export async function notifyEmployeeFlexibleOtWhatsApp({
             nextDayDate: record?.flexibleOtNextDayDate,
             approvedHours,
             remainderHours,
+            description: record?.flexibleOtReason,
         });
 
         const { sendTextMessage } = await import('../services/whatsappService.js');

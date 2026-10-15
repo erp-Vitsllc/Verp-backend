@@ -306,6 +306,10 @@ export async function decideEmployeeHubRequest(req, res) {
         if (decision !== 'Approved' && decision !== 'Rejected') {
             return res.status(400).json({ message: 'Decision must be Approved or Rejected.' });
         }
+        const decisionNote = String(req.body?.note || '').trim();
+        if (decision === 'Rejected' && !decisionNote) {
+            return res.status(400).json({ message: 'Reject reason is required.' });
+        }
 
         const row = await EmployeeHubRequest.findById(req.params.id);
         if (!row) return res.status(404).json({ message: 'Request not found.' });
@@ -317,7 +321,7 @@ export async function decideEmployeeHubRequest(req, res) {
         }
 
         row.status = decision;
-        row.decisionNote = String(req.body?.note || '').trim();
+        row.decisionNote = decisionNote;
         row.decidedAt = new Date();
         row.decidedBy = self._id;
         await row.save();

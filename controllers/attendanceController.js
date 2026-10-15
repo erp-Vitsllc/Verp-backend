@@ -2821,67 +2821,7 @@ export async function mapAttendanceFromEmployee(req, res) {
         if (!checkOutLocation) unset.checkOutLocation = 1;
 
         const approvalCtx = await loadChangeApprovalContext(req);
-        const reporteeRef = targetEmp.primaryReportee;
-        const stage = approvalStageForAttendanceChange({
-            actorIsHr: approvalCtx.actorIsHr,
-            actorId: approvalCtx.actor?._id,
-            reporteeId: reporteeRef?._id || reporteeRef || '',
-            hrId: approvalCtx.hr?._id,
-        });
-
-        if (stage !== 'apply') {
-            if (stage === 'pending_hr' && !approvalCtx.hr?._id) {
-                return res.status(400).json({
-                    message: 'Flowchart HR is not set, so this attendance change cannot be sent for approval.',
-                });
-            }
-            let reportee =
-                reporteeRef && typeof reporteeRef === 'object' && reporteeRef._id
-                    ? reporteeRef
-                    : null;
-            if (!reportee && reporteeRef) {
-                reportee = await EmployeeBasic.findById(reporteeRef)
-                    .select(CHANGE_REPORTEE_SELECT)
-                    .lean();
-            }
-            if (stage === 'pending_reportee' && !reportee?._id) {
-                return res.status(400).json({
-                    message: 'This employee has no primary reportee, so the change cannot be sent for approval.',
-                });
-            }
-            const existing = await Attendance.findOne({ date, employeeMongoId: targetId }).lean();
-            const pending = await submitAttendanceChange({
-                employee: targetEmp,
-                date,
-                action: 'map',
-                proposed: {
-                    statusKey: set.statusKey,
-                    statusLabel: set.statusLabel,
-                    leavePayType: leavePayTypeForStatus(set.statusKey),
-                    timeIn: set.timeIn,
-                    timeOut: set.timeOut,
-                    timeOutDate: set.timeOutDate,
-                    punchSessions: sessions,
-                    reason: set.reason,
-                    attachmentName: '',
-                    punchSource: set.punchSource,
-                    checkOutSource: set.checkOutSource,
-                    punchMappedFromEmployeeMongoId: sourceId,
-                    checkInLocation: checkInLocation || undefined,
-                    checkOutLocation: checkOutLocation || undefined,
-                },
-                previous: previousAttendanceSnapshot(existing),
-                stage,
-                actor: approvalCtx.actor,
-                reportee,
-                hr: approvalCtx.hr,
-            });
-            return res.status(200).json({
-                message: describeAttendanceSave({ savedCount: 0, pending: [pending] }),
-                date,
-                pending: [pending],
-            });
-        }
+        const existing = await Attendance.findOne({ date, employeeMongoId: targetId }).lean();
 
         await dropMappedOvertime(targetId, date);
         const doc = await Attendance.findOneAndUpdate(
@@ -2897,6 +2837,19 @@ export async function mapAttendanceFromEmployee(req, res) {
             employeeMongoId: targetId,
             actorId: approvalCtx.actor?._id,
         });
+        if (!approvalCtx.actorIsHr) {
+            await emailDirectAttendanceChange({
+                actor: approvalCtx.actor,
+                hr: approvalCtx.hr,
+                employee: targetEmp,
+                date,
+                previousLabel: existing?.statusLabel || 'Not marked',
+                nextLabel: `Mapped from ${employeeFullName(sourceEmp)}`,
+                timeIn: set.timeIn || '',
+                timeOut: set.timeOut || '',
+                reason: set.reason || '',
+            });
+        }
 
         return res.status(200).json({
             message: hasOut
@@ -3582,24 +3535,26 @@ export async function decideAttendanceChangeRequest(req, res) {
             staffType: request.staffType || '',
         };
 
-        if (decision === 'rejected' && (request.action === 'hour_adjust' || request.action === 'flexible_ot')) {
+        if (decision === 'rejected') {
             const rejectReason = String(req.body?.rejectReason || '').trim();
             if (!rejectReason) {
                 return res.status(400).json({ message: 'Reject reason is required.' });
             }
-            const bounced = await bounceHourAttendanceChange({
-                request,
-                actor,
-                employee: summaryEmployee,
-                reason: rejectReason,
-                noun: request.action === 'flexible_ot' ? 'OT' : 'hour',
-            });
-            if (bounced.error) return res.status(400).json({ message: bounced.error });
-            return res.status(200).json({ message: bounced.message });
-        }
+            if (request.action === 'hour_adjust' || request.action === 'flexible_ot') {
+                const bounced = await bounceHourAttendanceChange({
+                    request,
+                    actor,
+                    employee: summaryEmployee,
+                    reason: rejectReason,
+                    noun: request.action === 'flexible_ot' ? 'OT' : 'hour',
+                });
+                if (bounced.error) return res.status(400).json({ message: bounced.error });
+                return res.status(200).json({ message: bounced.message });
+            }
 
-        if (decision === 'rejected') {
             const waitingOnHr = request.stage === 'pending_hr';
+            request.rejectReason = rejectReason;
+            request.rejectedByName = [actor.firstName, actor.lastName].filter(Boolean).join(' ').trim();
             request.stage = 'rejected';
             if (waitingOnHr) {
                 request.decidedByHr = actor._id;
@@ -3920,7 +3875,15 @@ export async function requestAttendanceLeave(req, res) {
             });
         }
 
+        const requestedTimeIn = normalizeClockHHmm(req.body?.timeIn);
+        const requestedTimeOut = normalizeClockHHmm(req.body?.timeOut);
         if (isLateArrival) {
+            if (!requestedTimeIn || !requestedTimeOut) {
+                return res.status(400).json({ message: 'Check-in time and check-out time are required.' });
+            }
+            if (requestedTimeOut <= requestedTimeIn) {
+                return res.status(400).json({ message: 'Check-out time must be after check-in time.' });
+            }
             const limitMessage = await attendanceApprovalLimitMessageFor(employee, {
                 pool: 'late',
                 requestDates: [date],
@@ -3984,8 +3947,8 @@ export async function requestAttendanceLeave(req, res) {
         record.leaveRequestDayPart = dayPart;
         record.leaveRequestSession = session;
         record.leaveDayFraction = dayPart ? partialLeavePortion(dayPart) : 0;
-        record.leaveRequestTimeIn = partialLeave ? partialLeave.workStart || '' : '';
-        record.leaveRequestTimeOut = partialLeave ? partialLeave.workEnd || '' : '';
+        record.leaveRequestTimeIn = partialLeave ? partialLeave.workStart || '' : requestedTimeIn;
+        record.leaveRequestTimeOut = partialLeave ? partialLeave.workEnd || '' : requestedTimeOut;
         record.attachmentName = attachmentName || record.attachmentName || '';
         record.leaveRequestStatus = 'pending';
         record.leaveApprovalStage = opening.stage;
@@ -4286,8 +4249,8 @@ export async function requestAttendanceFuture(req, res) {
         if (dayPart !== 'full' && !session) {
             return res.status(400).json({ message: 'Choose AM or PM for a half day or quarter day.' });
         }
-        if (kind === 'leave' && !reason) {
-            return res.status(400).json({ message: 'Reason is required for authorized leave.' });
+        if ((kind === 'leave' || kind === 'late_arrived' || kind === 'early_go') && !reason) {
+            return res.status(400).json({ message: 'Reason is required.' });
         }
 
         const todayKey = getDubaiDateKey();
@@ -4559,6 +4522,7 @@ export async function decideAttendanceLeaveRequest(req, res) {
             leavePayType,
             timeIn: req.body?.timeIn,
             timeOut: req.body?.timeOut,
+            rejectReason: req.body?.rejectReason || req.body?.reason,
             actor: self,
         });
 
@@ -4591,6 +4555,7 @@ export async function decideLeaveRequestInternal({
     leavePayType = '',
     timeIn = '',
     timeOut = '',
+    rejectReason = '',
     actor,
     hrBypass = false,
 }) {
@@ -4640,6 +4605,11 @@ export async function decideLeaveRequestInternal({
                     ? 'Only HR can accept or reject this request.'
                     : 'Only the primary reportee can accept or reject this request.',
         };
+    }
+
+    const trimmedRejectReason = String(rejectReason || '').trim();
+    if (decision === 'rejected' && !trimmedRejectReason) {
+        return { ok: false, status: 400, message: 'Reject reason is required.' };
     }
 
     // Multi-day requests share a group id, so one decision covers every day of the range.
@@ -4780,6 +4750,7 @@ export async function decideLeaveRequestInternal({
             overflowMap.get(String(groupRecord.date || '').trim()) ||
             approvedStatusKey ||
             String(groupRecord.requestedStatusKey || requestedKey || '').trim();
+        if (decision === 'rejected') groupRecord.leaveRejectReason = trimmedRejectReason;
         const applied = await applyLeaveDecisionToRecord({
             record: groupRecord,
             decision,
@@ -4805,6 +4776,7 @@ export async function decideLeaveRequestInternal({
             decision,
             requestedLabel,
             finalLabel,
+            rejectReason: trimmedRejectReason,
         });
     }
 

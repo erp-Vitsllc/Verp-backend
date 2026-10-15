@@ -13,6 +13,7 @@ import EmployeeSalary from '../../models/EmployeeSalary.js';
 import AttendanceChangeRequest from '../../models/AttendanceChangeRequest.js';
 import { ATTENDANCE_CHANGE_OPEN_STAGES } from '../../utils/attendanceChangeApproval.js';
 import { collectPendingCalendarRequests } from '../../utils/groupCalendarRequests.js';
+import { resolveFlowchartHrEmployee } from '../../utils/resolveFlowchartHrEmployee.js';
 import { loadEnrolledLeaveVisibilityByMongoId } from '../../utils/leaveSalaryVisibility.js';
 import { getScheduledEmailTimeZone, getZonedParts } from '../../utils/scheduleDailyAtMidnight.js';
 import {
@@ -121,7 +122,7 @@ export async function getLeaveGroupCalendars(req, res) {
             employeeId: { $ne: 'VEGA-HR-0000' },
             ...REAL_EMPLOYEE_MONGO_FILTER,
         })
-            .select('_id employeeId firstName lastName staffType dateOfJoining')
+            .select('_id employeeId firstName lastName staffType dateOfJoining primaryReportee')
             .lean()
             .maxTimeMS(12000);
 
@@ -136,8 +137,11 @@ export async function getLeaveGroupCalendars(req, res) {
         const mongoIdSet = new Set(mongoIds);
         const codes = people.map((emp) => String(emp.employeeId || '').trim()).filter(Boolean);
         const mongoByCode = new Map(people.map((emp) => [String(emp.employeeId || '').trim(), String(emp._id)]));
+        const reporteeIds = [...new Set(
+            people.map((emp) => String(emp.primaryReportee || '').trim()).filter(Boolean),
+        )];
 
-        const [storedRecords, coverIndex, workingTime, holidayRows, salaryRows, changeRows] = await Promise.all([
+        const [storedRecords, coverIndex, workingTime, holidayRows, salaryRows, changeRows, reporteePeople, hrResolved] = await Promise.all([
             mongoIds.length
                 ? Attendance.find({
                       date: { $gte: window.from, $lte: window.to },
@@ -147,7 +151,7 @@ export async function getLeaveGroupCalendars(req, res) {
                       ],
                   })
                       .select(detail
-                          ? 'employeeMongoId employeeId employeeName date statusKey statusLabel timeIn timeOut timeOutDate checkInLocation checkOutLocation reason leaveRequestReason hourAdjustReason flexibleOtReason hourAdjustStatus leaveRequestStatus leaveRequestKind requestedStatusKey requestedStatusLabel flexibleOtStatus approvalStatus hoursApproved hoursTaken flexibleWorkedHours flexibleRequiredHours flexibleFromOtDate flexibleOtNextDayDate compOff leavePayType updatedAt historical'
+                          ? 'employeeMongoId employeeId employeeName date statusKey statusLabel timeIn timeOut timeOutDate checkInLocation checkOutLocation reason leaveRequestReason hourAdjustReason flexibleOtReason hourAdjustStatus leaveRequestStatus leaveApprovalStage leaveRequestKind requestedStatusKey requestedStatusLabel flexibleOtStatus approvalStatus hoursApproved hoursTaken flexibleWorkedHours flexibleRequiredHours flexibleFromOtDate flexibleOtNextDayDate compOff leavePayType updatedAt historical'
                           : 'employeeMongoId employeeId date statusKey timeIn timeOut updatedAt historical')
                       .lean()
                       .maxTimeMS(12000)
@@ -170,10 +174,17 @@ export async function getLeaveGroupCalendars(req, res) {
                       stage: { $in: ATTENDANCE_CHANGE_OPEN_STAGES },
                       date: { $gte: window.from, $lte: window.to },
                   })
-                    .select('employeeMongoId employeeName date action stage requestedByName proposed.statusLabel proposed.statusKey')
+                    .select('employeeMongoId employeeName date action stage requestedByName reporteeId reporteeName hrId hrName proposed.statusLabel proposed.statusKey')
                     .lean()
                     .maxTimeMS(8000)
                 : [],
+            detail && reporteeIds.length
+                ? EmployeeBasic.find({ _id: { $in: reporteeIds } })
+                    .select('firstName lastName')
+                    .lean()
+                    .maxTimeMS(8000)
+                : [],
+            detail ? resolveFlowchartHrEmployee().catch(() => null) : null,
         ]);
         const salaryByCode = new Map(
             (salaryRows || []).map((row) => [
@@ -201,11 +212,55 @@ export async function getLeaveGroupCalendars(req, res) {
         for (const list of byEmployee.values()) preferred.push(...preferPunchedRows(list));
         const covered = applyLeaveCoverIndex(preferred, coverIndex);
 
+        const hrEmployee = hrResolved?.employee || null;
+        const hrId = hrEmployee?._id ? String(hrEmployee._id) : '';
+        const hrName = employeeName(hrEmployee);
+        const nameById = new Map(
+            (reporteePeople || []).map((person) => [String(person._id), employeeName(person)]),
+        );
+        if (hrId && hrName) nameById.set(hrId, hrName);
+        const missingApproverIds = new Set();
+        for (const row of changeRows || []) {
+            const reporteeId = String(row?.reporteeId || '').trim();
+            const rowHrId = String(row?.hrId || '').trim();
+            if (!String(row?.reporteeName || '').trim() && reporteeId && !nameById.has(reporteeId)) {
+                missingApproverIds.add(reporteeId);
+            }
+            if (!String(row?.hrName || '').trim() && rowHrId && !nameById.has(rowHrId)) {
+                missingApproverIds.add(rowHrId);
+            }
+        }
+        if (missingApproverIds.size) {
+            const extraPeople = await EmployeeBasic.find({ _id: { $in: [...missingApproverIds] } })
+                .select('firstName lastName')
+                .lean()
+                .maxTimeMS(8000);
+            for (const person of extraPeople || []) nameById.set(String(person._id), employeeName(person));
+        }
+        for (const row of changeRows || []) {
+            if (!String(row?.reporteeName || '').trim() && row?.reporteeId) {
+                row.reporteeName = nameById.get(String(row.reporteeId)) || '';
+            }
+            if (!String(row?.hrName || '').trim() && row?.hrId) {
+                row.hrName = nameById.get(String(row.hrId)) || '';
+            }
+        }
+        const approversByEmployee = new Map(people.map((emp) => {
+            const reporteeId = String(emp.primaryReportee || '').trim();
+            return [String(emp._id), {
+                reporteeId,
+                reporteeName: nameById.get(reporteeId) || '',
+                hrId,
+                hrName,
+            }];
+        }));
+
         const pendingByEmployee = detail
             ? collectPendingCalendarRequests({
                 attendanceRows: preferred,
                 changeRows,
                 employeeNames: new Map(people.map((emp) => [String(emp._id), employeeName(emp)])),
+                approversByEmployee,
                 from: window.from,
                 to: window.to,
             })

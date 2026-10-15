@@ -276,7 +276,7 @@ export async function requestFlexibleOvertime(req, res) {
             return res.status(placement.error.status).json(placement.error.body);
         }
 
-        if (confirmNextDay && (isHr || permitted)) {
+        if (confirmNextDay) {
             const applied = await approveFlexibleOvertimeRecord(record, {
                 approvedHours,
                 reason,
@@ -287,7 +287,7 @@ export async function requestFlexibleOvertime(req, res) {
             if (applied.status !== 200) {
                 return res.status(applied.status).json(applied.body);
             }
-            if (!isHr && confirmNextDay) {
+            if (!isHr) {
                 const hr = await getDepartmentHOD('hr').catch(() => null);
                 try {
                     await sendAttendanceDirectChangeEmail({
@@ -304,7 +304,7 @@ export async function requestFlexibleOvertime(req, res) {
                 }
             }
             return res.status(200).json({
-                message: confirmNextDay ? 'Present set on the selected day.' : 'Overtime applied.',
+                message: 'Present set on the selected day.',
                 applied: true,
                 ...applied.body,
             });
@@ -383,8 +383,13 @@ export async function decideFlexibleOvertime(req, res) {
         }
 
         if (decision === 'rejected') {
+            const rejectReason = String(req.body?.rejectReason || '').trim();
+            if (!rejectReason) {
+                return res.status(400).json({ message: 'Reject reason is required.' });
+            }
             record.flexibleOtStatus = 'rejected';
             record.flexibleOtApprovedHours = 0;
+            record.flexibleOtReason = rejectReason;
             await record.save();
             return res.status(200).json({ message: 'Overtime rejected.', record });
         }

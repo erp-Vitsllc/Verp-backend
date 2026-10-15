@@ -37,8 +37,12 @@ describe('buildFlexibleOtWhatsAppText', () => {
             sourceDate: '2026-10-11',
             nextDayPresent: false,
             approvedHours: 4,
+            description: 'Night shift cover',
         });
-        assert.equal(text, 'Hello Ahmed, you got OT for 11 Oct 2026: 4 hours.');
+        assert.equal(
+            text,
+            'Hello Ahmed, you have earned 4 hrs of OT on 11 Oct 2026. Night shift cover. Your OT will be adjusted as per your worked hours.',
+        );
     });
 
     it('keeps the notice to the decision and leaves out employee codes', () => {
@@ -46,8 +50,12 @@ describe('buildFlexibleOtWhatsAppText', () => {
             firstName: 'Sara\nAli <tag>',
             sourceDate: '2026-10-01',
             approvedHours: 1,
+            description: 'Store\nclosing <note>',
         });
-        assert.equal(text, 'Hello Sara Ali tag, you got OT for 1 Oct 2026: 1 hour.');
+        assert.equal(
+            text,
+            'Hello Sara Ali tag, you have earned 1 hr of OT on 1 Oct 2026. Store closing note. Your OT will be adjusted as per your worked hours.',
+        );
         assert.doesNotMatch(text, /VITS|971|\d{8,}/);
     });
 });
