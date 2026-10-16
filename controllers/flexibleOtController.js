@@ -387,11 +387,20 @@ export async function decideFlexibleOvertime(req, res) {
             if (!rejectReason) {
                 return res.status(400).json({ message: 'Reject reason is required.' });
             }
-            record.flexibleOtStatus = 'rejected';
+            const previousNext = String(record.flexibleOtNextDayDate || '').trim();
+            if (previousNext) {
+                await revertSyntheticOtDay(record.employeeMongoId, previousNext, record.date);
+            }
+            record.flexibleOtStatus = '';
             record.flexibleOtApprovedHours = 0;
-            record.flexibleOtReason = rejectReason;
+            record.flexibleOtReason = '';
+            record.flexibleOtNextDayDate = '';
             await record.save();
-            return res.status(200).json({ message: 'Overtime rejected.', record });
+            await refreshFlexibleOtRecords([record]);
+            return res.status(200).json({
+                message: 'Overtime rejected. The request button is available again.',
+                record,
+            });
         }
 
         const editedHours = roundHours(req.body?.approvedHours);

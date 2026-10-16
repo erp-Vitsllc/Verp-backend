@@ -20,13 +20,15 @@ function hoursDiffer(left, right) {
     return Math.abs((Number(left) || 0) - (Number(right) || 0)) >= 0.001;
 }
 
-function writeFromMerged(merged) {
+function writeFromMerged(merged, existing) {
     const write = {
         flexibleWorkedHours: merged.flexibleWorkedHours,
         flexibleRequiredHours: merged.flexibleRequiredHours,
         flexibleOtHours: merged.flexibleOtHours,
     };
-    if (merged.changed) {
+    const rejected = String(existing?.flexibleOtStatus || '') === 'rejected';
+    // Rejection must not keep the request buttons hidden.
+    if (merged.changed || rejected) {
         write.flexibleOtStatus = '';
         write.flexibleOtApprovedHours = 0;
         write.flexibleOtReason = '';
@@ -39,6 +41,7 @@ function rowNeedsOtWrite(row, write, changed) {
     if (hoursDiffer(row?.flexibleOtHours, write.flexibleOtHours)) return true;
     if (hoursDiffer(row?.flexibleWorkedHours, write.flexibleWorkedHours)) return true;
     if (hoursDiffer(row?.flexibleRequiredHours, write.flexibleRequiredHours)) return true;
+    if (String(row?.flexibleOtStatus || '') === 'rejected') return true;
     if (!changed) return false;
     return Boolean(
         String(row?.flexibleOtStatus || '').trim() ||
@@ -159,7 +162,8 @@ export async function refreshFlexibleOtRecords(records) {
         }
         const punchIn = String(row?.timeIn || '').trim();
         const punchOut = String(row?.timeOut || '').trim();
-        if (punchIn === 'OT' || punchOut === 'OT' || String(row?.flexibleFromOtDate || '').trim()) continue;
+        // A copied next-day present is stored as OT. A real check-in and check-out still has overtime.
+        if (punchIn === 'OT' || punchOut === 'OT') continue;
         const staffType = normalizeStaffType(staffById.get(String(row.employeeMongoId)) || 'office');
         const week = getWeekForStaffType(workingTime, staffType);
         const flexible = isFlexibleTiming(week);
@@ -182,11 +186,15 @@ export async function refreshFlexibleOtRecords(records) {
             statusKey: row.statusKey,
         });
         const merged = mergeFlexibleOtState(row, fields);
-        const write = writeFromMerged(merged);
+        const rejected = String(row.flexibleOtStatus || '') === 'rejected';
+        const write = writeFromMerged(merged, row);
         if (!rowNeedsOtWrite(row, write, merged.changed)) continue;
+        const revertNext =
+            merged.revertNextDayDate ||
+            (rejected ? String(row.flexibleOtNextDayDate || '').trim() : '');
         Object.assign(row, write);
-        if (merged.revertNextDayDate) {
-            await revertSyntheticOtDay(row.employeeMongoId, merged.revertNextDayDate, row.date);
+        if (revertNext) {
+            await revertSyntheticOtDay(row.employeeMongoId, revertNext, row.date);
         }
         writes.push({
             updateOne: {
@@ -230,5 +238,5 @@ export async function flexibleOtManualUpdate({ employee, date, timeIn, timeOut, 
     if (merged.revertNextDayDate) {
         await revertSyntheticOtDay(employeeMongoId, merged.revertNextDayDate, date);
     }
-    return { timeOutDate, ...writeFromMerged(merged) };
+    return { timeOutDate, ...writeFromMerged(merged, existing) };
 }

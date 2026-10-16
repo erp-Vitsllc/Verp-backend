@@ -3549,6 +3549,18 @@ export async function decideAttendanceChangeRequest(req, res) {
                     noun: request.action === 'flexible_ot' ? 'OT' : 'hour',
                 });
                 if (bounced.error) return res.status(400).json({ message: bounced.error });
+                if (request.action === 'flexible_ot' && request.stage === 'rejected') {
+                    const attendanceId = String(request.proposed?.attendanceId || '').trim();
+                    if (mongoose.Types.ObjectId.isValid(attendanceId)) {
+                        const otRow = await Attendance.findById(attendanceId);
+                        const otStatus = String(otRow?.flexibleOtStatus || '');
+                        if (otRow && otStatus !== 'approved') {
+                            if (otStatus === 'pending') otRow.flexibleOtStatus = 'rejected';
+                            if (otRow.isModified?.()) await otRow.save();
+                            await refreshFlexibleOtRecords([otRow]);
+                        }
+                    }
+                }
                 return res.status(200).json({ message: bounced.message });
             }
 
