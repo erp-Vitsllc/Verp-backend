@@ -246,6 +246,10 @@ export async function syncZohoBillsChunk(query = {}) {
                 '../utils/markVehicleGarageServicesPaidFromZoho.js'
             );
             await markVehicleGarageServicesPaidFromZohoBillIds(paidIds);
+            const { markUtilityBillsPaidForZohoBillIds } = await import(
+                '../utils/markUtilityVendorBillsPaidFromZoho.js'
+            );
+            await markUtilityBillsPaidForZohoBillIds(paidIds);
         }
     } catch (err) {
         console.warn(
@@ -377,6 +381,10 @@ export async function upsertZohoBillFromApi(bill, extras = {}) {
                 '../utils/markVehicleGarageServicesPaidFromZoho.js'
             );
             await markVehicleGarageServicesPaidFromZohoBillIds([doc.zohoBillId]);
+            const { markUtilityBillsPaidForZohoBillIds } = await import(
+                '../utils/markUtilityVendorBillsPaidFromZoho.js'
+            );
+            await markUtilityBillsPaidForZohoBillIds([doc.zohoBillId]);
         }
     } catch (err) {
         console.warn(

@@ -3,7 +3,13 @@ import UtilityBillPayment from '../models/UtilityBillPayment.js';
 import EmployeeBasic from '../models/EmployeeBasic.js';
 import DashboardAction from '../models/DashboardAction.js';
 import ZohoBill from '../models/ZohoBill.js';
-import { fetchBillById, fetchBillByIdAcrossOrgs } from '../services/zohoService.js';
+import {
+    fetchBillById,
+    fetchBillByIdAcrossOrgs,
+    searchZohoBillsByNumber,
+    searchZohoBillsByText,
+} from '../services/zohoService.js';
+import { resolveZohoBillSerialNumber } from './zohoPurchaseMappers.js';
 import { upsertZohoBillFromApi } from '../services/zohoPurchaseSyncService.js';
 import { withZohoOrganization } from './zohoOrgContext.js';
 import { resolveZohoOrganizationIdForCompany } from './resolveZohoOrganization.js';
@@ -36,9 +42,26 @@ function paymentRowsTotal(zohoBill) {
     }, 0);
 }
 
+function zohoBillHasPaymentSignal(zohoBill) {
+    const source =
+        zohoBill?.bill && typeof zohoBill.bill === 'object' ? zohoBill.bill : zohoBill;
+    if (!source || typeof source !== 'object') return false;
+    if (clean(source.status || source.status_formatted || source.current_sub_status)) return true;
+    const balance = toAmount(
+        source.balance ?? source.balance_due ?? source.balanceDue ?? source.bcy_balance,
+    );
+    if (Number.isFinite(balance)) return true;
+    const total = toAmount(source.total ?? source.total_amount ?? source.amount);
+    return Number.isFinite(total);
+}
+
 function isZohoBillFullyPaidFields(zohoBill) {
-    const status = clean(zohoBill.status || zohoBill.status_formatted).toLowerCase();
-    if (status === 'paid') return true;
+    const status = clean(
+        zohoBill.status || zohoBill.status_formatted || zohoBill.current_sub_status,
+    )
+        .toLowerCase()
+        .replace(/\s+/g, '_');
+    if (status === 'paid' || status === 'fully_paid') return true;
     if (status === 'void' || status === 'draft') return false;
 
     const total = toAmount(zohoBill.total ?? zohoBill.total_amount ?? zohoBill.amount);
@@ -191,6 +214,59 @@ async function persistUtilityBillsAsPaid(bills, { paidBy = null, comment = '' } 
         paidCount: bills.length,
         bills: bills.map((b) => (typeof b.toObject === 'function' ? b.toObject() : b)),
     };
+}
+
+/** True when a Zoho bill row is the serial / bill number shown on the utility card. */
+export function zohoBillMatchesDisplayedNumber(zohoBill, number) {
+    const wanted = clean(number);
+    if (!wanted || !zohoBill || typeof zohoBill !== 'object') return false;
+    const serial = clean(resolveZohoBillSerialNumber(zohoBill));
+    if (serial && serial === wanted) return true;
+    return [
+        zohoBill.bill_number,
+        zohoBill.billNumber,
+        zohoBill.reference_number,
+        zohoBill.referenceNumber,
+    ].some((value) => clean(value) === wanted);
+}
+
+/**
+ * Zoho bills sync already knows these ids are paid. Stamp the linked utility
+ * rows, including a match on the Serial No. shown in the ERP.
+ */
+export async function markUtilityBillsPaidForZohoBillIds(zohoBillIds = []) {
+    const ids = [...new Set((Array.isArray(zohoBillIds) ? zohoBillIds : []).map((id) => clean(id)).filter(Boolean))];
+    if (!ids.length) return { paidCount: 0, bills: [] };
+
+    const cached = await ZohoBill.find({ zohoBillId: { $in: ids } })
+        .select('billNumber zohoRaw')
+        .lean();
+    const serials = [
+        ...new Set(
+            cached
+                .map(
+                    (row) =>
+                        clean(resolveZohoBillSerialNumber(row?.zohoRaw)) ||
+                        clean(row?.billNumber),
+                )
+                .filter(Boolean),
+        ),
+    ];
+    const or = [
+        { zohoBillId: { $in: ids } },
+        { zohoBillIds: { $in: ids } },
+        { 'zohoLineItems.zohoBillId': { $in: ids } },
+    ];
+    if (serials.length) or.push({ zohoBillNumber: { $in: serials } });
+
+    const bills = await UtilityBillPayment.find({
+        status: 'Approved',
+        $or: or,
+    });
+    if (!bills.length) return { paidCount: 0, bills: [] };
+    return persistUtilityBillsAsPaid(bills, {
+        comment: 'Paid in Zoho (synced to ERP)',
+    });
 }
 
 function collectZohoBillIds({ body = {}, payload = {}, zohoPayment = {} } = {}) {
@@ -505,7 +581,7 @@ export async function syncApprovedUtilityBillsPaidFromZoho({
                     cached?.organizationId,
                 );
                 const live = await fetchZohoBillLive(id, preferredOrg);
-                if (live) {
+                if (live && zohoBillHasPaymentSignal(live)) {
                     try {
                         await upsertZohoBillFromApi(live);
                     } catch {
@@ -524,6 +600,58 @@ export async function syncApprovedUtilityBillsPaidFromZoho({
 
         if (cached && isZohoBillFullyPaid(cached)) return { paid: true, live: false };
         return { paid: null, live: false };
+    }
+
+    async function confirmPaidByDisplayedNumber(number, bill) {
+        const wanted = clean(number);
+        if (!wanted) return false;
+        const preferred = await resolvePreferredOrgForBill(bill, '');
+        const orgs = [...new Set([preferred, ...orgFallbacks].filter(Boolean))].slice(0, 3);
+        const attempts = orgs.length ? orgs : [''];
+
+        for (const orgId of attempts) {
+            let rows = [];
+            try {
+                rows = await withZohoOrganization(orgId || null, async () => {
+                    const [byNumber, byText] = await Promise.all([
+                        searchZohoBillsByNumber(wanted),
+                        searchZohoBillsByText(wanted),
+                    ]);
+                    return [...byNumber, ...byText];
+                });
+            } catch {
+                continue;
+            }
+
+            const seen = new Set();
+            let detailFetches = 0;
+            for (const row of rows) {
+                const id = clean(row?.bill_id || row?.id);
+                if (id && seen.has(id)) continue;
+                if (id) seen.add(id);
+                let full = row;
+                if (id && !zohoBillMatchesDisplayedNumber(row, wanted)) {
+                    if (detailFetches >= 4) continue;
+                    detailFetches += 1;
+                    try {
+                        full =
+                            (await withZohoOrganization(orgId || null, () => fetchBillById(id))) ||
+                            row;
+                    } catch {
+                        full = row;
+                    }
+                }
+                if (!zohoBillMatchesDisplayedNumber(full, wanted)) continue;
+                if (!isZohoBillFullyPaid(full)) continue;
+                try {
+                    await upsertZohoBillFromApi(full);
+                } catch {
+                    /* cache update optional */
+                }
+                return true;
+            }
+        }
+        return false;
     }
 
     for (const bill of candidates) {
@@ -546,6 +674,12 @@ export async function syncApprovedUtilityBillsPaidFromZoho({
                 checks.push(await readPaidFlag(serialId, bill));
             } else if (bySerial && isZohoBillFullyPaid(bySerial)) {
                 checks.push({ paid: true, live: false });
+            }
+        }
+
+        if (!checks.some((row) => row.paid === true) && serial) {
+            if (await confirmPaidByDisplayedNumber(serial, bill)) {
+                checks.push({ paid: true, live: true });
             }
         }
 

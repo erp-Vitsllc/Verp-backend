@@ -188,8 +188,22 @@ function entryEligibleForBillMonth(entry, billMonth) {
 }
 
 /**
- * That month's bill is settled when Paid OR already sent to Zoho.
+ * A saved month is settled when it is Paid, already in Zoho, or the entered
+ * amount is 0. Zoho cannot take a zero bill, and there is nothing to pay.
  */
+export function utilityMonthBillIsSettled(bills = []) {
+    const rows = (Array.isArray(bills) ? bills : []).filter(
+        (bill) => String(bill?.status || '') !== 'Rejected',
+    );
+    if (!rows.length) return false;
+    return rows.some((bill) => {
+        if (String(bill.status || '') === 'Paid') return true;
+        if (utilityBillHasZohoLink(bill)) return true;
+        const amount = Number(bill.amount);
+        return Number.isFinite(amount) && amount <= 0;
+    });
+}
+
 export async function isUtilityMonthBillSettled(entryId, billMonth) {
     const id = String(entryId || '').trim();
     const ym = normalizeUtilityBillMonth(billMonth);
@@ -200,13 +214,10 @@ export async function isUtilityMonthBillSettled(entryId, billMonth) {
         billMonth: ym,
         status: { $ne: 'Rejected' },
     })
-        .select('status zohoBillId zohoBillIds zohoLineItems zohoSyncedAt')
+        .select('status amount zohoBillId zohoBillIds zohoLineItems zohoSyncedAt')
         .lean();
 
-    if (!bills.length) return false;
-    return bills.some(
-        (b) => String(b.status || '') === 'Paid' || utilityBillHasZohoLink(b),
-    );
+    return utilityMonthBillIsSettled(bills);
 }
 
 /**

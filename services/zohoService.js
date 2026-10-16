@@ -1472,6 +1472,25 @@ export async function fetchBills(query = {}) {
     };
 }
 
+/** Search bills by any text Zoho indexes, including the Serial No. custom field. */
+export async function searchZohoBillsByText(text) {
+    const query = String(text || '').trim();
+    if (!query) return [];
+    try {
+        const chunk = await fetchZohoBooksChunk('/bills', 'bills', {
+            params: { search_text: query },
+            startPage: 1,
+            maxRows: 15,
+            perPage: 15,
+            timeout: 15000,
+        });
+        return chunk.rows || [];
+    } catch (err) {
+        console.warn('[searchZohoBillsByText]', err?.message || err);
+        return [];
+    }
+}
+
 /** Targeted lookup by Zoho bill_number and/or reference_number (vendor invoice). */
 export async function searchZohoBillsByNumber(billNumber) {
     const number = String(billNumber || '').trim();

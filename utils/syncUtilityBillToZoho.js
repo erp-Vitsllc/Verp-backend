@@ -480,6 +480,20 @@ async function syncApprovedUtilityBillToZohoInner(billDoc, { markAsOpen = true }
     if (!Number.isFinite(amount) || amount <= 0) {
         billDoc.zohoSyncError = 'Actual amount must be greater than zero for Zoho.';
         await billDoc.save();
+        try {
+            const { clearUtilityBillPaymentDayRemindersForBills } = await import(
+                './processUtilityBillPaymentDayReminders.js'
+            );
+            await clearUtilityBillPaymentDayRemindersForBills(
+                [billDoc],
+                'Month bill amount is zero — nothing to pay',
+            );
+        } catch (clearErr) {
+            console.warn(
+                '[UtilityBillZoho] zero-amount reminder clear failed:',
+                clearErr?.message || clearErr,
+            );
+        }
         return { ok: false, message: billDoc.zohoSyncError };
     }
 

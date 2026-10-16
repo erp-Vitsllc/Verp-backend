@@ -88,14 +88,27 @@ function normalizePaymentDay(values = {}) {
     return next;
 }
 
-function mapEntry(doc, detailRevisions = []) {
+function valuesForResponse(values, { leanAttachment = false } = {}) {
+    const next = normalizePaymentDay(values || {});
+    if (!leanAttachment) return next;
+    const file = next.attachment;
+    if (!file || typeof file !== 'object') return next;
+    next.attachment = {
+        name: String(file.name || ''),
+        type: String(file.type || ''),
+        size: Number(file.size) || 0,
+    };
+    return next;
+}
+
+function mapEntry(doc, detailRevisions = [], { leanAttachment = false } = {}) {
     if (!doc) return null;
     const o = doc.toObject ? doc.toObject() : doc;
     return {
         id: String(o._id),
         type: o.type || '',
         status: o.status === 'Inactive' ? 'Inactive' : 'Active',
-        values: normalizePaymentDay(o.values || {}),
+        values: valuesForResponse(o.values || {}, { leanAttachment }),
         assignedTo: o.assignedTo || '',
         assignedToType: o.assignedToType || '',
         assignedToId: o.assignedToId || '',
@@ -242,7 +255,9 @@ export async function listUtilityEntries(req, res) {
         const rows = await UtilityEntry.find(filter).sort({ createdAt: -1 }).lean();
         const revisions = await detailRevisionsByEntryId(rows.map((row) => row._id));
         return res.json({
-            entries: rows.map((row) => mapEntry(row, revisions.get(String(row._id)) || [])),
+            entries: rows.map((row) =>
+                mapEntry(row, revisions.get(String(row._id)) || [], { leanAttachment: true }),
+            ),
         });
     } catch (err) {
         console.error('[listUtilityEntries]', err);

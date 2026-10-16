@@ -76,6 +76,28 @@ function attachmentIsPresent(attachment) {
     return Boolean(String(attachment?.name || '').trim());
 }
 
+async function clearZeroAmountPaymentDayReminders(bills = []) {
+    const zeroBills = (Array.isArray(bills) ? bills : []).filter((bill) => {
+        const amount = Number(bill?.amount);
+        return Number.isFinite(amount) && amount <= 0;
+    });
+    if (!zeroBills.length) return;
+    try {
+        const { clearUtilityBillPaymentDayRemindersForBills } = await import(
+            '../../utils/processUtilityBillPaymentDayReminders.js'
+        );
+        await clearUtilityBillPaymentDayRemindersForBills(
+            zeroBills,
+            'Month bill amount is zero — nothing to pay',
+        );
+    } catch (err) {
+        console.warn(
+            '[UtilityBill] zero-amount reminder clear failed:',
+            err?.message || err,
+        );
+    }
+}
+
 async function resolveRequesterEmployee(user) {
     if (!user) return null;
     const oid = user.employeeObjectId || user.employeeId;
@@ -650,6 +672,47 @@ async function refreshUtilityBillBatchInbox(batchId, { comment = '' } = {}) {
     return { remainingPending: remaining.length };
 }
 
+const OVERVIEW_BILL_FIELDS =
+    '_id entryId batchId utilityType provider accountNo billMonth amount monthlyRental differenceAmount status paymentDay payByCompanyName payByEmployeeName payByEmployeeId companyPayAmount employeePayAmount zohoBillId zohoBillIds zohoBillNumber zohoBillStatus zohoLineItems.zohoBillId zohoLineItems.payByEmployeeId zohoLineItems.amount createdAt';
+
+/** Dashboard refreshes must not each start another Zoho round-trip. */
+const OVERVIEW_PAID_SYNC_COOLDOWN_MS = 60_000;
+let overviewPaidSyncAt = 0;
+let overviewPaidSyncInFlight = null;
+
+/**
+ * Paid-status sync for the dashboard. Runs after the response is sent.
+ * A live Zoho check of many bills was blocking the Utility Bills page.
+ */
+function scheduleOverviewPaidSync(bills) {
+    const billIds = (Array.isArray(bills) ? bills : [])
+        .filter((bill) => bill?.status === 'Approved' && utilityBillHasZohoLink(bill))
+        .sort((a, b) => String(b.billMonth || '').localeCompare(String(a.billMonth || '')))
+        .slice(0, 12)
+        .map((bill) => bill._id);
+    if (!billIds.length) return;
+
+    const now = Date.now();
+    if (overviewPaidSyncInFlight || now - overviewPaidSyncAt < OVERVIEW_PAID_SYNC_COOLDOWN_MS) {
+        return;
+    }
+
+    overviewPaidSyncAt = now;
+    overviewPaidSyncInFlight = syncApprovedUtilityBillsPaidFromZoho({
+        billIds,
+        fetchLive: true,
+    })
+        .catch((syncErr) => {
+            console.warn(
+                '[listUtilityBillPayments] overview Zoho paid sync failed:',
+                syncErr?.message || syncErr,
+            );
+        })
+        .finally(() => {
+            overviewPaidSyncInFlight = null;
+        });
+}
+
 /**
  * POST /api/UtilityBill/check-duplicates
  * Body: { items: [{ provider, billNumber, billId? }] }
@@ -684,7 +747,7 @@ export async function listUtilityBillPayments(req, res) {
             overview,
         } = req.query;
 
-        // Dashboard / pending cards / profile: one lean list, no Zoho live sync or attachment payloads.
+        // Dashboard / pending cards / profile: lean list. Zoho paid sync runs after this response.
         if (String(overview || '') === '1' && !batchId) {
             const overviewFilter = {};
             if (entryId) {
@@ -710,36 +773,10 @@ export async function listUtilityBillPayments(req, res) {
             if (/^\d{4}-\d{2}$/.test(occupancyMonth)) {
                 overviewFilter.billMonth = occupancyMonth;
             }
-            let overviewBills = await UtilityBillPayment.find(overviewFilter)
-                .select(
-                    '_id entryId batchId utilityType provider accountNo billMonth amount monthlyRental differenceAmount status paymentDay payByCompanyName payByEmployeeName payByEmployeeId companyPayAmount employeePayAmount zohoBillId zohoBillIds zohoBillNumber zohoBillStatus zohoLineItems.zohoBillId zohoLineItems.payByEmployeeId zohoLineItems.amount createdAt',
-                )
+            const overviewBills = await UtilityBillPayment.find(overviewFilter)
+                .select(OVERVIEW_BILL_FIELDS)
                 .lean();
-            const linkedIds = overviewBills
-                .filter((bill) => bill.status === 'Approved' && utilityBillHasZohoLink(bill))
-                .sort((a, b) => String(b.billMonth || '').localeCompare(String(a.billMonth || '')))
-                .slice(0, 12)
-                .map((bill) => bill._id);
-            if (linkedIds.length) {
-                try {
-                    const synced = await syncApprovedUtilityBillsPaidFromZoho({
-                        billIds: linkedIds,
-                        fetchLive: true,
-                    });
-                    if ((synced?.paidCount || 0) > 0 || (synced?.unpaidCount || 0) > 0) {
-                        overviewBills = await UtilityBillPayment.find(overviewFilter)
-                            .select(
-                                '_id entryId batchId utilityType provider accountNo billMonth amount monthlyRental differenceAmount status paymentDay payByCompanyName payByEmployeeName payByEmployeeId companyPayAmount employeePayAmount zohoBillId zohoBillIds zohoBillNumber zohoBillStatus zohoLineItems.zohoBillId zohoLineItems.payByEmployeeId zohoLineItems.amount createdAt',
-                            )
-                            .lean();
-                    }
-                } catch (syncErr) {
-                    console.warn(
-                        '[listUtilityBillPayments] overview Zoho paid sync failed:',
-                        syncErr?.message || syncErr,
-                    );
-                }
-            }
+            scheduleOverviewPaidSync(overviewBills);
             return res.status(200).json({ bills: overviewBills });
         }
 
@@ -1349,6 +1386,7 @@ export async function createUtilityBillBatch(req, res) {
         }
 
         const bills = await UtilityBillPayment.insertMany(docs);
+        await clearZeroAmountPaymentDayReminders(bills);
         let zohoSync = null;
         if (stage.status === 'Approved') {
             zohoSync = await syncApprovedUtilityBillsToZoho(bills, { markAsOpen: true });
@@ -1934,6 +1972,7 @@ export async function updateUtilityBillBatch(req, res) {
             }
             await bill.save();
         }
+        await clearZeroAmountPaymentDayReminders(bills);
 
         if (creatorResend) {
             const inboxBatchId = String(bills[0]?.batchId || batchId || '');
