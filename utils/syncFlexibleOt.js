@@ -102,64 +102,6 @@ export async function refreshFlexibleOtRecords(records) {
     const writes = [];
 
     for (const row of list) {
-        if (String(row?.punchMappedFromEmployeeMongoId || '').trim()) {
-            const staffType = normalizeStaffType(staffById.get(String(row.employeeMongoId)) || 'office');
-            const week = getWeekForStaffType(workingTime, staffType);
-            const flexible = isFlexibleTiming(week);
-            const nonWorking = Boolean(
-                nonWorkingFromContext({
-                    holiday: holidayByDate.get(String(row.date || '')),
-                    week,
-                    staffType,
-                    date: row.date,
-                }),
-            );
-            const fields = flexibleOtFieldsFromDuration({
-                isFlexible: flexible,
-                nonWorking,
-                date: row.date,
-                timeIn: row.timeIn,
-                timeOut: row.timeOut,
-                timeOutDate: row.timeOutDate,
-                requiredHours: flexible ? requiredHoursForDate(week, row.date) : 0,
-                statusKey: row.statusKey,
-            });
-            const write = {
-                flexibleWorkedHours: fields.flexibleWorkedHours,
-                flexibleRequiredHours: fields.flexibleRequiredHours,
-                flexibleOtHours: 0,
-                flexibleOtStatus: '',
-                flexibleOtApprovedHours: 0,
-                flexibleOtReason: '',
-                flexibleOtNextDayDate: '',
-                flexibleFromOtDate: '',
-            };
-            const hasOvertime = Boolean(
-                hoursDiffer(row.flexibleOtHours, 0) ||
-                    String(row.flexibleOtStatus || '').trim() ||
-                    Number(row.flexibleOtApprovedHours) ||
-                    String(row.flexibleOtReason || '').trim() ||
-                    String(row.flexibleOtNextDayDate || '').trim() ||
-                    String(row.flexibleFromOtDate || '').trim(),
-            );
-            const workedChanged =
-                hoursDiffer(row.flexibleWorkedHours, write.flexibleWorkedHours) ||
-                hoursDiffer(row.flexibleRequiredHours, write.flexibleRequiredHours);
-            if (!hasOvertime && !workedChanged) continue;
-            const revert =
-                String(row.flexibleOtStatus || '') === 'approved'
-                    ? String(row.flexibleOtNextDayDate || '').trim()
-                    : '';
-            Object.assign(row, write);
-            if (revert) await revertSyntheticOtDay(row.employeeMongoId, revert, row.date);
-            writes.push({
-                updateOne: {
-                    filter: { _id: row._id },
-                    update: { $set: write },
-                },
-            });
-            continue;
-        }
         const punchIn = String(row?.timeIn || '').trim();
         const punchOut = String(row?.timeOut || '').trim();
         // A copied next-day present is stored as OT. A real check-in and check-out still has overtime.

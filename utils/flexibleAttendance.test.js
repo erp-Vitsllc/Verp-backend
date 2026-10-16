@@ -100,6 +100,20 @@ describe('flexibleOtFieldsFromDuration', () => {
         assert.equal(fields.flexibleOtHours, 2);
     });
 
+    it('keeps overtime on a next-day checkout that runs past the required day', () => {
+        const fields = flexibleOtFieldsFromDuration({
+            isFlexible: true,
+            date: '2026-10-15',
+            timeIn: '08:14:35',
+            timeOut: '03:46:03',
+            timeOutDate: '2026-10-16',
+            requiredHours: 10,
+            statusKey: 'on_office',
+        });
+        assert.equal(fields.flexibleWorkedHours, 19.53);
+        assert.ok(fields.flexibleOtHours >= 9);
+    });
+
     it('hides overtime until the extra hour after the required day is complete', () => {
         const fields = flexibleOtFieldsFromDuration({
             isFlexible: true,

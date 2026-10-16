@@ -710,11 +710,36 @@ export async function listUtilityBillPayments(req, res) {
             if (/^\d{4}-\d{2}$/.test(occupancyMonth)) {
                 overviewFilter.billMonth = occupancyMonth;
             }
-            const overviewBills = await UtilityBillPayment.find(overviewFilter)
+            let overviewBills = await UtilityBillPayment.find(overviewFilter)
                 .select(
                     '_id entryId batchId utilityType provider accountNo billMonth amount monthlyRental differenceAmount status paymentDay payByCompanyName payByEmployeeName payByEmployeeId companyPayAmount employeePayAmount zohoBillId zohoBillIds zohoBillNumber zohoBillStatus zohoLineItems.zohoBillId zohoLineItems.payByEmployeeId zohoLineItems.amount createdAt',
                 )
                 .lean();
+            const linkedIds = overviewBills
+                .filter((bill) => bill.status === 'Approved' && utilityBillHasZohoLink(bill))
+                .sort((a, b) => String(b.billMonth || '').localeCompare(String(a.billMonth || '')))
+                .slice(0, 12)
+                .map((bill) => bill._id);
+            if (linkedIds.length) {
+                try {
+                    const synced = await syncApprovedUtilityBillsPaidFromZoho({
+                        billIds: linkedIds,
+                        fetchLive: true,
+                    });
+                    if ((synced?.paidCount || 0) > 0 || (synced?.unpaidCount || 0) > 0) {
+                        overviewBills = await UtilityBillPayment.find(overviewFilter)
+                            .select(
+                                '_id entryId batchId utilityType provider accountNo billMonth amount monthlyRental differenceAmount status paymentDay payByCompanyName payByEmployeeName payByEmployeeId companyPayAmount employeePayAmount zohoBillId zohoBillIds zohoBillNumber zohoBillStatus zohoLineItems.zohoBillId zohoLineItems.payByEmployeeId zohoLineItems.amount createdAt',
+                            )
+                            .lean();
+                    }
+                } catch (syncErr) {
+                    console.warn(
+                        '[listUtilityBillPayments] overview Zoho paid sync failed:',
+                        syncErr?.message || syncErr,
+                    );
+                }
+            }
             return res.status(200).json({ bills: overviewBills });
         }
 
@@ -2774,8 +2799,10 @@ export async function payUtilityBillBatch(req, res) {
             });
         }
 
+        const payFailures = [];
         for (const bill of bills) {
             // Prefer Open; if still Draft, try to open before marking Paid.
+            // One bill already paid in Zoho must not stop the rest of the group.
             if (String(bill.zohoBillStatus || '').toLowerCase() !== 'open') {
                 try {
                     const { syncApprovedUtilityBillToZoho } = await import(
@@ -2785,22 +2812,42 @@ export async function payUtilityBillBatch(req, res) {
                         markAsOpen: true,
                     });
                     if (!openResult?.ok && !openResult?.zohoBillId) {
-                        return res.status(400).json({
+                        const synced = await syncApprovedUtilityBillsPaidFromZoho({
+                            billIds: [bill._id],
+                            userId: actor?._id || req.user?._id || null,
+                            fetchLive: true,
+                        });
+                        if ((synced?.paidCount || 0) > 0) {
+                            bill.status = 'Paid';
+                            continue;
+                        }
+                        payFailures.push({
+                            billId: String(bill._id),
                             message:
                                 openResult?.message ||
                                 bill.zohoSyncError ||
                                 'Could not open Zoho bill before payment.',
-                            zohoSyncError: bill.zohoSyncError || openResult?.message || '',
                         });
+                        continue;
                     }
                 } catch (openErr) {
-                    return res.status(400).json({
+                    const synced = await syncApprovedUtilityBillsPaidFromZoho({
+                        billIds: [bill._id],
+                        userId: actor?._id || req.user?._id || null,
+                        fetchLive: true,
+                    });
+                    if ((synced?.paidCount || 0) > 0) {
+                        bill.status = 'Paid';
+                        continue;
+                    }
+                    payFailures.push({
+                        billId: String(bill._id),
                         message:
                             openErr?.message ||
                             bill.zohoSyncError ||
                             'Could not open Zoho bill before payment.',
-                        zohoSyncError: bill.zohoSyncError || openErr?.message || '',
                     });
+                    continue;
                 }
             }
 
@@ -2812,6 +2859,14 @@ export async function payUtilityBillBatch(req, res) {
             bill.actionedBy = actor?._id || null;
             bill.actionedAt = new Date();
             await bill.save();
+        }
+
+        if (!bills.some((bill) => bill.status === 'Paid') && payFailures.length) {
+            return res.status(400).json({
+                message: payFailures[0].message,
+                zohoSyncError: payFailures[0].message,
+                failedBillIds: payFailures.map((row) => row.billId),
+            });
         }
 
         try {
@@ -2887,7 +2942,7 @@ export async function payUtilityBillBatch(req, res) {
 
         return res.status(200).json({
             batchId,
-            paidCount: bills.length,
+            paidCount: bills.filter((bill) => bill.status === 'Paid').length,
             remainingApproved: remaining,
             bills: bills.map((b) => decorateBill(b.toObject())),
             statusLabel: remaining === 0 ? 'paid' : 'partially paid',

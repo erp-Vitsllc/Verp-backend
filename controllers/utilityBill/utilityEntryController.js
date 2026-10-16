@@ -14,6 +14,11 @@ import {
     daysUntilContractEnd,
 } from '../../utils/processUtilityContractExpiryReminders.js';
 import { employeeIdQueryVariants } from '../../utils/upsertUtilityBalancePartyExpense.js';
+import {
+    commitUtilityEntryDetailChange,
+    detailRevisionsByEntryId,
+    snapshotEntryDetails,
+} from '../../utils/utilityEntryDetailRevision.js';
 
 function escapeRegex(s) {
     return String(s || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -83,7 +88,7 @@ function normalizePaymentDay(values = {}) {
     return next;
 }
 
-function mapEntry(doc) {
+function mapEntry(doc, detailRevisions = []) {
     if (!doc) return null;
     const o = doc.toObject ? doc.toObject() : doc;
     return {
@@ -98,6 +103,7 @@ function mapEntry(doc) {
         pendingStatusChange: o.pendingStatusChange || null,
         createdAt: o.createdAt,
         updatedAt: o.updatedAt,
+        detailRevisions: Array.isArray(detailRevisions) ? detailRevisions : [],
     };
 }
 
@@ -234,7 +240,10 @@ export async function listUtilityEntries(req, res) {
         if (status === 'Active' || status === 'Inactive') filter.status = status;
 
         const rows = await UtilityEntry.find(filter).sort({ createdAt: -1 }).lean();
-        return res.json({ entries: rows.map(mapEntry) });
+        const revisions = await detailRevisionsByEntryId(rows.map((row) => row._id));
+        return res.json({
+            entries: rows.map((row) => mapEntry(row, revisions.get(String(row._id)) || [])),
+        });
     } catch (err) {
         console.error('[listUtilityEntries]', err);
         return res.status(500).json({ message: err?.message || 'Failed to load entries' });
@@ -270,8 +279,9 @@ export async function getUtilityEntry(req, res) {
         if (doc.type) {
             config = await UtilityConfig.findOne({ type: nameRegex(doc.type) }).lean();
         }
+        const revisions = await detailRevisionsByEntryId([doc._id]);
         return res.json({
-            entry: mapEntry(doc),
+            entry: mapEntry(doc, revisions.get(String(doc._id)) || []),
             config: config
                 ? {
                       id: String(config._id),
@@ -332,6 +342,7 @@ export async function updateUtilityEntry(req, res) {
         if (!doc) return res.status(404).json({ message: 'Entry not found.' });
 
         const body = req.body || {};
+        const beforeDetails = snapshotEntryDetails(doc.toObject());
         const prevAssignedTo = String(doc.assignedTo || '').trim();
         const prevAssignedToId = String(doc.assignedToId || '').trim();
         const prevAssignedToType = String(doc.assignedToType || '').trim();
@@ -368,10 +379,26 @@ export async function updateUtilityEntry(req, res) {
             doc.markModified('pendingStatusChange');
         }
 
-        await doc.save();
+        const afterDetails = snapshotEntryDetails(doc.toObject());
+        const detailChange = await commitUtilityEntryDetailChange(
+            doc._id,
+            beforeDetails,
+            afterDetails,
+        );
+        try {
+            await doc.save();
+        } catch (saveErr) {
+            if (detailChange?.rollback) {
+                await detailChange.rollback().catch((rollbackErr) => {
+                    console.error('[updateUtilityEntry] revision rollback', rollbackErr?.message || rollbackErr);
+                });
+            }
+            throw saveErr;
+        }
         await syncPaymentDay(doc);
 
-        const mapped = mapEntry(doc);
+        const revisions = await detailRevisionsByEntryId([doc._id]);
+        const mapped = mapEntry(doc, revisions.get(String(doc._id)) || []);
         const timing = daysUntilContractEnd(mapped?.values?.contractEnd);
         const contractResolved =
             mapped.status === 'Inactive' || !timing || timing.daysUntil > 0;

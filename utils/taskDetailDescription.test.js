@@ -97,6 +97,73 @@ test("fine and utility descriptions include the amount, account, and reason", ()
     assert.match(utility, /Bill Month: August 2026/);
 });
 
+test("attendance description lists the request, times, duration, and OT hours", () => {
+    const late = composeTaskDescription({
+        requestType: "Attendance Change Request",
+        extra1: "Not marked → Late Arrival (09:37 – 18:17) · Waiting for HR",
+        subjectName: "Philipose K",
+        subjectEmployeeId: "VITS022",
+        requestedBy: "Melvin",
+        source: {
+            attendance: true,
+            employeeName: "Philipose K",
+            employeeId: "VITS022",
+            date: "2026-10-16",
+            from: "2026-10-16",
+            to: "2026-10-16",
+            requestKind: "Late In",
+            timeIn: "09:37",
+            timeOut: "18:17",
+            duration: "8h 40m",
+            currentStatus: "Not marked",
+            requestedStatus: "Late Arrival",
+            reason: "Traffic",
+        },
+    });
+    assert.match(late, /What to do: Review this Late In request for Oct 16, 2026\./);
+    assert.match(late, /Request: Late In/);
+    assert.match(late, /Date: Oct 16, 2026/);
+    assert.match(late, /Employee: Philipose K/);
+    assert.match(late, /Employee ID: VITS022/);
+    assert.match(late, /Time in: 09:37/);
+    assert.match(late, /Time out: 18:17/);
+    assert.match(late, /Duration: 8h 40m/);
+    assert.match(late, /Current: Not marked/);
+    assert.match(late, /Requested: Late Arrival/);
+    assert.match(late, /Reason: Traffic/);
+    assert.doesNotMatch(late, /Waiting for HR/);
+
+    const ot = composeTaskDescription({
+        requestType: "Attendance Change Request",
+        subjectName: "Philipose K",
+        requestedBy: "Philipose K",
+        source: {
+            attendance: true,
+            employeeName: "Philipose K",
+            employeeId: "VITS022",
+            date: "2026-10-16",
+            from: "2026-10-16",
+            to: "2026-10-16",
+            requestKind: "OT",
+            timeIn: "07:34",
+            timeOut: "22:18",
+            duration: "14h 44m",
+            otRequestedFor: "2026-10-17",
+            otHours: "3 hr",
+            otApprovedHours: "2 hr",
+            reason: "Shutdown work",
+        },
+    });
+    assert.match(ot, /Request: OT/);
+    assert.match(ot, /Time in: 07:34/);
+    assert.match(ot, /Time out: 22:18/);
+    assert.match(ot, /Duration: 14h 44m/);
+    assert.match(ot, /OT requested for: Oct 17, 2026/);
+    assert.match(ot, /OT hours: 3 hr/);
+    assert.match(ot, /Approved hours: 2 hr/);
+    assert.match(ot, /Reason: Shutdown work/);
+});
+
 test("a handwritten task keeps its own description", () => {
     assert.equal(composeTaskDescription({
         requestType: "Workflow Task",

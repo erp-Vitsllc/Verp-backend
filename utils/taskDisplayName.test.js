@@ -13,6 +13,17 @@ test("vehicle service name is the vehicle number and the service type", () => {
     assert.equal(name, "Dubai A 12345, Mechanical Work");
 });
 
+test("vehicle service uses the vehicle name when the asset has one", () => {
+    const name = formatTaskDisplayName({
+        requestType: "Vehicle Service Request",
+        extra1: "Mechanical Work pending with NESMI SHAMSUDEEN — Schedule",
+        extra3: JSON.stringify({ serviceType: "Mechanical Work" }),
+        assetName: "Toyota Hilux",
+        vehicleNo: "Dubai A 12345",
+    });
+    assert.equal(name, "Toyota Hilux, Mechanical Work");
+});
+
 test("vehicle service still names the service when the plate is missing", () => {
     const name = formatTaskDisplayName({
         requestType: "Vehicle Service Request",
@@ -22,14 +33,25 @@ test("vehicle service still names the service when the plate is missing", () => 
     assert.equal(name, "VEGA-VEH-014, Oil Service");
 });
 
-test("expiry name is the document and the employee, vehicle, or company it belongs to", () => {
+test("expiry name is the number, the document, and expiry or not renew", () => {
     assert.equal(
         formatTaskDisplayName({
             requestType: "Employee Document Expiry Reminder",
             extra1: "Expiry follow-up required: Passport (Exp: 12 Oct 2026)",
             extra2: "Ahmed Khan (VITS001)",
+            taskName: "Passport Expiry Reminder — Ahmed Khan",
         }),
-        "Passport Expiry Reminder — Ahmed Khan",
+        "VITS001 - Passport - Expiry",
+    );
+    assert.equal(
+        formatTaskDisplayName({
+            requestType: "Vehicle Document Expiry Reminder",
+            extra1: "Expiry follow-up required: Insurance (Exp: 01 Nov 2026)",
+            extra2: "Toyota Hilux (VEGA-VEH-014)",
+            vehicleNo: "Dubai A 12345",
+            taskName: "Document Expiry",
+        }),
+        "Dubai A 12345 - Insurance - Expiry",
     );
     assert.equal(
         formatTaskDisplayName({
@@ -37,7 +59,7 @@ test("expiry name is the document and the employee, vehicle, or company it belon
             extra1: "Expiry follow-up required: Insurance (Exp: 01 Nov 2026)",
             extra2: "Toyota Hilux (VEGA-VEH-014)",
         }),
-        "Insurance Expiry Reminder — Toyota Hilux",
+        "VEGA-VEH-014 - Insurance - Expiry",
     );
     assert.equal(
         formatTaskDisplayName({
@@ -45,7 +67,7 @@ test("expiry name is the document and the employee, vehicle, or company it belon
             extra1: "Expiry follow-up required: Trade License (Exp: 01 Jan 2027)",
             extra2: "Vega Technologies (C001)",
         }),
-        "Trade License Expiry Reminder — Vega Technologies",
+        "C001 - Trade License - Expiry",
     );
     assert.equal(
         formatTaskDisplayName({
@@ -54,7 +76,7 @@ test("expiry name is the document and the employee, vehicle, or company it belon
             extra2: "Corolla (VEGA-VHCL-001)",
             taskName: "Corolla (VEGA-VHCL-001)",
         }),
-        "Mulkia (Registration) Expiry Reminder — Corolla",
+        "VEGA-VHCL-001 - Mulkia (Registration) - Expiry",
     );
 });
 
@@ -86,16 +108,55 @@ test("fine, not-renew, leave, and asset names stay short", () => {
             extra1: "Not renew pending: Visa",
             extra2: "Employee is travelling",
             subjectName: "Ahmed Khan",
+            subjectEmployeeId: "VITS001",
         }),
-        "Visa Not Renew — Ahmed Khan",
+        "VITS001 - Visa - Not Renew",
     );
     assert.equal(
         formatTaskDisplayName({
             requestType: "Employee Leave Request",
-            extra2: "Annual Leave request for 2026-10-01",
+            extra2: "Comp off request for 2026-10-01",
+            extra3: JSON.stringify({
+                from: "2026-10-01",
+                to: "2026-10-03",
+                requestedStatusKey: "compoff_leave",
+                leaveRequestKind: "leave",
+            }),
             subjectName: "Ahmed Khan",
         }),
-        "Annual Leave, Ahmed Khan",
+        "Ahmed Khan, Oct 1, 2026 – Oct 3, 2026, Comp Off",
+    );
+    assert.equal(
+        formatTaskDisplayName({
+            requestType: "Attendance Change Request",
+            extra1: "Not marked → Late Arrival (09:37 – 18:17) · Waiting for HR",
+            extra3: JSON.stringify({
+                action: "mark",
+                date: "2026-10-16",
+                statusKey: "late_arrived",
+                statusLabel: "Late Arrival",
+                timeIn: "09:37",
+                timeOut: "18:17",
+            }),
+            subjectName: "Philipose K",
+            taskName: "Philipose K, Attendance Change",
+        }),
+        "Philipose K, Oct 16, 2026, Late In",
+    );
+    assert.equal(
+        formatTaskDisplayName({
+            requestType: "Attendance Change Request",
+            subjectName: "Philipose K",
+            source: {
+                attendance: true,
+                employeeName: "Philipose K",
+                date: "2026-10-16",
+                from: "2026-10-16",
+                to: "2026-10-16",
+                requestKind: "OT",
+            },
+        }),
+        "Philipose K, Oct 16, 2026, OT",
     );
     assert.equal(
         formatTaskDisplayName({

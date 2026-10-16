@@ -1,9 +1,17 @@
 /**
  * Short Task Manager name.
- * Vehicle service: "{vehicle no}, {service type}".
- * Document expiry: "{doc name} Expiry Reminder — {employee / vehicle / company}".
+ * Vehicle service: "{vehicle name}, {service type}".
+ * Document expiry: "{veh no / emp no / company id} - {document} - Expiry".
+ * Not renew: "{id} - {document} - Not Renew".
+ * Attendance: "{employee}, {date}, {Late In | OT | Mispunch | Comp Off | …}".
  * The long notification sentence stays in the description.
  */
+
+import {
+    attendanceTaskTitle,
+    isAttendanceTaskType,
+    resolveAttendanceFacts,
+} from "./attendanceTaskCopy.js";
 
 const SERVICE_TYPES = [
     "Oil Service",
@@ -181,8 +189,19 @@ function utilityParts(body, meta) {
     };
 }
 
+function isGeneratedTitle(stored) {
+    const value = text(stored);
+    if (!value) return false;
+    if (/^(employee |company |vehicle )?document expiry( reminder)?$/i.test(value)) return true;
+    if (/^.+ expiry reminder — .+$/i.test(value)) return true;
+    if (/^.+ not renew — .+$/i.test(value)) return true;
+    if (/,\s*(attendance leave|attendance change|hour approval|flexible ot)$/i.test(value)) return true;
+    return false;
+}
+
 function isCustomName(stored, body, requestType, secondary = "") {
     if (!stored) return false;
+    if (isGeneratedTitle(stored)) return false;
     if (stored.toLowerCase() === text(requestType).toLowerCase()) return false;
     if (stored === text(body)) return false;
     if (/\bpending with\b/i.test(stored)) return false;
@@ -191,6 +210,48 @@ function isCustomName(stored, body, requestType, secondary = "") {
     const ownerLine = text(secondary);
     if (ownerLine && stored.toLowerCase() === ownerLine.toLowerCase()) return false;
     return true;
+}
+
+function parenCode(value) {
+    const id = text(value).match(/\(([^)]+)\)\s*$/)?.[1] || "";
+    if (!id || id.length > 40 || isObjectId(id)) return "";
+    return id;
+}
+
+function recordCode(value) {
+    const code = text(value);
+    if (!code || isObjectId(code)) return "";
+    return code;
+}
+
+function expirySubjectCode({ typeKey, extra2, subjectName, subjectEmployeeId, vehicleNo, assetNo, source }) {
+    if (typeKey.includes("vehicle")) {
+        return text(source?.vehicleNo)
+            || text(vehicleNo)
+            || text(source?.assetNo)
+            || text(assetNo)
+            || recordCode(subjectEmployeeId)
+            || parenCode(extra2)
+            || shortName(extra2)
+            || shortName(subjectName);
+    }
+    return text(source?.employeeId)
+        || text(source?.companyId)
+        || recordCode(subjectEmployeeId)
+        || parenCode(extra2)
+        || shortName(subjectName)
+        || shortName(extra2);
+}
+
+function titledRecord(code, document, action) {
+    return [text(code), text(document) || "Document", text(action)].filter(Boolean).join(" - ");
+}
+
+function vehicleServiceName(assetName, vehicleNo) {
+    const name = text(assetName);
+    const plate = text(vehicleNo);
+    if (name && !/^vehicle$/i.test(name)) return name;
+    return plate || name;
 }
 
 function assetTitle(typeKey, { body, vehicleNo, assetLabel, hasPlate }) {
@@ -217,11 +278,15 @@ export function formatTaskDisplayName({
     extra2,
     extra3,
     subjectName,
+    subjectEmployeeId,
     taskName,
     vehicleNo,
+    assetNo,
+    assetName,
     assetLabel,
     hasPlate,
     manual,
+    source,
 } = {}) {
     const type = text(requestType);
     const typeKey = type.toLowerCase();
@@ -234,14 +299,23 @@ export function formatTaskDisplayName({
     if (isCustomName(stored, body, type, secondary)) return stored;
 
     if (typeKey === "vehicle service request") {
-        const service = serviceTypeFrom(meta, body) || "Service";
-        return joinName(vehicleNo, service);
+        const service = serviceTypeFrom(meta, body) || text(source?.serviceType) || "Service";
+        const vehicleName = vehicleServiceName(source?.assetName || assetName, source?.vehicleNo || vehicleNo);
+        return joinName(vehicleName, service);
     }
 
     if (EXPIRY_TYPES.has(typeKey)) {
         const doc = docLabel(body, meta) || "Document";
-        const owner = shortName(secondary) || shortName(subjectName);
-        return withOwner(`${doc} Expiry Reminder`, owner);
+        const code = expirySubjectCode({
+            typeKey,
+            extra2: secondary,
+            subjectName,
+            subjectEmployeeId,
+            vehicleNo,
+            assetNo,
+            source,
+        });
+        return titledRecord(code, doc, "Expiry");
     }
 
     if (typeKey === "utility contract expiry") {
@@ -252,7 +326,28 @@ export function formatTaskDisplayName({
 
     if (typeKey === "company document not renew" || typeKey === "employee document not renew") {
         const doc = docLabel(body, meta) || "Document";
-        return withOwner(`${doc} Not Renew`, shortName(subjectName));
+        const code = expirySubjectCode({
+            typeKey,
+            extra2: secondary,
+            subjectName,
+            subjectEmployeeId,
+            vehicleNo,
+            assetNo,
+            source,
+        });
+        return titledRecord(code, doc, "Not Renew");
+    }
+
+    if (isAttendanceTaskType(type)) {
+        return attendanceTaskTitle(resolveAttendanceFacts({
+            requestType: type,
+            extra1: body,
+            extra2: secondary,
+            extra3: meta,
+            subjectName,
+            subjectEmployeeId,
+            source,
+        }));
     }
 
     if (

@@ -14,6 +14,7 @@ import { withZohoOrganization } from './zohoOrgContext.js';
 import { resolveZohoOrganizationIdForCompany } from './resolveZohoOrganization.js';
 import { resolveZohoBillSerialNumber } from './zohoPurchaseMappers.js';
 import { buildUtilityBillZohoLineItems, collectUtilityZohoBillIds } from './upsertUtilityBalancePartyExpense.js';
+import { isZohoBillFullyPaid } from './markUtilityVendorBillsPaidFromZoho.js';
 
 function utilityZohoBillExtras(billDoc, line, lineIndex, parentBillNumber) {
     return {
@@ -323,7 +324,25 @@ async function openExistingZohoBill(billDoc) {
     try {
         let lastAttach = { ok: true, skipped: true };
         for (const zohoBillId of zohoBillIds) {
-            await markBillAsOpen(zohoBillId);
+            try {
+                await markBillAsOpen(zohoBillId);
+            } catch (openErr) {
+                let live = null;
+                try {
+                    live = await fetchBillById(zohoBillId);
+                } catch {
+                    live = null;
+                }
+                if (live && isZohoBillFullyPaid(live)) {
+                    try {
+                        await upsertZohoBillFromApi(live);
+                    } catch {
+                        /* cache update optional */
+                    }
+                    continue;
+                }
+                throw openErr;
+            }
             let zohoBillForUpsert = null;
             try {
                 zohoBillForUpsert = await fetchBillById(zohoBillId);

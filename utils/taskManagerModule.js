@@ -9,6 +9,14 @@ import { emailFrontendUrl } from "./resolveFrontendBaseUrl.js";
 import { resolveEmployeeEmailWithReporteeLoaded } from "./resolveEmployeeEmail.js";
 import { isReqUserSystemSuperUser } from "./systemSuperUser.js";
 import { buildEmployeeExpiryAccessPath, buildEmployeePathWithFocus } from "./notificationFocusNavigation.js";
+import {
+    buildAssetListSectionPath,
+    buildAttendanceSectionPath,
+    buildCompanySectionPath,
+    buildEmployeeSectionPath,
+    buildHubSectionPath,
+    buildUtilitySectionPath,
+} from "./taskSectionPath.js";
 import { resolveVehicleExpiryFocusCard, resolveVehicleExpiryTab } from "./vehicleExpiryScanUtils.js";
 
 const TASK_TYPE_LABELS = new Map([
@@ -138,6 +146,8 @@ function appPath(value) {
 }
 
 function storedRecordPath(meta) {
+    const review = appPath(meta?.reviewPath);
+    if (review && /[?&](statusChangeId|batchId)=/.test(review)) return review;
     return ["detailsPath", "reviewPath", "linkPath", "href", "path"]
         .map((key) => appPath(meta?.[key]))
         .find(Boolean) || "";
@@ -207,11 +217,14 @@ function exactRecordPath(meta, requestId, stored) {
         if (query) return `/HRM/Leave/annual-leave?${query}`;
     }
 
-    const entryId = String(meta.entryId || "").trim();
-    if (entryId && /utility/i.test(`${requestType} ${stored}`)) {
-        const built = `/HRM/Asset/UtilityBills/details/${encodeURIComponent(entryId)}`;
-        if (stored.startsWith(built)) return stored;
-        return built;
+    if (/utility/i.test(`${requestType} ${stored}`)) {
+        if (/[?&](batchId|statusChangeId)=/.test(stored) && !/\/details\//.test(stored)) return stored;
+        const entryId = String(meta.entryId || "").trim();
+        if (entryId) {
+            const built = `/HRM/Asset/UtilityBills/details/${encodeURIComponent(entryId)}`;
+            if (stored.startsWith(built)) return stored;
+            return built;
+        }
     }
 
     return "";
@@ -383,10 +396,17 @@ function applySectionFocus(path, meta, destination, requestId) {
 
     if (/^\/HRM\/Asset\/details\/[^/]+$/.test(bare) && !queryHas(out, "focusCard")) {
         const card = assetFocusFromMeta(meta);
-        if (card) out = appendQuery(out, "focusCard", card);
-        if (card === "operationalExpiry" || card.startsWith("accessory")) {
-            out = appendQuery(out, "tab", meta.tab || "document");
+        if (card) {
+            out = appendQuery(out, "focusCard", card);
+            if (card.startsWith("accessory")) out = appendQuery(out, "tab", "accessories");
+            else if (card === "operationalExpiry") out = appendQuery(out, "tab", meta.tab || "document");
         }
+    }
+    if (/^\/HRM\/Asset\/details\/[^/]+$/.test(bare) && !queryHas(out, "authAction")) {
+        const type = `${meta.requestType || ""} ${meta.extra1 || ""}`.toLowerCase();
+        if (type.includes("loss") || type.includes("damage")) out = appendQuery(out, "authAction", "damage");
+        else if (type.includes("end of life")) out = appendQuery(out, "authAction", "eol");
+        else if (type.includes("accessory")) out = appendQuery(out, "authAction", "accessory");
     }
 
     if (bare.startsWith("/Company/") && !queryHas(out, "focusCard") && !queryHas(out, "focusCertificate")) {
@@ -428,6 +448,14 @@ function applySectionFocus(path, meta, destination, requestId) {
 export function accessPathFor(destination, requestId, subjectEmployeeId, context = null) {
     const meta = parseTaskMeta(context);
     const stored = storedRecordPath(meta);
+    const requestType = String(meta.requestType || "");
+    const section =
+        buildAttendanceSectionPath({ meta, requestId, requestType, subjectEmployeeId }) ||
+        buildHubSectionPath({ meta, requestId, requestType }) ||
+        buildUtilitySectionPath({ meta, requestId, requestType, stored }) ||
+        buildAssetListSectionPath({ meta, requestId, requestType });
+    if (section) return applySectionFocus(section, meta, destination, requestId);
+
     const exact = exactRecordPath(meta, requestId, stored);
     let path = "";
     if (exact) path = exact;
@@ -453,8 +481,8 @@ export function accessPathFor(destination, requestId, subjectEmployeeId, context
             }
             const requestType = String(meta.requestType || "");
             if (!path && /^document expiry reminder$/i.test(requestType) && id) path = `/Company/${id}`;
-            if (!path && moduleName === "employees" && employeeCode) path = `/emp/${encodeURIComponent(employeeCode)}`;
-            else if (!path && moduleName === "company" && id) path = `/Company/${id}`;
+            if (!path && moduleName === "employees" && employeeCode) path = buildEmployeeSectionPath(employeeCode, requestType);
+            else if (!path && moduleName === "company" && id) path = buildCompanySectionPath(id, requestType);
             else if (!path && /salary/i.test(requestType) && meta.employeeId) {
                 path = `/HRM/Salary/enroll/${encodeURIComponent(String(meta.employeeId))}`;
             } else if (!path && /salary/i.test(requestType) && meta.monthKey) {
@@ -565,6 +593,15 @@ function mailTransport() {
             auth: { user: emailUser, pass: emailPass },
         }),
     };
+}
+
+export function reassignedRequesterLabel(requesterName, originalAssigneeName) {
+    const strip = (value) => String(value || "").trim().replace(/\s*\([^)]*\)\s*$/, "").trim();
+    const requester = strip(requesterName);
+    const original = strip(originalAssigneeName);
+    if (!original) return requester;
+    if (!requester || requester.toLowerCase() === original.toLowerCase()) return original;
+    return `${original} (${requester})`;
 }
 
 export function taskOpenPath(taskKey) {

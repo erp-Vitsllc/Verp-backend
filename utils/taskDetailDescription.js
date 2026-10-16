@@ -1,7 +1,15 @@
 /**
  * Full task description for the details page.
  * One labeled line per fact: what to do, the record, who asked, and why.
+ * Attendance lines include the request, times, duration, and OT or hour-approval hours.
  */
+
+import {
+    formatTaskDate,
+    formatTaskDateRange,
+    isAttendanceTaskType,
+    resolveAttendanceFacts,
+} from "./attendanceTaskCopy.js";
 
 function text(value) {
     return String(value ?? "").replace(/\s+/g, " ").trim();
@@ -85,6 +93,12 @@ function money(value) {
 }
 
 function whatToDo(typeKey, facts) {
+    if (isAttendanceTaskType(typeKey)) {
+        const kind = facts.requestKind || "attendance";
+        return facts.when
+            ? `Review this ${kind} request for ${facts.when}.`
+            : `Review this ${kind} request.`;
+    }
     const doc = facts.document || "the document";
     const service = facts.service || "the service";
     const stage = facts.stage ? ` Current stage: ${facts.stage}.` : "";
@@ -112,12 +126,14 @@ function whatToDo(typeKey, facts) {
     return facts.taskName || "Review this request.";
 }
 
-function push(lines, seen, label, value) {
+function push(lines, seen, label, value, { allowRepeat = false } = {}) {
     const clean = text(value);
     if (!clean || clean === "—" || /^system$/i.test(clean) && label !== "Requested by") return;
     const key = `${label}:${clean.toLowerCase()}`;
     if (seen.has(key)) return;
-    seen.add(clean.toLowerCase());
+    if (!allowRepeat && seen.has(clean.toLowerCase())) return;
+    seen.add(key);
+    if (!allowRepeat) seen.add(clean.toLowerCase());
     lines.push(`${label}: ${clean}`);
 }
 
@@ -200,10 +216,57 @@ export function composeTaskDescription({
         facts.amount = money(extra1);
     }
 
+    const attendanceTask = isAttendanceTaskType(typeKey);
+    const attendance = attendanceTask
+        ? resolveAttendanceFacts({
+            requestType,
+            extra1,
+            extra2,
+            extra3,
+            subjectName,
+            subjectEmployeeId,
+            source,
+        })
+        : {};
+    if (attendanceTask) {
+        facts.requestKind = attendance.requestKind || "Attendance";
+        facts.when = formatTaskDateRange(attendance.from || attendance.date, attendance.to || attendance.from || attendance.date);
+        facts.employee = attendance.employeeName || facts.employee;
+        facts.employeeId = attendance.employeeId || facts.employeeId;
+        facts.timeIn = attendance.timeIn || "";
+        facts.timeOut = attendance.timeOut || "";
+        facts.duration = attendance.duration || facts.duration;
+        facts.otFor = formatTaskDate(attendance.otRequestedFor);
+        facts.otHours = attendance.otHours || "";
+        facts.approvedHours = attendance.otApprovedHours || attendance.hoursApproved || "";
+        facts.hoursTaken = attendance.hoursTaken || "";
+        facts.currentStatus = attendance.currentStatus || "";
+        facts.requestedStatus = attendance.requestedStatus || "";
+        if (attendance.reason) facts.reason = attendance.reason;
+        else if (/^\d{4}-\d{2}-\d{2}$/.test(facts.reason) || /request for/i.test(facts.reason)) facts.reason = "";
+        facts.from = "";
+        facts.to = "";
+    }
+
     const lines = [];
     const seen = new Set();
-    const add = (label, value) => push(lines, seen, label, value);
+    const add = (label, value, options) => push(lines, seen, label, value, options);
     add("What to do", whatToDo(typeKey, facts));
+    if (attendanceTask) {
+        add("Request", facts.requestKind);
+        add("Date", facts.when);
+        add("Employee", facts.employee);
+        add("Employee ID", facts.employeeId);
+        add("Time in", facts.timeIn);
+        add("Time out", facts.timeOut);
+        add("Duration", facts.duration);
+        add("OT requested for", facts.otFor, { allowRepeat: true });
+        add("OT hours", facts.otHours);
+        add("Approved hours", facts.approvedHours);
+        add("Hours taken", facts.hoursTaken);
+        add("Current", facts.currentStatus);
+        add("Requested", facts.requestedStatus);
+    }
     add("Asset No", facts.assetNo);
     add("Asset Name", facts.assetName);
     add("Vehicle No", facts.vehicleNo);
@@ -237,7 +300,7 @@ export function composeTaskDescription({
     add("Requested by", facts.requestedBy);
     add("Reason", facts.reason);
 
-    const leftover = [extra2, extra1, source.note].map(text).find((value) => {
+    const leftover = attendanceTask ? "" : [extra2, extra1, source.note].map(text).find((value) => {
         if (!value || value.length < 12) return false;
         if (seen.has(value.toLowerCase())) return false;
         if (owner.name && value.replace(/\s*\([^)]*\)\s*$/, "").trim() === owner.name) return false;

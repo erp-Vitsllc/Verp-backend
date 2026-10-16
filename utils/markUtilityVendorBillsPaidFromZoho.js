@@ -24,31 +24,38 @@ function toAmount(value) {
     return Number.isFinite(n) ? n : NaN;
 }
 
+function paymentRowsTotal(zohoBill) {
+    const rows = []
+        .concat(Array.isArray(zohoBill?.payments) ? zohoBill.payments : [])
+        .concat(Array.isArray(zohoBill?.vendorpayments) ? zohoBill.vendorpayments : []);
+    return rows.reduce((sum, row) => {
+        const amount = toAmount(
+            row?.amount ?? row?.amount_applied ?? row?.payment_amount ?? row?.total,
+        );
+        return Number.isFinite(amount) ? sum + amount : sum;
+    }, 0);
+}
+
 function isZohoBillFullyPaidFields(zohoBill) {
     const status = clean(zohoBill.status || zohoBill.status_formatted).toLowerCase();
     if (status === 'paid') return true;
+    if (status === 'void' || status === 'draft') return false;
 
     const total = toAmount(zohoBill.total ?? zohoBill.total_amount ?? zohoBill.amount);
     const paymentMade = toAmount(
         zohoBill.payment_made ?? zohoBill.payments_made ?? zohoBill.paymentMade,
     );
-    if (
-        Number.isFinite(paymentMade) &&
-        Number.isFinite(total) &&
-        total > 0 &&
-        paymentMade + 0.009 >= total
-    ) {
-        return true;
-    }
-
-    if (status === 'void' || status === 'draft' || status === 'partially_paid') return false;
-    const balance = toAmount(
-        zohoBill.balance ?? zohoBill.balance_due ?? zohoBill.balanceDue,
+    const applied = Math.max(
+        Number.isFinite(paymentMade) ? paymentMade : 0,
+        paymentRowsTotal(zohoBill),
     );
-    if (Number.isFinite(balance) && Math.abs(balance) < 0.01) {
-        if (status === 'open' || status === 'overdue' || status === 'unpaid') {
-            return Number.isFinite(total) ? total > 0 : true;
-        }
+    if (Number.isFinite(total) && total > 0 && applied + 0.009 >= total) return true;
+
+    const balance = toAmount(
+        zohoBill.balance ?? zohoBill.balance_due ?? zohoBill.balanceDue ?? zohoBill.bcy_balance,
+    );
+    // Group payments can leave status as open / partially_paid while the balance is already cleared.
+    if (Number.isFinite(balance) && Math.abs(balance) < 0.05 && (!Number.isFinite(total) || total > 0)) {
         return true;
     }
     return false;
@@ -370,6 +377,19 @@ export async function syncApprovedUtilityBillsPaidFromZoho({
     const paidBy = await resolvePaidByEmployeeId(userId);
     const toMarkPaid = [];
     const toMarkUnpaid = [];
+    const cacheByZohoId = new Map();
+    const prefetchIds = [
+        ...new Set(candidates.flatMap((bill) => collectZohoIdsFromUtilityBill(bill))),
+    ];
+    if (prefetchIds.length) {
+        const cachedRows = await ZohoBill.find({ zohoBillId: { $in: prefetchIds } })
+            .select('status balance total zohoBillId organizationId zohoRaw billNumber referenceNumber')
+            .lean();
+        cachedRows.forEach((row) => {
+            const id = clean(row?.zohoBillId);
+            if (id) cacheByZohoId.set(id, row);
+        });
+    }
 
     let companyOrgIds = [];
     try {
@@ -467,13 +487,16 @@ export async function syncApprovedUtilityBillsPaidFromZoho({
         }
     }
 
+    /**
+     * paid true/false is trusted for closing a bill only when `live` is true.
+     * A failed Zoho fetch must not turn a paid ERP bill back to Not Paid from a stale cache.
+     * A cached paid bill can still move Approved → Paid.
+     */
     async function readPaidFlag(zohoId, bill) {
         const id = clean(zohoId);
-        if (!id) return null;
+        if (!id) return { paid: null, live: false };
 
-        const cached = await ZohoBill.findOne({ zohoBillId: id })
-            .select('status balance total zohoBillId organizationId zohoRaw')
-            .lean();
+        const cached = cacheByZohoId.get(id) || null;
 
         if (fetchLive) {
             try {
@@ -489,7 +512,7 @@ export async function syncApprovedUtilityBillsPaidFromZoho({
                         /* cache update optional */
                     }
                     await rememberBillOrg(bill, live, preferredOrg);
-                    return isZohoBillFullyPaid(live);
+                    return { paid: isZohoBillFullyPaid(live), live: true };
                 }
             } catch (err) {
                 console.warn(
@@ -499,52 +522,48 @@ export async function syncApprovedUtilityBillsPaidFromZoho({
             }
         }
 
-        if (cached) return isZohoBillFullyPaid(cached);
-        return null;
+        if (cached && isZohoBillFullyPaid(cached)) return { paid: true, live: false };
+        return { paid: null, live: false };
     }
 
     for (const bill of candidates) {
         const zohoIds = collectZohoIdsFromUtilityBill(bill);
         const primaryId = clean(bill.zohoBillId) || zohoIds[0] || '';
         const serial = clean(bill.zohoBillNumber);
+        const checks = [];
 
-        // One ERP utility row → one vendor bill. Primary id / serial is the source of
-        // truth — extra leftover line ids must not keep Vendor Payment as Not Paid.
-        let paidFlag = primaryId ? await readPaidFlag(primaryId, bill) : null;
+        if (primaryId) checks.push(await readPaidFlag(primaryId, bill));
 
-        if (paidFlag !== true && serial) {
+        if (!checks.some((row) => row.paid === true) && serial) {
             const bySerial = await ZohoBill.findOne({
                 $or: [{ billNumber: serial }, { referenceNumber: serial }],
             })
-                .select('status balance total zohoBillId organizationId zohoRaw')
+                .select('status balance total zohoBillId organizationId zohoRaw billNumber referenceNumber')
                 .lean();
             const serialId = clean(bySerial?.zohoBillId);
             if (serialId && serialId !== primaryId) {
-                const serialPaid = await readPaidFlag(serialId, bill);
-                if (serialPaid === true) paidFlag = true;
-            }
-            if (paidFlag !== true && bySerial && isZohoBillFullyPaid(bySerial)) {
-                paidFlag = true;
-            }
-        }
-
-        if (paidFlag !== true) {
-            for (const zohoId of zohoIds) {
-                if (zohoId === primaryId) continue;
-                const extraPaid = await readPaidFlag(zohoId, bill);
-                if (extraPaid === true) {
-                    paidFlag = true;
-                    break;
-                }
+                if (!cacheByZohoId.has(serialId) && bySerial) cacheByZohoId.set(serialId, bySerial);
+                checks.push(await readPaidFlag(serialId, bill));
+            } else if (bySerial && isZohoBillFullyPaid(bySerial)) {
+                checks.push({ paid: true, live: false });
             }
         }
 
-        if (paidFlag == null) continue;
+        for (const zohoId of zohoIds) {
+            if (zohoId === primaryId) continue;
+            if (checks.some((row) => row.paid === true)) break;
+            checks.push(await readPaidFlag(zohoId, bill));
+        }
+
+        const anyPaid = checks.some((row) => row.paid === true);
+        const anyUnknown = checks.length === 0 || checks.some((row) => row.paid == null);
+        const anyLiveUnpaid = checks.some((row) => row.live && row.paid === false);
+        if (!anyPaid && anyUnknown) continue;
 
         const erpStatus = String(bill.status || '').trim();
-        if (paidFlag && erpStatus === 'Approved') {
+        if (anyPaid && erpStatus === 'Approved') {
             toMarkPaid.push(bill);
-        } else if (!paidFlag && erpStatus === 'Paid') {
+        } else if (!anyPaid && anyLiveUnpaid && !anyUnknown && erpStatus === 'Paid') {
             toMarkUnpaid.push(bill);
         }
     }

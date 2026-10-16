@@ -2696,11 +2696,14 @@ function applyMappedPunch(target, punch, sourceRecord) {
     target.approvalStatus = approvalStatusForMark(status.statusKey);
     if (checkInLocation) target.checkInLocation = checkInLocation;
     if (punch.timeOut && checkOutLocation) target.checkOutLocation = checkOutLocation;
-    Object.assign(target, CLEARED_MAPPED_OT);
+    const otStatus = String(target.flexibleOtStatus || '');
+    if (otStatus !== 'approved' && otStatus !== 'pending') {
+        Object.assign(target, CLEARED_MAPPED_OT);
+    }
     return true;
 }
 
-/** Copy a later check-in or check-out onto employees mapped from this person. Overtime is not copied. */
+/** Copy a later check-in or check-out onto employees mapped from this person. Added overtime stays. */
 async function syncPunchMapTargets(sourceRecord) {
     const sourceId = String(sourceRecord?.employeeMongoId || '').trim();
     const date = String(sourceRecord?.date || '').trim();
@@ -2853,8 +2856,8 @@ export async function mapAttendanceFromEmployee(req, res) {
 
         return res.status(200).json({
             message: hasOut
-                ? 'Check-in and check-out copied. Overtime stays with the other employee.'
-                : 'Check-in copied. Their later check-out is copied here too. Overtime is not copied.',
+                ? 'Check-in and check-out copied. Apply OT and next day present stay until overtime is added.'
+                : 'Check-in copied. Their later check-out is copied here too. Apply OT stays until overtime is added.',
             date,
             record: doc,
         });

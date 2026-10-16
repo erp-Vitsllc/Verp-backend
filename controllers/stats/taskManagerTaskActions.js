@@ -4,6 +4,8 @@ import Payment from "../../models/Payment.js";
 import AssetHistory from "../../models/AssetHistory.js";
 import AssetItem from "../../models/AssetItem.js";
 import Attendance from "../../models/Attendance.js";
+import { attendanceFactsByActionId } from "../../utils/loadAttendanceTaskFacts.js";
+import { isAttendanceTaskType } from "../../utils/attendanceTaskCopy.js";
 import EmployeeBasic from "../../models/EmployeeBasic.js";
 import EmployeeHubRequest from "../../models/EmployeeHubRequest.js";
 import Fine from "../../models/Fine.js";
@@ -54,6 +56,7 @@ import {
     publishReassignmentNotices,
     sendTaskActivityEmail,
     sendTaskReassignedEmail,
+    reassignedRequesterLabel,
     syncManualTaskNotification,
     taskOpenPath,
     upsertTaskNotice,
@@ -480,7 +483,9 @@ async function notifyRequesterTaskClosed(task, target) {
     const requesterName = personName(requester) || personBaseName(task.requestedByName) || "there";
     const link = taskDetailLink(target);
     const recordId = String(target?.action?._id || task._id || "");
-    const sentence = "Your task is closed. You can reopen it by opening this page and choosing Reopen Request. After 2 days the status becomes Completed and Reopen Request is disabled.";
+    const sentence = task.status === "Completed"
+        ? "Your task is closed."
+        : "Your task is closed. You can reopen it by opening this page and choosing Reopen Request. After 2 days the status becomes Completed and Reopen Request is disabled.";
     let channel = "";
     if (companyEmail) {
         const sent = await sendTaskActivityEmail({
@@ -576,10 +581,11 @@ async function closeFlags(task, viewer, currentAssigneeId, assigneeEmpId, action
     }
     const holder = viewer?.superUser || viewerIsAssignee;
     return {
+        reassigned,
         canReassign: open && (viewer?.superUser || viewerIsAssignee || viewerIsOriginal),
         canReturn: open && reassigned && viewerIsAssignee && !viewerIsOriginal,
         canSubmitCompletion: open && reassigned && viewerIsAssignee && !viewerIsOriginal && !completionPending && !closeScheduled,
-        canConfirmComplete: open && reassigned && (viewerIsOriginal || viewer?.superUser) && !closeScheduled,
+        canConfirmComplete: open && reassigned && completionPending && (viewerIsOriginal || viewer?.superUser) && !closeScheduled,
         completionPending,
         completionByName: saved.completionRequestedByName || "",
         completionNote: saved.completionNote || "",
@@ -592,14 +598,6 @@ async function closeFlags(task, viewer, currentAssigneeId, assigneeEmpId, action
         closeState: closed ? "closed" : completionPending ? "confirm" : notified ? "requested" : "none",
         closeMessage,
     };
-}
-
-function requesterWithAssigner(baseName, assignerName) {
-    const assigner = String(assignerName || "").trim();
-    const base = String(baseName || "").trim().replace(/\s*\([^)]*\)\s*$/, "").trim();
-    if (!assigner) return base;
-    if (!base || base.toLowerCase() === assigner.toLowerCase()) return assigner;
-    return `${base} (${assigner})`;
 }
 
 function assigneeOf(target) {
@@ -650,6 +648,10 @@ function readMeta(extra3) {
 /** Extra facts from the record this task points at. Missing records stay blank. */
 async function loadTaskSourceFacts(action) {
     const type = String(action?.requestType || "");
+    if (isAttendanceTaskType(type)) {
+        const map = await attendanceFactsByActionId([action]);
+        return map.get(String(action?._id || "")) || {};
+    }
     const id = String(action?.requestId || "");
     if (!isObjectId(id)) return {};
     try {
@@ -773,14 +775,16 @@ async function buildDetail(target, viewer) {
         action,
         sourceRequesters,
     ) || "System";
-    const requester = await findEmployeeByName(requesterName);
+    const requester = await findEmployeeByName(personBaseName(requesterName) || requesterName);
     const destination = manual
         ? moduleForText(task.taskName, task.description, task.taskType)
         : moduleForRequestType(action.requestType, `${action.extra1 || ""} ${action.extra2 || ""}`);
     const cardAssignee = contactCard(assigneeEmp);
         if (!cardAssignee.name) cardAssignee.name = task?.assigneeName || "Unassigned";
     const cardRequester = contactCard(requester);
-    if (!cardRequester.name) cardRequester.name = requesterName;
+    if (!cardRequester.name) cardRequester.name = personBaseName(requesterName) || requesterName;
+    const originalAssigneeName = String(task?.closeRequest?.originalAssigneeName || "").trim();
+    const requesterLabel = reassignedRequesterLabel(cardRequester.name, originalAssigneeName);
 
     const { assigneeId: currentAssigneeId, assigneeEmpId } = assigneeOf(target);
     const vehicles = manual || !action ? new Map() : await vehicleDisplayById([action]);
@@ -927,7 +931,8 @@ async function buildDetail(target, viewer) {
         assigneeEmail: cardAssignee.email,
         assigneePhone: cardAssignee.phone,
         assigneePhoto: cardAssignee.photo,
-        requesterName: cardRequester.name,
+        requesterName: requesterLabel || cardRequester.name,
+        requesterBaseName: cardRequester.name,
         requesterRole: cardRequester.role,
         requesterEmail: cardRequester.email,
         requesterPhone: cardRequester.phone,
@@ -1036,8 +1041,6 @@ export const updateTaskManagerTask = async (req, res) => {
         const previousAssigneeName = assigneeChanged
             ? await nameOfAssignee(previous, target.task?.assigneeName || viewer.name)
             : "";
-        const ownerReassigned = assigneeChanged && viewerIsCurrentAssignee(viewer, previous);
-        const assignerName = ownerReassigned ? previousAssigneeName : "";
         let saved;
         if (target.kind === "manual") {
             const task = target.task;
@@ -1049,7 +1052,6 @@ export const updateTaskManagerTask = async (req, res) => {
             task.assignee = assignee._id;
             task.assigneeEmpId = assignee.employeeId || "";
             task.assigneeName = assigneeName;
-            if (assignerName) task.requestedByName = requesterWithAssigner(task.requestedByName, assignerName);
             task.completionDate = completionDate;
             if (storedFiles.length) task.attachments = [...(task.attachments || []), ...storedFiles];
             task.history = task.history || [];
@@ -1082,9 +1084,6 @@ export const updateTaskManagerTask = async (req, res) => {
             overlay.assignee = assignee._id;
             overlay.assigneeEmpId = assignee.employeeId || "";
             overlay.assigneeName = assigneeName;
-            if (assignerName) {
-                overlay.requestedByName = requesterWithAssigner(action.requestedByName || overlay.requestedByName, assignerName);
-            }
             overlay.completionDate = completionDate;
             if (storedFiles.length) overlay.attachments = [...(overlay.attachments || []), ...storedFiles];
             overlay.history = overlay.history || [];
@@ -1169,13 +1168,6 @@ export const reassignTaskManagerTask = async (req, res) => {
             target.kind === "manual" ? target.task?.assigneeName : target.task?.assigneeName || "",
         );
         const detail = `Reassigned from ${previousName || "the previous assignee"} to ${assigneeName}. ${reason}`;
-        const ownerReassigned = viewerIsCurrentAssignee(viewer, current);
-        const assignerName = ownerReassigned
-            ? await nameOfAssignee(
-                current,
-                target.kind === "manual" ? target.task?.assigneeName : target.task?.assigneeName || viewer.name,
-            )
-            : "";
 
         let taskName = "";
         let requesterName = "";
@@ -1190,7 +1182,6 @@ export const reassignTaskManagerTask = async (req, res) => {
             task.assignee = assignee._id;
             task.assigneeEmpId = assignee.employeeId || "";
             task.assigneeName = assigneeName;
-            if (assignerName) task.requestedByName = requesterWithAssigner(task.requestedByName, assignerName);
             task.history = task.history || [];
             task.history.push(historyEntry("Reassigned", detail, viewer.name));
             await pushWorkUpdate(task, {
@@ -1234,9 +1225,6 @@ export const reassignTaskManagerTask = async (req, res) => {
             overlay.assignee = assignee._id;
             overlay.assigneeEmpId = assignee.employeeId || "";
             overlay.assigneeName = assigneeName;
-            if (assignerName) {
-                overlay.requestedByName = requesterWithAssigner(action.requestedByName || overlay.requestedByName, assignerName);
-            }
             overlay.history = overlay.history || [];
             overlay.history.push(historyEntry("Reassigned", detail, viewer.name));
             await pushWorkUpdate(overlay, {
@@ -1293,7 +1281,10 @@ export const reassignTaskManagerTask = async (req, res) => {
                     subject: `Task reassigned: ${taskName || "Task"}`,
                     html: taskActionHtml({
                         hello: personName(previousEmp) || previousName || "there",
-                        lines: [`This task was reassigned from you to ${assigneeName}.`],
+                        lines: [
+                            `This task is now also with ${assigneeName}.`,
+                            "It stays on your tasks until they close it and you confirm.",
+                        ],
                         taskName,
                         description: reason,
                         link,
@@ -1307,7 +1298,7 @@ export const reassignTaskManagerTask = async (req, res) => {
             }
         }
         if (notifyRequester && requesterName) {
-            const requester = await findEmployeeByName(requesterName);
+            const requester = await findEmployeeByName(personBaseName(requesterName));
             if (requester) {
                 try {
                     await sendTaskReassignedEmail({
@@ -1328,8 +1319,8 @@ export const reassignTaskManagerTask = async (req, res) => {
         const fresh = await loadTarget(req.params.taskKey);
         return res.status(200).json({
             message: emailSent
-                ? "Task reassigned. The new assignee was emailed."
-                : "Task reassigned. The assignee email could not be sent.",
+                ? "Task reassigned. It stays with the original assignee and the new assignee. The new assignee was emailed."
+                : "Task reassigned. It stays with both assignees. The new assignee email could not be sent.",
             emailSent,
             task: await buildDetail(fresh, viewer),
         });
@@ -1456,6 +1447,7 @@ export const submitTaskCompletion = async (req, res) => {
         }
         const current = assigneeOf(target);
         const original = await resolveOriginalAssignee(task);
+        if (!original) return res.status(400).json({ message: "The original assignee could not be found." });
         if (!viewerIsCurrentAssignee(viewer, current) || viewerMatchesEmployee(viewer, original)) {
             return res.status(403).json({ message: "Only the reassigned employee can send this for confirmation." });
         }
@@ -1556,16 +1548,23 @@ export const confirmTaskCompletion = async (req, res) => {
         }
         const current = assigneeOf(target);
         const saved = closeSnapshot(task);
-        if (completionWindowOpen(task)) {
-            return res.status(400).json({ message: "This task is already closed. The status becomes Completed after 2 days." });
+        if (!saved.completionRequestedAt || saved.completionConfirmedAt) {
+            return res.status(400).json({ message: "The reassigned employee has to close this before you confirm." });
         }
-        const completesAt = scheduleCompletion();
-        const text = `Confirmed close. The status becomes Completed after 2 days. ${note.text}`;
+        if (completionWindowOpen(task) || task.status === "Completed") {
+            return res.status(400).json({ message: "This task is already closed." });
+        }
+        const sourceStillOpen = Boolean(target.action) && !dashboardActionIsClosed(target.action) && target.action.requestType !== "Task Manager";
+        const text = sourceStillOpen
+            ? `Confirmed close. This task is closed. The original request is still open on its own page. ${note.text}`
+            : `Confirmed close. This task is closed. ${note.text}`;
+        task.status = "Completed";
         task.closeRequest = {
             ...saved,
             completionConfirmedAt: new Date(),
-            completesAt,
+            closedAt: new Date(),
             closedByName: viewer.name,
+            completesAt: null,
         };
         task.markModified("closeRequest");
         task.history = task.history || [];
@@ -1578,6 +1577,8 @@ export const confirmTaskCompletion = async (req, res) => {
             text,
         }, SILENT_MAIL);
         await task.save();
+        await closeReassignmentNotices(task);
+        if (!task.sourceDashboardActionId) await syncManualTaskNotification(task);
         const requestedId = saved.completionRequestedById;
         const recipient = isObjectId(requestedId)
             ? await employeeById(requestedId)
@@ -1591,7 +1592,7 @@ export const confirmTaskCompletion = async (req, res) => {
                         hello: personName(recipient) || "there",
                         lines: [
                             `${viewer.name} confirmed this task is closed.`,
-                            "The status becomes Completed after 2 days. Reopen Request is disabled after that.",
+                            "It is no longer in the open task list.",
                         ],
                         taskName: task.taskName,
                         description: note.text,
@@ -1611,8 +1612,13 @@ export const confirmTaskCompletion = async (req, res) => {
             console.error("Requester close notice failed:", noticeError);
         }
         const fresh = await loadTarget(req.params.taskKey);
+        if (fresh?.task?.status !== "Completed") {
+            return res.status(500).json({ message: "The task did not close. It is still open." });
+        }
         return res.status(200).json({
-            message: "Close confirmed. The status becomes Completed after 2 days. The requester can reopen until then.",
+            message: sourceStillOpen
+                ? "Close confirmed. This task is closed. The original request is still open on its own page."
+                : "Close confirmed. This task is closed and has left the open list.",
             emailSent,
             task: await buildDetail(fresh, viewer),
         });
@@ -1714,10 +1720,9 @@ export const updateTaskManagerTaskStatus = async (req, res) => {
         const task = target.task || (target.action ? blankOverlay(target.action) : null);
         if (!task) return res.status(404).json({ message: "Task not found." });
         if (status === "Completed" && taskWasReassigned(task)) {
-            const original = await resolveOriginalAssignee(task);
-            if (!viewerMatchesEmployee(viewer, original) && !viewer.superUser) {
-                return res.status(400).json({ message: "The original assignee has to confirm this close." });
-            }
+            return res.status(400).json({
+                message: "The reassigned employee closes first. The original assignee confirms close after that.",
+            });
         }
         if (status === "Completed") {
             if (completionWindowOpen(task)) {
