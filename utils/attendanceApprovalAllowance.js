@@ -1,7 +1,7 @@
 import Attendance from '../models/Attendance.js';
 import EmployeeBasic from '../models/EmployeeBasic.js';
 import { resolveEmployeePayrollPolicy } from './employeeLeavePolicy.js';
-import { lateDeductMultiplier, missedPunchRuleOf, sharedLateRule } from './lateDeductionPolicy.js';
+import { lateDeductMultiplier, sharedLateRule } from './lateDeductionPolicy.js';
 import { punchAttendanceKind } from './partialLeaveWindow.js';
 import { getScheduledEmailTimeZone, getZonedParts } from './scheduleDailyAtMidnight.js';
 
@@ -42,8 +42,18 @@ export function approvalEventPool(row, { countOpenPunch = false } = {}) {
     return '';
 }
 
+/** Monthly missed-punch requests allowed by the salary-policy request count. Blank means no limit. */
+export function missedPunchRequestLimit(policy) {
+    const raw = policy?.missedPunchRule?.maxRequests;
+    if (raw == null || raw === '') return null;
+    const count = Number(raw);
+    if (!Number.isFinite(count) || count < 0) return null;
+    return Math.floor(count);
+}
+
 export function allowedApprovalEvents(policy, pool) {
-    const rule = pool === 'mispunch' ? missedPunchRuleOf(policy) : sharedLateRule(policy);
+    if (pool === 'mispunch') return missedPunchRequestLimit(policy);
+    const rule = sharedLateRule(policy);
     if (lateDeductMultiplier(rule) <= 0) return null;
     const events = Number(rule?.events);
     if (!Number.isFinite(events) || events < 0) return 0;
@@ -51,7 +61,8 @@ export function allowedApprovalEvents(policy, pool) {
 }
 
 /**
- * Block when this request would put the month above the salary-policy event count.
+ * Block when this request would put the month above the allowed count.
+ * For missed punch that count is the salary-policy maximum request.
  * `taken` is how many events are already on record in that month.
  */
 export function approvalAllowanceBlock({ allowed, existingDates, requestDates }) {

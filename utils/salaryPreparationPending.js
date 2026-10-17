@@ -337,3 +337,23 @@ export function buildSalaryPreparationPending({
 
     return items.sort((a, b) => String(b.dateKey || '').localeCompare(String(a.dateKey || '')));
 }
+
+function rangeOf(row) {
+    const from = dateKeyOf(row?.fromDate) || dateKeyOf(row?.dateKey);
+    const to = dateKeyOf(row?.toDate) || from;
+    return { from, to };
+}
+
+/** A reassigned approval task covers this salary row, so the row stays off salary preparation. */
+export function hiddenByReassignedLeave(row, cards = []) {
+    const id = String(row?.id || '');
+    const range = rangeOf(row);
+    return (cards || []).some((card) => {
+        if (!card?.reassigned) return false;
+        const requestId = String(card.requestId || '').trim();
+        if (requestId && id.includes(requestId)) return true;
+        const cardRange = rangeOf(card);
+        if (!range.from || !cardRange.from) return false;
+        return range.from === cardRange.from && range.to === cardRange.to;
+    });
+}

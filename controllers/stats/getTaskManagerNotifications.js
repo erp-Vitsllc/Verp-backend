@@ -985,7 +985,7 @@ function leaveReviewHref(action) {
     return query ? `/HRM/Leave/annual-leave?${query}` : "/HRM/Leave/annual-leave";
 }
 
-function leaveCardFromAction(action, ownerName, { ownRequest = false } = {}) {
+function leaveCardFromAction(action, ownerName, { ownRequest = false, reassigned = false } = {}) {
     const meta = actionMeta(action?.extra3);
     const from = dateKeyOrBlank(meta.from) || dateKeyOrBlank(meta.date) || dateKeyOrBlank(action?.extra1);
     const to = dateKeyOrBlank(meta.to) || from;
@@ -1003,7 +1003,8 @@ function leaveCardFromAction(action, ownerName, { ownRequest = false } = {}) {
         dateLabel: formatProfileDay(action?.requestedDate || action?.createdAt),
         href: leaveReviewHref(action),
         spanAllMonths: true,
-        ownRequest: Boolean(ownRequest),
+        ownRequest: Boolean(ownRequest) && !reassigned,
+        reassigned: Boolean(reassigned),
     };
 }
 
@@ -1169,6 +1170,10 @@ export async function listProfileEmployeeTasks({ employeeId, employeeCode, emplo
             const reassignedRequester = Boolean(originalAssigneeName) && personKey(cleanRequester(requesterBase)) === nameKey;
             if (!assignedToEmployee({ assigneeId, assigneeEmpId, assigneeName }) && !requesterMatch && !originalHold && !reassignedRequester) continue;
             const leaveTask = PROFILE_LEAVE_TYPES.has(String(action.requestType || ""));
+            const reassigned = Boolean(
+                String(overlay?.closeRequest?.originalAssigneeId || "").trim()
+                || String(overlay?.closeRequest?.originalAssigneeName || "").trim(),
+            );
             rows.push({
                 actionId: String(action._id),
                 requestId: String(action.requestId || ""),
@@ -1179,7 +1184,7 @@ export async function listProfileEmployeeTasks({ employeeId, employeeCode, emplo
                 status: profileStatusLabel(status),
                 sortAt: new Date(requestedAt || 0).getTime(),
                 href: leaveTask ? leaveReviewHref(action) : "",
-                leaveCard: leaveTask ? leaveCardFromAction(action, assigneeName, { ownRequest: requesterMatch }) : null,
+                leaveCard: leaveTask ? leaveCardFromAction(action, assigneeName, { ownRequest: requesterMatch, reassigned }) : null,
             });
         }
 

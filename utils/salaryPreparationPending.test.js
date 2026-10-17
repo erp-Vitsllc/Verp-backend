@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
-import { buildSalaryPreparationPending } from './salaryPreparationPending.js';
+import { buildSalaryPreparationPending, hiddenByReassignedLeave } from './salaryPreparationPending.js';
 
 const todayKey = '2026-10-15';
 const year = { yearFrom: '2026-01-01', yearTo: '2026-12-31', todayKey, reportsTo: 'HR Manager', hrName: 'Sara HR', staffType: 'office' };
@@ -133,5 +133,24 @@ describe('buildSalaryPreparationPending', () => {
             ],
         });
         assert.equal(items.length, 0);
+    });
+
+    it('hides a salary row when that request was reassigned as a task', () => {
+        const row = {
+            id: 'leave-group-1',
+            title: 'Miss Punch request',
+            fromDate: '2026-10-12',
+            toDate: '2026-10-12',
+        };
+        assert.equal(hiddenByReassignedLeave(row, [
+            { reassigned: true, requestId: 'other', fromDate: '2026-10-16', toDate: '2026-10-16' },
+        ]), false);
+        assert.equal(hiddenByReassignedLeave(row, [
+            { reassigned: true, requestId: 'task-1', fromDate: '2026-10-12', toDate: '2026-10-12' },
+        ]), true);
+        assert.equal(hiddenByReassignedLeave(
+            { id: 'leave-task-abc', fromDate: '2026-08-15', toDate: '2026-08-15' },
+            [{ reassigned: true, requestId: 'abc', fromDate: '2026-01-01', toDate: '2026-01-01' }],
+        ), true);
     });
 });

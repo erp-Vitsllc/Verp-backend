@@ -49,7 +49,7 @@ import {
     utilityBillIsVisibleToEmployee,
 } from '../../utils/employeeFinancialVisibility.js';
 import { ATTENDANCE_CHANGE_OPEN_STAGES } from '../../utils/attendanceChangeApproval.js';
-import { buildSalaryPreparationPending } from '../../utils/salaryPreparationPending.js';
+import { buildSalaryPreparationPending, hiddenByReassignedLeave } from '../../utils/salaryPreparationPending.js';
 import { getDepartmentHOD } from '../../utils/getDepartmentHOD.js';
 
 const LEAVE_STATUS_KEYS = new Set([
@@ -1248,20 +1248,25 @@ export async function getEmployeeAttendanceProfile(req, res) {
             employeeName: employeeName(employee),
             limit: 200,
         });
+        const reassignedHolds = (employeeTasks.leaveCards || [])
+            .filter((card) => card.reassigned)
+            .map((card) => ({ ...card, ownRequest: false, reassigned: true }));
+        const visiblePending = pendingHrRequests.filter((row) => !hiddenByReassignedLeave(row, reassignedHolds));
         const seenLeave = new Set(
-            pendingHrRequests.map((row) => `${row.fromDate || ''}|${row.toDate || ''}|${String(row.title || '').toLowerCase()}`),
+            visiblePending.map((row) => `${row.fromDate || ''}|${row.toDate || ''}|${String(row.title || '').toLowerCase()}`),
         );
         const extraLeave = [];
         for (const card of employeeTasks.leaveCards || []) {
             // Assigned and reassigned approval tasks stay on Pending Tasks.
-            // Salary preparation only lists a leave this employee requested.
-            if (!card.ownRequest) continue;
+            // A reassigned task is a task request, so it does not block salary preparation
+            // and it does not link the attendance calendar.
+            if (card.reassigned || !card.ownRequest) continue;
             const requestId = String(card.requestId || '').trim();
-            const sameRequest = requestId && pendingHrRequests.some((row) => {
+            const sameRequest = requestId && visiblePending.some((row) => {
                 const id = String(row.id || '');
                 return id === `leave-${requestId}` || id === `leave-task-${requestId}`;
             });
-            const sameDates = card.fromDate && pendingHrRequests.some((row) =>
+            const sameDates = card.fromDate && visiblePending.some((row) =>
                 String(row.id || '').startsWith('leave') &&
                 row.fromDate === card.fromDate &&
                 row.toDate === card.toDate,
@@ -1272,7 +1277,8 @@ export async function getEmployeeAttendanceProfile(req, res) {
             seenLeave.add(key);
             extraLeave.push(card);
         }
-        if (extraLeave.length) pendingHrRequests.unshift(...extraLeave);
+        if (extraLeave.length) visiblePending.unshift(...extraLeave);
+        const salaryPending = [...visiblePending, ...reassignedHolds];
         const workTasks = employeeTasks.tasks;
         const rawPhoto = employee.profilePicture || '';
         const profilePicture = rawPhoto.startsWith('data:')
@@ -1406,12 +1412,12 @@ export async function getEmployeeAttendanceProfile(req, res) {
                 })),
             },
             requests: {
-                pending: pendingHrRequests,
-                hrPendingCount: pendingHrRequests.length,
+                pending: salaryPending,
+                hrPendingCount: visiblePending.length,
                 workTasks,
                 workTaskPendingCount: employeeTasks.pendingCount,
-                workflowActiveIndex: pendingHrRequests.length ? 1 : 3,
-                taskAging: taskAgingBuckets(pendingHrRequests),
+                workflowActiveIndex: visiblePending.length ? 1 : 3,
+                taskAging: taskAgingBuckets(visiblePending),
             },
         });
     } catch (error) {

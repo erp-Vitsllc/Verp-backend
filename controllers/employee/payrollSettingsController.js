@@ -129,11 +129,19 @@ function toExtraLateRules(value) {
     });
 }
 
+function toRequestCount(value) {
+    if (value === '' || value == null) return null;
+    const n = Number(value);
+    if (!Number.isFinite(n) || n < 0) return null;
+    return Math.floor(n);
+}
+
 function toMissedPunchRule(value) {
     const deduct = String(value?.deduct || '').trim().toLowerCase();
     return {
         events: toDays(value?.events),
         deduct: LATE_DEDUCT.has(deduct) ? deduct : '',
+        maxRequests: toRequestCount(value?.maxRequests),
     };
 }
 
@@ -142,6 +150,7 @@ function serializeMissedPunchRule(value) {
     return {
         events: rule.events ?? '',
         deduct: rule.deduct,
+        maxRequests: rule.maxRequests ?? '',
     };
 }
 

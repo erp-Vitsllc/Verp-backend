@@ -32,11 +32,19 @@ describe('attendance approval allowance', () => {
     it('reads the salary policy event counts', () => {
         const policy = {
             lateInRules: [{ minutes: 15, events: 4, deduct: 'quarter' }],
-            missedPunchRule: { events: 0, deduct: 'half' },
+            missedPunchRule: { events: 2, deduct: 'half', maxRequests: 5 },
         };
         assert.equal(allowedApprovalEvents(policy, 'late'), 4);
-        assert.equal(allowedApprovalEvents(policy, 'mispunch'), 0);
+        assert.equal(allowedApprovalEvents(policy, 'mispunch'), 5);
         assert.equal(allowedApprovalEvents({ lateInRules: [{ events: 4 }] }, 'late'), null);
+        assert.equal(
+            allowedApprovalEvents({ missedPunchRule: { events: 2, deduct: 'half' } }, 'mispunch'),
+            null,
+        );
+        assert.equal(
+            allowedApprovalEvents({ missedPunchRule: { maxRequests: 0, deduct: 'half' } }, 'mispunch'),
+            0,
+        );
     });
 
     it('blocks once the month is already over the allowed count', () => {

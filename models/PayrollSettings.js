@@ -39,6 +39,7 @@ const lateDeductRuleSchema = new mongoose.Schema(
         minutes: { type: Number, default: null },
         events: { type: Number, default: null },
         deduct: { type: String, default: '' },
+        maxRequests: { type: Number, default: null },
     },
     { _id: false },
 );
