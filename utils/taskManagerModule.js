@@ -1020,6 +1020,8 @@ export async function loadTaskManagerInboxItems(assigneeClauses, moduleName, opt
     } catch (error) {
         console.error("Task inbox notice cleanup failed:", error);
     }
+    // A reassignment notice is a copy of the module request. It stays off every module bell.
+    mapped = mapped.filter((row) => !readTaskInboxMeta(row.extra3).reassignedNotice);
     if (options.omitExpiryFollowUps) {
         mapped = mapped.filter((row) => !isExpiryFollowUpTaskRow(row));
     }
