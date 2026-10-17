@@ -5,6 +5,7 @@ import {
     approvalAllowanceBlock,
     approvalEventPool,
     attendanceApprovalLimitText,
+    closedMissingCheckout,
 } from './attendanceApprovalAllowance.js';
 
 describe('attendance approval allowance', () => {
@@ -26,6 +27,61 @@ describe('attendance approval allowance', () => {
                 { countOpenPunch: true },
             ),
             'mispunch',
+        );
+        assert.equal(
+            approvalEventPool(
+                { statusKey: 'on_office', timeIn: '09:00', timeOut: '', date: '2026-10-06' },
+                { countOpenPunch: false },
+            ),
+            '',
+        );
+        assert.equal(
+            approvalEventPool(
+                { statusKey: 'absent', timeIn: '20:47:19', timeOut: '', date: '2026-10-06' },
+                { countOpenPunch: true },
+            ),
+            'mispunch',
+        );
+        assert.equal(
+            approvalEventPool(
+                { statusKey: 'holiday', timeIn: '09:00', timeOut: '' },
+                { countOpenPunch: true },
+            ),
+            '',
+        );
+        assert.equal(
+            approvalEventPool({
+                statusKey: 'on_office',
+                timeIn: '09:00',
+                timeOut: '18:00',
+                hourAdjustStatus: 'pending',
+                hourAdjustKind: 'mispunch',
+            }),
+            'mispunch',
+        );
+    });
+
+    it('treats a finished day with no check-out as a mispunch', () => {
+        assert.equal(
+            closedMissingCheckout(
+                { date: '2026-10-06', statusKey: 'on_office', timeIn: '20:47:19', timeOut: '' },
+                '2026-10-17',
+            ),
+            true,
+        );
+        assert.equal(
+            closedMissingCheckout(
+                { date: '2026-10-17', statusKey: 'on_office', timeIn: '20:47:19', timeOut: '' },
+                '2026-10-17',
+            ),
+            false,
+        );
+        assert.equal(
+            closedMissingCheckout(
+                { date: '2026-10-06', statusKey: 'on_office', timeIn: '07:38:22', timeOut: '19:04:44' },
+                '2026-10-17',
+            ),
+            false,
         );
     });
 

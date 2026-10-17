@@ -2,6 +2,7 @@ import nodemailer from 'nodemailer';
 import { emailFrontendUrl } from './resolveFrontendBaseUrl.js';
 import EmployeeBasic from '../models/EmployeeBasic.js';
 import { resolveEmployeeEmail } from './resolveEmployeeEmail.js';
+import { rememberSentEmail } from './emailDispatch.js';
 
 function createTransport() {
     const emailUser = process.env.EMAIL_USER;
@@ -88,12 +89,24 @@ export async function sendUtilityContractExpiryEmail({
             </div>
         `;
 
+        const subject = titles[kind] || titles.due;
         await transporter.sendMail({
             from: `"VeRP Notifications" <${process.env.EMAIL_USER}>`,
             to: recipientEmail,
-            subject: titles[kind] || titles.due,
+            subject,
             html,
         });
+        if (entryId) {
+            await rememberSentEmail({
+                from: `"VeRP Notifications" <${process.env.EMAIL_USER}>`,
+                to: [recipientEmail],
+                subject,
+                html,
+                recordId: entryId,
+                module: 'Utility Contract Expiry',
+                emailType: 'Utility contract expiry',
+            });
+        }
     } catch (err) {
         console.error('[UtilityContractExpiryEmail]', err?.message || err);
     }

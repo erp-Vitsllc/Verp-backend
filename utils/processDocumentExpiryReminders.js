@@ -100,7 +100,7 @@ const createTransporter = () => {
     });
 };
 
-const sendExpiryReminderEmail = async ({ to, subject, html, eventKey = "", emailType = "", recordId = "" }) => {
+const sendExpiryReminderEmail = async ({ to, subject, html, eventKey = "", emailType = "", recordId = "", taskRecordId = "" }) => {
     const transporter = createTransporter();
     if (!transporter || !to?.length) return { sent: false };
     const emailOk = await isEmailEnabledForEvent(eventKey, emailType);
@@ -115,9 +115,21 @@ const sendExpiryReminderEmail = async ({ to, subject, html, eventKey = "", email
         dedupeKey: buildEmailDedupeKey([emailType || eventKey || "expiry", recordId, subject]),
         module: eventKey || "expiry",
         emailType: emailType || "ExpiryReminder",
-        recordId,
+        recordId: String(taskRecordId || recordId || ""),
         metadata: { eventKey, subjectCategory: "reminder" },
     });
+};
+
+/** The follow-up task for this document, so the sent email opens on that task only. */
+const pendingExpiryActionId = async ({ requestId, requestType, extra1 }) => {
+    if (!requestId || !requestType || !extra1) return "";
+    const row = await DashboardAction.findOne({
+        requestId,
+        requestType,
+        extra1,
+        status: "Pending",
+    }).select("_id").lean();
+    return row?._id ? String(row._id) : "";
 };
 
 /** Pending expiry rows that were reassigned in Task Manager must stay open. */
@@ -218,6 +230,12 @@ const removeVehicleExpiryActionsOutsideLiveSet = async ({ requestId, allowedExtr
 
     if (actionIdsToDelete.length > 0) {
         await DashboardAction.deleteMany({ _id: { $in: actionIdsToDelete } });
+        try {
+            const { finishTasksForRemovedExpiryActions } = await import("./finishVehicleExpiryTasks.js");
+            await finishTasksForRemovedExpiryActions(actionIdsToDelete);
+        } catch (err) {
+            console.warn("[vehicle expiry] finish linked tasks:", err?.message || err);
+        }
     }
 };
 
@@ -606,6 +624,7 @@ const processCompanyReminders = async () => {
                 </div>
             `;
 
+            const companyExtra1 = `Expiry follow-up required: ${doc.label}${formatExpiryDateLabel(doc.expiryDate) ? ` (Exp: ${formatExpiryDateLabel(doc.expiryDate)})` : ""}`;
             await sendExpiryReminderEmail({
                 to: recipients.emails,
                 subject,
@@ -613,6 +632,11 @@ const processCompanyReminders = async () => {
                 eventKey: "hrm.company.document_expiry",
                 emailType: "CompanyDocumentExpiry",
                 recordId: `${company._id}:${doc.key}:${emailStage}`,
+                taskRecordId: await pendingExpiryActionId({
+                    requestId: company._id,
+                    requestType: "Document Expiry Reminder",
+                    extra1: companyExtra1,
+                }),
             });
 
             await markReminderSent({
@@ -888,6 +912,11 @@ const processEmployeeReminders = async () => {
                     eventKey: "hrm.employees.document_expiry",
                     emailType: "EmployeeDocumentExpiry",
                     recordId: `${employee._id}:${docKey}:${emailStage}`,
+                    taskRecordId: await pendingExpiryActionId({
+                        requestId: employee._id,
+                        requestType: "Employee Document Expiry Reminder",
+                        extra1,
+                    }),
                 });
             }
 
@@ -1052,6 +1081,11 @@ const processVehicleReminders = async () => {
                 eventKey: "hrm.vehicle.document_expiry",
                 emailType: "VehicleDocumentExpiry",
                 recordId: `${asset._id}:${doc.key}:${emailStage}`,
+                taskRecordId: await pendingExpiryActionId({
+                    requestId: asset._id,
+                    requestType: "Vehicle Document Expiry Reminder",
+                    extra1,
+                }),
             });
 
             await markReminderSent({

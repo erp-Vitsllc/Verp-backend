@@ -452,6 +452,7 @@ export const submitVehicleProfileActivation = async (req, res) => {
                 changesHtml: reviewerChangesHtml(asset, sections),
                 noteText: descText,
                 requesterName: requestedByName,
+                recordId: String(asset._id),
             });
 
             await createPendingDashboardForAssignees({
@@ -526,6 +527,7 @@ export const submitVehicleProfileActivation = async (req, res) => {
                 changesHtml: reviewerChangesHtml(asset, sections),
                 noteText: descText,
                 requesterName: requestedByName,
+                recordId: String(asset._id),
             }).catch(() => {});
         }
 
@@ -676,6 +678,7 @@ export const approveVehicleProfileActivation = async (req, res) => {
                 changesHtml: reviewerChangesHtml(asset, sections),
                 noteText: descText,
                 requesterName: requestedByName,
+                recordId: String(asset._id),
             });
 
             await createPendingDashboardForAssignees({

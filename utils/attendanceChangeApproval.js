@@ -1,4 +1,5 @@
 import AttendanceChangeRequest from '../models/AttendanceChangeRequest.js';
+import DashboardAction from '../models/DashboardAction.js';
 import EmployeeBasic from '../models/EmployeeBasic.js';
 import { syncDashboardAction } from './syncDashboard.js';
 import {
@@ -292,6 +293,11 @@ async function openChangeBell({ request, approver, employee, summary, notice = '
             targetDate: request.proposed?.targetDate || '',
         }),
     });
+    const action = await DashboardAction.findOne({
+        requestId: request._id,
+        requestType: ATTENDANCE_CHANGE_REQUEST_TYPE,
+    }).sort({ updatedAt: -1 }).select('_id').lean();
+    const recordIds = [action?._id || request._id];
     if (notice === 'rejected') {
         const requestNoun =
             request.action === 'flexible_ot' ? 'OT' : request.action === 'hour_adjust' ? 'Hour' : 'Attendance';
@@ -304,6 +310,7 @@ async function openChangeBell({ request, approver, employee, summary, notice = '
             requestedLabel: request.proposed?.statusLabel || `${requestNoun} approval`,
             requestNoun,
             reviewPath: path,
+            recordIds,
         });
         return;
     }
@@ -319,6 +326,7 @@ async function openChangeBell({ request, approver, employee, summary, notice = '
         reason: request.proposed?.reason || '',
         stage: request.stage,
         reviewPath: path,
+        recordIds,
     });
 }
 

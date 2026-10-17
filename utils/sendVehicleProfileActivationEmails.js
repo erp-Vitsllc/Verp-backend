@@ -1,6 +1,7 @@
 import nodemailer from 'nodemailer';
 
 import { pickEffectiveEmail as pickEmployeeEmail } from "./pickEffectiveEmail.js";
+import { rememberSentEmail } from './emailDispatch.js';
 
 const escapeHtmlBasic = (s) =>
     String(s || '')
@@ -137,7 +138,7 @@ export const sendVehicleProfileActivationOutcomeEmail = async ({
     });
 };
 
-const sendSimpleActivationMail = async ({ toEmployee, subject, title, bodyHtml, detailUrl, headerColor = '#059669' }) => {
+const sendSimpleActivationMail = async ({ toEmployee, subject, title, bodyHtml, detailUrl, headerColor = '#059669', recordId = '', emailType = '' }) => {
     if (!toEmployee) return false;
     const toEmail = pickEmployeeEmail(toEmployee);
     if (!toEmail) return false;
@@ -146,11 +147,7 @@ const sendSimpleActivationMail = async ({ toEmployee, subject, title, bodyHtml, 
     const emailUser = process.env.EMAIL_USER?.trim();
     const greeting =
         `${toEmployee.firstName || ''} ${toEmployee.lastName || ''}`.trim() || 'there';
-    await transporter.sendMail({
-        from: `"VeRP Portal" <${emailUser}>`,
-        to: toEmail,
-        subject,
-        html: `
+    const html = `
             <div style="font-family:Segoe UI,Arial,sans-serif;color:#1e293b;line-height:1.6;max-width:600px;margin:0 auto;border:1px solid #e2e8f0;border-radius:12px;overflow:hidden;">
                 <div style="background:${headerColor};color:#fff;padding:22px;">
                     <h1 style="margin:0;font-size:20px;">${escapeHtmlBasic(title)}</h1>
@@ -163,8 +160,24 @@ const sendSimpleActivationMail = async ({ toEmployee, subject, title, bodyHtml, 
                     </p>
                 </div>
             </div>
-        `,
+        `;
+    await transporter.sendMail({
+        from: `"VeRP Portal" <${emailUser}>`,
+        to: toEmail,
+        subject,
+        html,
     });
+    if (recordId) {
+        await rememberSentEmail({
+            from: `"VeRP Portal" <${emailUser}>`,
+            to: [toEmail],
+            subject,
+            html,
+            recordId: String(recordId),
+            module: 'Vehicle Profile',
+            emailType: emailType || title,
+        });
+    }
     return true;
 };
 
@@ -178,6 +191,7 @@ export const sendVehicleProfileActivationReviewRequestEmail = async ({
     changesHtml = '',
     noteText = '',
     requesterName = '',
+    recordId = '',
 }) => {
     const noteBlock = noteText
         ? `<p style="margin:12px 0 0 0;"><strong>Note:</strong><br/>${escapeHtmlBasic(noteText).replace(/\n/g, '<br/>')}</p>`
@@ -191,6 +205,8 @@ export const sendVehicleProfileActivationReviewRequestEmail = async ({
         title: 'Vehicle profile — activation review',
         headerColor: '#059669',
         detailUrl,
+        recordId,
+        emailType: 'Vehicle profile review',
         bodyHtml: `
             <p>A vehicle profile is ready for <strong>${escapeHtmlBasic(reviewerRoleLabel)}</strong> review.</p>
             ${requesterLine}

@@ -2,6 +2,8 @@ import mongoose from 'mongoose';
 import Attendance from '../../models/Attendance.js';
 import DashboardAction from '../../models/DashboardAction.js';
 import EmployeeBasic from '../../models/EmployeeBasic.js';
+import EmployeeHubRequest from '../../models/EmployeeHubRequest.js';
+import TaskManagerTask from '../../models/TaskManagerTask.js';
 import {
     isCompanyShellEmployee,
     REAL_EMPLOYEE_MONGO_FILTER,
@@ -34,6 +36,8 @@ import {
     resolveDashboardAssigneeContext,
 } from '../../utils/resolveDashboardAssigneeContext.js';
 import { loadTaskManagerInboxItems } from '../../utils/taskManagerModule.js';
+import { dubaiTodayKey, selectOpenLeaveBellItems } from '../../utils/leaveBellVisibility.js';
+import { dismissDecidedLeaveBells } from '../../utils/dismissDecidedLeaveBells.js';
 import { syncDashboardAction } from '../../utils/syncDashboard.js';
 import {
     LEAVE_DASHBOARD_REQUEST_TYPE,
@@ -308,6 +312,11 @@ function formatRequestedDate(value) {
     return formatDisplayDate(`${parts.year}-${month}-${day}`);
 }
 
+/** When the request was sent. Older rows only have the record's created time. */
+function requestStamp(row) {
+    return row?.leaveRequestedAt || row?.createdAt || null;
+}
+
 function formatEndDateLabel(record) {
     const fromDate = record.leaveRequestFromDate || record.date;
     const toDate = record.leaveRequestToDate || record.date;
@@ -366,9 +375,9 @@ function groupPendingRows(rows) {
                 annualLeaveNotEligible: Boolean(row.annualLeaveNotEligible),
                 timeIn: row.leaveRequestTimeIn || row.timeIn || '',
                 timeOut: row.leaveRequestTimeOut || row.timeOut || '',
-                requestedAt: row.leaveRequestedAt || null,
-                requestedDate: formatRequestedDate(row.leaveRequestedAt),
-                sortAt: row.leaveRequestedAt || row.leaveDecidedAt || row.date || '',
+                requestedAt: requestStamp(row),
+                requestedDate: formatRequestedDate(requestStamp(row)),
+                sortAt: requestStamp(row) || row.leaveDecidedAt || row.date || '',
             });
         }
 
@@ -390,15 +399,15 @@ function groupPendingRows(rows) {
             group.leaveApprovalStage = String(row.leaveApprovalStage || group.leaveApprovalStage || '').trim();
             group.leaveRequestKind = row.leaveRequestKind || group.leaveRequestKind;
         }
-        const sortAt = row.leaveRequestedAt || row.leaveDecidedAt || '';
+        const sortAt = requestStamp(row) || row.leaveDecidedAt || '';
         if (sortAt && (!group.sortAt || String(sortAt) > String(group.sortAt))) {
             group.sortAt = sortAt;
         }
-        const requestedAt = requestedTime(row.leaveRequestedAt);
+        const requestedAt = requestedTime(requestStamp(row));
         const currentRequested = requestedTime(group.requestedAt);
         if (requestedAt && (!currentRequested || requestedAt < currentRequested)) {
-            group.requestedAt = row.leaveRequestedAt;
-            group.requestedDate = formatRequestedDate(row.leaveRequestedAt);
+            group.requestedAt = requestStamp(row);
+            group.requestedDate = formatRequestedDate(requestStamp(row));
         }
     }
 
@@ -599,22 +608,24 @@ export async function getLeavePendingRequests(req, res) {
             employeeId: { $ne: 'VEGA-HR-0000' },
             ...REAL_EMPLOYEE_MONGO_FILTER,
         })
-            .select('_id employeeId firstName lastName primaryReportee')
+            .select('_id employeeId firstName lastName primaryReportee staffType')
             .lean()
             .maxTimeMS(12000);
 
         const realEmployees = (activeEmployees || []).filter((row) => !isCompanyShellEmployee(row));
         const visibility = await loadEnrolledLeaveVisibilityByMongoId(realEmployees);
         const visibilityByCode = leaveVisibilityByEmployeeId(realEmployees, visibility);
-        const employeeIds = realEmployees
-            .map((row) => String(row._id))
-            .filter((id) => visibility.has(id));
+        const allEmployeeIds = realEmployees.map((row) => String(row._id)).filter(Boolean);
+        const allCodes = realEmployees
+            .map((row) => String(row.employeeId || '').trim())
+            .filter(Boolean);
+        const employeeIds = allEmployeeIds.filter((id) => visibility.has(id));
         const enrolledCodes = realEmployees
             .filter((row) => visibility.has(String(row._id)))
             .map((row) => String(row.employeeId || '').trim())
             .filter(Boolean);
 
-        if (!employeeIds.length) {
+        if (!allEmployeeIds.length) {
             return res.status(200).json({
                 message: 'Leave pending requests fetched successfully',
                 year: yearRaw === 'all' ? 'all' : year,
@@ -643,33 +654,46 @@ export async function getLeavePendingRequests(req, res) {
               }
             : {};
 
-        const partyFilter = {
+        const pendingPartyFilter = {
             $or: [
-                { employeeMongoId: { $in: employeeIds } },
-                ...(enrolledCodes.length ? [{ employeeId: { $in: enrolledCodes } }] : []),
+                { employeeMongoId: { $in: allEmployeeIds } },
+                ...(allCodes.length ? [{ employeeId: { $in: allCodes } }] : []),
             ],
         };
+        const decidedPartyFilter = employeeIds.length
+            ? {
+                  $or: [
+                      { employeeMongoId: { $in: employeeIds } },
+                      ...(enrolledCodes.length ? [{ employeeId: { $in: enrolledCodes } }] : []),
+                  ],
+              }
+            : null;
 
-        const baseFilter = {
+        const pendingFilter = {
             leaveRequestKind: { $in: PENDING_LEAVE_KINDS },
+            leaveRequestStatus: 'pending',
             employeeName: { $not: /\(company\)\s*$/i },
-            $and: [partyFilter, ...(year ? [yearDateFilter] : [])],
+            $and: [pendingPartyFilter, ...(year ? [yearDateFilter] : [])],
         };
 
         const [pendingRows, decidedRows] = await Promise.all([
-            Attendance.find({ ...baseFilter, leaveRequestStatus: 'pending' })
+            Attendance.find(pendingFilter)
                 .sort({ leaveRequestedAt: -1, date: -1 })
                 .limit(1500)
                 .lean()
                 .maxTimeMS(12000),
-            Attendance.find({
-                ...baseFilter,
-                leaveRequestStatus: { $in: ['approved', 'rejected'] },
-            })
-                .sort({ leaveDecidedAt: -1, leaveRequestedAt: -1, date: -1 })
-                .limit(1500)
-                .lean()
-                .maxTimeMS(12000),
+            decidedPartyFilter
+                ? Attendance.find({
+                      leaveRequestKind: { $in: PENDING_LEAVE_KINDS },
+                      leaveRequestStatus: { $in: ['approved', 'rejected'] },
+                      employeeName: { $not: /\(company\)\s*$/i },
+                      $and: [decidedPartyFilter, ...(year ? [yearDateFilter] : [])],
+                  })
+                      .sort({ leaveDecidedAt: -1, leaveRequestedAt: -1, date: -1 })
+                      .limit(1500)
+                      .lean()
+                      .maxTimeMS(12000)
+                : [],
         ]);
 
         const openRows = await settleFulfilledLeaveRows(pendingRows || []);
@@ -677,6 +701,7 @@ export async function getLeavePendingRequests(req, res) {
             if (isCompanyShellEmployee(row.employeeName) || isCompanyShellEmployee(row)) {
                 return false;
             }
+            if (String(row.leaveRequestStatus || '').toLowerCase() === 'pending') return true;
             const fromKey = row.leaveRequestFromDate || row.date;
             const toKey = row.leaveRequestToDate || row.date;
             return isLeaveRangeEntryVisible(
@@ -696,6 +721,14 @@ export async function getLeavePendingRequests(req, res) {
         const actorId = actor?._id ? String(actor._id) : '';
         const reporteeByMongoId = new Map(
             realEmployees.map((emp) => [String(emp._id), String(emp.primaryReportee || '')]),
+        );
+        const staffTypeByMongoId = new Map(
+            realEmployees.map((emp) => [String(emp._id), String(emp.staffType || '').trim()]),
+        );
+        const staffTypeByCode = new Map(
+            realEmployees
+                .filter((emp) => String(emp.employeeId || '').trim())
+                .map((emp) => [String(emp.employeeId).trim(), String(emp.staffType || '').trim()]),
         );
         const reporteeIds = [
             ...new Set(
@@ -720,6 +753,10 @@ export async function getLeavePendingRequests(req, res) {
         const items = requestItems
             .map((item) => {
                 const reporteeId = reporteeByMongoId.get(String(item.employeeMongoId)) || '';
+                const staffType =
+                    staffTypeByMongoId.get(String(item.employeeMongoId)) ||
+                    staffTypeByCode.get(String(item.employeeId || '').trim()) ||
+                    '';
                 const approvalStage =
                     item.statusKey === 'pending'
                         ? inferLeaveApprovalStage(item, { reporteeId, hrId })
@@ -740,6 +777,7 @@ export async function getLeavePendingRequests(req, res) {
                           : '';
                 return {
                     ...item,
+                    staffType,
                     approvalStage,
                     pendingWithName,
                     canDecide,
@@ -985,7 +1023,7 @@ export async function getLeavePendingInbox(req, res) {
             buildAssigneeClauses(ctx.relevantIds || [], ctx.employeeIdCode),
             'leave',
         );
-        const items = [...hubMapped, ...attendanceItems, ...taskItems];
+        const items = await keepOpenLeaveBellItems([...hubMapped, ...attendanceItems, ...taskItems]);
         return res.status(200).json({
             message: 'Leave pending inbox fetched successfully',
             count: items.length,
@@ -997,6 +1035,49 @@ export async function getLeavePendingInbox(req, res) {
             message: error.message || 'Failed to fetch pending leave requests.',
         });
     }
+}
+
+function leaveBellRange(row) {
+    const from = String(row?.leaveRequestFromDate || row?.date || '').slice(0, 10);
+    const to = String(row?.leaveRequestToDate || row?.date || from).slice(0, 10);
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(from) || !/^\d{4}-\d{2}-\d{2}$/.test(to)) return null;
+    return {
+        employeeMongoId: String(row.employeeMongoId || ''),
+        from,
+        to,
+    };
+}
+
+/** Pending requests only. Old, accepted, rejected, and deleted requests stay off the bell. */
+async function keepOpenLeaveBellItems(items) {
+    const list = Array.isArray(items) ? items : [];
+    const employeeIds = [...new Set(
+        list.map((item) => String(item?.employeeMongoId || '').trim()).filter((id) => mongoose.Types.ObjectId.isValid(id)),
+    )];
+    let pendingRanges = [];
+    let decidedRanges = [];
+    if (employeeIds.length) {
+        const today = dubaiTodayKey();
+        const rows = await Attendance.find({
+            employeeMongoId: { $in: employeeIds },
+            leaveRequestStatus: { $in: ['pending', 'approved', 'rejected'] },
+            date: { $gte: shiftDateKey(today, -500), $lte: shiftDateKey(today, 500) },
+        })
+            .select('employeeMongoId date leaveRequestFromDate leaveRequestToDate leaveRequestStatus')
+            .lean();
+        pendingRanges = rows.filter((row) => row.leaveRequestStatus === 'pending').map(leaveBellRange).filter(Boolean);
+        decidedRanges = rows
+            .filter((row) => row.leaveRequestStatus === 'approved' || row.leaveRequestStatus === 'rejected')
+            .map(leaveBellRange)
+            .filter(Boolean);
+    }
+    return selectOpenLeaveBellItems(list, { pendingRanges, decidedRanges });
+}
+
+function shiftDateKey(dateKey, days) {
+    const [year, month, day] = String(dateKey).split('-').map(Number);
+    const next = new Date(Date.UTC(year, month - 1, day + days));
+    return `${next.getUTCFullYear()}-${String(next.getUTCMonth() + 1).padStart(2, '0')}-${String(next.getUTCDate()).padStart(2, '0')}`;
 }
 
 function nextDateKey(dateKey) {
@@ -1822,6 +1903,164 @@ export async function returnLeaveRequest(req, res) {
     }
 }
 
+function readInboxMeta(value) {
+    if (!value) return {};
+    if (typeof value === 'object') return value;
+    try {
+        return JSON.parse(String(value));
+    } catch {
+        return {};
+    }
+}
+
+function objectIdList(values) {
+    return [...new Set((values || []).map((value) => String(value || '').trim()).filter((id) => mongoose.Types.ObjectId.isValid(id)))];
+}
+
+/** Drop the leave request's tasks and every bell row that points at it. */
+async function purgeLeaveRequestArtifacts(records = [], extraIds = []) {
+    const requestIds = new Set(objectIdList(extraIds));
+    for (const record of records) {
+        const groupId = String(record.leaveRequestGroupId || '').trim();
+        const requestId = leaveDashboardRequestObjectId(groupId, record._id);
+        if (mongoose.Types.ObjectId.isValid(String(requestId))) requestIds.add(String(requestId));
+        if (mongoose.Types.ObjectId.isValid(String(record._id))) requestIds.add(String(record._id));
+        if (mongoose.Types.ObjectId.isValid(groupId)) requestIds.add(groupId);
+    }
+    const idList = [...requestIds];
+    if (!idList.length) return;
+
+    const matchers = [{ requestId: { $in: idList } }];
+    for (const id of idList) {
+        matchers.push({ extra3: new RegExp(`"attendanceId":"${id}"`) });
+        matchers.push({ extra3: new RegExp(`"leaveRequestGroupId":"${id}"`) });
+    }
+    const actions = await DashboardAction.find({
+        $or: matchers,
+        requestType: {
+            $in: [LEAVE_DASHBOARD_REQUEST_TYPE, 'Attendance Leave Request', 'Employee Request Resend', 'Task Manager'],
+        },
+    })
+        .select('_id')
+        .lean();
+    const actionIds = actions.map((row) => row._id);
+    const tasks = actionIds.length
+        ? await TaskManagerTask.find({ sourceDashboardActionId: { $in: actionIds } }).select('_id closeRequest').lean()
+        : [];
+    const taskIds = tasks.map((task) => task._id);
+    const noticeIds = [];
+    for (const task of tasks) {
+        for (const notice of task.closeRequest?.reassignmentNotices || []) {
+            if (mongoose.Types.ObjectId.isValid(String(notice?.requestId || ''))) noticeIds.push(notice.requestId);
+        }
+    }
+    const bellOr = [];
+    if (taskIds.length || noticeIds.length) bellOr.push({ requestId: { $in: [...taskIds, ...noticeIds] } });
+    for (const taskId of taskIds) {
+        const id = String(taskId);
+        bellOr.push({ extra3: new RegExp(`"taskManagerId":"${id}"`) });
+        bellOr.push({ extra3: new RegExp(`"taskKey":"(?:manual-)?${id}"`) });
+    }
+    if (bellOr.length) {
+        await DashboardAction.deleteMany({ requestType: 'Task Manager', $or: bellOr });
+    }
+    if (taskIds.length) await TaskManagerTask.deleteMany({ _id: { $in: taskIds } });
+    if (actionIds.length) await DashboardAction.deleteMany({ _id: { $in: actionIds } });
+    await DashboardAction.deleteMany({
+        requestId: { $in: idList },
+        requestType: { $in: [LEAVE_DASHBOARD_REQUEST_TYPE, 'Attendance Leave Request', 'Employee Request Resend'] },
+    });
+    for (const record of records) {
+        await dismissDecidedLeaveBells({
+            employeeMongoId: record.employeeMongoId,
+            from: record.leaveRequestFromDate || record.date,
+            to: record.leaveRequestToDate || record.date,
+            attendanceIds: [record._id],
+            groupId: record.leaveRequestGroupId,
+            outcome: 'Dismissed',
+        });
+    }
+}
+
+/**
+ * POST /api/Leave/dashboard/pending-inbox/delete
+ * Admin super user deletes a bell item, its task, and the request behind it.
+ */
+export async function deleteLeaveInboxItem(req, res) {
+    try {
+        if (mongoose.connection.readyState !== 1) {
+            return res.status(503).json({ message: 'Database not connected.' });
+        }
+        if (!(await isReqUserSystemSuperUser(req.user))) {
+            return res.status(403).json({ message: 'Only an admin super user can delete this request.' });
+        }
+
+        const item = req.body?.item && typeof req.body.item === 'object' ? req.body.item : req.body || {};
+        const meta = readInboxMeta(item.extra3);
+        const requestType = String(item.requestType || item.type || '').trim();
+        const hub = Boolean(item.hubRequest || meta.hubRequest);
+
+        if (requestType === 'Task Manager' || meta.taskManager) {
+            const key = String(item.dashboardActionId || item.id || item.requestObjectId || '').trim();
+            const { eraseTaskByKey } = await import('../stats/taskManagerTaskActions.js');
+            const result = await eraseTaskByKey(key);
+            if (!result.ok) {
+                return res.status(result.status || 400).json({ message: result.message || 'Task not found.' });
+            }
+            return res.status(200).json({
+                message: 'Deleted. The task, its notification, and the request were removed.',
+            });
+        }
+
+        if (hub) {
+            const hubId = String(item.requestObjectId || item.id || item.dashboardActionId || '').trim();
+            if (mongoose.Types.ObjectId.isValid(hubId)) {
+                await EmployeeHubRequest.deleteOne({ _id: hubId });
+                await DashboardAction.deleteMany({ requestId: hubId });
+            }
+        }
+
+        const attendanceId = String(
+            meta.attendanceId || (!hub && (item.id || item.requestObjectId || item.dashboardActionId)) || '',
+        ).trim();
+        const group = mongoose.Types.ObjectId.isValid(attendanceId)
+            ? await loadEditableLeaveGroup(attendanceId)
+            : null;
+        let records = (group?.records || []).filter((row) => {
+            const status = String(row.leaveRequestStatus || '').trim();
+            return status === 'pending' || status === 'approved' || status === 'rejected';
+        });
+        const groupId = String(meta.leaveRequestGroupId || group?.groupId || '').trim();
+        if (!records.length && groupId) {
+            records = await Attendance.find({
+                leaveRequestGroupId: groupId,
+                leaveRequestStatus: { $in: ['pending', 'approved', 'rejected'] },
+            });
+        }
+        if (!records.length && !hub) {
+            return res.status(404).json({ message: 'No leave request found to delete.' });
+        }
+
+        await purgeLeaveRequestArtifacts(records, [attendanceId, groupId, item.dashboardActionId, item.requestObjectId]);
+        for (const record of records) {
+            if (record.leaveRequestReason && record.reason === record.leaveRequestReason) {
+                record.reason = '';
+            }
+            await revertLeaveAttendanceRecord(record);
+        }
+
+        return res.status(200).json({
+            message: 'Deleted. The task, its notification, and the request were removed.',
+            count: records.length,
+        });
+    } catch (error) {
+        console.error('[deleteLeaveInboxItem]', error);
+        return res.status(500).json({
+            message: error.message || 'Failed to delete this request.',
+        });
+    }
+}
+
 /**
  * POST /api/Leave/pending-requests/remove
  * HR removes an approved or pending leave request and clears it from those attendance days.
@@ -1851,27 +2090,14 @@ export async function removeLeaveRequest(req, res) {
             return res.status(404).json({ message: 'No leave request found to remove.' });
         }
 
-        const requestIds = new Set();
         for (const record of records) {
             if (record.leaveRequestReason && record.reason === record.leaveRequestReason) {
                 record.reason = '';
             }
-            const groupId = String(record.leaveRequestGroupId || group.groupId || '').trim();
-            const requestId = leaveDashboardRequestObjectId(groupId, record._id);
-            if (requestId && mongoose.Types.ObjectId.isValid(String(requestId))) {
-                requestIds.add(String(requestId));
-            }
-            if (mongoose.Types.ObjectId.isValid(String(record._id))) {
-                requestIds.add(String(record._id));
-            }
-            await revertLeaveAttendanceRecord(record);
         }
-
-        if (requestIds.size) {
-            await DashboardAction.deleteMany({
-                requestId: { $in: [...requestIds] },
-                requestType: { $in: [LEAVE_DASHBOARD_REQUEST_TYPE, 'Attendance Leave Request'] },
-            });
+        await purgeLeaveRequestArtifacts(records, [attendanceId, group.groupId]);
+        for (const record of records) {
+            await revertLeaveAttendanceRecord(record);
         }
 
         return res.status(200).json({

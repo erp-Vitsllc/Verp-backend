@@ -1,9 +1,10 @@
 /**
- * Short Task Manager name.
- * Vehicle service: "{vehicle name}, {service type}".
- * Document expiry: "{veh no / emp no / company id} - {document} - Expiry".
- * Not renew: "{id} - {document} - Not Renew".
- * Attendance: "Employee - {date} {Late In | OT | Mispunch | Comp Off | …}".
+ * Task Manager name, listed as separate lines.
+ * First line is the task. Following lines are the employee, vehicle, or record.
+ * Vehicle service: service, then vehicle name and plate.
+ * Document expiry: "{document} - Expiry", then the owner.
+ * Not renew: "{document} - Not Renew", then the owner.
+ * Attendance: "{date} {Late In | OT | Mispunch | Comp Off | …}", then the employee.
  * The long notification sentence stays in the description.
  */
 
@@ -136,19 +137,21 @@ function shortName(value) {
     return cleaned;
 }
 
-function joinName(left, right) {
-    const a = text(left);
-    const b = text(right);
-    if (a && b) return `${a}, ${b}`;
-    return a || b;
-}
-
-function withOwner(title, owner) {
-    const head = text(title);
-    const who = text(owner);
-    if (!head) return who;
-    if (!who || head.toLowerCase().includes(who.toLowerCase())) return head;
-    return `${head} — ${who}`;
+function uniqueLines(title, values = []) {
+    const lines = [];
+    const seen = new Set();
+    const push = (value) => {
+        const line = text(value);
+        if (!line) return;
+        const key = line.toLowerCase();
+        if (seen.has(key)) return;
+        seen.add(key);
+        lines.push(line);
+    };
+    push(title);
+    values.forEach(push);
+    const [first, ...rest] = lines;
+    return { title: first || "Task", subject: rest.join("\n") };
 }
 
 function serviceTypeFrom(meta, body) {
@@ -224,55 +227,51 @@ function recordCode(value) {
     return code;
 }
 
-function expirySubjectCode({ typeKey, extra2, subjectName, subjectEmployeeId, vehicleNo, assetNo, source }) {
-    if (typeKey.includes("vehicle")) {
-        return text(source?.vehicleNo)
-            || text(vehicleNo)
-            || text(source?.assetNo)
-            || text(assetNo)
-            || recordCode(subjectEmployeeId)
-            || parenCode(extra2)
-            || shortName(extra2)
-            || shortName(subjectName);
-    }
-    return text(source?.employeeId)
-        || text(source?.companyId)
-        || recordCode(subjectEmployeeId)
-        || parenCode(extra2)
+function vehicleServiceName(assetName) {
+    const name = text(assetName);
+    if (!name || /^vehicle$/i.test(name)) return "";
+    return name;
+}
+
+function personLines({ subjectName, subjectEmployeeId, extra2, source }) {
+    const name = shortName(source?.employeeName)
+        || shortName(source?.companyName)
         || shortName(subjectName)
         || shortName(extra2);
+    const code = recordCode(source?.employeeId)
+        || recordCode(source?.companyId)
+        || recordCode(subjectEmployeeId)
+        || parenCode(extra2);
+    return [name, code];
 }
 
-function titledRecord(code, document, action) {
-    return [text(code), text(document) || "Document", text(action)].filter(Boolean).join(" - ");
+function vehicleLines({ vehicleNo, assetNo, assetName, subjectEmployeeId, extra2, source }) {
+    const name = vehicleServiceName(source?.assetName || assetName) || shortName(extra2);
+    const plate = text(source?.vehicleNo) || text(vehicleNo);
+    const code = text(source?.assetNo) || text(assetNo) || recordCode(subjectEmployeeId) || parenCode(extra2);
+    if (plate) return [name, plate];
+    return [name, code];
 }
 
-function vehicleServiceName(assetName, vehicleNo) {
-    const name = text(assetName);
-    const plate = text(vehicleNo);
-    if (name && !/^vehicle$/i.test(name)) return name;
-    return plate || name;
-}
-
-function assetTitle(typeKey, { body, vehicleNo, assetLabel, hasPlate }) {
+function assetParts(typeKey, { body, vehicleNo, assetLabel, hasPlate }) {
     const action = ASSET_LABELS[typeKey];
-    if (!action) return "";
+    if (!action) return null;
     if (hasPlate && vehicleNo) {
         const vehicleAction = typeKey === "asset assignment" ? "Handover" : action;
-        return joinName(vehicleNo, vehicleAction);
+        return uniqueLines(vehicleAction, [vehicleNo]);
     }
     const identity = text(assetLabel) || text(body).replace(/\s+/g, " ");
     if (identity && identity.length <= 80 && !/\bpending with\b/i.test(identity)) {
-        if (identity.toLowerCase().includes(action.toLowerCase())) return identity;
-        return `${identity.replace(/[,\s]+$/, "")}, ${action}`;
+        if (identity.toLowerCase().includes(action.toLowerCase())) return uniqueLines(identity);
+        return uniqueLines(action, [identity.replace(/[,\s]+$/, "")]);
     }
-    return action;
+    return uniqueLines(action);
 }
 
 /**
- * @returns {string} Task Name shown in the list and on the task details page.
+ * @returns {{ title: string, subject: string }} First line is the task. Subject lines are separated by newlines.
  */
-export function formatTaskDisplayName({
+export function formatTaskDisplayParts({
     requestType,
     extra1,
     extra2,
@@ -294,10 +293,12 @@ export function formatTaskDisplayName({
     const secondary = text(extra2);
     const stored = text(taskName);
     const meta = parseMeta(extra3);
+    const owners = { subjectName, subjectEmployeeId, extra2: secondary, source, vehicleNo, assetNo, assetName };
 
-    if (manual || MANUAL_TYPES.has(typeKey)) return stored || body || "Task";
+    if (manual || MANUAL_TYPES.has(typeKey)) return uniqueLines(stored || body || "Task");
+
     if (isAttendanceTaskType(type)) {
-        return attendanceTaskTitle(resolveAttendanceFacts({
+        const facts = resolveAttendanceFacts({
             requestType: type,
             extra1: body,
             extra2: secondary,
@@ -305,48 +306,26 @@ export function formatTaskDisplayName({
             subjectName,
             subjectEmployeeId,
             source,
-        }));
+        });
+        return uniqueLines(attendanceTaskTitle(facts), [facts.employeeName || facts.employeeId]);
     }
-    if (isCustomName(stored, body, type, secondary)) return stored;
 
     if (typeKey === "vehicle service request") {
         const service = serviceTypeFrom(meta, body) || text(source?.serviceType) || "Service";
-        const vehicleName = vehicleServiceName(source?.assetName || assetName, source?.vehicleNo || vehicleNo);
-        return joinName(vehicleName, service);
+        return uniqueLines(service, vehicleLines(owners));
     }
 
-    if (EXPIRY_TYPES.has(typeKey)) {
+    if (EXPIRY_TYPES.has(typeKey) || typeKey === "company document not renew" || typeKey === "employee document not renew") {
         const doc = docLabel(body, meta) || "Document";
-        const code = expirySubjectCode({
-            typeKey,
-            extra2: secondary,
-            subjectName,
-            subjectEmployeeId,
-            vehicleNo,
-            assetNo,
-            source,
-        });
-        return titledRecord(code, doc, "Expiry");
+        const action = typeKey.includes("not renew") ? "Not Renew" : "Expiry";
+        const lines = typeKey.includes("vehicle") ? vehicleLines(owners) : personLines(owners);
+        return uniqueLines(`${doc} - ${action}`, lines);
     }
 
     if (typeKey === "utility contract expiry") {
         const { type: utilityType, account } = utilityParts(body, meta);
         const provider = text(body).split(/\s*[·•]\s*/)[1] || account;
-        return withOwner(`${utilityType} Contract Expiry Reminder`, shortName(provider));
-    }
-
-    if (typeKey === "company document not renew" || typeKey === "employee document not renew") {
-        const doc = docLabel(body, meta) || "Document";
-        const code = expirySubjectCode({
-            typeKey,
-            extra2: secondary,
-            subjectName,
-            subjectEmployeeId,
-            vehicleNo,
-            assetNo,
-            source,
-        });
-        return titledRecord(code, doc, "Not Renew");
+        return uniqueLines(`${utilityType} Contract Expiry`, [shortName(provider)]);
     }
 
     if (
@@ -355,48 +334,56 @@ export function formatTaskDisplayName({
         || typeKey === "utility entry status change"
     ) {
         const { type: utilityType, account } = utilityParts(body, meta);
-        return joinName(utilityType, account);
+        return uniqueLines(utilityType, [account]);
     }
 
     if (typeKey === "fine" || typeKey === "employee fine request") {
-        return typeKey === "employee fine request" ? "Fine Request" : (shortName(body) || "Fine");
+        const title = typeKey === "employee fine request" ? "Fine Request" : (shortName(body) || "Fine");
+        return uniqueLines(title, personLines(owners));
     }
     if (typeKey === "group fine request") {
         const fineType = shortName(body);
-        return fineType && !/^group fine/i.test(fineType) ? `Group Fine, ${fineType}` : "Group Fine";
+        return uniqueLines(fineType && !/^group fine/i.test(fineType) ? `Group Fine, ${fineType}` : "Group Fine");
     }
 
     if (typeKey === "payment approval") {
         const paymentType = shortName(body);
-        return paymentType && !/^payment/i.test(paymentType) ? `Payment, ${paymentType}` : "Payment Approval";
+        return uniqueLines(paymentType && !/^payment/i.test(paymentType) ? `Payment, ${paymentType}` : "Payment Approval");
     }
 
-    if (typeKey === "employee leave request") {
-        const match = secondary.match(/^(.+?)\s+request for\b/i) || body.match(/^(.+?)\s+request for\b/i);
-        return joinName(match ? text(match[1]) : "Leave", shortName(subjectName));
+    if (Object.prototype.hasOwnProperty.call(HUB_LABELS, typeKey)) {
+        return uniqueLines(HUB_LABELS[typeKey], personLines(owners));
     }
-
-    if (Object.prototype.hasOwnProperty.call(HUB_LABELS, typeKey)) return HUB_LABELS[typeKey];
 
     if (typeKey === "employee asset request") {
         const area = secondary.replace(/^assets\s*[·•-]?\s*/i, "").trim();
-        return area && !/^assets$/i.test(secondary) ? `Assets, ${area}` : "Assets";
+        const title = area && !/^assets$/i.test(secondary) ? `Assets, ${area}` : "Assets";
+        return uniqueLines(title, personLines(owners));
     }
 
     if (Object.prototype.hasOwnProperty.call(VEHICLE_LABELS, typeKey)) {
-        return joinName(vehicleNo, VEHICLE_LABELS[typeKey]);
+        return uniqueLines(VEHICLE_LABELS[typeKey], vehicleLines(owners));
     }
 
     if (Object.prototype.hasOwnProperty.call(ASSET_LABELS, typeKey)) {
-        return assetTitle(typeKey, { body, vehicleNo, assetLabel, hasPlate });
+        return assetParts(typeKey, { body, vehicleNo, assetLabel, hasPlate });
     }
 
     if (Object.prototype.hasOwnProperty.call(PERSON_LABELS, typeKey)) {
-        return joinName(shortName(subjectName) || shortName(secondary), PERSON_LABELS[typeKey]);
+        return uniqueLines(PERSON_LABELS[typeKey], personLines(owners));
     }
 
+    if (isCustomName(stored, body, type, secondary)) return uniqueLines(stored, personLines(owners));
+
     if (body && body.length <= 80 && !/\bpending with\b/i.test(body) && !/^expiry follow-up required:/i.test(body)) {
-        return body;
+        return uniqueLines(body, personLines(owners));
     }
-    return type || stored || "Task";
+    return uniqueLines(type || stored || "Task", personLines(owners));
+}
+
+/**
+ * @returns {string} First line of the task name.
+ */
+export function formatTaskDisplayName(input = {}) {
+    return formatTaskDisplayParts(input).title;
 }

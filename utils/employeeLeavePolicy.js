@@ -152,14 +152,7 @@ export function applyGroupLeavePolicy(policy, groupPolicy, leaveExclusionEmploye
     };
 }
 
-export async function resolveEmployeePayrollPolicy(employee) {
-    const employeeId = String(employee?.employeeId || '').trim();
-    const staffType = normalizeStaffTypeKey(employee?.staffType);
-    const [enrollment, group, main] = await Promise.all([
-        employeeId ? SalaryEnrollment.findOne({ employeeId }).select('policy').lean() : null,
-        staffType ? PayrollSettings.findOne({ key: `group:${staffType}` }).lean() : null,
-        PayrollSettings.findOne({ key: 'default' }).lean(),
-    ]);
+export function payrollPolicyFromLoaded({ enrollment, group, main } = {}) {
     const mainPolicy = serializePayrollSettings(main || {});
     const groupPolicy = serializePayrollSettings(group || main || {});
     if (
@@ -197,6 +190,49 @@ export async function resolveEmployeePayrollPolicy(employee) {
         ),
     };
     return applyGroupLeavePolicy(merged, groupPolicy, exclusionLists.leaveExclusionEmployeeIds);
+}
+
+export async function resolveEmployeePayrollPolicy(employee) {
+    const employeeId = String(employee?.employeeId || '').trim();
+    const staffType = normalizeStaffTypeKey(employee?.staffType);
+    const [enrollment, group, main] = await Promise.all([
+        employeeId ? SalaryEnrollment.findOne({ employeeId }).select('policy').lean() : null,
+        staffType ? PayrollSettings.findOne({ key: `group:${staffType}` }).lean() : null,
+        PayrollSettings.findOne({ key: 'default' }).lean(),
+    ]);
+    return payrollPolicyFromLoaded({ enrollment, group, main });
+}
+
+/** One policy per employee id, plus `__default__` when no employee row is loaded. */
+export async function loadPayrollPoliciesByEmployee(employees = []) {
+    const list = (Array.isArray(employees) ? employees : []).filter((employee) => employee);
+    const codes = [...new Set(list.map((employee) => String(employee.employeeId || '').trim()).filter(Boolean))];
+    const staffTypes = [...new Set(list.map((employee) => normalizeStaffTypeKey(employee.staffType)).filter(Boolean))];
+    const keys = ['default', ...staffTypes.map((staffType) => `group:${staffType}`)];
+    const [enrollments, settings] = await Promise.all([
+        codes.length
+            ? SalaryEnrollment.find({ employeeId: { $in: codes } }).select('employeeId policy').lean()
+            : [],
+        PayrollSettings.find({ key: { $in: keys } }).lean(),
+    ]);
+    const enrollmentByCode = new Map(
+        (enrollments || []).map((row) => [String(row.employeeId || '').trim(), row]),
+    );
+    const settingsByKey = new Map((settings || []).map((doc) => [String(doc.key || ''), doc]));
+    const main = settingsByKey.get('default') || null;
+    const policies = new Map();
+    policies.set('__default__', payrollPolicyFromLoaded({ enrollment: null, group: null, main }));
+    for (const employee of list) {
+        const id = String(employee._id || '');
+        if (!id || policies.has(id)) continue;
+        const staffType = normalizeStaffTypeKey(employee.staffType);
+        policies.set(id, payrollPolicyFromLoaded({
+            enrollment: enrollmentByCode.get(String(employee.employeeId || '').trim()) || null,
+            group: staffType ? settingsByKey.get(`group:${staffType}`) || null : null,
+            main,
+        }));
+    }
+    return policies;
 }
 
 export function leavePolicyEntitlements(policy) {

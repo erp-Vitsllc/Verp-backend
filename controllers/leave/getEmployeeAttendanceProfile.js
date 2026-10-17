@@ -49,7 +49,7 @@ import {
     utilityBillIsVisibleToEmployee,
 } from '../../utils/employeeFinancialVisibility.js';
 import { ATTENDANCE_CHANGE_OPEN_STAGES } from '../../utils/attendanceChangeApproval.js';
-import { buildSalaryPreparationPending, hiddenByReassignedLeave } from '../../utils/salaryPreparationPending.js';
+import { buildSalaryPreparationPending, leaveCardMatchesOpenRequest } from '../../utils/salaryPreparationPending.js';
 import { getDepartmentHOD } from '../../utils/getDepartmentHOD.js';
 
 const LEAVE_STATUS_KEYS = new Set([
@@ -1248,25 +1248,26 @@ export async function getEmployeeAttendanceProfile(req, res) {
             employeeName: employeeName(employee),
             limit: 200,
         });
-        const reassignedHolds = (employeeTasks.leaveCards || [])
-            .filter((card) => card.reassigned)
-            .map((card) => ({ ...card, ownRequest: false, reassigned: true }));
-        const visiblePending = pendingHrRequests.filter((row) => !hiddenByReassignedLeave(row, reassignedHolds));
+        const viewer = await resolveViewerEmployee(req);
+        const ownView = Boolean(viewer?._id) && String(viewer._id) === String(employeeMongoId);
         const seenLeave = new Set(
-            visiblePending.map((row) => `${row.fromDate || ''}|${row.toDate || ''}|${String(row.title || '').toLowerCase()}`),
+            pendingHrRequests.map((row) => `${row.fromDate || ''}|${row.toDate || ''}|${String(row.title || '').toLowerCase()}`),
         );
         const extraLeave = [];
         for (const card of employeeTasks.leaveCards || []) {
-            // Assigned and reassigned approval tasks stay on Pending Tasks.
-            // A reassigned task is a task request, so it does not block salary preparation
-            // and it does not link the attendance calendar.
+            // Salary preparation and the calendar link belong only to the employee who
+            // requested the leave. The assignee and anyone who reassigned the task do not get it.
             if (card.reassigned || !card.ownRequest) continue;
+            if (!leaveCardMatchesOpenRequest(card, {
+                attendanceRows: prepAttendance,
+                changeRows: prepChanges,
+            })) continue;
             const requestId = String(card.requestId || '').trim();
-            const sameRequest = requestId && visiblePending.some((row) => {
+            const sameRequest = requestId && pendingHrRequests.some((row) => {
                 const id = String(row.id || '');
                 return id === `leave-${requestId}` || id === `leave-task-${requestId}`;
             });
-            const sameDates = card.fromDate && visiblePending.some((row) =>
+            const sameDates = card.fromDate && pendingHrRequests.some((row) =>
                 String(row.id || '').startsWith('leave') &&
                 row.fromDate === card.fromDate &&
                 row.toDate === card.toDate,
@@ -1277,8 +1278,10 @@ export async function getEmployeeAttendanceProfile(req, res) {
             seenLeave.add(key);
             extraLeave.push(card);
         }
-        if (extraLeave.length) visiblePending.unshift(...extraLeave);
-        const salaryPending = [...visiblePending, ...reassignedHolds];
+        if (extraLeave.length) pendingHrRequests.unshift(...extraLeave);
+        const salaryPending = ownView
+            ? pendingHrRequests
+            : pendingHrRequests.filter((row) => String(row?.appliedKey || '') === 'utility');
         const workTasks = employeeTasks.tasks;
         const rawPhoto = employee.profilePicture || '';
         const profilePicture = rawPhoto.startsWith('data:')
@@ -1413,11 +1416,12 @@ export async function getEmployeeAttendanceProfile(req, res) {
             },
             requests: {
                 pending: salaryPending,
-                hrPendingCount: visiblePending.length,
+                ownView,
+                hrPendingCount: salaryPending.length,
                 workTasks,
                 workTaskPendingCount: employeeTasks.pendingCount,
-                workflowActiveIndex: visiblePending.length ? 1 : 3,
-                taskAging: taskAgingBuckets(visiblePending),
+                workflowActiveIndex: salaryPending.length ? 1 : 3,
+                taskAging: taskAgingBuckets(salaryPending),
             },
         });
     } catch (error) {

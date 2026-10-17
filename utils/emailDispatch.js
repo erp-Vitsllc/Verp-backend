@@ -281,15 +281,17 @@ export function emailBelongsToDocumentExpiry(row, { docLabel = '', docType = '' 
         || /document expiry|expiry reminder|expiry follow-up/.test(html);
     if (!expiryMail) return false;
 
+    const label = String(docLabel || '').trim().toLowerCase();
+    const hay = `${identity} ${recordId.toLowerCase()} ${html}`;
+    // The document name in the sent message decides the task. A shorter type
+    // inside a longer key (medical-insurance vs insurance) must not hide it.
+    if (label && hay.includes(label)) return true;
+
     const type = String(docType || '').trim().toLowerCase();
     const segment = EXPIRY_RECORD_TYPES.find((name) => recordHasDocType(recordId, name)) || '';
     if (type && segment && segment !== type && !segment.startsWith(`${type}:`) && !type.startsWith(`${segment}:`)) {
         return false;
     }
-
-    const label = String(docLabel || '').trim().toLowerCase();
-    const hay = `${identity} ${recordId.toLowerCase()} ${html}`;
-    if (label && hay.includes(label)) return true;
     if (type && recordHasDocType(recordId, type)) return true;
     if (!segment && type === 'registration' && /\bmulkia\b|\bregistration\b/.test(hay)) return true;
     return false;

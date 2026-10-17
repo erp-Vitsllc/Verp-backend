@@ -690,6 +690,7 @@ export const approveProfile = async (req, res) => {
                     reason: "Administrator applied profile changes directly",
                     description: "Changes are now live on the employee profile. No HR approval action is required.",
                     req,
+                    recordId: String(completeEmployee._id || ""),
                 }).catch((err) => console.error("[ApproveProfile] Admin direct HR notify error:", err));
             }
         }

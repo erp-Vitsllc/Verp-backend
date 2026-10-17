@@ -1,6 +1,10 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
-import { buildSalaryPreparationPending, hiddenByReassignedLeave } from './salaryPreparationPending.js';
+import {
+    buildSalaryPreparationPending,
+    hiddenByReassignedLeave,
+    leaveCardMatchesOpenRequest,
+} from './salaryPreparationPending.js';
 
 const todayKey = '2026-10-15';
 const year = { yearFrom: '2026-01-01', yearTo: '2026-12-31', todayKey, reportsTo: 'HR Manager', hrName: 'Sara HR', staffType: 'office' };
@@ -43,6 +47,7 @@ describe('buildSalaryPreparationPending', () => {
         assert.match(items[0].href, /approvalId=a1/);
         assert.match(items[0].href, /employeeId=emp/);
         assert.equal(items[0].fromDate, '2026-10-21');
+        assert.equal(items[0].dateLabel, '21 Oct 2026');
         assert.equal(items[0].spanAllMonths, true);
     });
 
@@ -133,6 +138,34 @@ describe('buildSalaryPreparationPending', () => {
             ],
         });
         assert.equal(items.length, 0);
+    });
+
+    it('keeps a task card only when this employee still has that request open', () => {
+        const openLeave = {
+            _id: 'att-1',
+            date: '2026-10-21',
+            leaveRequestStatus: 'pending',
+            leaveRequestFromDate: '2026-10-21',
+            leaveRequestToDate: '2026-10-21',
+            leaveRequestGroupId: 'group-1',
+        };
+        const openPunch = { _id: 'chg-1', date: '2026-10-12', stage: 'pending_reportee' };
+        assert.equal(leaveCardMatchesOpenRequest(
+            { requestId: 'group-1', fromDate: '2026-10-21', toDate: '2026-10-21' },
+            { attendanceRows: [openLeave], changeRows: [] },
+        ), true);
+        assert.equal(leaveCardMatchesOpenRequest(
+            { requestId: 'old-task', fromDate: '2026-10-21', toDate: '2026-10-21' },
+            { attendanceRows: [], changeRows: [] },
+        ), false);
+        assert.equal(leaveCardMatchesOpenRequest(
+            { requestId: 'hub-1', fromDate: '', title: 'Leave request' },
+            { attendanceRows: [openLeave], changeRows: [openPunch] },
+        ), false);
+        assert.equal(leaveCardMatchesOpenRequest(
+            { requestId: 'chg-1', fromDate: '2026-10-12', toDate: '2026-10-12' },
+            { attendanceRows: [], changeRows: [openPunch] },
+        ), true);
     });
 
     it('hides a salary row when that request was reassigned as a task', () => {

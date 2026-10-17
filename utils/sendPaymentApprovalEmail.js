@@ -2,6 +2,7 @@ import nodemailer from 'nodemailer';
 import { emailFrontendUrl } from './resolveFrontendBaseUrl.js';
 import EmployeeBasic from '../models/EmployeeBasic.js';
 import { resolveEmployeeEmail } from './resolveEmployeeEmail.js';
+import { rememberSentEmail } from './emailDispatch.js';
 
 /**
  * Sends a notification email to the Accounts department for payment approval.
@@ -109,6 +110,17 @@ export const sendPaymentApprovalEmail = async (payment, accountsHOD) => {
             subject: subject,
             html: html
         });
+        if (payment?._id) {
+            await rememberSentEmail({
+                from: process.env.EMAIL_USER || '',
+                to: [recipientEmail],
+                subject,
+                html,
+                recordId: String(payment._id),
+                module: 'Payment',
+                emailType: 'Payment approval',
+            });
+        }
 
         console.log(`[PaymentApprovalEmail] Email sent successfully to ${recipientEmail}`);
         return true;

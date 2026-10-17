@@ -24,12 +24,23 @@ export const cleanupVehicleExpiryNotificationsByLabels = async ({
     const normalizedLabels = [...new Set((labels || []).map((x) => String(x || '').trim()).filter(Boolean))];
     if (!normalizedLabels.length) return;
 
-    await DashboardAction.deleteMany({
+    const pending = await DashboardAction.find({
         requestId: assetMongoId,
         requestType: VEHICLE_EXPIRY_REQUEST_TYPE,
         status: 'Pending',
         $or: normalizedLabels.map((label) => ({ extra1: { $regex: buildExtra1Regex(label) } })),
-    });
+    })
+        .select('_id')
+        .lean();
+    if (!pending.length) return;
+    const actionIds = pending.map((row) => row._id);
+    await DashboardAction.deleteMany({ _id: { $in: actionIds } });
+    try {
+        const { finishTasksForRemovedExpiryActions } = await import('./finishVehicleExpiryTasks.js');
+        await finishTasksForRemovedExpiryActions(actionIds);
+    } catch (err) {
+        console.warn('[vehicle expiry] finish linked tasks:', err?.message || err);
+    }
 };
 
 export { VEHICLE_EXPIRY_REQUEST_TYPE };

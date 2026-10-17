@@ -22,7 +22,7 @@ import {
     viewerCanReassign,
 } from "../../utils/taskManagerModule.js";
 import { assignTaskNumbers } from "../../utils/taskNumber.js";
-import { formatTaskDisplayName, vehicleRecordId } from "../../utils/taskDisplayName.js";
+import { formatTaskDisplayParts, vehicleRecordId } from "../../utils/taskDisplayName.js";
 import { composeTaskDescription } from "../../utils/taskDetailDescription.js";
 import { attendanceFactsByActionId } from "../../utils/loadAttendanceTaskFacts.js";
 
@@ -278,7 +278,7 @@ export function taskTitleAndDescription({
         baseDescription = longText && longText !== baseName ? longText : "";
     }
 
-    const displayName = formatTaskDisplayName({
+    const displayParts = formatTaskDisplayParts({
         requestType,
         extra1,
         extra2,
@@ -294,7 +294,8 @@ export function taskTitleAndDescription({
         manual,
         source,
     });
-    const nextName = displayName || baseName;
+    const nextName = displayParts.title || baseName;
+    const taskSubject = displayParts.subject || "";
     let nextDescription = baseDescription;
     if (nextName !== baseName && baseName && baseName !== nextName) {
         if (!nextDescription || nextDescription === nextName) nextDescription = baseName;
@@ -316,7 +317,7 @@ export function taskTitleAndDescription({
         manual,
         source,
     });
-    return { taskName: nextName, description: composed || nextDescription };
+    return { taskName: nextName, taskSubject, description: composed || nextDescription };
 }
 
 function isGeneralHubRequest(requestType, extra = "") {
@@ -369,25 +370,8 @@ function viewerOwnsOriginal(viewer, row) {
     return Boolean(originalName && viewerName && originalName === viewerName);
 }
 
-function taskWasReassignedRow(row) {
-    return Boolean(
-        row?.closeRequest?.originalAssigneeId
-        || String(row?.closeRequest?.originalAssigneeName || "").trim(),
-    );
-}
-
-function viewerIsStoredRequester(viewer, { requesterName, requestedByUserId }) {
-    if (requestedByUserId && viewer?.userId && String(requestedByUserId) === String(viewer.userId)) return true;
-    const requester = personKey(cleanRequester(requesterName));
-    const viewerName = personKey(viewer?.name);
-    return Boolean(requester && viewerName && requester === viewerName);
-}
-
-function taskMine(viewer, { assigneeId, assigneeEmpId, assigneeName, row, requesterName, requestedByUserId }) {
-    if (assigneeIsViewer(viewer, assigneeId, assigneeEmpId, assigneeName)) return true;
-    if (!taskWasReassignedRow(row)) return false;
-    if (viewerOwnsOriginal(viewer, row)) return true;
-    return viewerIsStoredRequester(viewer, { requesterName, requestedByUserId });
+function taskMine(viewer, { assigneeId, assigneeEmpId, assigneeName }) {
+    return assigneeIsViewer(viewer, assigneeId, assigneeEmpId, assigneeName);
 }
 
 function assigneeIsViewer(viewer, assigneeId, assigneeEmpId, assigneeName = "") {
@@ -686,6 +670,7 @@ export const getTaskManagerNotifications = async (req, res) => {
                 }),
                 requestType: action.requestType || "Notification",
                 taskName: copy.taskName,
+                taskSubject: copy.taskSubject || "",
                 description: copy.description,
                 requesterName,
                 requesterBaseName: cleanRequester(requesterBase),
@@ -788,6 +773,7 @@ export const getTaskManagerNotifications = async (req, res) => {
                 accessPath: accessPathFor(destination, "", ""),
                 requestType: displayTaskType(row.taskType),
                 taskName: row.taskName || "Task",
+                taskSubject: "",
                 description: row.description || "",
                 requesterName,
                 requesterBaseName: cleanRequester(requesterBase),
@@ -947,7 +933,6 @@ function leaveRequestedByEmployee(action, { id, code, nameKey }) {
     const mongoIds = [meta.employeeMongoId, meta.requesterMongoId].map((value) => String(value || "").trim());
     if (id && mongoIds.includes(id)) return true;
     if (nameKey && personKey(action.subjectName) === nameKey) return true;
-    if (nameKey && personKey(action.requestedByName) === nameKey) return true;
     return false;
 }
 

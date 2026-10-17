@@ -1,6 +1,29 @@
 import nodemailer from 'nodemailer';
 import { emailFrontendUrl } from './resolveFrontendBaseUrl.js';
 import { resolveEmployeeEmail } from './resolveEmployeeEmail.js';
+import { rememberSentEmail } from './emailDispatch.js';
+
+function mailRecordIds(recordIds) {
+    const list = Array.isArray(recordIds) ? recordIds : [recordIds];
+    return [...new Set(list.map((id) => String(id || '').trim()).filter(Boolean))];
+}
+
+/** Save the exact message that went out, keyed to this request's task. */
+async function keepSentMail({ from, to, subject, html, recordIds, emailType }) {
+    const ids = mailRecordIds(recordIds);
+    if (!ids.length || !String(html || '').trim()) return;
+    await Promise.all(ids.map((recordId) => rememberSentEmail({
+        from,
+        to,
+        subject,
+        html,
+        recordId,
+        module: 'Attendance',
+        emailType,
+    }).catch((err) => {
+        console.warn('[AttendanceEmail] copy not saved:', err?.message || err);
+    })));
+}
 
 function createTransport() {
     const emailUser =
@@ -60,6 +83,7 @@ export async function sendAttendanceLeaveRequestEmail({
     reviewPath = '',
     buttonLabel = '',
     emailTitle = '',
+    recordIds = [],
 }) {
     try {
         const mail = createTransport();
@@ -140,12 +164,7 @@ export async function sendAttendanceLeaveRequestEmail({
                 : isYellow
                   ? 'If you <strong>Confirm</strong>, the day becomes Present (green). If you <strong>Reject</strong>, it stays as it is.'
                   : 'If you <strong>Approve</strong>, the requested leave status is applied. If you <strong>Reject</strong>, the current status stays.';
-
-        await mail.transporter.sendMail({
-            from: `"VeRP System" <${mail.from}>`,
-            to,
-            subject: subjectLine,
-            html: `
+        const html = `
                 <div style="font-family:Segoe UI,Tahoma,sans-serif;color:#1e293b;max-width:600px;margin:0 auto;border:1px solid #e2e8f0;border-radius:12px;overflow:hidden;">
                     <div style="background:${accent};color:${headerColor};padding:20px;text-align:center;">
                         <h1 style="margin:0;font-size:20px;">${title}</h1>
@@ -164,7 +183,21 @@ export async function sendAttendanceLeaveRequestEmail({
                         ${decisionButtons}
                     </div>
                 </div>
-            `,
+            `;
+
+        await mail.transporter.sendMail({
+            from: `"VeRP System" <${mail.from}>`,
+            to,
+            subject: subjectLine,
+            html,
+        });
+        await keepSentMail({
+            from: `"VeRP System" <${mail.from}>`,
+            to: [to],
+            subject: subjectLine,
+            html,
+            recordIds,
+            emailType: title,
         });
     } catch (err) {
         console.error('[AttendanceLeaveEmail] request email failed:', err?.message || err);
@@ -186,6 +219,7 @@ export async function sendAttendanceChangeRequestEmail({
     reason = '',
     stage = 'pending_reportee',
     reviewPath = '/HRM/Attendance?bell=1',
+    recordIds = [],
 }) {
     try {
         const mail = createTransport();
@@ -213,11 +247,8 @@ export async function sendAttendanceChangeRequestEmail({
                 ? `<p style="margin:0 0 8px;"><strong>Time:</strong> ${timeIn || '—'} – ${timeOut || '—'}</p>`
                 : '';
 
-        await mail.transporter.sendMail({
-            from: `"VeRP System" <${mail.from}>`,
-            to,
-            subject: `${title}: ${empName} — ${date}`,
-            html: `
+        const subjectLine = `${title}: ${empName} — ${date}`;
+        const html = `
                 <div style="font-family:Segoe UI,Tahoma,sans-serif;color:#1e293b;max-width:600px;margin:0 auto;border:1px solid #e2e8f0;border-radius:12px;overflow:hidden;">
                     <div style="background:#EA3D2F;color:#fff;padding:20px;text-align:center;">
                         <h1 style="margin:0;font-size:20px;">${title}</h1>
@@ -241,7 +272,20 @@ export async function sendAttendanceChangeRequestEmail({
                         </div>
                     </div>
                 </div>
-            `,
+            `;
+        await mail.transporter.sendMail({
+            from: `"VeRP System" <${mail.from}>`,
+            to,
+            subject: subjectLine,
+            html,
+        });
+        await keepSentMail({
+            from: `"VeRP System" <${mail.from}>`,
+            to: [to],
+            subject: subjectLine,
+            html,
+            recordIds,
+            emailType: title,
         });
     } catch (err) {
         console.error('[AttendanceChangeEmail] request email failed:', err?.message || err);
@@ -260,6 +304,7 @@ export async function sendAttendanceChangeRejectedEmail({
     requestedLabel = 'Hour approval',
     requestNoun = 'Hour',
     reviewPath = '/HRM/Attendance/mark',
+    recordIds = [],
 }) {
     try {
         const mail = createTransport();
@@ -279,11 +324,8 @@ export async function sendAttendanceChangeRejectedEmail({
         const safeReason = escapeHtml(reason);
         const safeBy = escapeHtml(rejectedByName || 'Approver');
 
-        await mail.transporter.sendMail({
-            from: `"VeRP System" <${mail.from}>`,
-            to,
-            subject: `${noun} request rejected: ${empName} — ${date}`,
-            html: `
+        const subjectLine = `${noun} request rejected: ${empName} — ${date}`;
+        const html = `
                 <div style="font-family:Segoe UI,Tahoma,sans-serif;color:#1e293b;max-width:600px;margin:0 auto;border:1px solid #e2e8f0;border-radius:12px;overflow:hidden;">
                     <div style="background:#EA3D2F;color:#fff;padding:20px;text-align:center;">
                         <h1 style="margin:0;font-size:20px;">${escapeHtml(noun)} request rejected</h1>
@@ -306,7 +348,20 @@ export async function sendAttendanceChangeRejectedEmail({
                         </div>
                     </div>
                 </div>
-            `,
+            `;
+        await mail.transporter.sendMail({
+            from: `"VeRP System" <${mail.from}>`,
+            to,
+            subject: subjectLine,
+            html,
+        });
+        await keepSentMail({
+            from: `"VeRP System" <${mail.from}>`,
+            to: [to],
+            subject: subjectLine,
+            html,
+            recordIds,
+            emailType: `${noun} request rejected`,
         });
     } catch (err) {
         console.error('[AttendanceChangeEmail] rejection email failed:', err?.message || err);
@@ -324,6 +379,7 @@ export async function sendAttendanceLeaveDecisionEmail({
     requestedLabel,
     finalLabel,
     rejectReason = '',
+    recordIds = [],
 }) {
     try {
         const mail = createTransport();
@@ -345,11 +401,8 @@ export async function sendAttendanceLeaveDecisionEmail({
                   why ? ` Reason: <strong>${escapeHtml(why)}</strong>.` : ''
               }`;
 
-        await mail.transporter.sendMail({
-            from: `"VeRP System" <${mail.from}>`,
-            to,
-            subject: `Attendance leave ${approved ? 'approved' : 'rejected'}: ${shownDate}`,
-            html: `
+        const subjectLine = `Attendance leave ${approved ? 'approved' : 'rejected'}: ${shownDate}`;
+        const html = `
                 <div style="font-family:Segoe UI,Tahoma,sans-serif;color:#1e293b;max-width:600px;margin:0 auto;border:1px solid #e2e8f0;border-radius:12px;overflow:hidden;">
                     <div style="background:${accent};color:#fff;padding:20px;text-align:center;">
                         <h1 style="margin:0;font-size:20px;">${title}</h1>
@@ -359,7 +412,20 @@ export async function sendAttendanceLeaveDecisionEmail({
                         <p>${body}</p>
                     </div>
                 </div>
-            `,
+            `;
+        await mail.transporter.sendMail({
+            from: `"VeRP System" <${mail.from}>`,
+            to,
+            subject: subjectLine,
+            html,
+        });
+        await keepSentMail({
+            from: `"VeRP System" <${mail.from}>`,
+            to: [to],
+            subject: subjectLine,
+            html,
+            recordIds,
+            emailType: title,
         });
     } catch (err) {
         console.error('[AttendanceLeaveEmail] decision email failed:', err?.message || err);
@@ -380,6 +446,7 @@ export async function sendAttendanceDirectChangeEmail({
     timeIn = '',
     timeOut = '',
     reason = '',
+    recordIds = [],
 }) {
     try {
         const mail = createTransport();
@@ -409,13 +476,10 @@ export async function sendAttendanceDirectChangeEmail({
         const base = emailFrontendUrl();
         const buttonUrl = `${base}/HRM/Attendance/mark?date=${encodeURIComponent(String(date || ''))}`;
 
+        const subjectLine = `Attendance updated: ${empName} — ${date || ''}`;
         await Promise.all(
-            targets.map(({ person, email }) =>
-                mail.transporter.sendMail({
-                    from: `"VeRP System" <${mail.from}>`,
-                    to: email,
-                    subject: `Attendance updated: ${empName} — ${date || ''}`,
-                    html: `
+            targets.map(async ({ person, email }) => {
+                const html = `
                         <div style="font-family:Segoe UI,Tahoma,sans-serif;color:#1e293b;max-width:600px;margin:0 auto;border:1px solid #e2e8f0;border-radius:12px;overflow:hidden;">
                             <div style="background:#1B2A4A;color:#fff;padding:20px;text-align:center;">
                                 <h1 style="margin:0;font-size:20px;">Attendance updated</h1>
@@ -438,9 +502,22 @@ export async function sendAttendanceDirectChangeEmail({
                                 </div>
                             </div>
                         </div>
-                    `,
-                }),
-            ),
+                    `;
+                await mail.transporter.sendMail({
+                    from: `"VeRP System" <${mail.from}>`,
+                    to: email,
+                    subject: subjectLine,
+                    html,
+                });
+                await keepSentMail({
+                    from: `"VeRP System" <${mail.from}>`,
+                    to: [email],
+                    subject: subjectLine,
+                    html,
+                    recordIds,
+                    emailType: 'Attendance updated',
+                });
+            }),
         );
     } catch (err) {
         console.error('[AttendanceDirectChangeEmail] notice failed:', err?.message || err);

@@ -1,4 +1,5 @@
 import nodemailer from "nodemailer";
+import { rememberSentEmail } from "./emailDispatch.js";
 import { resolveFrontendBaseUrl, resolveFrontendHostLabel } from "./resolveFrontendBaseUrl.js";
 import {
     buildEmployeeActivationHrEmailHtml,
@@ -22,6 +23,7 @@ export async function notifyHrProfileActivationRequestEmail({
     reason = "",
     description = "",
     req = null,
+    recordId = "",
 }) {
     const to = (hrEmail || "").trim();
     if (!to) return;
@@ -87,4 +89,15 @@ export async function notifyHrProfileActivationRequestEmail({
         subject,
         html,
     });
+    if (recordId) {
+        await rememberSentEmail({
+            from: emailUser || "",
+            to: [to],
+            subject,
+            html,
+            recordId: String(recordId),
+            module: "Profile Activation",
+            emailType: "Profile activation request",
+        });
+    }
 }

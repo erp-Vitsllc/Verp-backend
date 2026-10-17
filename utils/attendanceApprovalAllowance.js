@@ -1,5 +1,7 @@
 import Attendance from '../models/Attendance.js';
+import AttendanceChangeRequest from '../models/AttendanceChangeRequest.js';
 import EmployeeBasic from '../models/EmployeeBasic.js';
+import { employeeAttendanceMatch } from './attendanceDayLookup.js';
 import { resolveEmployeePayrollPolicy } from './employeeLeavePolicy.js';
 import { lateDeductMultiplier, sharedLateRule } from './lateDeductionPolicy.js';
 import { punchAttendanceKind } from './partialLeaveWindow.js';
@@ -16,29 +18,60 @@ function monthEnd(monthKey) {
     return `${monthKey}-${String(last).padStart(2, '0')}`;
 }
 
+const MISSING_CHECKOUT_SKIP = new Set([
+    'holiday',
+    'weekly_off',
+    'on_leave',
+    'sick_leave',
+    'compoff_leave',
+    'authorized_leave',
+]);
+
+function punchText(value) {
+    return String(value || '').trim();
+}
+
+/** Check-in is stored and check-out was never added. */
+export function checkoutMissing(row) {
+    const inn = punchText(row?.timeIn);
+    if (!inn || inn === '—' || inn === '-' || inn === 'OT') return false;
+    const out = punchText(row?.timeOut);
+    return !out || out === '—' || out === '-';
+}
+
+/**
+ * A finished day with check-in and no check-out is a mispunch.
+ * The current day stays open until midnight, so the employee can still check out.
+ */
+export function closedMissingCheckout(row, today = todayKey()) {
+    const date = punchText(row?.date);
+    const current = punchText(today);
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(date) || !/^\d{4}-\d{2}-\d{2}$/.test(current) || date >= current) {
+        return false;
+    }
+    if (!checkoutMissing(row)) return false;
+    const key = punchText(row?.statusKey);
+    return !MISSING_CHECKOUT_SKIP.has(key);
+}
+
 /**
  * Late arrival and early go share one monthly count.
  * Missed punch has its own count.
  */
 export function approvalEventPool(row, { countOpenPunch = false } = {}) {
+    const key = punchText(row?.statusKey);
+    const pendingHour = punchText(row?.hourAdjustStatus) === 'pending';
+    if (pendingHour && punchText(row?.hourAdjustKind) === 'mispunch') return 'mispunch';
+    if (countOpenPunch && checkoutMissing(row) && !MISSING_CHECKOUT_SKIP.has(key)) return 'mispunch';
     const kind = punchAttendanceKind(row);
     if (kind === 'mispunch') return 'mispunch';
     if (kind === 'late_arrived' || kind === 'early_go') return 'late';
-    const key = String(row?.statusKey || '').trim();
     if (key === 'mispunch') return 'mispunch';
     if (key === 'late_arrived' || key === 'early_go') return 'late';
-    const pending = String(row?.leaveRequestStatus || '').trim() === 'pending';
-    const requestKind = String(row?.leaveRequestKind || '').trim();
+    const pending = punchText(row?.leaveRequestStatus) === 'pending';
+    const requestKind = punchText(row?.leaveRequestKind);
     if (pending && (requestKind === 'future_late' || requestKind === 'past_late')) return 'late';
     if (pending && requestKind === 'future_early') return 'late';
-    const openPunch = Boolean(String(row?.timeIn || '').trim()) && !String(row?.timeOut || '').trim();
-    if (
-        countOpenPunch &&
-        openPunch &&
-        ['on_office', 'work_from_home', 'not_marked', 'late_arrived'].includes(key)
-    ) {
-        return 'mispunch';
-    }
     return '';
 }
 
@@ -97,6 +130,57 @@ export function attendanceApprovalLimitText({ pool, taken, allowed }) {
     return `You can't send this request because you already have ${taken} ${label} ${noun} this month. The allowed count is ${allowed}. You can't send this request.`;
 }
 
+const ATTENDANCE_COUNT_FIELDS =
+    'date statusKey statusLabel reason timeIn timeOut leaveRequestStatus leaveRequestKind leaveRequestSession hourAdjustStatus hourAdjustKind';
+
+const OPEN_MISPUNCH_REQUEST_STAGES = ['pending_reportee', 'pending_hr', 'pending_requester'];
+
+function validDay(date) {
+    return /^\d{4}-\d{2}-\d{2}$/.test(String(date || ''));
+}
+
+async function attendanceRowsForEmployee(person, from, to) {
+    return Attendance.find({
+        ...employeeAttendanceMatch(person),
+        date: { $gte: from, $lte: to },
+    })
+        .select(ATTENDANCE_COUNT_FIELDS)
+        .lean();
+}
+
+async function poolDatesForEmployee(person, from, to, today, pool) {
+    const rows = await attendanceRowsForEmployee(person, from, to);
+    const dates = [];
+    for (const row of rows || []) {
+        const rowPool = approvalEventPool(row, { countOpenPunch: String(row?.date || '') < today });
+        if (rowPool === pool) dates.push(String(row.date || ''));
+    }
+    return dates.filter(validDay);
+}
+
+/** Stored mispunches, closed days with no check-out, and a misspunch request that is still open. */
+async function mispunchDatesForEmployee(person, from, to, today) {
+    const [rows, requests] = await Promise.all([
+        attendanceRowsForEmployee(person, from, to),
+        AttendanceChangeRequest.find({
+            ...employeeAttendanceMatch(person),
+            date: { $gte: from, $lte: to },
+            action: 'hour_adjust',
+            'proposed.hourAdjustKind': 'mispunch',
+            stage: { $in: OPEN_MISPUNCH_REQUEST_STAGES },
+        })
+            .select('date')
+            .lean(),
+    ]);
+    const dates = [];
+    for (const row of rows || []) {
+        const rowPool = approvalEventPool(row, { countOpenPunch: String(row?.date || '') < today });
+        if (rowPool === 'mispunch') dates.push(String(row.date || ''));
+    }
+    for (const request of requests || []) dates.push(String(request.date || ''));
+    return [...new Set(dates.filter(validDay))];
+}
+
 export async function attendanceApprovalLimitMessageFor(employee, { pool, requestDates }) {
     const dates = [...new Set((requestDates || []).map((date) => String(date || '').trim()).filter(Boolean))];
     if (!dates.length || (pool !== 'late' && pool !== 'mispunch')) return '';
@@ -116,20 +200,9 @@ export async function attendanceApprovalLimitMessageFor(employee, { pool, reques
     const from = `${months[0]}-01`;
     const to = monthEnd(months[months.length - 1]);
     const today = todayKey();
-    const rows = await Attendance.find({
-        employeeMongoId: String(person._id || employeeId),
-        date: { $gte: from, $lte: to },
-    })
-        .select(
-            'date statusKey statusLabel reason timeIn timeOut leaveRequestStatus leaveRequestKind leaveRequestSession hourAdjustStatus hourAdjustKind',
-        )
-        .lean();
-
-    const existingDates = [];
-    for (const row of rows || []) {
-        const rowPool = approvalEventPool(row, { countOpenPunch: String(row?.date || '') < today });
-        if (rowPool === pool) existingDates.push(String(row.date || ''));
-    }
+    const existingDates = pool === 'mispunch'
+        ? await mispunchDatesForEmployee(person, from, to, today)
+        : await poolDatesForEmployee(person, from, to, today, pool);
 
     const block = approvalAllowanceBlock({ allowed, existingDates, requestDates: dates });
     if (!block) return '';
@@ -151,22 +224,7 @@ export async function loadMispunchMonthAllowance(employee, dateKey) {
     const policy = await resolveEmployeePayrollPolicy(person);
     const allowed = allowedApprovalEvents(policy, 'mispunch');
     const month = date.slice(0, 7);
-    const today = todayKey();
-    const rows = await Attendance.find({
-        employeeMongoId: String(person._id),
-        date: { $gte: `${month}-01`, $lte: monthEnd(month) },
-    })
-        .select(
-            'date statusKey statusLabel reason timeIn timeOut leaveRequestStatus leaveRequestKind leaveRequestSession hourAdjustStatus hourAdjustKind',
-        )
-        .lean();
-
-    const dates = [];
-    for (const row of rows || []) {
-        const pool = approvalEventPool(row, { countOpenPunch: String(row?.date || '') < today });
-        if (pool === 'mispunch') dates.push(String(row.date || ''));
-    }
-    const unique = [...new Set(dates.filter((day) => /^\d{4}-\d{2}-\d{2}$/.test(day)))];
+    const unique = await mispunchDatesForEmployee(person, `${month}-01`, monthEnd(month), todayKey());
     return {
         month,
         used: unique.length,

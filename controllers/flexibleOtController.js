@@ -298,6 +298,7 @@ export async function requestFlexibleOvertime(req, res) {
                         previousLabel: 'Authorized leave',
                         nextLabel: `Present from overtime on ${record.date}`,
                         reason,
+                        recordIds: [record._id],
                     });
                 } catch (mailErr) {
                     console.error('[requestFlexibleOvertime] notice email failed:', mailErr?.message || mailErr);

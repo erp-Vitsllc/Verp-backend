@@ -14,6 +14,7 @@ import { punchAttendanceKind } from '../utils/partialLeaveWindow.js';
 import {
     attendanceApprovalLimitMessageFor,
     attendanceApprovalLimitText,
+    closedMissingCheckout,
     loadMispunchMonthAllowance,
 } from '../utils/attendanceApprovalAllowance.js';
 import {
@@ -69,6 +70,7 @@ async function actorIsFlowchartHr(actor) {
 export function hourAdjustKindOf(record) {
     const kind = punchAttendanceKind(record);
     if (kind) return kind;
+    if (closedMissingCheckout(record)) return 'mispunch';
     if (String(record?.statusKey || '').trim() === 'unauthorized_leave') return 'authorized_leave';
     return '';
 }

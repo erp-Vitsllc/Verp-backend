@@ -28,9 +28,11 @@ import {
 } from '../utils/attendanceNonWorkingDay.js';
 import { nonHrMarkableDateKeys } from '../utils/nonHrMarkWindow.js';
 import { describePartialLeave, partialLeaveOutcome, partialLeavePortion, storedPunchGapPatch } from '../utils/partialLeaveWindow.js';
+import { attachAttendanceDeductionDays } from '../utils/attachAttendanceDeductionDays.js';
 import {
     approvalEventPool,
     attendanceApprovalLimitMessageFor,
+    closedMissingCheckout,
 } from '../utils/attendanceApprovalAllowance.js';
 import { staffTypeMongoClause } from '../utils/workLocationHelpers.js';
 import { getDepartmentHOD } from '../utils/getDepartmentHOD.js';
@@ -63,6 +65,7 @@ import {
     leaveDashboardRequestObjectId,
     notifyLeaveRequestApprover,
 } from '../utils/notifyLeaveDashboardRequest.js';
+import { dismissDecidedLeaveBells } from '../utils/dismissDecidedLeaveBells.js';
 import {
     inferLeaveApprovalStage,
     isTwoStepLeaveKind,
@@ -915,6 +918,28 @@ async function rewriteStoredPunchGaps(rows) {
     if (jobs.length) await Promise.all(jobs);
 }
 
+/** A past day with check-in and no check-out is stored and shown as Mispunch. */
+async function rewriteMissingCheckouts(rows) {
+    const today = getDubaiDateKey();
+    const jobs = [];
+    for (const row of rows || []) {
+        if (!closedMissingCheckout(row, today) || String(row?.statusKey || '').trim() === 'mispunch') continue;
+        const patch = {
+            statusKey: 'mispunch',
+            statusLabel: 'Mispunch',
+            reason: String(row?.reason || '').trim() || 'Mispunched — forgot to check out',
+        };
+        Object.assign(row, patch);
+        if (!row?._id) continue;
+        jobs.push(
+            Attendance.updateOne({ _id: row._id }, { $set: patch }).catch((err) => {
+                console.error('[rewriteMissingCheckouts]', err?.message || err);
+            }),
+        );
+    }
+    if (jobs.length) await Promise.all(jobs);
+}
+
 export async function getAttendanceByDate(req, res) {
     try {
         if (mongoose.connection.readyState !== 1) {
@@ -946,10 +971,18 @@ export async function getAttendanceByDate(req, res) {
         );
         try {
             await rewriteStoredPunchGaps(records);
+            await rewriteMissingCheckouts(records);
         } catch (gapErr) {
             console.error('[getAttendanceByDate] punch gap rewrite failed:', gapErr);
         }
         const visibleRecords = (records || []).filter((r) => !isCompanyShellEmployee(r.employeeName));
+        let deductionRecords = visibleRecords;
+        try {
+            deductionRecords = await attachAttendanceDeductionDays(visibleRecords);
+        } catch (deductionErr) {
+            console.error('[getAttendanceByDate] deduction days failed:', deductionErr);
+            deductionRecords = visibleRecords.map((row) => ({ ...row, deductionDays: 0 }));
+        }
         const [pendingChanges, approvalHistory] = await Promise.all([
             loadPendingAttendanceChanges(date).catch((err) => {
                 console.error('[getAttendanceByDate] pending changes failed:', err);
@@ -963,7 +996,7 @@ export async function getAttendanceByDate(req, res) {
         return res.status(200).json({
             message: 'Attendance fetched successfully',
             date,
-            records: visibleRecords.map(presentAuthorizedLeaveRecord),
+            records: deductionRecords.map(presentAuthorizedLeaveRecord),
             pendingChanges,
             approvalHistory,
         });
@@ -1387,6 +1420,7 @@ async function emailDirectAttendanceChange({
     timeIn,
     timeOut,
     reason,
+    attendanceId = '',
 }) {
     const reportee = employee?.primaryReportee;
     try {
@@ -1400,6 +1434,7 @@ async function emailDirectAttendanceChange({
             timeIn,
             timeOut,
             reason,
+            recordIds: [attendanceId],
         });
     } catch (err) {
         console.error('[emailDirectAttendanceChange]', err?.message || err);
@@ -1480,6 +1515,7 @@ async function queueOrApplyManualMark(ctx, {
                 timeIn: payload.timeIn || '',
                 timeOut: payload.timeOut || '',
                 reason: payload.reason || reason || '',
+                attendanceId: doc?._id,
             });
         }
         return { applied: doc, pending: null };
@@ -2858,6 +2894,7 @@ export async function mapAttendanceFromEmployee(req, res) {
                 timeIn: set.timeIn || '',
                 timeOut: set.timeOut || '',
                 reason: set.reason || '',
+                attendanceId: doc?._id,
             });
         }
 
@@ -4802,6 +4839,7 @@ export async function decideLeaveRequestInternal({
             requestedLabel,
             finalLabel,
             rejectReason: trimmedRejectReason,
+            recordIds: [leaveDashboardRequestObjectId(groupId, record._id)],
         });
     }
 
@@ -4848,6 +4886,15 @@ async function syncLeaveDecisionDashboardActions({
             requestType: LEAVE_DASHBOARD_REQUEST_TYPE,
         });
     }
+
+    await dismissDecidedLeaveBells({
+        employeeMongoId: record.employeeMongoId,
+        from: record.leaveRequestFromDate || record.date,
+        to: record.leaveRequestToDate || record.date,
+        attendanceIds: [record._id],
+        groupId: record.leaveRequestGroupId,
+        outcome: status,
+    });
 }
 
 /** Applies one approve/reject to a single day and keeps its dashboard action in sync. */

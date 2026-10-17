@@ -1,5 +1,6 @@
 import mongoose from 'mongoose';
 import EmployeeBasic from '../models/EmployeeBasic.js';
+import DashboardAction from '../models/DashboardAction.js';
 import { syncDashboardAction } from './syncDashboard.js';
 import { sendAttendanceLeaveRequestEmail } from './sendAttendanceLeaveEmails.js';
 import { resolveFlowchartHrEmployee } from './resolveFlowchartHrEmployee.js';
@@ -37,6 +38,17 @@ export function leaveDashboardReviewPath({ from, to, attendanceId } = {}) {
     if (attendanceId) params.set('approvalId', String(attendanceId));
     const query = params.toString();
     return query ? `/HRM/Leave/annual-leave?${query}` : '/HRM/Leave/annual-leave';
+}
+
+async function mailIdsForRequest({ requestId, requestType }) {
+    if (requestId && requestType) {
+        const row = await DashboardAction.findOne({ requestId, requestType })
+            .sort({ updatedAt: -1 })
+            .select('_id')
+            .lean();
+        if (row?._id) return [String(row._id)];
+    }
+    return [requestId];
 }
 
 function personName(person) {
@@ -121,6 +133,10 @@ export async function notifyLeaveRequestApprover({
         }),
         buttonLabel: 'Open Leave Approval',
         emailTitle: hrStep ? `${label} — HR approval` : `${label} Request`,
+        recordIds: await mailIdsForRequest({
+            requestId,
+            requestType: LEAVE_DASHBOARD_REQUEST_TYPE,
+        }),
     });
 
     return receiver;
@@ -204,5 +220,9 @@ export async function notifyFlowchartHrOfIneligibleAnnualLeave({
         }),
         buttonLabel: 'Open Leave Approval',
         emailTitle: `${label} — not eligible`,
+        recordIds: await mailIdsForRequest({
+            requestId,
+            requestType: LEAVE_DASHBOARD_REQUEST_TYPE,
+        }),
     });
 }

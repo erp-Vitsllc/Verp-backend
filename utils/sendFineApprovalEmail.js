@@ -4,6 +4,7 @@ import EmployeeBasic from '../models/EmployeeBasic.js';
 import User from '../models/User.js';
 import { getDepartmentHOD } from './getDepartmentHOD.js';
 import { resolveEmployeeEmail } from './resolveEmployeeEmail.js';
+import { rememberSentEmail } from './emailDispatch.js';
 
 /**
  * Sends fine approval notification emails to the assigned approver (usually HR).
@@ -162,12 +163,24 @@ export const sendFineApprovalEmail = async (fine, assignedEmployees) => {
             </div>
         `;
 
+        const subject = `Action Required: Fine Approval for ${employeementDetails.length > 1 ? 'Multiple Employees' : employeementDetails[0].name} - ${fine.fineId}`;
         await transporter.sendMail({
             from: `"VeRP Notification" <${emailUser}>`,
             to: targetEmail,
-            subject: `Action Required: Fine Approval for ${employeementDetails.length > 1 ? 'Multiple Employees' : employeementDetails[0].name} - ${fine.fineId}`,
+            subject,
             html: htmlContent
         });
+        if (fine?._id) {
+            await rememberSentEmail({
+                from: `"VeRP Notification" <${emailUser}>`,
+                to: [targetEmail],
+                subject,
+                html: htmlContent,
+                recordId: String(fine._id),
+                module: 'Fine',
+                emailType: 'Fine approval',
+            });
+        }
 
         console.log(`[FineEmail] Email sent to ${targetEmail} for ${employeementDetails.length} employees.`);
         

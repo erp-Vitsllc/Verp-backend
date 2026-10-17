@@ -314,6 +314,31 @@ async function taskByStoredKey(taskKey) {
     );
 }
 
+async function taskFromReassignmentNotice(raw) {
+    const key = String(raw || "").trim();
+    if (!key) return null;
+    const clauses = [];
+    if (isObjectId(key)) {
+        clauses.push({ _id: key }, { requestId: key });
+    }
+    const escaped = key.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    clauses.push({ extra3: new RegExp(`"(?:taskKey|taskManagerId)":"${escaped}"`) });
+    const notice = await DashboardAction.findOne({
+        requestType: "Task Manager",
+        $or: clauses,
+    }).select("extra3").lean();
+    if (!notice) return null;
+    const meta = readMeta(notice.extra3);
+    const candidates = [meta.taskManagerId, meta.taskKey]
+        .map((value) => String(value || "").trim())
+        .filter((value) => value && value !== key);
+    for (const candidate of candidates) {
+        const task = await taskByStoredKey(candidate);
+        if (task) return task;
+    }
+    return null;
+}
+
 async function loadTarget(taskKey) {
     const raw = decodeURIComponent(String(taskKey || ""));
     const manualId = raw.startsWith("manual-") ? raw.slice("manual-".length) : "";
@@ -331,13 +356,24 @@ async function loadTarget(taskKey) {
         const storedKey = String(meta.taskKey || "").trim();
         const linked = await taskByStoredKey(meta.taskManagerId || (storedKey && storedKey !== raw ? storedKey : ""));
         if (linked) return targetFromTask(linked);
+        if (isObjectId(action.requestId)) {
+            const byRequest = await TaskManagerTask.findById(action.requestId);
+            if (byRequest) return targetFromTask(byRequest);
+        }
+        const recovered = await taskFromReassignmentNotice(raw);
+        if (recovered) return targetFromTask(recovered);
+        return null;
     }
     const overlay = await TaskManagerTask.findOne({ sourceDashboardActionId: raw });
     if (overlay) return targetFromTask(overlay, action);
     const byNotice = await TaskManagerTask.findOne({ "closeRequest.reassignmentNotices.requestId": raw });
     if (byNotice) return targetFromTask(byNotice);
     if (action) return { kind: "dashboard", task: null, action };
-    return targetFromTask(await TaskManagerTask.findById(raw));
+    const byId = await TaskManagerTask.findById(raw);
+    if (byId) return targetFromTask(byId);
+    const recovered = await taskFromReassignmentNotice(raw);
+    if (recovered) return targetFromTask(recovered);
+    return null;
 }
 
 function viewerIsCurrentAssignee(viewer, current) {
@@ -903,15 +939,24 @@ async function buildDetail(target, viewer) {
         });
     } else {
         recordEmails = await findEmailsForTask({
-            ids: [mailAction?.requestId],
+            ids: [
+                mailAction?.requestId,
+                action?.requestId,
+                mailMeta.attendanceId,
+                mailMeta.leaveRequestGroupId,
+                mailMeta.groupId,
+            ],
         });
     }
     const seenEmail = new Set();
+    const seenBody = new Set();
     const emails = [];
     for (const row of [...taskEmails, ...recordEmails]) {
         const id = String(row?.id || "");
-        if (!id || seenEmail.has(id)) continue;
+        const bodyKey = `${row?.subject || ""}\n${(row?.to || []).join(",")}\n${row?.html || ""}`;
+        if (!id || seenEmail.has(id) || (row?.html && seenBody.has(bodyKey))) continue;
         seenEmail.add(id);
+        if (row?.html) seenBody.add(bodyKey);
         emails.push(row);
     }
     emails.sort((a, b) => new Date(b.sentAt || 0) - new Date(a.sentAt || 0));
@@ -2692,11 +2737,26 @@ async function undoPendingAssetRequest(assetId) {
 
 async function undoLeaveRequest(action) {
     const meta = readActionMeta(action.extra3);
-    const ids = [action.requestId, meta.attendanceId].map((value) => String(value || "")).filter(isObjectId);
-    const groupIds = [meta.groupId, action.requestId].map((value) => String(value || "").trim()).filter(Boolean);
+    const ids = [action.requestId, meta.attendanceId, meta.leaveAttendanceId]
+        .map((value) => String(value || ""))
+        .filter(isObjectId);
+    const groupIds = [meta.groupId, meta.leaveRequestGroupId, action.requestId]
+        .map((value) => String(value || "").trim())
+        .filter(Boolean);
     const or = [];
     if (ids.length) or.push({ _id: { $in: ids } });
     if (groupIds.length) or.push({ leaveRequestGroupId: { $in: groupIds } });
+    const from = String(meta.from || "").trim();
+    const to = String(meta.to || from).trim();
+    const employeeMongoId = String(meta.employeeMongoId || "").trim();
+    if (employeeMongoId && /^\d{4}-\d{2}-\d{2}$/.test(from)) {
+        or.push({
+            employeeMongoId,
+            leaveRequestFromDate: from,
+            ...(to ? { leaveRequestToDate: to } : {}),
+            leaveRequestStatus: { $in: ["pending", "approved", "rejected"] },
+        });
+    }
     if (!or.length) return;
     const rows = await Attendance.find({ $or: or });
     for (const record of rows) {
@@ -2717,6 +2777,8 @@ async function undoLeaveRequest(action) {
         record.leaveRequestFromDate = "";
         record.leaveRequestToDate = "";
         record.leaveRequestGroupId = "";
+        record.leaveApprovalStage = "";
+        record.annualLeaveNotEligible = false;
         record.leaveRequestedAt = null;
         record.leaveDecidedAt = null;
         record.leaveDecidedBy = null;
@@ -2811,7 +2873,7 @@ async function deleteTaskSource(action) {
                 return String(readActionMeta(row.extra3).serviceRecordId || "") === serviceRecordId;
             })
             .map((row) => row._id);
-        await TaskManagerTask.deleteMany({ sourceDashboardActionId: { $in: relatedIds } });
+        await deleteTasksAndBellsForActions(relatedIds);
         await deleteDashboardActionsForVehicleService(requestId, serviceRecordId);
         if (relatedIds.length) await DashboardAction.deleteMany({ _id: { $in: relatedIds } });
         return;
@@ -2821,21 +2883,90 @@ async function deleteTaskSource(action) {
 
     const ids = [action._id];
     const title = String(action.extra1 || "").trim();
+    const leaveRequest = requestType === "Employee Leave Request" || requestType === "Attendance Leave Request";
     const siblingTypes = requestType === "Asset Assignment" || requestType === "Asset Reassign"
         ? ["Asset Assignment", "Asset", "Asset Reassign"]
-        : HUB_REQUEST_TYPES.has(requestType)
-            ? [...HUB_REQUEST_TYPES, "Employee Request Resend"]
-            : [requestType];
+        : leaveRequest
+            ? ["Employee Leave Request", "Attendance Leave Request", "Employee Request Resend"]
+            : HUB_REQUEST_TYPES.has(requestType)
+                ? [...HUB_REQUEST_TYPES, "Employee Request Resend"]
+                : [requestType];
     if (requestId && requestType && requestType !== "Task Manager") {
         const related = await DashboardAction.find({
             requestId,
             requestType: { $in: siblingTypes },
-            ...(title && !HUB_REQUEST_TYPES.has(requestType) ? { extra1: title } : {}),
+            ...(title && !HUB_REQUEST_TYPES.has(requestType) && !leaveRequest ? { extra1: title } : {}),
         }).select("_id").lean();
         related.forEach((row) => ids.push(row._id));
     }
-    await TaskManagerTask.deleteMany({ sourceDashboardActionId: { $in: ids } });
+    await deleteTasksAndBellsForActions(ids);
     await DashboardAction.deleteMany({ _id: { $in: ids } });
+}
+
+async function deleteTasksAndBellsForActions(actionIds = []) {
+    const ids = (actionIds || []).filter((id) => isObjectId(id));
+    if (!ids.length) return;
+    const tasks = await TaskManagerTask.find({ sourceDashboardActionId: { $in: ids } })
+        .select("_id closeRequest")
+        .lean();
+    const taskIds = tasks.map((task) => task._id).filter((id) => isObjectId(id));
+    const noticeIds = [];
+    for (const task of tasks) {
+        for (const notice of task.closeRequest?.reassignmentNotices || []) {
+            if (isObjectId(notice?.requestId)) noticeIds.push(notice.requestId);
+        }
+    }
+    const bellOr = [];
+    if (taskIds.length || noticeIds.length) {
+        bellOr.push({ requestId: { $in: [...taskIds, ...noticeIds] } });
+    }
+    for (const taskId of taskIds) {
+        const id = String(taskId);
+        bellOr.push({ extra3: new RegExp(`"taskManagerId":"${id}"`) });
+        bellOr.push({ extra3: new RegExp(`"taskKey":"(?:manual-)?${id}"`) });
+    }
+    if (bellOr.length) {
+        await DashboardAction.deleteMany({ requestType: "Task Manager", $or: bellOr });
+    }
+    await TaskManagerTask.deleteMany({ sourceDashboardActionId: { $in: ids } });
+}
+
+async function deleteTaskManagerBells(task) {
+    if (!task?._id) return;
+    await deleteReassignmentNotices(task);
+    const id = String(task._id);
+    await DashboardAction.deleteMany({
+        requestType: "Task Manager",
+        $or: [
+            { requestId: task._id },
+            { extra3: new RegExp(`"taskManagerId":"${id}"`) },
+            { extra3: new RegExp(`"taskKey":"(?:manual-)?${id}"`) },
+        ],
+    });
+}
+
+/** Remove the task, its bell rows, and the request it started. Caller checks permission. */
+export async function eraseTaskByKey(taskKey) {
+    const target = await loadTarget(taskKey);
+    if (!target) return { ok: false, status: 404, message: "Task not found." };
+    const task = target.task;
+    const manual = target.kind === "manual";
+    if (task) await deleteTaskManagerBells(task);
+    if (manual && task?._id) {
+        if (task.sourceDashboardActionId) {
+            const source = await DashboardAction.findById(task.sourceDashboardActionId);
+            if (source) await deleteTaskSource(source);
+        }
+        await TaskManagerTask.deleteOne({ _id: task._id });
+        await deleteTaskManagerBells(task);
+    } else if (target.action?._id) {
+        await deleteTaskSource(target.action);
+        if (task?._id) {
+            await TaskManagerTask.deleteOne({ _id: task._id });
+            await deleteTaskManagerBells(task);
+        }
+    }
+    return { ok: true, message: "Task deleted." };
 }
 
 export const deleteTaskManagerTask = async (req, res) => {
@@ -2859,20 +2990,14 @@ export const deleteTaskManagerTask = async (req, res) => {
                     : "Only an admin super user can delete a system or workflow task.",
             });
         }
-        const task = target.task;
-        if (task) await deleteReassignmentNotices(task);
-        if (manual && task?._id) {
-            await DashboardAction.deleteMany({ requestId: task._id, requestType: "Task Manager" });
-            if (task.sourceDashboardActionId) {
-                const source = await DashboardAction.findById(task.sourceDashboardActionId);
-                if (source) await deleteTaskSource(source);
-            }
-            await TaskManagerTask.deleteOne({ _id: task._id });
-        } else if (target.action?._id && (viewer?.superUser || target.action.requestType === "Task Manager")) {
-            await deleteTaskSource(target.action);
-            if (task?._id) await TaskManagerTask.deleteOne({ _id: task._id });
+        if (!manual && target.action?._id && !viewer?.superUser && target.action.requestType !== "Task Manager") {
+            return res.status(403).json({
+                message: "Only an admin super user can delete a system or workflow task.",
+            });
         }
-        return res.status(200).json({ message: "Task deleted." });
+        const result = await eraseTaskByKey(req.params.taskKey);
+        if (!result.ok) return res.status(result.status || 400).json({ message: result.message });
+        return res.status(200).json({ message: result.message || "Task deleted." });
     } catch (error) {
         console.error("Delete task error:", error);
         return res.status(500).json({ message: "Failed to delete task" });

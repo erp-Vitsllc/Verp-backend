@@ -230,15 +230,89 @@ const filterStaleExpiryDashboardRows = async (items = []) => {
             ]),
         );
 
-        return source.filter((it) => {
+        let vehicleLiveById = new Map();
+        let vehicleLiveByCode = new Map();
+        let vehicleLookupOk = false;
+        try {
+            const { collectLiveDueVehicleExpiryExtra1 } = await import(
+                "../../utils/vehicleExpiryNotificationHelpers.js"
+            );
+            const vehicleRows = source.filter(
+                (it) => it?.requestType === "Vehicle Document Expiry Reminder",
+            );
+            const vehicleIds = [
+                ...new Set(
+                    vehicleRows
+                        .map((it) => String(it?.requestId || "").trim())
+                        .filter((id) => /^[a-fA-F0-9]{24}$/.test(id)),
+                ),
+            ];
+            const vehicleCodes = [
+                ...new Set(
+                    vehicleRows
+                        .map((it) => String(it?.subjectEmployeeId || "").trim())
+                        .filter(Boolean),
+                ),
+            ];
+            const [vehiclesById, vehiclesByCode] = await Promise.all([
+                vehicleIds.length
+                    ? AssetItem.find({ _id: { $in: vehicleIds } })
+                          .select(
+                              "assetId name plateNumber vehicleBrand vehicleProfileActivationStatus vehicleDispositionStatus documents typeId",
+                          )
+                          .populate("typeId", "name")
+                          .lean()
+                    : [],
+                vehicleCodes.length
+                    ? AssetItem.find({ assetId: { $in: vehicleCodes } })
+                          .select(
+                              "assetId name plateNumber vehicleBrand vehicleProfileActivationStatus vehicleDispositionStatus documents typeId",
+                          )
+                          .populate("typeId", "name")
+                          .lean()
+                    : [],
+            ]);
+            vehicleLiveById = new Map(
+                [...vehiclesById, ...vehiclesByCode].map((asset) => [
+                    String(asset._id),
+                    collectLiveDueVehicleExpiryExtra1(asset),
+                ]),
+            );
+            vehicleLiveByCode = new Map(
+                [...vehiclesById, ...vehiclesByCode]
+                    .filter((asset) => asset.assetId)
+                    .map((asset) => [String(asset.assetId), collectLiveDueVehicleExpiryExtra1(asset)]),
+            );
+            vehicleLookupOk = true;
+        } catch (vehicleErr) {
+            console.warn(
+                "[getUserActivityStats] vehicle expiry live-set lookup skipped:",
+                vehicleErr?.message || vehicleErr,
+            );
+        }
+
+        const staleVehicleActionIds = [];
+        const kept = source.filter((it) => {
             const extra1 = String(it?.extra1 || "").trim();
+            if (it?.requestType === "Vehicle Document Expiry Reminder") {
+                const canonical = extra1.toLowerCase().startsWith("expiry follow-up required:");
+                if (!vehicleLookupOk) {
+                    if (!canonical && it?._id) staleVehicleActionIds.push(it._id);
+                    return canonical;
+                }
+                const set =
+                    vehicleLiveById.get(String(it.requestId || "")) ||
+                    vehicleLiveByCode.get(String(it.subjectEmployeeId || "").trim());
+                const stillDue = Boolean(set && set.has(extra1));
+                if (!stillDue && it?._id) staleVehicleActionIds.push(it._id);
+                return stillDue;
+            }
             if (!extra1.toLowerCase().startsWith("expiry follow-up required:")) return true;
 
             // Hard rule: Exp date on the row must still be ≤ today+10 (or overdue).
             if (
                 it?.requestType === "Document Expiry Reminder" ||
-                it?.requestType === "Employee Document Expiry Reminder" ||
-                it?.requestType === "Vehicle Document Expiry Reminder"
+                it?.requestType === "Employee Document Expiry Reminder"
             ) {
                 const isCertificate = /certificate/i.test(extra1);
                 if (!isExpiryExtra1StillInWindow(extra1, { isCertificate })) return false;
@@ -258,6 +332,30 @@ const filterStaleExpiryDashboardRows = async (items = []) => {
             }
             return true;
         });
+
+        if (staleVehicleActionIds.length) {
+            try {
+                const { finishTasksForRemovedExpiryActions, mongoIdList } = await import(
+                    "../../utils/finishVehicleExpiryTasks.js"
+                );
+                const DashboardAction = (await import("../../models/DashboardAction.js")).default;
+                const actionIds = mongoIdList(staleVehicleActionIds);
+                if (actionIds.length) {
+                    await DashboardAction.deleteMany({
+                        _id: { $in: actionIds },
+                        requestType: "Vehicle Document Expiry Reminder",
+                        status: "Pending",
+                    });
+                    await finishTasksForRemovedExpiryActions(actionIds);
+                }
+            } catch (deleteErr) {
+                console.warn(
+                    "[getUserActivityStats] vehicle expiry reminder delete skipped:",
+                    deleteErr?.message || deleteErr,
+                );
+            }
+        }
+        return kept;
     } catch (err) {
         console.warn(
             "[getUserActivityStats] filterStaleExpiryDashboardRows skipped:",

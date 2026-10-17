@@ -10,6 +10,7 @@ import {
     removeLeaveRequest,
     returnLeaveRequest,
     getLeavePendingInbox,
+    deleteLeaveInboxItem,
     getLeavePendingRequests,
     getLeaveTeamTrack,
 } from '../controllers/leave/leaveDashboardData.js';
@@ -56,6 +57,11 @@ router.get(
     '/dashboard/pending-inbox',
     checkPermission('hrm_leave', 'view'),
     getLeavePendingInbox,
+);
+router.post(
+    '/dashboard/pending-inbox/delete',
+    checkPermission('hrm_leave', 'view'),
+    deleteLeaveInboxItem,
 );
 router.post(
     '/pending-requests/decide',

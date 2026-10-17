@@ -1,7 +1,9 @@
 import mongoose from 'mongoose';
 import Attendance from '../models/Attendance.js';
 import EmployeeBasic from '../models/EmployeeBasic.js';
+import { employeeAttendanceMatch } from '../utils/attendanceDayLookup.js';
 import { isUserActiveInFlowchart } from '../utils/getDepartmentHOD.js';
+import { attachAttendanceDeductionDays } from '../utils/attachAttendanceDeductionDays.js';
 import { dayHasWaivableDeduction } from '../utils/deductionWaive.js';
 
 function personName(employee) {
@@ -9,13 +11,44 @@ function personName(employee) {
 }
 
 async function resolveActor(req) {
-    const select = '_id employeeId firstName lastName';
-    if (req.user?.employeeObjectId) {
+    const select = '_id employeeId firstName lastName companyEmail workEmail email';
+    if (req.user?.employeeObjectId && mongoose.Types.ObjectId.isValid(req.user.employeeObjectId)) {
         const byId = await EmployeeBasic.findById(req.user.employeeObjectId).select(select).lean();
         if (byId) return byId;
     }
     if (req.user?.employeeId) {
-        return EmployeeBasic.findOne({ employeeId: req.user.employeeId }).select(select).lean();
+        const byCode = await EmployeeBasic.findOne({ employeeId: req.user.employeeId }).select(select).lean();
+        if (byCode) return byCode;
+    }
+    const emails = [req.user?.companyEmail, req.user?.email]
+        .map((value) => String(value || '').trim().toLowerCase())
+        .filter(Boolean);
+    if (!emails.length) return null;
+    return EmployeeBasic.findOne({
+        $or: [
+            { companyEmail: { $in: emails } },
+            { workEmail: { $in: emails } },
+            { email: { $in: emails } },
+        ],
+    })
+        .select(select)
+        .lean();
+}
+
+async function resolveEmployee(employeeMongoId, employeeCode) {
+    const select = '_id employeeId';
+    const mongoId = String(employeeMongoId || '').trim();
+    if (mongoose.Types.ObjectId.isValid(mongoId) && mongoId.length === 24) {
+        const byId = await EmployeeBasic.findById(mongoId).select(select).lean();
+        if (byId) return byId;
+    }
+    const code = String(employeeCode || '').trim();
+    if (code) {
+        const byCode = await EmployeeBasic.findOne({ employeeId: code }).select(select).lean();
+        if (byCode) return byCode;
+    }
+    if (mongoId && mongoId !== code) {
+        return EmployeeBasic.findOne({ employeeId: mongoId }).select(select).lean();
     }
     return null;
 }
@@ -37,9 +70,10 @@ function yearOf(value) {
     return year >= 2000 && year <= 2100 ? year : 0;
 }
 
-async function waiveCount(employeeMongoId, year) {
+async function waiveCount(employee, year) {
+    const person = employee?._id ? employee : { _id: employee };
     return Attendance.countDocuments({
-        employeeMongoId: String(employeeMongoId),
+        ...employeeAttendanceMatch(person),
         date: { $gte: `${year}-01-01`, $lte: `${year}-12-31` },
         deductionWaived: true,
     });
@@ -55,11 +89,13 @@ export async function getDeductionWaiveCount(req, res) {
             return res.status(403).json({ message: 'Only the flowchart HR assignee can waive a deduction.' });
         }
         const employeeMongoId = String(req.query?.employeeMongoId || '').trim();
+        const employeeCode = String(req.query?.employeeId || '').trim();
         const year = yearOf(req.query?.year);
-        if (!mongoose.Types.ObjectId.isValid(employeeMongoId) || !year) {
+        const employee = await resolveEmployee(employeeMongoId, employeeCode);
+        if (!employee?._id || !year) {
             return res.status(400).json({ message: 'Employee and year are required.' });
         }
-        const count = await waiveCount(employeeMongoId, year);
+        const count = await waiveCount(employee, year);
         return res.status(200).json({ year, count });
     } catch (error) {
         console.error('[getDeductionWaiveCount]', error);
@@ -89,6 +125,10 @@ export async function waiveAttendanceDeduction(req, res) {
         if (!dayHasWaivableDeduction(record)) {
             return res.status(400).json({ message: 'This day has no deduction to waive.' });
         }
+        const [withDeduction] = await attachAttendanceDeductionDays([record.toObject()]);
+        if (!(Number(withDeduction?.deductionDays) > 0)) {
+            return res.status(400).json({ message: 'This day has no deduction to waive.' });
+        }
         const year = yearOf(record.date);
         if (!record.deductionWaived) {
             record.deductionWaived = true;
@@ -97,7 +137,12 @@ export async function waiveAttendanceDeduction(req, res) {
             record.deductionWaivedByName = personName(actor);
             await record.save();
         }
-        const count = year ? await waiveCount(record.employeeMongoId, year) : 0;
+        const count = year
+            ? await waiveCount(
+                { _id: record.employeeMongoId, employeeId: record.employeeId },
+                year,
+            )
+            : 0;
         return res.status(200).json({
             message: 'Deduction waived. The status is unchanged.',
             year,

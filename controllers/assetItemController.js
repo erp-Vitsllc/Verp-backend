@@ -21281,7 +21281,9 @@ export const getPendingAssetDashboardInbox = async (req, res) => {
         if (assigneeClauses.length && (scope === "vehicle" || scope === "tools")) {
             const modules = scope === "vehicle" ? ["vehicle"] : ["tools", "utility"];
             for (const moduleName of modules) {
-                const taskRows = await loadTaskManagerInboxItems(assigneeClauses, moduleName);
+                const taskRows = await loadTaskManagerInboxItems(assigneeClauses, moduleName, {
+                    omitExpiryFollowUps: true,
+                });
                 items.push(...taskRows);
             }
         }

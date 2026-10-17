@@ -1,5 +1,6 @@
 import DashboardAction from '../models/DashboardAction.js';
 import AssetItem from '../models/AssetItem.js';
+import { finishTasksForRemovedExpiryActions, mongoIdList } from './finishVehicleExpiryTasks.js';
 import {
     buildVehicleExpiryDocumentLabel,
     collectVehicleExpiryDocuments,
@@ -110,14 +111,35 @@ export async function clearVehicleExpiryNotificationsForDocument(asset, docOrTyp
     });
 }
 
+function escapeRegex(value) {
+    return String(value || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+async function deleteExpiryActionsAndFinishTasks(ids) {
+    const actionIds = mongoIdList(ids);
+    if (!actionIds.length) return;
+    await DashboardAction.deleteMany({ _id: { $in: actionIds } });
+    try {
+        await finishTasksForRemovedExpiryActions(actionIds);
+    } catch (err) {
+        console.error('[vehicle expiry] finish linked tasks:', err?.message || err);
+    }
+}
+
 /** Remove pending vehicle expiry reminders that no longer match a live due card. */
 export async function deleteStaleVehicleExpiryNotifications(asset) {
     if (!asset?._id) return;
     const liveDue = collectLiveDueVehicleExpiryExtra1(asset);
+    const or = [{ requestId: asset._id }];
+    const code = String(asset.assetId || '').trim();
+    if (code) {
+        or.push({ subjectEmployeeId: code });
+        or.push({ extra2: { $regex: escapeRegex(code), $options: 'i' } });
+    }
     const pending = await DashboardAction.find({
-        requestId: asset._id,
         requestType: VEHICLE_EXPIRY_REQUEST_TYPE,
         status: 'Pending',
+        $or: or,
     })
         .select('_id extra1')
         .lean();
@@ -126,9 +148,7 @@ export async function deleteStaleVehicleExpiryNotifications(asset) {
         .filter((row) => !liveDue.has(String(row?.extra1 || '').trim()))
         .map((row) => row._id);
 
-    if (staleIds.length) {
-        await DashboardAction.deleteMany({ _id: { $in: staleIds } });
-    }
+    await deleteExpiryActionsAndFinishTasks(staleIds);
 }
 
 /**
@@ -208,9 +228,7 @@ export async function clearStaleVehicleWarrantyExpiryNotifications(asset) {
         .filter((row) => documentExpiryReminderIsClosed(asset, row?.extra1))
         .map((row) => row._id);
 
-    if (staleIds.length) {
-        await DashboardAction.deleteMany({ _id: { $in: staleIds } });
-    }
+    await deleteExpiryActionsAndFinishTasks(staleIds);
 }
 
 /** Drop the expiry reminder for a document that was deleted, when no live card remains on that date. */
@@ -230,10 +248,11 @@ export async function clearVehicleExpiryNotificationsForRemovedDocuments(asset, 
         .filter((row) => reminderMatchesRemovedDocument(asset, row?.extra1, removedDocs))
         .map((row) => row._id);
 
-    if (staleIds.length) {
-        await DashboardAction.deleteMany({ _id: { $in: staleIds } });
-    }
+    await deleteExpiryActionsAndFinishTasks(staleIds);
 }
+
+const VEHICLE_EXPIRY_ASSET_FIELDS =
+    'assetId name plateNumber vehicleBrand vehicleProfileActivationStatus vehicleDispositionStatus documents typeId';
 
 async function restoreMissingLiveWarrantyExpiryReminders(existingRows = []) {
     const notifyOk = await isNotificationEnabledForType(VEHICLE_EXPIRY_REQUEST_TYPE);
@@ -332,24 +351,52 @@ export async function dropStaleVehicleWarrantyExpiryInboxRows(rows = []) {
         (row) => row?.requestType === VEHICLE_EXPIRY_REQUEST_TYPE,
     );
 
-    const assetIds = [...new Set(vehicleRows.map((row) => String(row.requestId || '')).filter(Boolean))];
-    const assets = assetIds.length
-        ? await AssetItem.find({ _id: { $in: assetIds } })
-              .select(
-                  'assetId name plateNumber vehicleBrand vehicleProfileActivationStatus vehicleDispositionStatus documents typeId',
-              )
-              .populate('typeId', 'name')
-              .lean()
-        : [];
-    const byId = new Map(assets.map((asset) => [String(asset._id), asset]));
+    const assetIds = mongoIdList(vehicleRows.map((row) => row.requestId));
+    const codes = [
+        ...new Set(vehicleRows.map((row) => String(row.subjectEmployeeId || '').trim()).filter(Boolean)),
+    ];
+    let assets = [];
+    try {
+        const [byIdRows, byCodeRows] = await Promise.all([
+            assetIds.length
+                ? AssetItem.find({ _id: { $in: assetIds } })
+                      .select(VEHICLE_EXPIRY_ASSET_FIELDS)
+                      .populate('typeId', 'name')
+                      .lean()
+                : [],
+            codes.length
+                ? AssetItem.find({ assetId: { $in: codes } })
+                      .select(VEHICLE_EXPIRY_ASSET_FIELDS)
+                      .populate('typeId', 'name')
+                      .lean()
+                : [],
+        ]);
+        assets = [...byIdRows, ...byCodeRows];
+    } catch (err) {
+        console.error('[vehicle expiry] load assets for inbox cleanup:', err?.message || err);
+        const nameOnlyIds = vehicleRows
+            .filter((row) => !/^Expiry follow-up required:/i.test(String(row?.extra1 || '').trim()))
+            .map((row) => row._id);
+        await deleteExpiryActionsAndFinishTasks(nameOnlyIds);
+        const stale = new Set(nameOnlyIds.map((id) => String(id)));
+        return rows.filter((row) => !stale.has(String(row?._id)));
+    }
+    const byId = new Map();
+    const byCode = new Map();
+    for (const asset of assets) {
+        byId.set(String(asset._id), asset);
+        if (asset.assetId) byCode.set(String(asset.assetId), asset);
+    }
 
     const staleIds = [];
     const assetsToEnsure = [];
     const seenAsset = new Set();
     for (const row of vehicleRows) {
-        const asset = byId.get(String(row.requestId || ''));
+        const asset =
+            byId.get(String(row.requestId || '')) ||
+            byCode.get(String(row.subjectEmployeeId || '').trim());
         const liveDue = asset ? collectLiveDueVehicleExpiryExtra1(asset) : new Set();
-        if (liveDue.has(String(row?.extra1 || '').trim())) continue;
+        if (asset && liveDue.has(String(row?.extra1 || '').trim())) continue;
         staleIds.push(row._id);
         const assetKey = asset ? String(asset._id) : '';
         if (asset && assetKey && !seenAsset.has(assetKey)) {
@@ -360,7 +407,7 @@ export async function dropStaleVehicleWarrantyExpiryInboxRows(rows = []) {
 
     let kept = rows;
     if (staleIds.length) {
-        await DashboardAction.deleteMany({ _id: { $in: staleIds } });
+        await deleteExpiryActionsAndFinishTasks(staleIds);
         const stale = new Set(staleIds.map((id) => String(id)));
         kept = rows.filter((row) => !stale.has(String(row?._id)));
     }

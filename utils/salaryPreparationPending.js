@@ -167,13 +167,44 @@ function changeStatus(stage) {
 }
 
 function withAge(item, todayKey) {
-    const anchor = item.dateKey || item.fromDate;
+    // The date on salary preparation is the day the request is about.
+    const anchor = item.fromDate || item.dateKey;
     return {
         ...item,
         dateLabel: formatDayMonthYear(anchor),
         badge: daysAgoLabel(anchor, todayKey),
         daysAgo: daysAgoCount(anchor, todayKey),
     };
+}
+
+function requestIdsOf(row) {
+    return [row?._id, row?.leaveRequestGroupId]
+        .map((value) => String(value || '').trim())
+        .filter(Boolean);
+}
+
+/** A task card belongs on salary preparation only while that request is still open. */
+export function leaveCardMatchesOpenRequest(card, { attendanceRows = [], changeRows = [] } = {}) {
+    const requestId = String(card?.requestId || '').trim();
+    const from = dateKeyOf(card?.fromDate);
+    const to = dateKeyOf(card?.toDate) || from;
+    const attendanceOpen = (attendanceRows || []).some((row) => {
+        if (String(row?.leaveRequestStatus || '').trim() !== 'pending') return false;
+        if (requestId && requestIdsOf(row).includes(requestId)) return true;
+        if (!from) return false;
+        const rowFrom = dateKeyOf(row?.leaveRequestFromDate) || dateKeyOf(row?.date);
+        const rowTo = dateKeyOf(row?.leaveRequestToDate) || dateKeyOf(row?.date) || rowFrom;
+        if (!rowFrom) return false;
+        return from <= rowTo && rowFrom <= to;
+    });
+    if (attendanceOpen) return true;
+    return (changeRows || []).some((row) => {
+        const id = String(row?._id || '').trim();
+        if (requestId && id === requestId) return true;
+        if (!from) return false;
+        const date = dateKeyOf(row?.date);
+        return Boolean(date) && date >= from && date <= to;
+    });
 }
 
 /**

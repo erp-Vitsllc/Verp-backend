@@ -81,4 +81,28 @@ describe('vehicle expiry reminders after renewal', () => {
             false,
         );
     });
+
+    it('drops the reminder after Not Renew and keeps a different card that is still due', () => {
+        const soon = daysFromToday(2);
+        const asset = fleetAsset([
+            {
+                type: 'Insurance',
+                expiryDate: daysFromToday(-1),
+                description: JSON.stringify({ isRenewed: true, notRenewed: true, archiveReason: 'Not Renewed' }),
+            },
+            { type: 'Warranty', expiryDate: soon },
+        ]);
+        const closedInsurance = buildVehicleExpiryFollowUpExtra1({
+            label: 'Insurance Card',
+            expiryDate: daysFromToday(-1),
+        });
+        const liveWarranty = buildVehicleExpiryFollowUpExtra1({
+            label: 'Warranty',
+            expiryDate: soon,
+        });
+
+        assert.equal(isLiveVehicleExpiryExtra1(asset, closedInsurance), false);
+        assert.equal(isLiveVehicleExpiryExtra1(asset, 'YARIS (VEGA-VHCL-006)'), false);
+        assert.equal(isLiveVehicleExpiryExtra1(asset, liveWarranty), true);
+    });
 });

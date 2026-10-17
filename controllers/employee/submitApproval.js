@@ -125,6 +125,7 @@ export const submitApproval = async (req, res) => {
             isAdminSubmitter,
             reason: "Profile submitted for activation review",
             req,
+            recordId: String(updated._id),
         }).catch((e) => console.error("[SubmitApproval] HR email error:", e));
 
         const completeEmployee = await getCompleteEmployee(employeeId);

@@ -895,7 +895,102 @@ export async function sendTaskActivityEmail({ to = [], subject, html, recordId =
     return { sent: true, to: recipients };
 }
 
-export async function loadTaskManagerInboxItems(assigneeClauses, moduleName) {
+export function readTaskInboxMeta(extra3) {
+    if (!extra3) return {};
+    if (typeof extra3 === "object") return extra3;
+    try {
+        const parsed = JSON.parse(String(extra3));
+        return parsed && typeof parsed === "object" ? parsed : {};
+    } catch {
+        return {};
+    }
+}
+
+export function isExpiryFollowUpTaskRow(row = {}) {
+    return /^Expiry follow-up required:/i.test(String(row?.extra1 || row?.taskName || "").trim());
+}
+
+export function taskInboxIdentity(row = {}) {
+    const meta = readTaskInboxMeta(row?.extra3);
+    return String(meta.taskManagerId || meta.taskKey || "").trim();
+}
+
+/** One row per task. Later copies of the same task are dropped. */
+export function dedupeTaskInboxRows(rows = []) {
+    const seen = new Set();
+    const unique = [];
+    for (const row of rows) {
+        const id = taskInboxIdentity(row);
+        if (id) {
+            if (seen.has(id)) continue;
+            seen.add(id);
+        }
+        unique.push(row);
+    }
+    return unique;
+}
+
+function manualTaskId(taskKey) {
+    const key = String(taskKey || "").trim();
+    if (!key.startsWith("manual-")) return "";
+    const id = key.slice("manual-".length);
+    return isObjectId(id) ? id : "";
+}
+
+/** A reassigned notice whose task is gone only opens as "Task not found." */
+async function omitUnopenableReassignmentNotices(rows) {
+    const notices = rows.filter((row) => readTaskInboxMeta(row.extra3).reassignedNotice);
+    if (!notices.length) return rows;
+
+    const directIds = [];
+    const sourceIds = [];
+    for (const row of notices) {
+        const meta = readTaskInboxMeta(row.extra3);
+        const id = String(meta.taskManagerId || "").trim();
+        if (isObjectId(id)) directIds.push(id);
+        const manual = manualTaskId(meta.taskKey);
+        if (manual) directIds.push(manual);
+        const key = String(meta.taskKey || "").trim();
+        if (isObjectId(key)) sourceIds.push(key);
+    }
+
+    const [byId, bySource] = await Promise.all([
+        directIds.length
+            ? TaskManagerTask.find({ _id: { $in: directIds } }).select("_id").lean()
+            : [],
+        sourceIds.length
+            ? TaskManagerTask.find({ sourceDashboardActionId: { $in: sourceIds } }).select("sourceDashboardActionId").lean()
+            : [],
+    ]);
+    const liveIds = new Set((byId || []).map((row) => String(row._id)));
+    const liveSources = new Set((bySource || []).map((row) => String(row.sourceDashboardActionId)));
+    const stale = [];
+    const kept = [];
+    for (const row of rows) {
+        const meta = readTaskInboxMeta(row.extra3);
+        if (!meta.reassignedNotice) {
+            kept.push(row);
+            continue;
+        }
+        const id = String(meta.taskManagerId || "").trim();
+        const manual = manualTaskId(meta.taskKey);
+        const key = String(meta.taskKey || "").trim();
+        const openable = (isObjectId(id) && liveIds.has(id))
+            || (manual && liveIds.has(manual))
+            || (isObjectId(key) && liveSources.has(key));
+        if (openable) kept.push(row);
+        else if (row.dashboardActionId) stale.push(row.dashboardActionId);
+    }
+    if (stale.length) {
+        await DashboardAction.updateMany(
+            { _id: { $in: stale }, requestType: "Task Manager", status: "Pending" },
+            { $set: { status: "Dismissed", actionedDate: new Date() } },
+        );
+    }
+    return kept;
+}
+
+export async function loadTaskManagerInboxItems(assigneeClauses, moduleName, options = {}) {
     const moduleKey = String(moduleName || "").trim();
     if (!Array.isArray(assigneeClauses) || !assigneeClauses.length || !moduleKey) return [];
     const rows = await DashboardAction.find({
@@ -907,7 +1002,7 @@ export async function loadTaskManagerInboxItems(assigneeClauses, moduleName) {
         .sort({ requestedDate: -1 })
         .limit(50)
         .lean();
-    return rows.map((da) => ({
+    let mapped = rows.map((da) => ({
         dashboardActionId: da._id,
         requestType: da.requestType,
         requestedDate: da.requestedDate,
@@ -920,6 +1015,15 @@ export async function loadTaskManagerInboxItems(assigneeClauses, moduleName) {
         primaryAssetId: "",
         asset: null,
     }));
+    try {
+        mapped = await omitUnopenableReassignmentNotices(mapped);
+    } catch (error) {
+        console.error("Task inbox notice cleanup failed:", error);
+    }
+    if (options.omitExpiryFollowUps) {
+        mapped = mapped.filter((row) => !isExpiryFollowUpTaskRow(row));
+    }
+    return dedupeTaskInboxRows(mapped);
 }
 
 export async function syncManualTaskNotification(task) {
