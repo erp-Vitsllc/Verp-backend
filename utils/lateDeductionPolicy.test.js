@@ -152,6 +152,43 @@ describe('late in/out combined events', () => {
         assert.equal(summary.lateOut.dayFraction, 0);
     });
 
+    it('drops a waived day from the late deduction', () => {
+        const summary = lateInOutSummary(
+            [
+                { date: '2026-10-05', statusKey: 'early_go', timeIn: '09:00', timeOut: '16:00', deductionWaived: true },
+                { date: '2026-10-06', statusKey: 'late_arrived', timeIn: '09:40', timeOut: '18:00' },
+            ],
+            {
+                lateInRules: [{ minutes: 15, events: 0, deduct: 'full' }],
+                lateOutRules: [{ minutes: 15, events: 0, deduct: 'full' }],
+            },
+            {
+                timingMode: 'fixed',
+                monday: {
+                    isOffDay: false,
+                    startHour: 9,
+                    startMinute: 0,
+                    startMeridiem: 'AM',
+                    endHour: 6,
+                    endMinute: 0,
+                    endMeridiem: 'PM',
+                },
+                tuesday: {
+                    isOffDay: false,
+                    startHour: 9,
+                    startMinute: 0,
+                    startMeridiem: 'AM',
+                    endHour: 6,
+                    endMinute: 0,
+                    endMeridiem: 'PM',
+                },
+            },
+        );
+        assert.equal(summary.lateOut.count, 0);
+        assert.equal(summary.lateOut.dayFraction, 0);
+        assert.equal(summary.lateIn.count, 1);
+    });
+
     it('deducts only the missed hours for a flexible group', () => {
         const week = {
             timingMode: 'flexible',

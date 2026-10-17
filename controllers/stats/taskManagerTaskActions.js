@@ -290,23 +290,54 @@ async function denyUnlessViewer(req, res) {
     return false;
 }
 
+async function targetFromTask(task, preferredAction = null) {
+    if (!task) return null;
+    let source = preferredAction && preferredAction.requestType !== "Task Manager" ? preferredAction : null;
+    if (!source && isObjectId(task.sourceDashboardActionId)) {
+        const found = await DashboardAction.findById(task.sourceDashboardActionId);
+        if (found && found.requestType !== "Task Manager") source = found;
+    }
+    if (source) return { kind: "dashboard", task, action: source };
+    return { kind: "manual", task, action: null };
+}
+
+async function taskByStoredKey(taskKey) {
+    const raw = decodeURIComponent(String(taskKey || "")).trim();
+    if (!raw) return null;
+    const manualId = raw.startsWith("manual-") ? raw.slice("manual-".length) : "";
+    if (manualId && isObjectId(manualId)) return TaskManagerTask.findById(manualId);
+    if (!isObjectId(raw)) return null;
+    return (
+        (await TaskManagerTask.findOne({ sourceDashboardActionId: raw }))
+        || (await TaskManagerTask.findById(raw))
+        || (await TaskManagerTask.findOne({ "closeRequest.reassignmentNotices.requestId": raw }))
+    );
+}
+
 async function loadTarget(taskKey) {
     const raw = decodeURIComponent(String(taskKey || ""));
     const manualId = raw.startsWith("manual-") ? raw.slice("manual-".length) : "";
     if (manualId && isObjectId(manualId)) {
-        const task = await TaskManagerTask.findById(manualId);
-        return task ? { kind: "manual", task, action: null } : null;
+        return targetFromTask(await TaskManagerTask.findById(manualId));
     }
     if (!isObjectId(raw)) return null;
     const action = await DashboardAction.findById(raw);
     if (action?.requestType === "Task Manager" && action.requestId) {
-        const task = await TaskManagerTask.findById(action.requestId);
-        if (task && !task.sourceDashboardActionId) return { kind: "manual", task, action };
+        const linked = await TaskManagerTask.findById(action.requestId);
+        if (linked && !linked.sourceDashboardActionId) return { kind: "manual", task: linked, action };
+    }
+    if (action?.requestType === "Task Manager") {
+        const meta = readMeta(action.extra3);
+        const storedKey = String(meta.taskKey || "").trim();
+        const linked = await taskByStoredKey(meta.taskManagerId || (storedKey && storedKey !== raw ? storedKey : ""));
+        if (linked) return targetFromTask(linked);
     }
     const overlay = await TaskManagerTask.findOne({ sourceDashboardActionId: raw });
-    if (action) return { kind: "dashboard", task: overlay, action };
-    const task = await TaskManagerTask.findById(raw);
-    return task ? { kind: "manual", task, action: null } : null;
+    if (overlay) return targetFromTask(overlay, action);
+    const byNotice = await TaskManagerTask.findOne({ "closeRequest.reassignmentNotices.requestId": raw });
+    if (byNotice) return targetFromTask(byNotice);
+    if (action) return { kind: "dashboard", task: null, action };
+    return targetFromTask(await TaskManagerTask.findById(raw));
 }
 
 function viewerIsCurrentAssignee(viewer, current) {
@@ -776,7 +807,7 @@ async function buildDetail(target, viewer) {
         sourceRequesters,
     ) || "System";
     const requester = await findEmployeeByName(personBaseName(requesterName) || requesterName);
-    const destination = manual
+    let destination = manual
         ? moduleForText(task.taskName, task.description, task.taskType)
         : moduleForRequestType(action.requestType, `${action.extra1 || ""} ${action.extra2 || ""}`);
     const cardAssignee = contactCard(assigneeEmp);
@@ -793,6 +824,27 @@ async function buildDetail(target, viewer) {
     let mailAction = action;
     if (!mailAction && isObjectId(task?.sourceDashboardActionId)) {
         mailAction = await DashboardAction.findById(task.sourceDashboardActionId);
+    }
+    if (!mailAction && /^expiry follow-up required:/i.test(String(task?.taskName || ""))) {
+        const sameReminder = {
+            extra1: task.taskName,
+            requestType: {
+                $in: [
+                    "Vehicle Document Expiry Reminder",
+                    "Employee Document Expiry Reminder",
+                    "Document Expiry Reminder",
+                ],
+            },
+        };
+        const extra2 = String(task.description || "").trim();
+        if (extra2) sameReminder.extra2 = extra2;
+        mailAction = await DashboardAction.findOne(sameReminder).sort({ updatedAt: -1 });
+    }
+    if (manual && mailAction?.requestType) {
+        destination = moduleForRequestType(
+            mailAction.requestType,
+            `${mailAction.extra1 || ""} ${mailAction.extra2 || ""} ${task?.taskName || ""} ${task?.description || ""}`,
+        );
     }
     const taskTitle = String(task?.taskName || mailAction?.extra1 || "").trim();
     const expirySource = [mailAction?.extra1, task?.description, task?.taskName]
@@ -886,13 +938,13 @@ async function buildDetail(target, viewer) {
             ? ""
             : accessPathFor(
                 destination,
-                action?.requestId,
-                action?.subjectEmployeeId,
+                (action || mailAction)?.requestId,
+                (action || mailAction)?.subjectEmployeeId,
                 {
-                    extra1: action?.extra1,
-                    extra2: action?.extra2,
-                    extra3: action?.extra3,
-                    requestType: action?.requestType,
+                    extra1: (action || mailAction)?.extra1 || task?.taskName,
+                    extra2: (action || mailAction)?.extra2 || task?.description,
+                    extra3: (action || mailAction)?.extra3,
+                    requestType: (action || mailAction)?.requestType,
                 },
             ),
         ...taskTitleAndDescription({
@@ -1374,28 +1426,11 @@ export const returnTaskManagerTask = async (req, res) => {
         }, SILENT_MAIL);
         await task.save();
         if (!task.sourceDashboardActionId) await syncManualTaskNotification(task);
-        const destination = target.kind === "manual"
-            ? moduleForText(task.taskName, task.description, task.taskType)
-            : moduleForRequestType(target.action?.requestType, `${target.action?.extra1 || ""} ${target.action?.extra2 || ""}`);
         try {
-            await keepReassignmentVisible(task, target, {
-                previous: current,
-                newAssignee: original,
-                reassigneeName: originalName,
-                taskName: task.taskName,
-                moduleName: destination.module,
-                noticeText: `${viewer.name} returned this task to ${originalName}.`,
-            });
-            await upsertTaskNotice(task, {
-                employeeId: original._id,
-                empId: original.employeeId || "",
-                taskName: task.taskName,
-                moduleName: destination.module,
-                taskKey: taskRecordKey(target, task),
-                noticeText: `${viewer.name} returned this task to you.`,
-            });
+            // The return stays on the task and in the email. It does not open a vehicle, employee, or company bell.
+            await closeReassignmentNotices(task);
         } catch (noticeError) {
-            console.error("Return notice failed:", noticeError);
+            console.error("Return notice clear failed:", noticeError);
         }
         const recordId = String(target.action?._id || task._id || "");
         let emailSent = false;

@@ -293,6 +293,21 @@ function formatDisplayDate(dateKey) {
     return date.toLocaleDateString('en-GB', { day: 'numeric', month: 'long', year: 'numeric' });
 }
 
+function requestedTime(value) {
+    if (!value) return 0;
+    const time = new Date(value).getTime();
+    return Number.isNaN(time) ? 0 : time;
+}
+
+function formatRequestedDate(value) {
+    const time = requestedTime(value);
+    if (!time) return '';
+    const parts = getZonedParts(new Date(time));
+    const month = String(parts.month).padStart(2, '0');
+    const day = String(parts.day).padStart(2, '0');
+    return formatDisplayDate(`${parts.year}-${month}-${day}`);
+}
+
 function formatEndDateLabel(record) {
     const fromDate = record.leaveRequestFromDate || record.date;
     const toDate = record.leaveRequestToDate || record.date;
@@ -351,6 +366,8 @@ function groupPendingRows(rows) {
                 annualLeaveNotEligible: Boolean(row.annualLeaveNotEligible),
                 timeIn: row.leaveRequestTimeIn || row.timeIn || '',
                 timeOut: row.leaveRequestTimeOut || row.timeOut || '',
+                requestedAt: row.leaveRequestedAt || null,
+                requestedDate: formatRequestedDate(row.leaveRequestedAt),
                 sortAt: row.leaveRequestedAt || row.leaveDecidedAt || row.date || '',
             });
         }
@@ -376,6 +393,12 @@ function groupPendingRows(rows) {
         const sortAt = row.leaveRequestedAt || row.leaveDecidedAt || '';
         if (sortAt && (!group.sortAt || String(sortAt) > String(group.sortAt))) {
             group.sortAt = sortAt;
+        }
+        const requestedAt = requestedTime(row.leaveRequestedAt);
+        const currentRequested = requestedTime(group.requestedAt);
+        if (requestedAt && (!currentRequested || requestedAt < currentRequested)) {
+            group.requestedAt = row.leaveRequestedAt;
+            group.requestedDate = formatRequestedDate(row.leaveRequestedAt);
         }
     }
 

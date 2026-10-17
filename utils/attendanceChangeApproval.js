@@ -90,6 +90,93 @@ export function attendanceChangeWaitingLabel(stage) {
     return 'Waiting for primary reportee';
 }
 
+function approvalStatusWord(key, label) {
+    const statusKey = String(key || '').trim();
+    const raw = String(label || '').trim();
+    if (statusKey === 'unauthorized_leave' || /^unauth/i.test(raw)) return 'Unauth';
+    if (statusKey === 'authorized_leave' || /^auth\b/i.test(raw) || /authorized leave/i.test(raw)) return 'Auth';
+    if (statusKey === 'early_go' || /early/i.test(raw)) return 'Early out';
+    if (statusKey === 'late_arrived' || /late/i.test(raw)) return 'Late arrival';
+    if (statusKey === 'mispunch' || /mispunch/i.test(raw)) return 'Mispunch';
+    if (statusKey === 'on_leave' || /annual/i.test(raw)) return 'Annual leave';
+    if (statusKey === 'sick_leave' || /sick/i.test(raw)) return 'Sick leave';
+    if (statusKey === 'compoff_leave' || /comp(?:ensation)?[ -]?off/i.test(raw)) return 'Comp off';
+    if (statusKey === 'work_from_home' || /work from home/i.test(raw)) return 'Work from home';
+    if (statusKey === 'holiday' || /^holiday$/i.test(raw)) return 'Holiday';
+    if (statusKey === 'weekly_off' || /weekly off|off day/i.test(raw)) return 'Off day';
+    if (
+        statusKey === 'on_office' ||
+        /^present\b/i.test(raw) ||
+        /^(on time|on work|on office)$/i.test(raw)
+    ) {
+        return 'Present';
+    }
+    if (!statusKey || statusKey === 'not_marked' || statusKey === 'absent' || /^(not marked|absent)$/i.test(raw)) {
+        return 'Not marked';
+    }
+    return raw || 'Updated';
+}
+
+function approvalConversionType(fromKey, fromLabel, toKey, toLabel) {
+    const from = approvalStatusWord(fromKey, fromLabel);
+    const to = approvalStatusWord(toKey, toLabel);
+    if (from === 'Unauth' && to === 'Auth') return 'Unauth to Auth';
+    if (from === 'Unauth' && (to === 'Early out' || to === 'Late arrival' || to === 'Mispunch')) return to;
+    if (from === 'Unauth' && to === 'Present') return 'Unauth to Present';
+    if (from && to && from !== to && from !== 'Not marked') return `${from} to ${to}`;
+    if (to && to !== 'Not marked') return to;
+    return from && from !== 'Not marked' ? from : 'Attendance change';
+}
+
+/**
+ * Short name for one finished attendance request.
+ * Examples: Early out, Unauth to Auth, OT approval, Present from OT.
+ */
+export function approvalRequestType(source = {}) {
+    const action = String(source.action || '').trim();
+    const proposed = source.proposed && typeof source.proposed === 'object' ? source.proposed : {};
+    const previous = source.previous && typeof source.previous === 'object' ? source.previous : {};
+    const viewDate = String(source.viewDate || '').trim();
+    const requestDate = String(source.date || '').trim();
+    const targetDate = String(proposed.targetDate || source.targetDate || '').trim();
+    const confirmNextDay = proposed.confirmNextDay === true || source.confirmNextDay === true;
+
+    if (action === 'flexible_ot') {
+        if (confirmNextDay && targetDate && viewDate && targetDate === viewDate && requestDate !== viewDate) {
+            return 'Present from OT';
+        }
+        return 'OT approval';
+    }
+    if (action === 'hour_adjust') {
+        const kind = String(proposed.hourAdjustKind || source.hourAdjustKind || '').trim();
+        if (kind === 'early_go') return 'Early out';
+        if (kind === 'late_arrived') return 'Late arrival';
+        if (kind === 'mispunch') return 'Mispunch';
+        if (kind === 'authorized_leave') return 'Unauth to Auth';
+        return 'Hour approval';
+    }
+    if (action === 'map') return 'Mapped punches';
+    if (action === 'clear') return 'Clear attendance';
+
+    const fromKey = previous.statusKey || source.previousStatusKey || '';
+    const fromLabel = previous.statusLabel || source.previousStatusLabel || '';
+    const toKey = proposed.statusKey || source.requestedStatusKey || source.statusKey || '';
+    const toLabel = proposed.statusLabel || source.requestedStatusLabel || source.statusLabel || '';
+    const kind = String(source.leaveRequestKind || '').trim();
+
+    if (kind === 'future_early') return 'Early out';
+    if (kind === 'future_late' || kind === 'past_late') return 'Late arrival';
+    if (kind === 'future_annual') return 'Annual leave';
+    if (kind === 'yellow') {
+        const from = approvalStatusWord(fromKey, fromLabel);
+        if (from === 'Early out' || from === 'Late arrival' || from === 'Mispunch') return `${from} to Present`;
+        if (from === 'Unauth') return 'Unauth to Present';
+        return 'Present';
+    }
+
+    return approvalConversionType(fromKey, fromLabel, toKey, toLabel);
+}
+
 export function attendanceChangeSummary(request) {
     const who = attendanceChangeWaitingLabel(request?.stage);
     const rejection = String(request?.rejectReason || '').trim();
@@ -392,6 +479,115 @@ export async function loadPendingAttendanceChanges(date) {
         for (const person of people || []) names.set(String(person._id), personName(person));
     }
     return (rows || []).map((row) => pendingChangeRow(row, names));
+}
+
+function approverDisplayName(person) {
+    return [person?.firstName, person?.lastName].filter(Boolean).join(' ').trim();
+}
+
+function approvalIsoStamp(value) {
+    if (!value) return '';
+    const date = new Date(value);
+    if (Number.isNaN(date.getTime())) return '';
+    return date.toISOString();
+}
+
+async function approverNamesById(ids) {
+    const keys = [...ids].map((id) => String(id || '').trim()).filter((id) => /^[a-f\d]{24}$/i.test(id));
+    if (!keys.length) return new Map();
+    const people = await EmployeeBasic.find({ _id: { $in: keys } })
+        .select('firstName lastName')
+        .lean();
+    const names = new Map();
+    for (const person of people || []) {
+        const name = approverDisplayName(person);
+        if (name) names.set(String(person._id), name);
+    }
+    return names;
+}
+
+/**
+ * Finished requests for one attendance day.
+ * Change requests stay after HR approves them. Leave decisions stay on the attendance row.
+ */
+export async function loadDayApprovalHistory(date, attendanceRows = []) {
+    const day = String(date || '').trim();
+    const changes = await AttendanceChangeRequest.find({
+        stage: 'approved',
+        $or: [
+            { date: day },
+            {
+                action: 'flexible_ot',
+                'proposed.confirmNextDay': true,
+                'proposed.targetDate': day,
+            },
+        ],
+    })
+        .select(
+            'date employeeMongoId action proposed.hourAdjustKind proposed.confirmNextDay proposed.targetDate proposed.statusKey proposed.statusLabel previous.statusKey previous.statusLabel decidedByHr decidedAtHr hrName updatedAt',
+        )
+        .sort({ decidedAtHr: 1, updatedAt: 1 })
+        .lean();
+
+    const pendingNames = new Set();
+    const items = [];
+
+    for (const row of changes || []) {
+        const employeeMongoId = String(row.employeeMongoId || '').trim();
+        if (!employeeMongoId) continue;
+        const approvedById = row.decidedByHr ? String(row.decidedByHr) : '';
+        if (approvedById) pendingNames.add(approvedById);
+        items.push({
+            id: `change-${row._id}`,
+            employeeMongoId,
+            type: approvalRequestType({ ...row, viewDate: day }),
+            approvedAt: row.decidedAtHr || row.updatedAt || null,
+            approvedById,
+            approvedByFallback: String(row.hrName || '').trim(),
+        });
+    }
+
+    for (const record of attendanceRows || []) {
+        if (String(record?.date || '').trim() !== day) continue;
+        if (String(record?.leaveRequestStatus || '').trim() !== 'approved') continue;
+        if (!record?.leaveDecidedAt && !record?.leaveDecidedBy) continue;
+        const employeeMongoId = String(record.employeeMongoId || '').trim();
+        if (!employeeMongoId) continue;
+        const approvedById = record.leaveDecidedBy ? String(record.leaveDecidedBy) : '';
+        if (approvedById) pendingNames.add(approvedById);
+        items.push({
+            id: `leave-${record._id || `${employeeMongoId}-${day}`}`,
+            employeeMongoId,
+            type: approvalRequestType({
+                action: 'leave',
+                date: record.date,
+                viewDate: day,
+                leaveRequestKind: record.leaveRequestKind,
+                previousStatusKey: record.previousStatusKey,
+                previousStatusLabel: record.previousStatusLabel,
+                requestedStatusKey: record.requestedStatusKey,
+                requestedStatusLabel: record.requestedStatusLabel,
+            }),
+            approvedAt: record.leaveDecidedAt || null,
+            approvedById,
+            approvedByFallback: '',
+        });
+    }
+
+    const names = await approverNamesById(pendingNames);
+    return items
+        .map((item) => ({
+            id: item.id,
+            employeeMongoId: item.employeeMongoId,
+            type: item.type,
+            approvedAt: approvalIsoStamp(item.approvedAt),
+            approvedBy: names.get(item.approvedById) || item.approvedByFallback || '',
+        }))
+        .sort((left, right) => {
+            const byPerson = left.employeeMongoId.localeCompare(right.employeeMongoId);
+            if (byPerson) return byPerson;
+            return String(left.approvedAt).localeCompare(String(right.approvedAt));
+        });
 }
 
 /**

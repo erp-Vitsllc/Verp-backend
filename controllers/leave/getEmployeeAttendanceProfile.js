@@ -1201,7 +1201,7 @@ export async function getEmployeeAttendanceProfile(req, res) {
                 ],
             })
                 .select(
-                    'date employeeMongoId leaveRequestStatus requestedStatusKey leaveRequestKind leaveRequestGroupId leaveRequestFromDate leaveRequestToDate leaveRequestedAt hourAdjustStatus hoursApproved flexibleOtStatus flexibleOtApprovedHours createdAt',
+                    'date employeeMongoId employeeName leaveRequestStatus requestedStatusKey leaveRequestKind leaveRequestGroupId leaveRequestFromDate leaveRequestToDate leaveRequestedAt hourAdjustStatus hoursApproved flexibleOtStatus flexibleOtApprovedHours createdAt',
                 )
                 .lean()
                 .maxTimeMS(12000),
@@ -1253,6 +1253,9 @@ export async function getEmployeeAttendanceProfile(req, res) {
         );
         const extraLeave = [];
         for (const card of employeeTasks.leaveCards || []) {
+            // Assigned and reassigned approval tasks stay on Pending Tasks.
+            // Salary preparation only lists a leave this employee requested.
+            if (!card.ownRequest) continue;
             const requestId = String(card.requestId || '').trim();
             const sameRequest = requestId && pendingHrRequests.some((row) => {
                 const id = String(row.id || '');

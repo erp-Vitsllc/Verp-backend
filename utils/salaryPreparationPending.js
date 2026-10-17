@@ -90,6 +90,10 @@ function leaveHref(row, staffType) {
     const to = dateKeyOf(row.leaveRequestToDate) || from;
     if (isLeaveDashboardAttendanceRow(row)) {
         const params = new URLSearchParams();
+        const employee = String(row.employeeMongoId || '').trim();
+        if (employee) params.set('employeeId', employee);
+        const employeeName = String(row.employeeName || '').trim();
+        if (employeeName) params.set('employeeName', employeeName);
         if (from) params.set('from', from);
         if (to) params.set('to', to);
         if (row._id) params.set('approvalId', String(row._id));

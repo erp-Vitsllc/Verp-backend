@@ -31,6 +31,7 @@ import {
     missedPunchDeduction,
 } from '../../utils/lateDeductionPolicy.js';
 import { partialLeavePortion } from '../../utils/partialLeaveWindow.js';
+import { isDeductionWaived } from '../../utils/deductionWaive.js';
 import {
     keepAttendanceForProcessingStart,
     resolveSalaryProcessingStartDate,
@@ -1466,7 +1467,7 @@ export const getSalaryRegister = async (req, res) => {
                 date: { $gte: from, $lte: to },
                 statusKey: { $in: ['authorized_leave', 'unauthorized_leave'] },
             })
-                .select('employeeMongoId date statusKey reason timeIn timeOut leaveRequestDayPart leaveDayFraction leaveDeductionTimes')
+                .select('employeeMongoId date statusKey reason timeIn timeOut leaveRequestDayPart leaveDayFraction leaveDeductionTimes deductionWaived')
                 .lean()
                 .maxTimeMS(15000)
             : [];
@@ -1494,6 +1495,7 @@ export const getSalaryRegister = async (req, res) => {
             });
 
         for (const row of leaveRows) {
+            if (isDeductionWaived(row)) continue;
             const key = String(row?.statusKey || '');
             const ym = String(row?.date || '').slice(0, 7);
             if (!/^\d{4}-\d{2}$/.test(ym)) continue;
@@ -1529,13 +1531,14 @@ export const getSalaryRegister = async (req, res) => {
                 date: { $gte: from, $lte: to },
                 statusKey: { $in: ['late_arrived', 'early_go'] },
             })
-                .select('employeeMongoId date timeIn timeOut timeOutDate punchSessions flexibleWorkedHours hourAdjustStatus hoursApproved statusKey')
+                .select('employeeMongoId date timeIn timeOut timeOutDate punchSessions flexibleWorkedHours hourAdjustStatus hoursApproved statusKey deductionWaived')
                 .lean()
                 .maxTimeMS(15000);
 
             const lateRowsByKey = new Map();
             const seenLateDates = new Set();
             for (const row of lateRows || []) {
+                if (isDeductionWaived(row)) continue;
                 const emp = empByMongo.get(String(row.employeeMongoId || ''));
                 if (!emp) continue;
                 const date = String(row.date || '').slice(0, 10);
@@ -1556,11 +1559,12 @@ export const getSalaryRegister = async (req, res) => {
                 date: { $gte: from, $lte: to },
                 statusKey: 'mispunch',
             })
-                .select('employeeMongoId date')
+                .select('employeeMongoId date deductionWaived')
                 .lean()
                 .maxTimeMS(15000);
             const missedByKey = new Map();
             for (const row of missedRows || []) {
+                if (isDeductionWaived(row)) continue;
                 const emp = empByMongo.get(String(row.employeeMongoId || ''));
                 if (!emp) continue;
                 const ym = String(row.date || '').slice(0, 7);
@@ -1584,11 +1588,12 @@ export const getSalaryRegister = async (req, res) => {
                 date: { $gte: from, $lte: to },
                 timeIn: { $nin: ['', null] },
             })
-                .select('employeeMongoId date timeIn timeOut timeOutDate punchSessions flexibleWorkedHours hourAdjustStatus hoursApproved statusKey')
+                .select('employeeMongoId date timeIn timeOut timeOutDate punchSessions flexibleWorkedHours hourAdjustStatus hoursApproved statusKey deductionWaived')
                 .lean()
                 .maxTimeMS(15000);
             const punchesByKey = new Map();
             for (const row of punchRows || []) {
+                if (isDeductionWaived(row)) continue;
                 const emp = empByMongo.get(String(row.employeeMongoId || ''));
                 if (!emp) continue;
                 const ym = String(row.date || '').slice(0, 7);

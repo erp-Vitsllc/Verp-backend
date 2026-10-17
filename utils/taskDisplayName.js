@@ -3,7 +3,7 @@
  * Vehicle service: "{vehicle name}, {service type}".
  * Document expiry: "{veh no / emp no / company id} - {document} - Expiry".
  * Not renew: "{id} - {document} - Not Renew".
- * Attendance: "{employee}, {date}, {Late In | OT | Mispunch | Comp Off | …}".
+ * Attendance: "Employee - {date} {Late In | OT | Mispunch | Comp Off | …}".
  * The long notification sentence stays in the description.
  */
 
@@ -296,6 +296,17 @@ export function formatTaskDisplayName({
     const meta = parseMeta(extra3);
 
     if (manual || MANUAL_TYPES.has(typeKey)) return stored || body || "Task";
+    if (isAttendanceTaskType(type)) {
+        return attendanceTaskTitle(resolveAttendanceFacts({
+            requestType: type,
+            extra1: body,
+            extra2: secondary,
+            extra3: meta,
+            subjectName,
+            subjectEmployeeId,
+            source,
+        }));
+    }
     if (isCustomName(stored, body, type, secondary)) return stored;
 
     if (typeKey === "vehicle service request") {
@@ -336,18 +347,6 @@ export function formatTaskDisplayName({
             source,
         });
         return titledRecord(code, doc, "Not Renew");
-    }
-
-    if (isAttendanceTaskType(type)) {
-        return attendanceTaskTitle(resolveAttendanceFacts({
-            requestType: type,
-            extra1: body,
-            extra2: secondary,
-            extra3: meta,
-            subjectName,
-            subjectEmployeeId,
-            source,
-        }));
     }
 
     if (

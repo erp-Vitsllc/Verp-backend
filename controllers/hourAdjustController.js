@@ -11,7 +11,11 @@ import {
     normalizeStaffType,
 } from '../utils/workingTimeHelpers.js';
 import { punchAttendanceKind } from '../utils/partialLeaveWindow.js';
-import { attendanceApprovalLimitMessageFor } from '../utils/attendanceApprovalAllowance.js';
+import {
+    attendanceApprovalLimitMessageFor,
+    attendanceApprovalLimitText,
+    loadMispunchMonthAllowance,
+} from '../utils/attendanceApprovalAllowance.js';
 import {
     attendanceChangeQueuedMessage,
     openAttendanceChangeForEmployee,
@@ -97,7 +101,16 @@ async function weekForRecord(record) {
     return getWeekForStaffType(doc, normalizeStaffType(employee?.staffType));
 }
 
-function applyApproved(record, { kind, approvedHours, taken, max, reason }) {
+function storedPunchClock(value) {
+    const match = /^(\d{1,2}):(\d{2})/.exec(String(value || '').trim());
+    if (!match) return '';
+    const hour = Number(match[1]);
+    const minute = Number(match[2]);
+    if (!Number.isFinite(hour) || !Number.isFinite(minute) || hour > 23 || minute > 59) return '';
+    return `${String(hour).padStart(2, '0')}:${String(minute).padStart(2, '0')}:00`;
+}
+
+function applyApproved(record, { kind, approvedHours, taken, max, reason, timeIn, timeOut }) {
     record.hourAdjustStatus = 'approved';
     record.hourAdjustKind = kind;
     record.hoursTaken = taken;
@@ -106,6 +119,18 @@ function applyApproved(record, { kind, approvedHours, taken, max, reason }) {
     if (reason != null) record.hourAdjustReason = reason;
     record.statusKey = STATUS_KEY[kind];
     record.statusLabel = APPROVED_LABEL[kind];
+    if (kind !== 'mispunch') return;
+    const checkIn = storedPunchClock(timeIn);
+    const checkOut = storedPunchClock(timeOut);
+    if (checkIn) {
+        record.timeIn = checkIn;
+        record.punchSource = 'manual';
+    }
+    if (checkOut) {
+        record.timeOut = checkOut;
+        record.checkOutSource = 'manual';
+    }
+    if (reason) record.reason = reason;
 }
 
 function isFlexibleHourProposal(proposed = {}) {
@@ -153,6 +178,8 @@ export async function applyStoredHourAdjust(record, proposed = {}) {
         taken: roundHours(proposed.hoursTaken),
         max: roundHours(proposed.hoursMax),
         reason: proposed.reason,
+        timeIn: proposed.timeIn,
+        timeOut: proposed.timeOut,
     });
     await record.save();
     return record;
@@ -313,11 +340,134 @@ export async function decideHourAdjust(req, res) {
             taken: roundHours(record.hoursTaken),
             max: roundHours(record.hoursMax),
             reason: edited.reason,
+            timeIn: req.body?.timeIn,
+            timeOut: req.body?.timeOut,
         });
         await record.save();
         return res.status(200).json({ message: 'Hours approved.', record });
     } catch (error) {
         console.error('[decideHourAdjust]', error);
         return res.status(500).json({ message: error.message || 'Failed to decide hour request.' });
+    }
+}
+
+export async function getMispunchAllowance(req, res) {
+    try {
+        if (mongoose.connection.readyState !== 1) {
+            return res.status(503).json({ message: 'Database not connected.' });
+        }
+        const employeeMongoId = String(req.query?.employeeMongoId || '').trim();
+        const date = String(req.query?.date || '').trim();
+        if (!mongoose.Types.ObjectId.isValid(employeeMongoId)) {
+            return res.status(400).json({ message: 'Employee is required.' });
+        }
+        const allowance = await loadMispunchMonthAllowance({ _id: employeeMongoId }, date);
+        if (allowance.error) return res.status(400).json({ message: allowance.error });
+        return res.status(200).json(allowance);
+    } catch (error) {
+        console.error('[getMispunchAllowance]', error);
+        return res.status(500).json({ message: error.message || 'Failed to load the mispunch allowance.' });
+    }
+}
+
+export async function requestMispunch(req, res) {
+    try {
+        if (mongoose.connection.readyState !== 1) {
+            return res.status(503).json({ message: 'Database not connected.' });
+        }
+        const actor = await resolveActor(req);
+        if (!actor) return res.status(404).json({ message: 'No linked employee profile found.' });
+
+        const attendanceId = String(req.body?.attendanceId || '').trim();
+        const timeIn = storedPunchClock(req.body?.timeIn);
+        const timeOut = storedPunchClock(req.body?.timeOut);
+        const reason = String(req.body?.reason || '').trim();
+        if (!mongoose.Types.ObjectId.isValid(attendanceId)) {
+            return res.status(400).json({ message: 'Attendance record is required.' });
+        }
+        if (!timeIn || !timeOut) {
+            return res.status(400).json({ message: 'Check-in time and check-out time are required.' });
+        }
+        if (!reason) return res.status(400).json({ message: 'Reason is required.' });
+
+        const record = await Attendance.findById(attendanceId);
+        if (!record) return res.status(404).json({ message: 'Attendance record not found.' });
+        if (record.hourAdjustStatus === 'approved' && record.hourAdjustKind === 'mispunch') {
+            return res.status(400).json({ message: 'This missed punch is already approved.' });
+        }
+        if (hourAdjustKindOf(record) !== 'mispunch') {
+            return res.status(400).json({ message: 'This day is not a missed punch.' });
+        }
+
+        const allowance = await loadMispunchMonthAllowance(
+            { _id: record.employeeMongoId, employeeId: record.employeeId },
+            record.date,
+        );
+        if (allowance.error) return res.status(400).json({ message: allowance.error });
+        if (allowance.allowed != null && !allowance.includesDate && allowance.used >= allowance.allowed) {
+            return res.status(400).json({
+                message: attendanceApprovalLimitText({
+                    pool: 'mispunch',
+                    taken: allowance.used,
+                    allowed: allowance.allowed,
+                }),
+            });
+        }
+
+        const isHr = await actorIsFlowchartHr(actor);
+        if (isHr) {
+            applyApproved(record, {
+                kind: 'mispunch',
+                approvedHours: 0,
+                taken: 0,
+                max: 0,
+                reason,
+                timeIn,
+                timeOut,
+            });
+            await record.save();
+            return res.status(200).json({ message: 'Misspunch saved.', record });
+        }
+
+        const employee = await EmployeeBasic.findById(record.employeeMongoId)
+            .select('_id employeeId firstName lastName staffType primaryReportee companyEmail workEmail email')
+            .populate('primaryReportee', 'firstName lastName employeeId companyEmail workEmail email')
+            .lean();
+        const hr = await getDepartmentHOD('hr').catch(() => null);
+        const queued = await openAttendanceChangeForEmployee({
+            employee,
+            date: record.date,
+            proposed: {
+                statusKey: 'mispunch',
+                statusLabel: 'Misspunch request',
+                reason,
+                timeIn,
+                timeOut,
+                attendanceId: String(record._id),
+                hourAdjustKind: 'mispunch',
+                hoursTaken: 0,
+                hoursMax: 0,
+                hoursApproved: 0,
+                hourAdjustFlexible: false,
+            },
+            previous: {
+                statusKey: record.statusKey || '',
+                statusLabel: record.statusLabel || 'Not marked',
+                timeIn: record.timeIn || '',
+                timeOut: record.timeOut || '',
+                reason: record.reason || '',
+            },
+            actor,
+            hr,
+            action: 'hour_adjust',
+        });
+        if (queued.error) return res.status(400).json({ message: queued.error });
+        return res.status(200).json({
+            message: attendanceChangeQueuedMessage(queued.pending?.stage),
+            pending: queued.pending,
+        });
+    } catch (error) {
+        console.error('[requestMispunch]', error);
+        return res.status(500).json({ message: error.message || 'Failed to send the misspunch request.' });
     }
 }

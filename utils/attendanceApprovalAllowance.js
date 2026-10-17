@@ -124,3 +124,42 @@ export async function attendanceApprovalLimitMessageFor(employee, { pool, reques
     if (!block) return '';
     return attendanceApprovalLimitText({ pool, taken: block.taken, allowed: block.allowed });
 }
+
+/** Monthly missed-punch events already on record, and the salary-policy count. */
+export async function loadMispunchMonthAllowance(employee, dateKey) {
+    const date = String(dateKey || '').trim();
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return { error: 'A valid date is required.' };
+
+    const employeeId = String(employee?._id || employee?.employeeMongoId || '').trim();
+    let person = employee;
+    if (!person?.staffType || !person?.employeeId) {
+        person = await EmployeeBasic.findById(employeeId).select('_id employeeId staffType').lean();
+    }
+    if (!person?._id) return { error: 'Employee not found.' };
+
+    const policy = await resolveEmployeePayrollPolicy(person);
+    const allowed = allowedApprovalEvents(policy, 'mispunch');
+    const month = date.slice(0, 7);
+    const today = todayKey();
+    const rows = await Attendance.find({
+        employeeMongoId: String(person._id),
+        date: { $gte: `${month}-01`, $lte: monthEnd(month) },
+    })
+        .select(
+            'date statusKey statusLabel reason timeIn timeOut leaveRequestStatus leaveRequestKind leaveRequestSession hourAdjustStatus hourAdjustKind',
+        )
+        .lean();
+
+    const dates = [];
+    for (const row of rows || []) {
+        const pool = approvalEventPool(row, { countOpenPunch: String(row?.date || '') < today });
+        if (pool === 'mispunch') dates.push(String(row.date || ''));
+    }
+    const unique = [...new Set(dates.filter((day) => /^\d{4}-\d{2}-\d{2}$/.test(day)))];
+    return {
+        month,
+        used: unique.length,
+        allowed,
+        includesDate: unique.includes(date),
+    };
+}

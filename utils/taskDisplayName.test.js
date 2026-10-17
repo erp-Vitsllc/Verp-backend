@@ -124,7 +124,7 @@ test("fine, not-renew, leave, and asset names stay short", () => {
             }),
             subjectName: "Ahmed Khan",
         }),
-        "Ahmed Khan, Oct 1, 2026 – Oct 3, 2026, Comp Off",
+        "Employee - Oct 1, 2026 – Oct 3, 2026 Comp Off",
     );
     assert.equal(
         formatTaskDisplayName({
@@ -141,7 +141,20 @@ test("fine, not-renew, leave, and asset names stay short", () => {
             subjectName: "Philipose K",
             taskName: "Philipose K, Attendance Change",
         }),
-        "Philipose K, Oct 16, 2026, Late In",
+        "Employee - Oct 16, 2026 Late In",
+    );
+    assert.equal(
+        formatTaskDisplayName({
+            requestType: "Attendance Change Request",
+            extra3: JSON.stringify({
+                action: "mark",
+                date: "2026-10-02",
+                statusKey: "mispunch",
+                statusLabel: "Mispunched",
+            }),
+            subjectName: "Vishnu Prasad",
+        }),
+        "Employee - Oct 2, 2026 Mispunch",
     );
     assert.equal(
         formatTaskDisplayName({
@@ -156,7 +169,7 @@ test("fine, not-renew, leave, and asset names stay short", () => {
                 requestKind: "OT",
             },
         }),
-        "Philipose K, Oct 16, 2026, OT",
+        "Employee - Oct 16, 2026 OT",
     );
     assert.equal(
         formatTaskDisplayName({

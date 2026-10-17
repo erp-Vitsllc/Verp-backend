@@ -677,7 +677,7 @@ export async function syncApprovedUtilityBillsPaidFromZoho({
             }
         }
 
-        if (!checks.some((row) => row.paid === true) && serial) {
+        if (fetchLive && !checks.some((row) => row.paid === true) && serial) {
             if (await confirmPaidByDisplayedNumber(serial, bill)) {
                 checks.push({ paid: true, live: true });
             }

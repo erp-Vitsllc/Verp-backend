@@ -675,44 +675,6 @@ async function refreshUtilityBillBatchInbox(batchId, { comment = '' } = {}) {
 const OVERVIEW_BILL_FIELDS =
     '_id entryId batchId utilityType provider accountNo billMonth amount monthlyRental differenceAmount status paymentDay payByCompanyName payByEmployeeName payByEmployeeId companyPayAmount employeePayAmount zohoBillId zohoBillIds zohoBillNumber zohoBillStatus zohoLineItems.zohoBillId zohoLineItems.payByEmployeeId zohoLineItems.amount createdAt';
 
-/** Dashboard refreshes must not each start another Zoho round-trip. */
-const OVERVIEW_PAID_SYNC_COOLDOWN_MS = 60_000;
-let overviewPaidSyncAt = 0;
-let overviewPaidSyncInFlight = null;
-
-/**
- * Paid-status sync for the dashboard. Runs after the response is sent.
- * A live Zoho check of many bills was blocking the Utility Bills page.
- */
-function scheduleOverviewPaidSync(bills) {
-    const billIds = (Array.isArray(bills) ? bills : [])
-        .filter((bill) => bill?.status === 'Approved' && utilityBillHasZohoLink(bill))
-        .sort((a, b) => String(b.billMonth || '').localeCompare(String(a.billMonth || '')))
-        .slice(0, 12)
-        .map((bill) => bill._id);
-    if (!billIds.length) return;
-
-    const now = Date.now();
-    if (overviewPaidSyncInFlight || now - overviewPaidSyncAt < OVERVIEW_PAID_SYNC_COOLDOWN_MS) {
-        return;
-    }
-
-    overviewPaidSyncAt = now;
-    overviewPaidSyncInFlight = syncApprovedUtilityBillsPaidFromZoho({
-        billIds,
-        fetchLive: true,
-    })
-        .catch((syncErr) => {
-            console.warn(
-                '[listUtilityBillPayments] overview Zoho paid sync failed:',
-                syncErr?.message || syncErr,
-            );
-        })
-        .finally(() => {
-            overviewPaidSyncInFlight = null;
-        });
-}
-
 /**
  * POST /api/UtilityBill/check-duplicates
  * Body: { items: [{ provider, billNumber, billId? }] }
@@ -776,7 +738,36 @@ export async function listUtilityBillPayments(req, res) {
             const overviewBills = await UtilityBillPayment.find(overviewFilter)
                 .select(OVERVIEW_BILL_FIELDS)
                 .lean();
-            scheduleOverviewPaidSync(overviewBills);
+            const approvedLinkedIds = overviewBills
+                .filter((bill) => bill?.status === 'Approved' && utilityBillHasZohoLink(bill))
+                .map((bill) => bill._id);
+            if (approvedLinkedIds.length) {
+                try {
+                    const synced = await syncApprovedUtilityBillsPaidFromZoho({
+                        billIds: approvedLinkedIds,
+                        fetchLive: false,
+                    });
+                    if (synced?.paidCount) {
+                        const fresh = await UtilityBillPayment.find({
+                            _id: { $in: approvedLinkedIds },
+                        })
+                            .select('status')
+                            .lean();
+                        const statusById = new Map(
+                            fresh.map((bill) => [String(bill._id), bill.status]),
+                        );
+                        overviewBills.forEach((bill) => {
+                            const next = statusById.get(String(bill._id));
+                            if (next) bill.status = next;
+                        });
+                    }
+                } catch (syncErr) {
+                    console.warn(
+                        '[listUtilityBillPayments] overview cache paid sync failed:',
+                        syncErr?.message || syncErr,
+                    );
+                }
+            }
             return res.status(200).json({ bills: overviewBills });
         }
 

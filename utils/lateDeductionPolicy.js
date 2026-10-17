@@ -1,4 +1,5 @@
 import { flexibleMissedPayFraction } from './flexibleAttendance.js';
+import { isDeductionWaived } from './deductionWaive.js';
 import { clockTimeToMinutes, getScheduledPunchMinutes, isFlexibleTiming } from './workingTimeHelpers.js';
 
 function ruleHasValue(row) {
@@ -217,6 +218,7 @@ export function lateInOutSummary(rows, policy, week) {
         let lateInFraction = 0;
         let lateOutFraction = 0;
         for (const row of rows || []) {
+            if (isDeductionWaived(row)) continue;
             const key = String(row?.statusKey || '');
             const fraction = flexibleMissedPayFraction(row, week);
             if (key === 'early_go') {
@@ -250,6 +252,7 @@ export function lateInOutSummary(rows, policy, week) {
     let sharedLateOut = 0;
 
     for (const row of rows || []) {
+        if (isDeductionWaived(row)) continue;
         const statusKey = String(row?.statusKey || '');
         let extraIn = false;
         let extraOut = false;

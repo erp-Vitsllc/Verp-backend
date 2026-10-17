@@ -39,6 +39,30 @@ function docMatchesReminder(doc, label, expText) {
     return formatExpiryDateLabel(doc.expiryDate).trim().toLowerCase() === expText;
 }
 
+/** Same extra1 string the daily vehicle expiry job stores on DashboardAction. */
+export function buildVehicleExpiryFollowUpExtra1(doc) {
+    const label = doc?.label || 'Document';
+    const expLabel = formatExpiryDateLabel(doc?.expiryDate);
+    return `Expiry follow-up required: ${label}${expLabel ? ` (Exp: ${expLabel})` : ''}`;
+}
+
+/**
+ * extra1 values for live cards that are still inside the HR window (≤10 days or overdue).
+ * A renewed card with a later date is not included, so the old reminder is stale.
+ */
+export function collectLiveDueVehicleExpiryExtra1(asset) {
+    const due = new Set();
+    for (const doc of collectVehicleExpiryDocuments(asset)) {
+        if (!isExpiryHrTaskDueForDoc(getDaysUntil(doc.expiryDate))) continue;
+        due.add(buildVehicleExpiryFollowUpExtra1(doc));
+    }
+    return due;
+}
+
+export function isLiveVehicleExpiryExtra1(asset, extra1) {
+    return collectLiveDueVehicleExpiryExtra1(asset).has(String(extra1 || '').trim());
+}
+
 /** True when this reminder's card was renewed or marked Not Renewed, and no live card remains on that date. */
 function documentExpiryReminderIsClosed(asset, extra1) {
     const label = extractExpiryLabel(extra1).toLowerCase();
@@ -84,6 +108,87 @@ export async function clearVehicleExpiryNotificationsForDocument(asset, docOrTyp
         assetMongoId: asset._id,
         labels: [label],
     });
+}
+
+/** Remove pending vehicle expiry reminders that no longer match a live due card. */
+export async function deleteStaleVehicleExpiryNotifications(asset) {
+    if (!asset?._id) return;
+    const liveDue = collectLiveDueVehicleExpiryExtra1(asset);
+    const pending = await DashboardAction.find({
+        requestId: asset._id,
+        requestType: VEHICLE_EXPIRY_REQUEST_TYPE,
+        status: 'Pending',
+    })
+        .select('_id extra1')
+        .lean();
+
+    const staleIds = pending
+        .filter((row) => !liveDue.has(String(row?.extra1 || '').trim()))
+        .map((row) => row._id);
+
+    if (staleIds.length) {
+        await DashboardAction.deleteMany({ _id: { $in: staleIds } });
+    }
+}
+
+/**
+ * Create the follow-up task for each live card still inside the window, when that
+ * exact reminder is not already pending. Does not send email.
+ */
+export async function ensureLiveDueVehicleExpiryNotifications(asset, hrUser = null) {
+    if (!asset?._id || !isFleetVehicleAsset(asset)) return [];
+    const notifyOk = await isNotificationEnabledForType(VEHICLE_EXPIRY_REQUEST_TYPE);
+    if (!notifyOk) return [];
+
+    const hr = hrUser || (await getDepartmentHOD('hr'));
+    if (!hr?._id) return [];
+
+    const vehicleLabel = `${asset.name || 'Vehicle'} (${asset.assetId || asset._id})`;
+    const created = [];
+    for (const doc of collectVehicleExpiryDocuments(asset)) {
+        const days = getDaysUntil(doc.expiryDate);
+        if (!isExpiryHrTaskDueForDoc(days)) continue;
+        const extra1 = buildVehicleExpiryFollowUpExtra1(doc);
+        const already = await DashboardAction.findOne({
+            requestId: asset._id,
+            requestType: VEHICLE_EXPIRY_REQUEST_TYPE,
+            status: 'Pending',
+            extra1,
+        })
+            .select('_id')
+            .lean();
+        if (already) continue;
+
+        const extra3 = JSON.stringify({
+            activationSubject: 'vehicle',
+            vehicleMongoId: String(asset._id),
+            vehicleDocType: doc.docType,
+            focusCard: resolveVehicleExpiryFocusCard(doc.docType),
+            vehicleTab: resolveVehicleExpiryTab(doc.docType),
+        });
+        const row = await DashboardAction.create({
+            assignedTo: hr._id,
+            ...(hr.employeeId ? { assignedToEmpId: hr.employeeId } : {}),
+            requestId: asset._id,
+            requestType: VEHICLE_EXPIRY_REQUEST_TYPE,
+            status: 'Pending',
+            subjectEmployeeId: asset.assetId || '',
+            subjectName: asset.name || 'Vehicle',
+            requestedByName: 'System',
+            extra1,
+            extra2: vehicleLabel,
+            extra3,
+        });
+        created.push(row.toObject());
+    }
+    return created;
+}
+
+/** After renew, edit, or not-renew: drop reminders for cards that are no longer due, then keep the ones that are. */
+export async function reconcileVehicleExpiryNotifications(asset) {
+    if (!asset?._id) return [];
+    await deleteStaleVehicleExpiryNotifications(asset);
+    return ensureLiveDueVehicleExpiryNotifications(asset);
 }
 
 /** Drop an expiry task after that document card was marked Not Renewed. */
@@ -170,8 +275,10 @@ async function restoreMissingLiveWarrantyExpiryReminders(existingRows = []) {
             if (doc.docType !== 'warranty') continue;
             const days = getDaysUntil(doc.expiryDate);
             if (!isExpiryHrTaskDueForDoc(days)) continue;
-            const expLabel = formatExpiryDateLabel(doc.expiryDate);
-            const extra1 = `Expiry follow-up required: ${doc.label || VEHICLE_EXPIRY_DOC_LABELS.warranty}${expLabel ? ` (Exp: ${expLabel})` : ''}`;
+            const extra1 = buildVehicleExpiryFollowUpExtra1({
+                label: doc.label || VEHICLE_EXPIRY_DOC_LABELS.warranty,
+                expiryDate: doc.expiryDate,
+            });
             const key = `${String(asset._id)}|${extra1}`;
             if (present.has(key)) continue;
 
@@ -216,22 +323,20 @@ async function restoreMissingLiveWarrantyExpiryReminders(existingRows = []) {
 }
 
 /**
- * Remove a document expiry reminder only when that card is Not Renewed.
- * Covers warranty, registration, insurance, permit, petrol, toll, and mortgage.
- * Live reminders stay. Vehicle records are never deleted.
+ * Drop vehicle expiry reminders whose card was renewed, edited, or not renewed
+ * and is no longer inside the HR window. Legacy rows that only store the vehicle
+ * name are removed too. A card that is still due keeps (or regains) its reminder.
  */
 export async function dropStaleVehicleWarrantyExpiryInboxRows(rows = []) {
-    const warrantyRows = (rows || []).filter(
-        (row) =>
-            row?.requestType === VEHICLE_EXPIRY_REQUEST_TYPE &&
-            /^Expiry follow-up required:/i.test(String(row?.extra1 || '').trim()),
+    const vehicleRows = (rows || []).filter(
+        (row) => row?.requestType === VEHICLE_EXPIRY_REQUEST_TYPE,
     );
 
-    const assetIds = [...new Set(warrantyRows.map((row) => String(row.requestId || '')).filter(Boolean))];
+    const assetIds = [...new Set(vehicleRows.map((row) => String(row.requestId || '')).filter(Boolean))];
     const assets = assetIds.length
         ? await AssetItem.find({ _id: { $in: assetIds } })
               .select(
-                  'plateNumber vehicleBrand vehicleProfileActivationStatus vehicleDispositionStatus documents typeId',
+                  'assetId name plateNumber vehicleBrand vehicleProfileActivationStatus vehicleDispositionStatus documents typeId',
               )
               .populate('typeId', 'name')
               .lean()
@@ -239,9 +344,18 @@ export async function dropStaleVehicleWarrantyExpiryInboxRows(rows = []) {
     const byId = new Map(assets.map((asset) => [String(asset._id), asset]));
 
     const staleIds = [];
-    for (const row of warrantyRows) {
+    const assetsToEnsure = [];
+    const seenAsset = new Set();
+    for (const row of vehicleRows) {
         const asset = byId.get(String(row.requestId || ''));
-        if (documentExpiryReminderIsClosed(asset, row?.extra1)) staleIds.push(row._id);
+        const liveDue = asset ? collectLiveDueVehicleExpiryExtra1(asset) : new Set();
+        if (liveDue.has(String(row?.extra1 || '').trim())) continue;
+        staleIds.push(row._id);
+        const assetKey = asset ? String(asset._id) : '';
+        if (asset && assetKey && !seenAsset.has(assetKey)) {
+            seenAsset.add(assetKey);
+            assetsToEnsure.push(asset);
+        }
     }
 
     let kept = rows;
@@ -249,6 +363,27 @@ export async function dropStaleVehicleWarrantyExpiryInboxRows(rows = []) {
         await DashboardAction.deleteMany({ _id: { $in: staleIds } });
         const stale = new Set(staleIds.map((id) => String(id)));
         kept = rows.filter((row) => !stale.has(String(row?._id)));
+    }
+
+    if (assetsToEnsure.length) {
+        try {
+            const hr = await getDepartmentHOD('hr');
+            const createdForViewer = [];
+            for (const asset of assetsToEnsure) {
+                const assigneeIds = new Set(
+                    vehicleRows
+                        .filter((row) => String(row.requestId || '') === String(asset._id))
+                        .map((row) => String(row.assignedTo || '')),
+                );
+                const made = await ensureLiveDueVehicleExpiryNotifications(asset, hr);
+                for (const row of made) {
+                    if (assigneeIds.has(String(row.assignedTo || ''))) createdForViewer.push(row);
+                }
+            }
+            if (createdForViewer.length) kept = [...kept, ...createdForViewer];
+        } catch (err) {
+            console.error('[vehicle expiry] ensure live reminders:', err?.message || err);
+        }
     }
 
     try {

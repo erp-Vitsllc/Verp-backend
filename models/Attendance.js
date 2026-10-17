@@ -196,6 +196,25 @@ const attendanceSchema = new mongoose.Schema(
             type: Number,
             default: 1,
         },
+        /** HR waived the salary deduction. Status, punches, and the rest of the day stay as they are. */
+        deductionWaived: {
+            type: Boolean,
+            default: false,
+        },
+        deductionWaiveReason: {
+            type: String,
+            default: '',
+            trim: true,
+        },
+        deductionWaivedAt: {
+            type: Date,
+            default: null,
+        },
+        deductionWaivedByName: {
+            type: String,
+            default: '',
+            trim: true,
+        },
         leaveRequestTimeIn: {
             type: String,
             default: '',

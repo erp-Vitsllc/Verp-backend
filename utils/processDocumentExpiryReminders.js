@@ -19,6 +19,7 @@ import EmployeeLabourCard from "../models/EmployeeLabourCard.js";
 import EmployeeMedicalInsurance from "../models/EmployeeMedicalInsurance.js";
 import EmployeeDrivingLicense from "../models/EmployeeDrivingLicense.js";
 import DashboardAction from "../models/DashboardAction.js";
+import TaskManagerTask from "../models/TaskManagerTask.js";
 import ExpiryReminderLog from "../models/ExpiryReminderLog.js";
 import User from "../models/User.js";
 import { getDepartmentHOD } from "./getDepartmentHOD.js";
@@ -119,16 +120,37 @@ const sendExpiryReminderEmail = async ({ to, subject, html, eventKey = "", email
     });
 };
 
+/** Pending expiry rows that were reassigned in Task Manager must stay open. */
+const protectedExpiryActionIds = async (requestId, requestType, extra1 = "") => {
+    const query = { requestId, requestType, status: "Pending" };
+    if (extra1) query.extra1 = extra1;
+    const pending = await DashboardAction.find(query).select("_id").lean();
+    if (!pending.length) return new Set();
+    const overlays = await TaskManagerTask.find({
+        sourceDashboardActionId: { $in: pending.map((row) => row._id) },
+        status: { $nin: ["Completed", "Cancelled"] },
+    })
+        .select("sourceDashboardActionId")
+        .lean();
+    return new Set(overlays.map((row) => String(row.sourceDashboardActionId || "")).filter(Boolean));
+};
+
 /** Remove wrongly assigned expiry follow-ups (tasks belong to Flowchart HR only). */
 const purgeNonHrExpiryTasks = async ({ requestId, requestType, hrObjectId }) => {
     if (!requestId || !hrObjectId) return;
-    await DashboardAction.deleteMany({
+    const candidates = await DashboardAction.find({
         requestId,
         requestType,
         status: "Pending",
         assignedTo: { $ne: hrObjectId },
         extra1: { $regex: /^Expiry follow-up required:/i },
-    });
+    })
+        .select("_id")
+        .lean();
+    if (!candidates.length) return;
+    const kept = await protectedExpiryActionIds(requestId, requestType);
+    const deleteIds = candidates.map((row) => row._id).filter((id) => !kept.has(String(id)));
+    if (deleteIds.length) await DashboardAction.deleteMany({ _id: { $in: deleteIds } });
 };
 
 /** Company / employee document expiry tasks — assignee is Flowchart HR only. */
@@ -146,6 +168,8 @@ const ensureDashboardAction = async ({
     if (!assignedTo || !requestId) return;
     const notifyOk = await isNotificationEnabledForType(requestType);
     if (!notifyOk) return;
+    const reassigned = await protectedExpiryActionIds(requestId, requestType, extra1);
+    if (reassigned.size) return;
     const exists = await DashboardAction.findOne({
         assignedTo,
         requestId,
@@ -175,6 +199,26 @@ const ensureDashboardAction = async ({
         extra2,
         ...(extra3 ? { extra3 } : {}),
     });
+};
+
+/** Vehicle reminders stay only while a live card is still inside the HR window. Legacy name-only rows are removed too. */
+const removeVehicleExpiryActionsOutsideLiveSet = async ({ requestId, allowedExtra1Set }) => {
+    if (!requestId) return;
+    const pending = await DashboardAction.find({
+        requestId,
+        requestType: "Vehicle Document Expiry Reminder",
+        status: "Pending",
+    })
+        .select("_id extra1")
+        .lean();
+
+    const actionIdsToDelete = pending
+        .filter((row) => !allowedExtra1Set.has(String(row?.extra1 || "").trim()))
+        .map((row) => row._id);
+
+    if (actionIdsToDelete.length > 0) {
+        await DashboardAction.deleteMany({ _id: { $in: actionIdsToDelete } });
+    }
 };
 
 const removeObsoleteExpiryActions = async ({ requestId, requestType, allowedExtra1Set }) => {
@@ -934,9 +978,8 @@ const processVehicleReminders = async () => {
                 }),
         );
 
-        await removeObsoleteExpiryActions({
+        await removeVehicleExpiryActionsOutsideLiveSet({
             requestId: asset._id,
-            requestType: "Vehicle Document Expiry Reminder",
             allowedExtra1Set: activeTaskWindowExtra1,
         });
 

@@ -725,7 +725,16 @@ export const getTaskManagerNotifications = async (req, res) => {
             };
         });
 
-        for (const row of createdRows) {
+        const listedActionIds = new Set(tasks.map((task) => String(task.actionId || "")));
+        const visibleTaskRows = [
+            ...createdRows,
+            ...manualRows.filter((row) => {
+                const sourceId = String(row.sourceDashboardActionId || "");
+                return Boolean(sourceId) && !listedActionIds.has(sourceId);
+            }),
+        ];
+
+        for (const row of visibleTaskRows) {
             const requestedAt = row.createdAt || null;
             const requestedKey = dubaiDateKey(requestedAt);
             const dueKey = dubaiDateKey(row.completionDate);
@@ -763,7 +772,7 @@ export const getTaskManagerNotifications = async (req, res) => {
             const assigneeId = String(row.assignee || "");
             const category = displayTaskType(row.taskType);
             tasks.push({
-                actionId: `manual-${row._id}`,
+                actionId: row.sourceDashboardActionId ? String(row.sourceDashboardActionId) : `manual-${row._id}`,
                 manual: true,
                 workflowLocked: false,
                 canReassign: viewerCanReassign(viewer, assigneeId, row.assigneeEmpId) || viewerOwnsOriginal(viewer, row),
@@ -899,6 +908,7 @@ function formatProfileDay(value) {
 /**
  * Open tasks for this employee.
  * A leave task is included when they requested it and when they are the approver.
+ * ownRequest is only the leave this employee asked for. Approval tasks stay on the task card.
  */
 const PROFILE_LEAVE_TYPES = new Set(["Employee Leave Request", "Attendance Leave Request"]);
 const PROFILE_ACTION_SELECT = "assignedTo assignedToEmpId requestId requestType status requestedDate requestedByName subjectEmployeeId subjectName extra1 extra2 extra3 createdAt";
@@ -941,22 +951,32 @@ function leaveRequestedByEmployee(action, { id, code, nameKey }) {
     return false;
 }
 
+function leaveSubjectMongoId(action, meta) {
+    const mongo = String(meta?.employeeMongoId || meta?.requesterMongoId || "").trim();
+    if (isObjectId(mongo)) return mongo;
+    const subject = String(action?.subjectEmployeeId || "").trim();
+    return isObjectId(subject) ? subject : "";
+}
+
 function leaveReviewHref(action) {
     const meta = actionMeta(action?.extra3);
     const from = dateKeyOrBlank(meta.from) || dateKeyOrBlank(meta.date) || dateKeyOrBlank(action?.extra1);
     const to = dateKeyOrBlank(meta.to) || from;
     const attendanceId = String(meta.attendanceId || "").trim();
+    const employeeId = leaveSubjectMongoId(action, meta);
+    const employeeName = String(action?.subjectName || action?.requestedByName || "").trim();
     if (String(action?.requestType || "") === "Attendance Leave Request" && !meta.leaveDashboard) {
         const params = new URLSearchParams();
         if (from) params.set("date", from);
-        const employee = String(meta.employeeMongoId || "").trim();
-        if (employee) params.set("blinkEmployee", employee);
+        if (employeeId) params.set("blinkEmployee", employeeId);
         const requestId = String(attendanceId || action?.requestId || "").trim();
         if (requestId) params.set("leaveAttendanceId", requestId);
         const query = params.toString();
         return query ? `/HRM/Attendance/mark?${query}` : "/HRM/Attendance/mark";
     }
     const params = new URLSearchParams();
+    if (employeeId) params.set("employeeId", employeeId);
+    if (employeeName) params.set("employeeName", employeeName);
     if (from) params.set("from", from);
     if (to) params.set("to", to);
     const approvalId = attendanceId || String(action?.requestId || "").trim();
@@ -965,7 +985,7 @@ function leaveReviewHref(action) {
     return query ? `/HRM/Leave/annual-leave?${query}` : "/HRM/Leave/annual-leave";
 }
 
-function leaveCardFromAction(action, ownerName) {
+function leaveCardFromAction(action, ownerName, { ownRequest = false } = {}) {
     const meta = actionMeta(action?.extra3);
     const from = dateKeyOrBlank(meta.from) || dateKeyOrBlank(meta.date) || dateKeyOrBlank(action?.extra1);
     const to = dateKeyOrBlank(meta.to) || from;
@@ -983,6 +1003,7 @@ function leaveCardFromAction(action, ownerName) {
         dateLabel: formatProfileDay(action?.requestedDate || action?.createdAt),
         href: leaveReviewHref(action),
         spanAllMonths: true,
+        ownRequest: Boolean(ownRequest),
     };
 }
 
@@ -1158,7 +1179,7 @@ export async function listProfileEmployeeTasks({ employeeId, employeeCode, emplo
                 status: profileStatusLabel(status),
                 sortAt: new Date(requestedAt || 0).getTime(),
                 href: leaveTask ? leaveReviewHref(action) : "",
-                leaveCard: leaveTask ? leaveCardFromAction(action, assigneeName) : null,
+                leaveCard: leaveTask ? leaveCardFromAction(action, assigneeName, { ownRequest: requesterMatch }) : null,
             });
         }
 
@@ -1204,6 +1225,7 @@ export async function listProfileEmployeeTasks({ employeeId, employeeCode, emplo
             const receiverId = assigneeIdOf(hub.assignedTo);
             const involved = (id && (requesterId === id || receiverId === id));
             if (!involved) continue;
+            const hubOwnRequest = Boolean(id && requesterId === id);
             const action = {
                 _id: hub._id,
                 requestId: hub._id,
@@ -1229,7 +1251,7 @@ export async function listProfileEmployeeTasks({ employeeId, employeeCode, emplo
                 status: "Pending",
                 sortAt: new Date(requestedAt || 0).getTime(),
                 href: leaveReviewHref(action),
-                leaveCard: leaveCardFromAction(action, assigneeNameOf(hub.assignedTo)),
+                leaveCard: leaveCardFromAction(action, assigneeNameOf(hub.assignedTo), { ownRequest: hubOwnRequest }),
             });
         }
 

@@ -13869,13 +13869,12 @@ export const addAssetDocument = async (req, res) => {
 
         await asset.save();
         try {
-            const { clearVehicleExpiryNotificationsForDocument } = await import(
+            const { reconcileVehicleExpiryNotifications } = await import(
                 '../utils/vehicleExpiryNotificationHelpers.js'
             );
-            const addedDoc = asset.documents[asset.documents.length - 1];
-            await clearVehicleExpiryNotificationsForDocument(asset, addedDoc || type);
-        } catch {
-            /* non-fatal */
+            await reconcileVehicleExpiryNotifications(asset);
+        } catch (expiryErr) {
+            console.warn('[addAssetDocument] expiry reminder reconcile failed:', expiryErr?.message || expiryErr);
         }
         // Only notify on Service-specific document add flows.
         // For general documents (Registration, Insurance, etc.) there is no serviceType context.
@@ -13964,12 +13963,12 @@ export const updateAssetDocument = async (req, res) => {
         await asset.save();
 
         try {
-            const { clearVehicleExpiryNotificationsForDocument } = await import(
+            const { reconcileVehicleExpiryNotifications } = await import(
                 '../utils/vehicleExpiryNotificationHelpers.js'
             );
-            await clearVehicleExpiryNotificationsForDocument(asset, doc);
-        } catch {
-            /* non-fatal */
+            await reconcileVehicleExpiryNotifications(asset);
+        } catch (expiryErr) {
+            console.warn('[updateAssetDocument] expiry reminder reconcile failed:', expiryErr?.message || expiryErr);
         }
 
         // Log to history
@@ -14063,12 +14062,12 @@ export const deleteAssetDocument = async (req, res) => {
         await asset.save();
 
         try {
-            const { clearVehicleExpiryNotificationsForRemovedDocuments } = await import(
+            const { reconcileVehicleExpiryNotifications } = await import(
                 '../utils/vehicleExpiryNotificationHelpers.js'
             );
-            await clearVehicleExpiryNotificationsForRemovedDocuments(asset, removedSnapshots);
+            await reconcileVehicleExpiryNotifications(asset);
         } catch (expiryErr) {
-            console.warn('[deleteAssetDocument] expiry reminder clear failed:', expiryErr?.message || expiryErr);
+            console.warn('[deleteAssetDocument] expiry reminder reconcile failed:', expiryErr?.message || expiryErr);
         }
 
         // Log to history

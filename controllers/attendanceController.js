@@ -108,6 +108,7 @@ import {
     describeAttendanceSave,
     forwardAttendanceChangeToHr,
     loadAttendanceChangeInboxItems,
+    loadDayApprovalHistory,
     loadPendingAttendanceChanges,
     openAttendanceChangeForEmployee,
     resubmitHourAttendanceChange,
@@ -948,17 +949,23 @@ export async function getAttendanceByDate(req, res) {
         } catch (gapErr) {
             console.error('[getAttendanceByDate] punch gap rewrite failed:', gapErr);
         }
-        const pendingChanges = await loadPendingAttendanceChanges(date).catch((err) => {
-            console.error('[getAttendanceByDate] pending changes failed:', err);
-            return [];
-        });
+        const visibleRecords = (records || []).filter((r) => !isCompanyShellEmployee(r.employeeName));
+        const [pendingChanges, approvalHistory] = await Promise.all([
+            loadPendingAttendanceChanges(date).catch((err) => {
+                console.error('[getAttendanceByDate] pending changes failed:', err);
+                return [];
+            }),
+            loadDayApprovalHistory(date, visibleRecords).catch((err) => {
+                console.error('[getAttendanceByDate] approval history failed:', err);
+                return [];
+            }),
+        ]);
         return res.status(200).json({
             message: 'Attendance fetched successfully',
             date,
-            records: (records || [])
-                .filter((r) => !isCompanyShellEmployee(r.employeeName))
-                .map(presentAuthorizedLeaveRecord),
+            records: visibleRecords.map(presentAuthorizedLeaveRecord),
             pendingChanges,
+            approvalHistory,
         });
     } catch (error) {
         console.error('[getAttendanceByDate]', error);
@@ -3593,7 +3600,10 @@ export async function decideAttendanceChangeRequest(req, res) {
             if (edited.error) return res.status(400).json({ message: edited.error });
             request.proposed.hoursApproved = edited.hoursApproved;
             request.proposed.reason = edited.reason;
-            request.proposed.statusLabel = `Hour approval ${edited.hoursApproved} hr`;
+            request.proposed.statusLabel =
+                request.proposed.hourAdjustKind === 'mispunch'
+                    ? 'Misspunch request'
+                    : `Hour approval ${edited.hoursApproved} hr`;
             request.markModified('proposed');
             request.rejectReason = '';
             request.rejectedByName = '';

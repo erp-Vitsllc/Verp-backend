@@ -41,6 +41,7 @@ describe('buildSalaryPreparationPending', () => {
         assert.equal(items[0].subtitle, '21-22 Oct - 2 days');
         assert.equal(items[0].owner, 'HR Manager');
         assert.match(items[0].href, /approvalId=a1/);
+        assert.match(items[0].href, /employeeId=emp/);
         assert.equal(items[0].fromDate, '2026-10-21');
         assert.equal(items[0].spanAllMonths, true);
     });

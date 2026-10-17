@@ -2,7 +2,8 @@ import mongoose from "mongoose";
 import EmployeeBasic from "../../models/EmployeeBasic.js";
 import TaskManagerTask from "../../models/TaskManagerTask.js";
 import { uploadDocumentToS3 } from "../../utils/s3Upload.js";
-import { canonicalTaskType, sendTaskActivityEmail, syncManualTaskNotification } from "../../utils/taskManagerModule.js";
+import { canonicalTaskType, sendTaskActivityEmail, syncManualTaskNotification, taskOpenPath } from "../../utils/taskManagerModule.js";
+import { emailFrontendUrl } from "../../utils/resolveFrontendBaseUrl.js";
 import { viewerMaySeeAllNotifications } from "./getTaskManagerNotifications.js";
 
 const PRIORITIES = new Set(["High", "Medium", "Low"]);
@@ -22,6 +23,39 @@ function parseCompletionDate(value) {
     if (!/^\d{4}-\d{2}-\d{2}$/.test(text)) return null;
     const date = new Date(`${text}T12:00:00+04:00`);
     return Number.isNaN(date.getTime()) ? null : date;
+}
+
+function escapeHtml(value) {
+    return String(value || "")
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;");
+}
+
+function mailDateLabel(value) {
+    const date = value instanceof Date ? value : new Date(value);
+    if (Number.isNaN(date.getTime())) return "";
+    return new Intl.DateTimeFormat("en-US", {
+        month: "short",
+        day: "numeric",
+        year: "numeric",
+        timeZone: "Asia/Dubai",
+    }).format(date);
+}
+
+function createdTaskEmailHtml({ hello, taskName, description, completionDate, link }) {
+    const note = String(description || "").trim()
+        ? `<p><strong>Description:</strong></p><p>${escapeHtml(description).replace(/\n/g, "<br>")}</p>`
+        : "";
+    const due = mailDateLabel(completionDate);
+    return `
+        <p>Hello ${escapeHtml(hello || "there")},</p>
+        <p>Task created and assigned to you.</p>
+        <p><strong>${escapeHtml(taskName || "Task")}</strong></p>
+        ${due ? `<p><strong>Completion date:</strong> ${escapeHtml(due)}</p>` : ""}
+        ${note}
+        <p><a href="${escapeHtml(link)}">Open Task</a></p>
+    `;
 }
 
 export const getTaskManagerAssignees = async (req, res) => {
@@ -159,7 +193,13 @@ export const createTaskManagerTask = async (req, res) => {
                 const sent = await sendTaskActivityEmail({
                     to: [assigneeEmail],
                     subject: `Task Updated: ${created.taskName}`,
-                    html: `<p>Task created and assigned to you.</p><p><strong>${created.taskName}</strong></p>`,
+                    html: createdTaskEmailHtml({
+                        hello: personName(assignee),
+                        taskName: created.taskName,
+                        description,
+                        completionDate,
+                        link: `${emailFrontendUrl()}${taskOpenPath(`manual-${created._id}`)}`,
+                    }),
                     recordId: String(created._id),
                     emailType: "Task created",
                 });

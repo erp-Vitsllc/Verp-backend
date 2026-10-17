@@ -33,7 +33,13 @@ import {
 import {
     requestHourAdjust,
     decideHourAdjust,
+    getMispunchAllowance,
+    requestMispunch,
 } from '../controllers/hourAdjustController.js';
+import {
+    getDeductionWaiveCount,
+    waiveAttendanceDeduction,
+} from '../controllers/deductionWaiveController.js';
 
 const router = express.Router();
 
@@ -64,6 +70,10 @@ router.post('/flexible-ot/request', requestFlexibleOvertime);
 router.post('/flexible-ot/decide', decideFlexibleOvertime);
 router.post('/hour-adjust/request', requestHourAdjust);
 router.post('/hour-adjust/decide', decideHourAdjust);
+router.get('/mispunch-allowance', getMispunchAllowance);
+router.post('/mispunch/request', requestMispunch);
+router.get('/deduction-waive', getDeductionWaiveCount);
+router.post('/deduction-waive', waiveAttendanceDeduction);
 router.post('/team/mark', markTeamAttendance);
 
 // Leave-request inbox is scoped to the viewer's reportees (no HR module permission required)

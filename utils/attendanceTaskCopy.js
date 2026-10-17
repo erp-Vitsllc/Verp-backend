@@ -1,6 +1,6 @@
 /**
  * Task Manager copy for attendance requests.
- * Title: employee, date, exact request (Late In, OT, Mispunch, Comp Off, …).
+ * Title: Employee - date request (Late In, OT, Mispunch, Comp Off, …). The person's name stays off the title.
  * Description: times, duration, and the hours on OT and hour-approval requests.
  */
 
@@ -242,7 +242,8 @@ function isoDates(...values) {
 
 export function attendanceTaskTitle(facts = {}) {
     const when = formatTaskDateRange(facts.from || facts.date, facts.to || facts.from || facts.date);
-    return [clean(facts.employeeName), when, clean(facts.requestKind)].filter(Boolean).join(", ");
+    const detail = [when, clean(facts.requestKind)].filter(Boolean).join(" ");
+    return detail ? `Employee - ${detail}` : "Employee";
 }
 
 export function attendanceFactsFromAction({

@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 import {
+    approvalRequestType,
     approvalStageForAttendanceChange,
     attendanceChangeSummary,
     attendanceMarksMatch,
@@ -197,6 +198,66 @@ describe('attendanceChangeSummary', () => {
         assert.match(summary, /Next day present on 2026-10-14/);
         assert.match(summary, /Waiting for HR/);
         assert.doesNotMatch(summary, /approved ot/i);
+    });
+});
+
+describe('approvalRequestType', () => {
+    it('names hour approvals by the request that was approved', () => {
+        assert.equal(approvalRequestType({ action: 'hour_adjust', proposed: { hourAdjustKind: 'early_go' } }), 'Early out');
+        assert.equal(
+            approvalRequestType({ action: 'hour_adjust', proposed: { hourAdjustKind: 'late_arrived' } }),
+            'Late arrival',
+        );
+        assert.equal(
+            approvalRequestType({ action: 'hour_adjust', proposed: { hourAdjustKind: 'authorized_leave' } }),
+            'Unauth to Auth',
+        );
+        assert.equal(approvalRequestType({ action: 'hour_adjust', proposed: { hourAdjustKind: 'mispunch' } }), 'Mispunch');
+    });
+
+    it('names a status change from the previous day to the approved day', () => {
+        assert.equal(
+            approvalRequestType({
+                action: 'mark',
+                previous: { statusKey: 'unauthorized_leave', statusLabel: 'Unauthorized Leave' },
+                proposed: { statusKey: 'authorized_leave', statusLabel: 'Authorized Leave' },
+            }),
+            'Unauth to Auth',
+        );
+        assert.equal(
+            approvalRequestType({
+                action: 'mark',
+                previous: { statusKey: 'on_office', statusLabel: 'Present' },
+                proposed: { statusKey: 'early_go', statusLabel: 'Early Go' },
+            }),
+            'Present to Early out',
+        );
+    });
+
+    it('names overtime on the worked day and present on the next day', () => {
+        const request = {
+            action: 'flexible_ot',
+            date: '2026-10-15',
+            proposed: { confirmNextDay: true, targetDate: '2026-10-16' },
+        };
+        assert.equal(approvalRequestType({ ...request, viewDate: '2026-10-15' }), 'OT approval');
+        assert.equal(approvalRequestType({ ...request, viewDate: '2026-10-16' }), 'Present from OT');
+    });
+
+    it('names an approved leave request from its kind', () => {
+        assert.equal(approvalRequestType({ action: 'leave', leaveRequestKind: 'future_early' }), 'Early out');
+        assert.equal(approvalRequestType({ action: 'leave', leaveRequestKind: 'past_late' }), 'Late arrival');
+        assert.equal(
+            approvalRequestType({
+                action: 'leave',
+                leaveRequestKind: 'leave',
+                previousStatusKey: 'unauthorized_leave',
+                previousStatusLabel: 'Unauthorized Leave',
+                requestedStatusKey: 'authorized_leave',
+                requestedStatusLabel: 'Authorized Leave',
+            }),
+            'Unauth to Auth',
+        );
     });
 });
 
