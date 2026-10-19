@@ -1280,9 +1280,7 @@ export async function getEmployeeAttendanceProfile(req, res) {
             extraLeave.push(card);
         }
         if (extraLeave.length) pendingHrRequests.unshift(...extraLeave);
-        const salaryPending = ownView
-            ? pendingHrRequests
-            : pendingHrRequests.filter((row) => String(row?.appliedKey || '') === 'utility');
+        const salaryPending = pendingHrRequests;
         const workTasks = employeeTasks.tasks;
         const rawPhoto = employee.profilePicture || '';
         const profilePicture = rawPhoto.startsWith('data:')
