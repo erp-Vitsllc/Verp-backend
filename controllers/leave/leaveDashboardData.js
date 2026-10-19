@@ -373,6 +373,8 @@ function groupPendingRows(rows) {
                 leaveRequestKind: row.leaveRequestKind || 'leave',
                 leaveApprovalStage: String(row.leaveApprovalStage || '').trim(),
                 annualLeaveNotEligible: Boolean(row.annualLeaveNotEligible),
+                reason: String(row.leaveRequestReason || row.reason || '').trim(),
+                attachmentName: String(row.attachmentName || '').trim(),
                 timeIn: row.leaveRequestTimeIn || row.timeIn || '',
                 timeOut: row.leaveRequestTimeOut || row.timeOut || '',
                 requestedAt: requestStamp(row),
@@ -384,6 +386,12 @@ function groupPendingRows(rows) {
         const group = groups.get(groupKey);
         group.attendanceIds.push(String(row._id));
         if (row.annualLeaveNotEligible) group.annualLeaveNotEligible = true;
+        if (!group.reason) {
+            group.reason = String(row.leaveRequestReason || row.reason || '').trim();
+        }
+        if (!group.attachmentName) {
+            group.attachmentName = String(row.attachmentName || '').trim();
+        }
         if (!group.timeIn && (row.leaveRequestTimeIn || row.timeIn)) {
             group.timeIn = row.leaveRequestTimeIn || row.timeIn || '';
         }
@@ -982,6 +990,8 @@ export async function getLeavePendingInbox(req, res) {
                 requestedStatusKey: group.requestedStatusKey,
                 leaveType: group.leaveType,
                 leaveRequestKind: group.leaveRequestKind,
+                reason: group.reason || '',
+                attachmentName: group.attachmentName || '',
                 status: 'Pending',
                 extra1: group.startDateKey,
                 extra2: summary,

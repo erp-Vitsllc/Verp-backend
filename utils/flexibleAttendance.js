@@ -99,7 +99,9 @@ export function flexibleExactLossHours(record, week) {
 
 /**
  * Flexible time does not use the late-arrival or early-go salary policy.
- * A 10-hour day with 6 hours 15 minutes worked deducts 3.75/10 of that day's salary.
+ * Until the hours are approved, the shortfall is deducted twice.
+ * A 10-hour day with 6 hours 15 minutes worked deducts 7.5/10 of that day's salary.
+ * After approval, only the approved hours are deducted.
  */
 export function flexibleMissedPayFraction(record, week) {
     if (!isFlexibleTiming(week)) return 0;
@@ -108,7 +110,8 @@ export function flexibleMissedPayFraction(record, week) {
     const required = requiredHoursForDate(week, record?.date);
     if (!(required > 0)) return 0;
     const approved = String(record?.hourAdjustStatus || '') === 'approved';
-    const missed = approved ? Number(record?.hoursApproved) || 0 : flexibleExactLossHours(record, week);
+    const exact = flexibleExactLossHours(record, week);
+    const missed = approved ? Number(record?.hoursApproved) || 0 : exact * 2;
     if (!(missed > 0)) return 0;
     return missed / required;
 }

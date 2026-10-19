@@ -2,7 +2,7 @@ import mongoose from 'mongoose';
 import Attendance from '../models/Attendance.js';
 import EmployeeBasic from '../models/EmployeeBasic.js';
 import { getDepartmentHOD } from '../utils/getDepartmentHOD.js';
-import { flexibleLossHours } from '../utils/flexibleAttendance.js';
+import { flexibleExactLossHours } from '../utils/flexibleAttendance.js';
 import {
     getScheduledPunchMinutes,
     getWeekForStaffType,
@@ -81,7 +81,7 @@ export function hourAdjustKindOf(record) {
 
 function hoursTakenOf(record, week, kind) {
     if (isFlexibleTiming(week)) {
-        return { taken: flexibleLossHours(record, week), dayHours: 0, flexible: true };
+        return { taken: roundHours(flexibleExactLossHours(record, week)), dayHours: 0, flexible: true };
     }
     const schedule = getScheduledPunchMinutes(week, record?.date);
     const dayHours = schedule?.flexible
@@ -160,15 +160,15 @@ export function normalizeHourAdjustEdit(proposed = {}, body = {}) {
     if (!Number.isFinite(requestedHours) || requestedHours < 0) {
         return { error: 'Approved hours cannot be negative.' };
     }
-    if (flexible && Math.abs(requestedHours - Math.round(requestedHours)) > 0.001) {
-        return { error: 'Approved hours must be a whole number.' };
-    }
-    const approvedHours = flexible ? Math.round(requestedHours) : roundHours(requestedHours);
+    const approvedHours = roundHours(requestedHours);
     if (approvedHours > max + 0.001) {
         return { error: `Approved hours cannot be more than ${max}.` };
     }
+    if (flexible && approvedHours === 0 && !nextReason) {
+        return { error: 'A reason is required when approved hours are 0.' };
+    }
     if (!flexible && !nextReason) return { error: 'Description is required.' };
-    return { hoursApproved: approvedHours, reason: flexible ? '' : nextReason };
+    return { hoursApproved: approvedHours, reason: flexible && approvedHours > 0 ? '' : nextReason };
 }
 
 async function emailDirectHourChange({ actor, hr, employee, record, previousLabel, nextLabel, reason }) {
@@ -267,11 +267,11 @@ export async function requestHourAdjust(req, res) {
 
         const week = await weekForRecord(record);
         const { taken, flexible } = hoursTakenOf(record, week, kind);
-        if (!flexible && !reason) return res.status(400).json({ message: 'Description is required.' });
-        if (flexible && Math.abs(requestedHours - Math.round(requestedHours)) > 0.001) {
-            return res.status(400).json({ message: 'Approved hours must be a whole number.' });
+        const approvedHours = roundHours(requestedHours);
+        if (flexible && approvedHours === 0 && !reason) {
+            return res.status(400).json({ message: 'A reason is required when approved hours are 0.' });
         }
-        const approvedHours = flexible ? Math.round(requestedHours) : roundHours(requestedHours);
+        if (!flexible && !reason) return res.status(400).json({ message: 'Description is required.' });
         const max = flexible ? taken : roundHours(taken * UNAUTH_TIMES);
         if (approvedHours > max + 0.001) {
             return res.status(400).json({ message: `Approved hours cannot be more than ${max}.` });
@@ -292,6 +292,7 @@ export async function requestHourAdjust(req, res) {
             timeOut: record.timeOut,
             reason,
         });
+        const zeroNeedsBothApprovers = flexible && approvedHours === 0;
         const route = isHr
             ? 'direct'
             : attendanceMarkRoute({
@@ -300,12 +301,12 @@ export async function requestHourAdjust(req, res) {
                 deductionHours: measured.deductionHours,
                 approvedHours,
             });
-        if (isHr) {
+        if (isHr && !zeroNeedsBothApprovers) {
             applyApproved(record, { kind, approvedHours, taken, max, reason });
             await record.save();
             return res.status(200).json({ message: 'Hours approved.', record });
         }
-        if (route === 'direct') {
+        if (route === 'direct' && !zeroNeedsBothApprovers) {
             const previousLabel = record.statusLabel || 'Not marked';
             applyDirectZeroHour(record, { kind, reason });
             await record.save();

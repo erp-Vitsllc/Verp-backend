@@ -777,6 +777,7 @@ function attendanceListPerson(emp, row, date) {
         employeeMongoId: String(row?.employeeMongoId || emp?._id || ''),
         employeeId: String(row?.employeeId || emp?.employeeId || ''),
         name: String(row?.employeeName || fromEmp || 'Employee').trim(),
+        companyName: String(emp?.company?.name || '').trim(),
         date,
     };
 }
@@ -1117,7 +1118,8 @@ export async function getAttendanceCalendarSummary(req, res) {
                 employeeId: { $ne: 'VEGA-HR-0000' },
                 ...REAL_EMPLOYEE_MONGO_FILTER,
             })
-                .select('_id employeeId staffType firstName lastName status')
+                .select('_id employeeId staffType firstName lastName status company')
+                .populate('company', 'name')
                 .lean(),
             Attendance.find({ date: { $gte: from, $lte: to } }).lean(),
             loadWorkingTimeDoc(),

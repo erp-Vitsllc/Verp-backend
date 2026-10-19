@@ -247,9 +247,9 @@ describe('flexibleLossHours', () => {
         assert.equal(flexibleLossHours({ date: '2026-10-05', flexibleWorkedHours: 10.2 }, week), 0);
     });
 
-    it('turns two missed hours on a ten-hour day into two tenths of a day', () => {
+    it('turns two missed hours on a ten-hour day into four tenths until the hours are approved', () => {
         const record = { date: '2026-10-05', statusKey: 'late_arrived', flexibleWorkedHours: 8 };
-        assert.equal(flexibleMissedPayFraction(record, week), 0.2);
+        assert.equal(flexibleMissedPayFraction(record, week), 0.4);
         assert.equal(
             flexibleMissedPayFraction(
                 { ...record, statusKey: 'early_go', hourAdjustStatus: 'approved', hoursApproved: 1 },
@@ -269,7 +269,7 @@ describe('flexibleLossHours', () => {
             flexibleWorkedHours: 6,
         };
         assert.equal(flexibleExactLossHours(record, week), 3.75);
-        assert.equal(flexibleMissedPayFraction(record, week), 0.375);
+        assert.equal(flexibleMissedPayFraction(record, week), 0.75);
     });
 });
 
