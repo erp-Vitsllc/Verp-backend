@@ -20,6 +20,7 @@ import {
     requestAttendanceFuture,
     decideAttendanceLeaveRequest,
     decideAttendanceChangeRequest,
+    getAttendanceOpenTarget,
 } from '../controllers/attendanceController.js';
 import {
     getCompOffMonth,
@@ -80,6 +81,7 @@ router.post('/team/mark', markTeamAttendance);
 router.get('/dashboard/pending-inbox', getAttendancePendingInbox);
 router.post('/dashboard/approve-pending', approveAttendancePending);
 router.post('/change-request/decide', decideAttendanceChangeRequest);
+router.get('/open-target', getAttendanceOpenTarget);
 
 router.get(
     '/mark-roster',

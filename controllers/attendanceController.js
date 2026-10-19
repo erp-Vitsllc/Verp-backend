@@ -3640,6 +3640,62 @@ export async function approveAttendancePending(req, res) {
 }
 
 /**
+ * GET /api/Attendance/open-target
+ * Resolve a notification id to the attendance day, staff group, and employee.
+ */
+export async function getAttendanceOpenTarget(req, res) {
+    try {
+        if (mongoose.connection.readyState !== 1) {
+            return res.status(503).json({ message: 'Database not connected.' });
+        }
+
+        const changeRequestId = String(req.query?.changeRequestId || '').trim();
+        const attendanceId = String(
+            req.query?.hourAttendanceId || req.query?.leaveAttendanceId || req.query?.otAttendanceId || '',
+        ).trim();
+
+        let date = '';
+        let employeeMongoId = '';
+        if (mongoose.Types.ObjectId.isValid(changeRequestId)) {
+            const request = await AttendanceChangeRequest.findById(changeRequestId)
+                .select('date employeeMongoId proposed.confirmNextDay proposed.targetDate')
+                .lean();
+            if (request) {
+                const target = String(request.proposed?.targetDate || '').trim();
+                date =
+                    request.proposed?.confirmNextDay === true && /^\d{4}-\d{2}-\d{2}$/.test(target)
+                        ? target
+                        : String(request.date || '').trim();
+                employeeMongoId = String(request.employeeMongoId || '').trim();
+            }
+        }
+        if (!date && mongoose.Types.ObjectId.isValid(attendanceId)) {
+            const record = await Attendance.findById(attendanceId).select('date employeeMongoId').lean();
+            if (record) {
+                date = String(record.date || '').trim();
+                employeeMongoId = String(record.employeeMongoId || '').trim();
+            }
+        }
+        if (!/^\d{4}-\d{2}-\d{2}$/.test(date) || !employeeMongoId) {
+            return res.status(404).json({ message: 'Attendance request was not found.' });
+        }
+
+        const employee = mongoose.Types.ObjectId.isValid(employeeMongoId)
+            ? await EmployeeBasic.findById(employeeMongoId).select('staffType').lean()
+            : null;
+
+        return res.status(200).json({
+            date,
+            staffType: normalizeStaffType(employee?.staffType) || 'office',
+            employeeMongoId,
+        });
+    } catch (error) {
+        console.error('[getAttendanceOpenTarget]', error);
+        return res.status(500).json({ message: error.message || 'Failed to open this attendance request.' });
+    }
+}
+
+/**
  * POST /api/Attendance/change-request/decide
  * Primary reportee approval forwards the edit to HR.
  * HR approval writes the attendance day.
