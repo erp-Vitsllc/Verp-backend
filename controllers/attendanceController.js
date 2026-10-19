@@ -26,7 +26,13 @@ import {
     repairBlankNonWorkingRows,
     restoreClearedAttendance,
 } from '../utils/attendanceNonWorkingDay.js';
-import { nonHrMarkableDateKeys } from '../utils/nonHrMarkWindow.js';
+import { isNextDayPresentMark, nonHrMarkableDateKeys } from '../utils/nonHrMarkWindow.js';
+import { attendanceMarkRoute, yellowMarkHours } from '../utils/attendanceMarkPolicy.js';
+import {
+    isAttendanceSuspendedOn,
+    overlaySuspendedAttendance,
+    suspendedAttendanceView,
+} from '../utils/attendanceSuspension.js';
 import { describePartialLeave, partialLeaveOutcome, partialLeavePortion, storedPunchGapPatch } from '../utils/partialLeaveWindow.js';
 import { attachAttendanceDeductionDays } from '../utils/attachAttendanceDeductionDays.js';
 import {
@@ -132,7 +138,7 @@ import {
     enrollmentCoverIndexForEmployee,
     loadLeaveCoverIndex,
 } from '../utils/attendanceLeaveDayCover.js';
-import { loadCurrentLeaveCycleEligibility, loadEmployeeSalaryWorkingDays } from '../utils/loadLeaveTicketEntitlement.js';
+import { loadCurrentLeaveCycleEligibility } from '../utils/loadLeaveTicketEntitlement.js';
 
 const LEAVE_REQUEST_STATUS_KEYS = new Set([
     'unauthorized_leave',
@@ -300,7 +306,8 @@ async function viewerIsFlowchartHr(req) {
 }
 
 const NON_HR_MARK_WINDOW_MESSAGE =
-    'Only the flowchart HR assignee can mark attendance outside today and the seven previous days. Holidays are included.';
+    'Only the flowchart HR assignee can mark attendance outside today and the seven previous days. The next day can be marked Present (comp off) only. Holidays are included.';
+const NEXT_DAY_PRESENT_ONLY_MESSAGE = 'The next day can only be marked Present (comp off).';
 
 /**
  * Flowchart HR may mark any status on any past or future day.
@@ -321,6 +328,13 @@ async function rejectIfMarkWindowClosed(req, res, { date, entries }) {
         res.status(403).json({
             message: 'Only the flowchart HR assignee can clear attendance.',
         });
+        return true;
+    }
+
+    if (date === shiftDateKey(today, 1)) {
+        const statusKeys = requested.map((entry) => String(entry?.statusKey || '').trim());
+        if (isNextDayPresentMark(today, date, statusKeys)) return false;
+        res.status(403).json({ message: NEXT_DAY_PRESENT_ONLY_MESSAGE });
         return true;
     }
 
@@ -495,7 +509,7 @@ async function rejectIfNotSalaryEnrolled(res, employee, opts = {}) {
 async function resolveLinkedEmployee(req) {
     let employee = null;
 
-    const selectFields = '_id employeeId firstName lastName companyEmail workEmail email staffType';
+    const selectFields = '_id employeeId firstName lastName companyEmail workEmail email staffType attendanceAccountStatus attendanceSuspension';
 
     if (req.user?.employeeObjectId) {
         try {
@@ -655,7 +669,27 @@ function emptyDayStats(totalStaff = 0) {
         totalPresent: 0,
         absentAuthorized: 0,
         absentUnauthorized: totalStaff,
+        otHours: 0,
     };
+}
+
+/** Approved overtime that still shows as OT hours. A next-day present mark is not leftover OT. */
+function addedOtHours(row) {
+    if (String(row?.flexibleOtStatus || '') !== 'approved') return 0;
+    const approved = Number(row?.flexibleOtApprovedHours) || 0;
+    if (!(approved > 0)) return 0;
+    const nextDay = String(row?.flexibleOtNextDayDate || '').trim();
+    const required = Number(row?.flexibleRequiredHours) || 0;
+    if (nextDay || (!required && approved > 10)) return 0;
+    return Math.floor(approved + 1e-9);
+}
+
+function headerLeaveBucket(statusKey) {
+    const key = String(statusKey || '').trim();
+    if (key === 'sick_leave') return 'sick';
+    if (key === 'unauthorized_leave' || key === 'not_marked' || key === 'absent' || key === '') return 'unauth';
+    if (key === 'on_leave' || key === 'authorized_leave' || key === 'compoff_leave') return 'auth';
+    return '';
 }
 
 /**
@@ -688,6 +722,7 @@ function buildDayStatsFromRecords(records, totalStaff = 0, { isWeeklyOffDay = fa
 
     let earlyGo = 0;
     let halfDay = 0;
+    let otHours = 0;
     for (const row of rows) {
         const key = String(row?.statusKey || '').trim();
         if (Object.prototype.hasOwnProperty.call(counts, key)) {
@@ -695,15 +730,16 @@ function buildDayStatsFromRecords(records, totalStaff = 0, { isWeeklyOffDay = fa
         }
         if (key === 'early_go') earlyGo += 1;
         else if (key !== 'on_office' && key !== 'late_arrived' && isHalfDayAttendance(row)) halfDay += 1;
+        otHours += addedOtHours(row);
     }
 
     const markedCount = rows.length;
     const offOrHolidayCount = counts.holiday + counts.weekly_off;
+    // People with a holiday or weekly-off mark are already inside markedCount.
     const implicitNotMarked = Math.max(0, totalStaff - markedCount);
-    // Weekly off / holiday staff are not "not marked".
     const notMarked = isWeeklyOffDay
         ? counts.not_marked + counts.unauthorized_leave
-        : counts.not_marked + counts.unauthorized_leave + Math.max(0, implicitNotMarked - offOrHolidayCount);
+        : counts.not_marked + counts.unauthorized_leave + implicitNotMarked;
     const authorizedLeaveTotal = counts.on_leave + counts.authorized_leave;
     const weeklyOff = isWeeklyOffDay ? Math.max(offOrHolidayCount, totalStaff) : counts.weekly_off;
     const holiday = counts.holiday;
@@ -731,6 +767,7 @@ function buildDayStatsFromRecords(records, totalStaff = 0, { isWeeklyOffDay = fa
         absentAuthorized: authorizedLeaveTotal,
         // Same value as notMarked — unauthorized and not marked are one category.
         absentUnauthorized: isWeeklyOffDay ? 0 : notMarked,
+        otHours,
     };
 }
 
@@ -754,6 +791,7 @@ function headerPeopleForDay({ roster, dayRecords, peopleById, dateKey, isWeeklyO
     const leave = [];
     const missed = [];
     const absent = [];
+    const ot = [];
     const seen = new Set();
     for (const row of dayRecords || []) {
         const id = String(row?.employeeMongoId || '');
@@ -761,17 +799,21 @@ function headerPeopleForDay({ roster, dayRecords, peopleById, dateKey, isWeeklyO
         seen.add(id);
         const person = attendanceListPerson(peopleById.get(id), row, dateKey);
         const key = String(row?.statusKey || '').trim();
+        const hours = addedOtHours(row);
+        if (hours > 0) ot.push({ ...person, hours });
         if (key === 'on_office') present.push(person);
         else if (key === 'late_arrived') late.push(person);
-        else if (HEADER_LEAVE_KEYS.has(key)) leave.push(person);
+        else if (HEADER_LEAVE_KEYS.has(key)) leave.push({ ...person, bucket: headerLeaveBucket(key) });
         else if (key === 'mispunch') missed.push(person);
-        else if (!isWeeklyOffDay && HEADER_ABSENT_KEYS.has(key)) absent.push(person);
+        else if (!isWeeklyOffDay && HEADER_ABSENT_KEYS.has(key)) {
+            absent.push({ ...person, bucket: 'unauth' });
+        }
     }
     const total = [];
     for (const id of roster || []) {
         const person = attendanceListPerson(peopleById.get(id), null, dateKey);
         total.push(person);
-        if (!isWeeklyOffDay && !seen.has(id)) absent.push(person);
+        if (!isWeeklyOffDay && !seen.has(id)) absent.push({ ...person, bucket: 'unauth' });
     }
     const byName = (a, b) => String(a.name).localeCompare(String(b.name));
     present.sort(byName);
@@ -779,8 +821,9 @@ function headerPeopleForDay({ roster, dayRecords, peopleById, dateKey, isWeeklyO
     late.sort(byName);
     leave.sort(byName);
     missed.sort(byName);
+    ot.sort(byName);
     total.sort(byName);
-    return { present, absent, late, leave, missed, total };
+    return { present, absent, late, leave, missed, ot, total };
 }
 
 function resolveStaffTypeFilter(raw) {
@@ -841,7 +884,7 @@ export async function getAttendanceMarkRoster(req, res) {
         }
 
         const rows = await EmployeeBasic.find(filter)
-            .select('_id employeeId firstName lastName staffType primaryReportee profileStatus status')
+            .select('_id employeeId firstName lastName staffType primaryReportee profileStatus status attendanceAccountStatus attendanceSuspension')
             .sort({ firstName: 1, lastName: 1 })
             .lean()
             .maxTimeMS(8000);
@@ -885,6 +928,8 @@ export async function getAttendanceMarkRoster(req, res) {
                 primaryReporteeName: reporteeNames.get(String(e.primaryReportee || '')) || '',
                 profileStatus: e.profileStatus || 'active',
                 status: e.status || '',
+                attendanceSuspended: isAttendanceSuspendedOn(e, dateKey),
+                attendanceSuspension: e.attendanceSuspension || null,
             }));
 
         return res.status(200).json({
@@ -969,13 +1014,22 @@ export async function getAttendanceByDate(req, res) {
         const records = applyLeaveCoverIndex(storedRecords, coverIndex).filter(
             (row) => String(row?.date || '') === date,
         );
+        const suspendedEmployees = await EmployeeBasic.find({
+            attendanceAccountStatus: 'suspended',
+            'attendanceSuspension.fromDate': { $lte: date },
+            'attendanceSuspension.untilDate': { $gte: date },
+        })
+            .select('_id employeeId firstName lastName attendanceAccountStatus attendanceSuspension')
+            .lean();
+        const suspendedIds = new Set((suspendedEmployees || []).map((row) => String(row._id)));
+        const editableRecords = records.filter((row) => !suspendedIds.has(String(row.employeeMongoId || '')));
         try {
-            await rewriteStoredPunchGaps(records);
-            await rewriteMissingCheckouts(records);
+            await rewriteStoredPunchGaps(editableRecords);
+            await rewriteMissingCheckouts(editableRecords);
         } catch (gapErr) {
             console.error('[getAttendanceByDate] punch gap rewrite failed:', gapErr);
         }
-        const visibleRecords = (records || []).filter((r) => !isCompanyShellEmployee(r.employeeName));
+        const visibleRecords = editableRecords.filter((r) => !isCompanyShellEmployee(r.employeeName));
         let deductionRecords = visibleRecords;
         try {
             deductionRecords = await attachAttendanceDeductionDays(visibleRecords);
@@ -983,6 +1037,8 @@ export async function getAttendanceByDate(req, res) {
             console.error('[getAttendanceByDate] deduction days failed:', deductionErr);
             deductionRecords = visibleRecords.map((row) => ({ ...row, deductionDays: 0 }));
         }
+        const suspendedViews = (suspendedEmployees || []).map((row) => suspendedAttendanceView(row, date));
+        const shownRecords = [...deductionRecords, ...suspendedViews];
         const [pendingChanges, approvalHistory] = await Promise.all([
             loadPendingAttendanceChanges(date).catch((err) => {
                 console.error('[getAttendanceByDate] pending changes failed:', err);
@@ -996,7 +1052,7 @@ export async function getAttendanceByDate(req, res) {
         return res.status(200).json({
             message: 'Attendance fetched successfully',
             date,
-            records: deductionRecords.map(presentAuthorizedLeaveRecord),
+            records: shownRecords.map(presentAuthorizedLeaveRecord),
             pendingChanges,
             approvalHistory,
         });
@@ -1469,6 +1525,10 @@ async function queueOrApplyManualMark(ctx, {
     });
     const existing = id ? await Attendance.findOne({ date, employeeMongoId: id }).lean() : null;
 
+    if (isAttendanceSuspendedOn(employee, date)) {
+        return { error: 'This employee is suspended on this date. Attendance cannot be changed.' };
+    }
+
     if (!ctx.actorIsHr && attendanceMarksMatch(existing, payload)) {
         return { applied: existing, pending: null };
     }
@@ -1481,10 +1541,21 @@ async function queueOrApplyManualMark(ctx, {
         reporteeId,
         hrId: ctx.hr?._id,
     });
+    const hours = ctx.actorIsHr ? { clockHours: 0, deductionHours: 0 } : await yellowMarkHours(employee, date, payload);
+    const route = ctx.actorIsHr
+        ? 'direct'
+        : attendanceMarkRoute({
+            statusKey: payload.statusKey,
+            clockHours: hours.clockHours,
+            deductionHours: hours.deductionHours,
+        });
+    if (!ctx.actorIsHr && date === shiftDateKey(getDubaiDateKey(), 1) && payload.statusKey === 'on_office') {
+        payload.statusLabel = 'Present (Comp off)';
+    }
 
-    // Flowchart HR applies directly. Any other user inside the mark window also applies
-    // immediately. HR and the primary reportee are emailed; they do not approve it.
-    if (stage === 'apply' || !ctx.actorIsHr) {
+    // HR writes the day. Other users write present and zero-hour yellow marks immediately.
+    // Leave and any deduction hours wait for the primary reportee, then HR.
+    if (route === 'direct') {
         const doc = await commitManualAttendanceMark({
             employee,
             employeeMongoId: id,
@@ -1552,6 +1623,9 @@ async function queueOrApplyManualMark(ctx, {
 }
 
 async function queueOrApplyClear(ctx, { employee, employeeMongoId, date, markedBy }) {
+    if (isAttendanceSuspendedOn(employee, date)) {
+        return { error: 'This employee is suspended on this date. Attendance cannot be changed.' };
+    }
     const id = String(employee?._id || employeeMongoId || '').trim();
     if (ctx.actorIsHr) {
         const restored = await restoreClearedAttendance({
@@ -1626,7 +1700,7 @@ export async function markAttendance(req, res) {
 
             const markEmployee = await EmployeeBasic.findById(employeeMongoId)
                 .select(
-                    '_id employeeId firstName lastName staffType primaryReportee companyEmail workEmail email',
+                    '_id employeeId firstName lastName staffType primaryReportee companyEmail workEmail email attendanceAccountStatus attendanceSuspension',
                 )
                 .populate('primaryReportee', CHANGE_REPORTEE_SELECT)
                 .lean();
@@ -1746,7 +1820,7 @@ export async function getMyAttendanceMonth(req, res) {
                 }
             }
             const target = await EmployeeBasic.findById(forEmployeeId)
-                .select('_id employeeId firstName lastName staffType companyEmail')
+                .select('_id employeeId firstName lastName staffType companyEmail attendanceAccountStatus attendanceSuspension')
                 .lean();
             if (!target) {
                 return res.status(404).json({ message: 'Employee not found.' });
@@ -1754,7 +1828,7 @@ export async function getMyAttendanceMonth(req, res) {
             employee = target;
         } else if (self) {
             employee = await EmployeeBasic.findById(self._id)
-                .select('_id employeeId firstName lastName staffType companyEmail')
+                .select('_id employeeId firstName lastName staffType companyEmail attendanceAccountStatus attendanceSuspension')
                 .lean();
             if (!employee) employee = self;
         }
@@ -1797,6 +1871,8 @@ export async function getMyAttendanceMonth(req, res) {
             hasWhatsappNumber: contactGate.hasWhatsappNumber,
             portalApp: contactGate.portalApp,
             web: contactGate.web,
+            attendanceSuspended: isAttendanceSuspendedOn(employee, todayKey),
+            attendanceSuspension: employee.attendanceSuspension || null,
         };
         const attendanceMatch = employeeAttendanceMatch(employee);
         const loadTodayPunch = async () => {
@@ -1825,9 +1901,13 @@ export async function getMyAttendanceMonth(req, res) {
                 contactGate,
                 offWeekdays: [],
                 workingTime: { site: {}, office: {}, extra: {} },
-                records: session.todayRecord ? [session.todayRecord] : [],
-                todayRecord: session.todayRecord,
-                openFlexiblePunch: session.openFlexiblePunch,
+                records: isAttendanceSuspendedOn(employee, todayKey)
+                    ? [suspendedAttendanceView(employee, todayKey)]
+                    : (session.todayRecord ? [session.todayRecord] : []),
+                todayRecord: isAttendanceSuspendedOn(employee, todayKey)
+                    ? suspendedAttendanceView(employee, todayKey)
+                    : session.todayRecord,
+                openFlexiblePunch: isAttendanceSuspendedOn(employee, todayKey) ? false : session.openFlexiblePunch,
             });
         }
 
@@ -1843,12 +1923,15 @@ export async function getMyAttendanceMonth(req, res) {
         const mergedRecords = applyLeaveCoverIndex(records, coverIndex).map((row) =>
             presentFromOpenPunch(row, todayKey),
         );
+        const openForRewrite = mergedRecords.filter(
+            (row) => !isAttendanceSuspendedOn(employee, row?.date),
+        );
         try {
-            await rewriteStoredPunchGaps(mergedRecords);
+            await rewriteStoredPunchGaps(openForRewrite);
         } catch (gapErr) {
             console.error('[getMyAttendanceMonth] punch gap rewrite failed:', gapErr);
         }
-        const promoteIds = mergedRecords
+        const promoteIds = openForRewrite
             .filter(
                 (row) =>
                     row?._id &&
@@ -1883,6 +1966,11 @@ export async function getMyAttendanceMonth(req, res) {
         const loadedToday = presentFromOpenPunch(bestDayRecord(mergedRecords, todayKey), todayKey);
         const session = await openFlexibleSession(employee, todayKey, loadedToday);
 
+        const displayRecords = overlaySuspendedAttendance(mergedRecords, employee, from, to);
+        const displayToday = isAttendanceSuspendedOn(employee, todayKey)
+            ? suspendedAttendanceView(employee, todayKey)
+            : session.todayRecord;
+
         return res.status(200).json({
             message: 'Attendance fetched successfully',
             salaryEnrolled: true,
@@ -1903,9 +1991,9 @@ export async function getMyAttendanceMonth(req, res) {
                 office: workingTime.office,
                 extra: workingTime.extra || {},
             },
-            records: mergedRecords,
-            todayRecord: session.todayRecord,
-            openFlexiblePunch: session.openFlexiblePunch,
+            records: displayRecords,
+            todayRecord: displayToday,
+            openFlexiblePunch: isAttendanceSuspendedOn(employee, todayKey) ? false : session.openFlexiblePunch,
         });
     } catch (error) {
         console.error('[getMyAttendanceMonth]', error);
@@ -1939,9 +2027,11 @@ const YEAR_SUMMARY_DETAIL_KEYS = [
     'authorized_leave',
     'unauthorized_leave',
     'work_from_home',
+    'on_office',
     'late_arrived',
     'early_go',
     'mispunch',
+    'holiday',
 ];
 
 function serializeYearSummaryEntry(row) {
@@ -2126,6 +2216,10 @@ export async function getMyAttendanceYearSummary(req, res) {
             to = `${year}-12-31`;
         }
 
+        const todayKey = getDubaiDateKey();
+        const countTo = to > todayKey ? todayKey : to;
+        const periodOpen = countTo < to;
+
         const todayMonth = `${dubai.year}-${String(dubai.month).padStart(2, '0')}`;
         const yearEndMonth = `${year}-12`;
         const summaryMonth = monthNum
@@ -2134,10 +2228,7 @@ export async function getMyAttendanceYearSummary(req, res) {
                 ? yearEndMonth
                 : todayMonth;
         const gate = await loadSalaryAttendanceGate(self, { monthKey: summaryMonth });
-        const [enrollWorking, leavePolicy] = await Promise.all([
-            loadEmployeeSalaryWorkingDays(self),
-            leavePolicyForEmployee(self),
-        ]);
+        const leavePolicy = await leavePolicyForEmployee(self);
         if (gate.attendanceLocked) {
             const counts = emptyYearCounts();
             counts.authorized_leave_paid = 0;
@@ -2157,10 +2248,12 @@ export async function getMyAttendanceYearSummary(req, res) {
                 absentAuth: 0,
                 absentSick: 0,
                 absentUnauthorized: 0,
-                workingDays: enrollWorking.workingDays,
+                workingDays: 0,
                 holidayCount: 0,
                 weeklyOffCount: 0,
                 lastAnnualLeaveDate: '',
+                countedTo: countTo,
+                periodOpen,
                 entries: [],
                 leaveBalances: {},
                 leavePolicy,
@@ -2189,10 +2282,12 @@ export async function getMyAttendanceYearSummary(req, res) {
                 absentAuth: 0,
                 absentSick: 0,
                 absentUnauthorized: 0,
-                workingDays: enrollWorking.workingDays,
+                workingDays: 0,
                 holidayCount: 0,
                 weeklyOffCount: 0,
                 lastAnnualLeaveDate: '',
+                countedTo: countTo,
+                periodOpen,
                 entries: [],
                 leaveBalances: {},
                 leavePolicy,
@@ -2215,7 +2310,7 @@ export async function getMyAttendanceYearSummary(req, res) {
                 {
                     $match: {
                         employeeMongoId: String(self._id),
-                        date: { $gte: attendanceFrom, $lte: to },
+                        date: { $gte: attendanceFrom, $lte: countTo },
                     },
                 },
                 {
@@ -2225,20 +2320,20 @@ export async function getMyAttendanceYearSummary(req, res) {
                     },
                 },
             ]),
-            Holiday.find({ date: { $gte: attendanceFrom, $lte: to } }).select('date appliesTo').lean(),
+            Holiday.find({ date: { $gte: attendanceFrom, $lte: countTo } }).select('date appliesTo').lean(),
             EmployeeBasic.findById(self._id).select('staffType').lean(),
             loadWorkingTimeDoc(),
             Attendance.findOne({
                 employeeMongoId: String(self._id),
                 statusKey: 'on_leave',
-                date: { $gte: attendanceFrom, $lte: to },
+                date: { $gte: attendanceFrom, $lte: countTo },
             })
                 .sort({ date: -1 })
                 .select('date')
                 .lean(),
             Attendance.find({
                 employeeMongoId: String(self._id),
-                date: { $gte: attendanceFrom, $lte: to },
+                date: { $gte: attendanceFrom, $lte: countTo },
                 statusKey: { $in: YEAR_SUMMARY_DETAIL_KEYS },
             })
                 .select(
@@ -2260,17 +2355,24 @@ export async function getMyAttendanceYearSummary(req, res) {
             }
         }
 
-        const overlay = overlayHistoricalLeave(historicalProfile, {
-            from: `${year}-01-01`,
-            to: `${year}-12-31`,
-            includeCountOnly: true,
+        const periodOverlay = overlayHistoricalLeave(historicalProfile, {
+            from: attendanceFrom,
+            to: countTo,
+            includeCountOnly: monthNum === 0,
         });
-        Object.assign(counts, applyOverlayCounts(counts, overlay.extraCounts));
+        const balanceOverlay = monthNum
+            ? overlayHistoricalLeave(historicalProfile, {
+                  from: `${year}-01-01`,
+                  to: `${year}-12-31`,
+                  includeCountOnly: true,
+              })
+            : periodOverlay;
+        Object.assign(counts, applyOverlayCounts(counts, periodOverlay.extraCounts));
         const yearCover = enrollmentCoverIndexForEmployee(
             historicalProfile,
             self,
             attendanceFrom,
-            to,
+            countTo,
         );
         const paintedDetails = applyLeaveCoverIndex(detailRows, yearCover, { fillMissing: false });
         let movedOffUnauthorized = 0;
@@ -2294,7 +2396,7 @@ export async function getMyAttendanceYearSummary(req, res) {
                 .map((row) => String(row.date || '').trim())
                 .filter(Boolean),
         );
-        const schedule = countScheduleDays(attendanceFrom, to, holidaySet, offWeekdays);
+        const schedule = countScheduleDays(attendanceFrom, countTo, holidaySet, offWeekdays);
 
         const presentDays =
             counts.on_office +
@@ -2328,7 +2430,7 @@ export async function getMyAttendanceYearSummary(req, res) {
         const enrollUsed = leaveCycle.used || {};
         const enrollAttendance = leaveCycle.attendance || {};
         const leaveBalances = applyEnrollUsedToLeaveBalances(
-            applyOverlayCountsToBalances(rawLeaveBalances, overlay.extraCounts),
+            applyOverlayCountsToBalances(rawLeaveBalances, balanceOverlay.extraCounts),
             enrollUsed,
             { ...entitlements, leaveEligible: Boolean(leaveCycle.leaveEligible) },
         );
@@ -2350,16 +2452,19 @@ export async function getMyAttendanceYearSummary(req, res) {
             absentAuth,
             absentSick,
             absentUnauthorized,
-            workingDays: enrollWorking.workingDays,
+            workingDays: schedule.workingDays,
             holidayCount: schedule.holidayCount,
             weeklyOffCount: schedule.weeklyOffCount,
+            holidayDates: [...holidaySet].sort(),
+            countedTo: countTo,
+            periodOpen,
             lastAnnualLeaveDate: lastOverlayAnnualLeaveDate(
-                overlay.entries,
+                periodOverlay.entries,
                 lastAnnualLeave?.date || '',
             ),
             entries: [
                 ...(paintedDetails || []).map(serializeYearSummaryEntry),
-                ...overlay.entries,
+                ...periodOverlay.entries,
             ],
             leaveBalances,
             leavePolicy: serializeLeavePolicy(entitlements) || leavePolicy,
@@ -2461,7 +2566,7 @@ async function resolveMarkTargetEmployee(req) {
     }
 
     const target = await EmployeeBasic.findById(forEmployeeId)
-        .select('_id employeeId firstName lastName staffType companyEmail')
+        .select('_id employeeId firstName lastName staffType companyEmail attendanceAccountStatus attendanceSuspension')
         .lean();
     if (!target) {
         return { error: { status: 404, message: 'Employee not found.' } };
@@ -2483,6 +2588,12 @@ export async function checkInMyAttendance(req, res) {
         }
 
         const { employee } = resolved;
+        if (isAttendanceSuspendedOn(employee, getDubaiDateKey())) {
+            return res.status(403).json({
+                message: 'Suspended account.',
+                attendanceSuspended: true,
+            });
+        }
         const date = getDubaiDateKey();
         const timeIn = getDubaiClockTime();
         const employeeMongoId = String(employee._id);
@@ -2924,6 +3035,12 @@ export async function checkOutMyAttendance(req, res) {
         }
 
         const { employee } = resolved;
+        if (isAttendanceSuspendedOn(employee, getDubaiDateKey())) {
+            return res.status(403).json({
+                message: 'Suspended account.',
+                attendanceSuspended: true,
+            });
+        }
         const date = getDubaiDateKey();
         const timeOut = getDubaiClockTime();
         const staffType = normalizeStaffType(employee.staffType);
@@ -3218,7 +3335,7 @@ export async function markTeamAttendance(req, res) {
 
             const emp = await EmployeeBasic.findById(employeeMongoId)
                 .select(
-                    '_id employeeId firstName lastName staffType primaryReportee companyEmail workEmail email',
+                    '_id employeeId firstName lastName staffType primaryReportee companyEmail workEmail email attendanceAccountStatus attendanceSuspension',
                 )
                 .populate('primaryReportee', CHANGE_REPORTEE_SELECT)
                 .lean();

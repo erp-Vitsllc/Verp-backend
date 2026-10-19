@@ -879,7 +879,7 @@ export const getFlowchartPositionSummary = async (req, res) => {
 // @access  Private
 export const getEmployeesForFlowchart = async (req, res) => {
     try {
-        const employees = await EmployeeBasic.find({ profileStatus: 'active' })
+        const employees = await EmployeeBasic.find({ profileStatus: 'active', status: { $ne: 'Left User' } })
             .select('employeeId firstName lastName department designation companyEmail email')
             .sort({ firstName: 1, lastName: 1 });
 

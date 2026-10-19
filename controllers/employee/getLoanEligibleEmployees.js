@@ -51,7 +51,7 @@ async function resolveSelfBasic(req) {
 export const getLoanEligibleEmployees = async (req, res) => {
     try {
         const employees = await EmployeeBasic.find(
-            { profileStatus: 'active' },
+            { profileStatus: 'active', status: { $ne: 'Left User' } },
             'employeeId firstName lastName status'
         ).lean();
 

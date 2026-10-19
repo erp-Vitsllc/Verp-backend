@@ -25,6 +25,14 @@ import { assignTaskNumbers } from "../../utils/taskNumber.js";
 import { formatTaskDisplayParts, vehicleRecordId } from "../../utils/taskDisplayName.js";
 import { composeTaskDescription } from "../../utils/taskDetailDescription.js";
 import { attendanceFactsByActionId } from "../../utils/loadAttendanceTaskFacts.js";
+import { getDepartmentHOD } from "../../utils/getDepartmentHOD.js";
+import { getManagementHOD } from "../../utils/getManagementHOD.js";
+import {
+    fineNeedsAccountsPaymentInbox,
+    fineStillNeedsApprovalInbox,
+    fineStillNeedsInbox,
+    getExpectedRoleForFineStatus,
+} from "../../utils/fineStageAuth.js";
 
 const DUBAI_DATE = new Intl.DateTimeFormat("en-CA", {
     timeZone: "Asia/Dubai",
@@ -224,6 +232,398 @@ export async function vehicleDisplayById(actions = []) {
     return map;
 }
 
+const COMPANY_FINE_IDS = new Set(["VEGA-HR-0000", "VEGA_INTERNAL"]);
+
+function fineBaseId(fineId = "") {
+    const id = String(fineId || "").trim();
+    const parts = id.split("-");
+    if (parts.length > 3) return parts.slice(0, 3).join("-");
+    return id;
+}
+
+function finePeople(fines = []) {
+    const names = [];
+    const ids = [];
+    const seen = new Set();
+    for (const fine of fines) {
+        for (const row of fine?.assignedEmployees || []) {
+            const id = String(row?.employeeId || "").trim();
+            if (!id || COMPANY_FINE_IDS.has(id) || seen.has(id)) continue;
+            seen.add(id);
+            ids.push(id);
+            const name = String(row?.employeeName || "").trim();
+            if (name) names.push(name);
+        }
+    }
+    return { names, ids, isGroup: ids.length > 1 };
+}
+
+/** One person is an individual fine. Sibling rows (-A/-B) and a company share stay one fine. */
+export async function fineFamilyByRequestId(actions = []) {
+    const ids = [...new Set(
+        actions
+            .filter((action) => /^(fine|group fine request)$/i.test(String(action?.requestType || "")))
+            .map((action) => String(action?.requestId || ""))
+            .filter(isObjectId),
+    )];
+    const map = new Map();
+    if (!ids.length) return map;
+    const seeds = await Fine.find({ _id: { $in: ids } })
+        .select("fineId fineType assignedEmployees")
+        .lean();
+    const bases = [...new Set(seeds.map((fine) => fineBaseId(fine.fineId)).filter(Boolean))];
+    const family = bases.length
+        ? await Fine.find({
+            $or: bases.map((base) => ({ fineId: new RegExp(`^${escapeRegex(base)}(-[A-Z])?$`, "i") })),
+        })
+            .select("fineId fineType assignedEmployees")
+            .lean()
+        : [];
+    const byBase = new Map();
+    for (const fine of family) {
+        const base = fineBaseId(fine.fineId);
+        const list = byBase.get(base) || [];
+        list.push(fine);
+        byBase.set(base, list);
+    }
+    const infoFor = (fine, members) => {
+        const people = finePeople(members);
+        const primary = members.find((row) => finePeople([row]).ids.length) || fine;
+        return {
+            fineId: people.isGroup
+                ? fineBaseId(primary?.fineId || fine.fineId)
+                : String(primary?.fineId || fine.fineId || "").trim(),
+            fineType: String(primary?.fineType || fine.fineType || "").trim(),
+            employeeName: people.names.join(", "),
+            employeeId: people.ids.join(", "),
+            isGroup: people.isGroup,
+            peopleCount: people.ids.length,
+            baseId: fineBaseId(fine.fineId),
+        };
+    };
+    for (const fine of seeds) {
+        const base = fineBaseId(fine.fineId);
+        map.set(String(fine._id), infoFor(fine, byBase.get(base) || [fine]));
+    }
+    for (const members of byBase.values()) {
+        for (const fine of members) {
+            const key = String(fine._id);
+            if (!map.has(key)) map.set(key, infoFor(fine, members));
+        }
+    }
+    return map;
+}
+
+/**
+ * An individual fine must not stay labeled Group Fine, and the same fine must not
+ * produce two pending tasks (the person row and the company row, or Fine plus Group Fine).
+ */
+export async function collapsePendingFineDashboardRows(actions = []) {
+    const fineInfo = await fineFamilyByRequestId(actions);
+    const drop = new Set();
+    const keptByBase = new Map();
+    for (const action of actions) {
+        const type = String(action?.requestType || "");
+        const status = String(action?.status || "");
+        if (!/^(fine|group fine request)$/i.test(type)) continue;
+        if (status !== "Pending" && status !== "On Hold") continue;
+        const info = fineInfo.get(String(action.requestId || ""));
+        const key = info?.baseId || String(action.requestId || action._id);
+        const previous = keptByBase.get(key);
+        if (!previous) {
+            keptByBase.set(key, action);
+            continue;
+        }
+        const previousTime = new Date(previous.requestedDate || previous.createdAt || 0).getTime();
+        const nextTime = new Date(action.requestedDate || action.createdAt || 0).getTime();
+        if (nextTime >= previousTime) {
+            drop.add(String(previous._id));
+            keptByBase.set(key, action);
+        } else {
+            drop.add(String(action._id));
+        }
+    }
+    const corrections = [];
+    for (const action of keptByBase.values()) {
+        const info = fineInfo.get(String(action.requestId || ""));
+        if (!info) continue;
+        const nextType = info.isGroup ? "Group Fine Request" : "Fine";
+        const patch = {};
+        if (action.requestType !== nextType) patch.requestType = nextType;
+        if (info.isGroup) {
+            const label = `Group Fine - ${info.peopleCount} Employees`;
+            if (action.subjectName !== label) patch.subjectName = label;
+        } else if (/^Group Fine/i.test(String(action.subjectName || ""))) {
+            const person = String(info.employeeName || "").split(",")[0].trim();
+            if (person) patch.subjectName = person;
+        }
+        if (!Object.keys(patch).length) continue;
+        Object.assign(action, patch);
+        corrections.push(DashboardAction.updateOne({ _id: action._id }, { $set: patch }));
+    }
+    if (drop.size) {
+        corrections.push(DashboardAction.updateMany(
+            { _id: { $in: [...drop] }, status: { $in: ["Pending", "On Hold"] } },
+            {
+                $set: {
+                    status: "Dismissed",
+                    actionedDate: new Date(),
+                    comment: "Closed: duplicate fine task",
+                },
+            },
+        ));
+    }
+    if (corrections.length) await Promise.all(corrections);
+    return {
+        rows: actions.filter((action) => !drop.has(String(action._id))),
+        fineInfo,
+    };
+}
+
+const FINE_TASK_TYPES = /^(fine|group fine request)$/i;
+const FINISHED_FINE_STATUSES = new Set(["Approved", "Active", "Paid", "Completed"]);
+
+function overlayWasReassigned(overlay) {
+    return Boolean(
+        String(overlay?.closeRequest?.originalAssigneeId || "").trim()
+        || String(overlay?.closeRequest?.originalAssigneeName || "").trim(),
+    );
+}
+
+function fineStagePerson(fine, hods) {
+    if (!fine || !hods) return null;
+    if (fineNeedsAccountsPaymentInbox(fine)) return hods.Accounts || null;
+    if (!fineStillNeedsApprovalInbox(fine)) return null;
+    const role = getExpectedRoleForFineStatus(fine.fineStatus, fine.workflow || []);
+    if (role === "HR") return hods.HR || null;
+    if (role === "Accounts") return hods.Accounts || null;
+    if (role === "Management") return hods.Management || null;
+    return null;
+}
+
+function closedFineDashboardStatus(members = []) {
+    const statuses = members.map((fine) => String(fine?.fineStatus || ""));
+    if (statuses.some((status) => FINISHED_FINE_STATUSES.has(status))) return "Approved";
+    if (statuses.some((status) => status === "Rejected")) return "Rejected";
+    return "Dismissed";
+}
+
+function sameFineAssignee(action, person) {
+    const current = String(action?.assignedTo || "");
+    const idMatch = [person?.employeeObjectId, person?.userId].filter(Boolean).map(String).includes(current);
+    const code = String(action?.assignedToEmpId || "").trim().toLowerCase();
+    const nextCode = String(person?.employeeId || "").trim().toLowerCase();
+    if (!code || !nextCode) return idMatch;
+    return idMatch && code === nextCode;
+}
+
+function packFineHod(hod, userIdByCode) {
+    const employeeObjectId = hod?._id ? String(hod._id) : "";
+    if (!employeeObjectId) return null;
+    const employeeId = String(hod.employeeId || "").trim();
+    return {
+        employeeId,
+        employeeObjectId,
+        userId: userIdByCode.get(employeeId.toLowerCase()) || "",
+        name: personName(hod),
+    };
+}
+
+async function loadFineStageAssignees() {
+    const [hr, accounts, management] = await Promise.all([
+        getDepartmentHOD("hr"),
+        getDepartmentHOD("finance"),
+        getManagementHOD(),
+    ]);
+    const codes = [...new Set(
+        [hr, accounts, management].map((hod) => String(hod?.employeeId || "").trim()).filter(Boolean),
+    )];
+    const users = codes.length
+        ? await User.find({ employeeId: { $in: codes } }).select("_id employeeId").lean()
+        : [];
+    const userIdByCode = new Map(
+        users.map((user) => [String(user.employeeId || "").trim().toLowerCase(), String(user._id)]),
+    );
+    return {
+        HR: packFineHod(hr, userIdByCode),
+        Accounts: packFineHod(accounts, userIdByCode),
+        Management: packFineHod(management, userIdByCode),
+    };
+}
+
+function markFineOverlayClosed(overlay) {
+    if (!overlay) return;
+    if (overlay.status === "Completed" || overlay.status === "Cancelled") return;
+    overlay.status = "Completed";
+}
+
+/**
+ * Pending fine tasks follow the fine itself.
+ * A finished fine leaves the pending list. An open fine shows the current stage assignee.
+ */
+export async function alignOpenFineDashboardRows(actions = [], overlaysByAction = new Map()) {
+    try {
+        const pending = (actions || []).filter((action) => (
+            FINE_TASK_TYPES.test(String(action?.requestType || ""))
+            && (action.status === "Pending" || action.status === "On Hold")
+        ));
+        if (!pending.length) return actions;
+
+        const ids = [...new Set(pending.map((action) => String(action.requestId || "")).filter(isObjectId))];
+        const fineSelect = "fineId fineStatus workflow accountsPaymentPath zohoBillId zohoBillNumber vendorBillStatus";
+        const missingOverlayIds = pending
+            .map((action) => action._id)
+            .filter((id) => id && !overlaysByAction.has(String(id)));
+        const [seeds, extraOverlays] = await Promise.all([
+            ids.length ? Fine.find({ _id: { $in: ids } }).select(fineSelect).lean() : [],
+            missingOverlayIds.length
+                ? TaskManagerTask.find({ sourceDashboardActionId: { $in: missingOverlayIds } })
+                    .select("assignee assigneeEmpId assigneeName sourceDashboardActionId status closeRequest")
+                    .lean()
+                : [],
+        ]);
+        for (const overlay of extraOverlays) {
+            const key = String(overlay.sourceDashboardActionId || "");
+            if (key && !overlaysByAction.has(key)) overlaysByAction.set(key, overlay);
+        }
+        const seedById = new Map(seeds.map((fine) => [String(fine._id), fine]));
+        const bases = [...new Set(seeds.map((fine) => fineBaseId(fine.fineId)).filter(Boolean))];
+        const family = bases.length
+            ? await Fine.find({
+                $or: bases.map((base) => ({ fineId: new RegExp(`^${escapeRegex(base)}(-[A-Z])?$`, "i") })),
+            }).select(fineSelect).lean()
+            : [];
+        const byBase = new Map();
+        for (const fine of family) {
+            const base = fineBaseId(fine.fineId);
+            const list = byBase.get(base) || [];
+            list.push(fine);
+            byBase.set(base, list);
+        }
+
+        const needsAssignee = pending.some((action) => {
+            const seed = seedById.get(String(action.requestId || ""));
+            if (!seed) return false;
+            const members = byBase.get(fineBaseId(seed.fineId)) || [seed];
+            return members.some((fine) => fineStillNeedsInbox(fine));
+        });
+        const hods = needsAssignee ? await loadFineStageAssignees() : null;
+
+        const closeByStatus = new Map();
+        const dismissIds = [];
+        const assigneeWrites = [];
+        for (const action of pending) {
+            const seed = seedById.get(String(action.requestId || ""));
+            const overlay = overlaysByAction.get(String(action._id || ""));
+            if (!seed) {
+                action.status = "Dismissed";
+                action.actionedDate = action.actionedDate || new Date();
+                if (action._id) dismissIds.push(action._id);
+                markFineOverlayClosed(overlay);
+                continue;
+            }
+            const members = byBase.get(fineBaseId(seed.fineId)) || [seed];
+            const openFine = members.find((fine) => String(fine._id) === String(action.requestId) && fineStillNeedsInbox(fine))
+                || members.find((fine) => fineStillNeedsInbox(fine));
+            if (!openFine) {
+                const nextStatus = closedFineDashboardStatus(members);
+                action.status = nextStatus;
+                action.actionedDate = action.actionedDate || new Date();
+                if (action._id) {
+                    const bucket = closeByStatus.get(nextStatus) || [];
+                    bucket.push(action._id);
+                    closeByStatus.set(nextStatus, bucket);
+                }
+                markFineOverlayClosed(overlay);
+                continue;
+            }
+            const person = fineStagePerson(openFine, hods);
+            if (!person?.employeeObjectId || sameFineAssignee(action, person)) continue;
+            action.assignedTo = person.employeeObjectId;
+            action.assignedToEmpId = person.employeeId;
+            assigneeWrites.push({ action, person, overlay });
+            if (overlay && !overlayWasReassigned(overlay)) {
+                overlay.assignee = person.employeeObjectId;
+                overlay.assigneeEmpId = person.employeeId;
+                if (person.name) overlay.assigneeName = person.name;
+            }
+        }
+
+        const writes = [];
+        for (const [nextStatus, ids] of closeByStatus) {
+            writes.push(DashboardAction.updateMany(
+                { _id: { $in: ids }, status: { $in: ["Pending", "On Hold"] } },
+                {
+                    $set: {
+                        status: nextStatus,
+                        actionedDate: new Date(),
+                        comment: nextStatus === "Rejected"
+                            ? "Closed: fine was rejected"
+                            : nextStatus === "Dismissed"
+                                ? "Closed: fine is not waiting for anyone"
+                                : "Closed: fine is already completed",
+                    },
+                },
+            ));
+        }
+        if (dismissIds.length) {
+            writes.push(DashboardAction.updateMany(
+                { _id: { $in: dismissIds }, status: { $in: ["Pending", "On Hold"] } },
+                {
+                    $set: {
+                        status: "Dismissed",
+                        actionedDate: new Date(),
+                        comment: "Closed: fine record is gone",
+                    },
+                },
+            ));
+        }
+        if (assigneeWrites.length) {
+            writes.push(DashboardAction.bulkWrite(assigneeWrites.map(({ action, person }) => ({
+                updateOne: {
+                    filter: { _id: action._id, status: { $in: ["Pending", "On Hold"] } },
+                    update: {
+                        $set: {
+                            assignedTo: person.employeeObjectId,
+                            assignedToEmpId: person.employeeId,
+                        },
+                    },
+                },
+            }))));
+            const overlayWrites = assigneeWrites.filter(({ overlay }) => overlay?._id && !overlayWasReassigned(overlay));
+            if (overlayWrites.length) {
+                writes.push(TaskManagerTask.bulkWrite(overlayWrites.map(({ overlay, person }) => ({
+                    updateOne: {
+                        filter: { _id: overlay._id },
+                        update: {
+                            $set: {
+                                assignee: person.employeeObjectId,
+                                assigneeEmpId: person.employeeId,
+                                ...(person.name ? { assigneeName: person.name } : {}),
+                            },
+                        },
+                    },
+                }))));
+            }
+        }
+        const finishedOverlayIds = [...closeByStatus.values()].flat().concat(dismissIds);
+        if (finishedOverlayIds.length) {
+            writes.push(TaskManagerTask.updateMany(
+                {
+                    sourceDashboardActionId: { $in: finishedOverlayIds },
+                    status: { $in: ["Pending", "In Progress", "On Hold"] },
+                },
+                { $set: { status: "Completed" } },
+            ));
+        }
+        if (writes.length) await Promise.all(writes);
+        return actions;
+    } catch (error) {
+        console.error("Align fine tasks failed:", error);
+        return actions;
+    }
+}
+
 export function vehicleDisplayFor(action, vehicles) {
     const record = vehicles?.get(vehicleRecordId(action)) || null;
     return {
@@ -399,6 +799,9 @@ function actionDuplicateKey(action) {
         if (!requestId && !extra) return "";
         return `system|${type}|${requestId}|${extra}`;
     }
+    if (/^(fine|group fine request)$/i.test(type)) {
+        return requestId ? `fine|${requestId}` : "";
+    }
     const detail = extra && extra !== type.toLowerCase() ? extra : "";
     if (detail) return `request|${type}|${subject}|${detail}`;
     if (subject || assignee) return `request|${type}|${subject}|${assignee}`;
@@ -492,8 +895,8 @@ export async function viewerMaySeeAllNotifications(req) {
 }
 
 /**
- * Read-only company-wide notification list.
- * Does not create, update, close, or dismiss any notification.
+ * Company-wide notification list.
+ * Finished fines are taken off the pending list, and an open fine shows the current stage assignee.
  */
 export const getTaskManagerNotifications = async (req, res) => {
     try {
@@ -519,23 +922,37 @@ export const getTaskManagerNotifications = async (req, res) => {
         const people = await EmployeeBasic.find({
             employeeId: { $ne: "VEGA-HR-0000" },
         })
-            .select("firstName lastName employeeId profilePicture")
+            .select("firstName lastName employeeId profilePicture status")
             .lean();
 
         const byId = new Map();
         const byCode = new Map();
         const nameOwners = new Map();
+        const leftUserIds = new Set();
+        const leftUserCodes = new Set();
         for (const person of people) {
             const id = String(person._id);
             const code = String(person.employeeId || "").trim();
             byId.set(id, person);
             if (code) byCode.set(code, person);
+            if (String(person.status || "") === "Left User") {
+                leftUserIds.add(id);
+                if (code) leftUserCodes.add(code.toUpperCase());
+            }
             const name = personName(person).toLowerCase();
             if (!name) continue;
             const owners = nameOwners.get(name) || [];
             owners.push(person);
             nameOwners.set(name, owners);
         }
+
+        const taskInvolvesLeftUser = (id, code) => {
+            const idKey = String(id || "").trim();
+            const codeKey = String(code || "").trim().toUpperCase();
+            if (idKey && (leftUserIds.has(idKey) || leftUserCodes.has(idKey.toUpperCase()))) return true;
+            if (codeKey && (leftUserCodes.has(codeKey) || leftUserIds.has(codeKey))) return true;
+            return false;
+        };
 
         const missingUserIds = assigneeIds.filter((id) => !byId.has(id));
         if (missingUserIds.length) {
@@ -585,7 +1002,17 @@ export const getTaskManagerNotifications = async (req, res) => {
         };
 
         const summary = { total: 0, pending: 0, pendingDue: 0, completed: 0 };
-        const uniqueActions = dedupeOpenActions(actions);
+        const preparedFines = await collapsePendingFineDashboardRows(actions);
+        await alignOpenFineDashboardRows(preparedFines.rows, overlayByAction);
+        const uniqueActions = dedupeOpenActions(preparedFines.rows).filter((action) => {
+            const overlay = overlayByAction.get(String(action._id));
+            if (taskInvolvesLeftUser(overlay?.assignee || action.assignedTo, overlay?.assigneeEmpId || action.assignedToEmpId)) {
+                return false;
+            }
+            if (taskInvolvesLeftUser(action.subjectEmployeeId, action.subjectEmployeeId)) return false;
+            return true;
+        });
+        const finesByRequest = preparedFines.fineInfo;
 
         const [sourceRequesters, vehicles, attendanceByAction] = await Promise.all([
             sourceRequesterNameMap(uniqueActions),
@@ -626,12 +1053,16 @@ export const getTaskManagerNotifications = async (req, res) => {
                 requestedBy: requesterBase,
                 taskName: overlay?.taskName,
                 description: overlay?.description,
-                source: attendanceByAction.get(String(action._id)) || undefined,
+                source: {
+                    ...(attendanceByAction.get(String(action._id)) || {}),
+                    ...(finesByRequest.get(String(action.requestId)) || {}),
+                },
                 ...vehicleDisplayFor(action, vehicles),
             });
             const requestMonth = monthKeyFromDateKey(requestedKey);
             const completedMonth = monthKeyFromDateKey(dubaiDateKey(action.actionedDate || requestedAt));
             if (overlay?.status === "Completed") status = "Completed";
+            else if (overlay?.status === "Rejected") status = "Rejected";
             else if (overlay?.status === "Cancelled") status = "Cancelled";
             else if (overlay?.status === "In Progress") status = "In Progress";
             else if (overlay?.status === "Pending" && overlay?.closeRequest?.reopenedAt) {
@@ -720,6 +1151,7 @@ export const getTaskManagerNotifications = async (req, res) => {
         ];
 
         for (const row of visibleTaskRows) {
+            if (taskInvolvesLeftUser(row.assignee, row.assigneeEmpId)) continue;
             const requestedAt = row.createdAt || null;
             const requestedKey = dubaiDateKey(requestedAt);
             const dueKey = dubaiDateKey(row.completionDate);
@@ -1126,14 +1558,17 @@ export async function listProfileEmployeeTasks({ employeeId, employeeCode, emplo
             return false;
         };
 
-        const sourceRequesters = await sourceRequesterNameMap([...actionById.values()]);
+        const preparedProfile = await collapsePendingFineDashboardRows([...actionById.values()]);
+        await alignOpenFineDashboardRows(preparedProfile.rows, overlayByAction);
+        const sourceRequesters = await sourceRequesterNameMap(preparedProfile.rows);
         const rows = [];
-        for (const action of dedupeOpenActions([...actionById.values()])) {
+        for (const action of dedupeOpenActions(preparedProfile.rows)) {
             const overlay = overlayByAction.get(String(action._id));
             const requestedAt = action.requestedDate || action.createdAt || null;
             const requestedKey = dubaiDateKey(requestedAt);
             let status = displayStatus(action.status, action.requestType, requestedKey, todayKey);
             if (overlay?.status === "Completed") status = "Completed";
+            else if (overlay?.status === "Rejected") status = "Rejected";
             else if (overlay?.status === "Cancelled") status = "Cancelled";
             else if (overlay?.status === "In Progress") status = "In Progress";
             else if (overlay?.status === "Pending" && overlay?.closeRequest?.reopenedAt) {
@@ -1285,7 +1720,7 @@ export async function taskNumbersByRecordId(recordIds) {
             .maxTimeMS(8000),
     ]);
 
-    const unique = dedupeOpenActions(actions || []);
+    const unique = dedupeOpenActions((await collapsePendingFineDashboardRows(actions || [])).rows);
     const stubs = unique.map((action) => ({
         actionId: String(action._id),
         requestDate: action.requestedDate || action.createdAt || null,
@@ -1350,7 +1785,9 @@ export async function countOpenTasksForAssignee(viewer) {
             .maxTimeMS(8000)
         : [];
 
-    const unique = dedupeOpenActions(actions);
+    const collapsedFines = await collapsePendingFineDashboardRows(actions);
+    await alignOpenFineDashboardRows(collapsedFines.rows);
+    const unique = dedupeOpenActions(collapsedFines.rows);
     const actionIds = unique.map((row) => row._id).filter(Boolean);
     const overlayOr = [];
     if (actionIds.length) overlayOr.push({ sourceDashboardActionId: { $in: actionIds } });
@@ -1383,10 +1820,13 @@ export async function countOpenTasksForAssignee(viewer) {
     const countedActions = new Set(actionIds.map((id) => String(id)));
     let actionOpen = 0;
     for (const action of unique) {
+        if (!PENDING_STATUSES.has(String(action.status || ""))) continue;
         const overlay = overlayByAction.get(String(action._id));
         if (overlay) {
             if (!OPEN_MANUAL_STATUSES.has(overlay.status || "Pending")) continue;
             if (!assigneeIsViewer(viewer, overlay.assignee, overlay.assigneeEmpId, overlay.assigneeName)) continue;
+        } else if (!assigneeIsViewer(viewer, action.assignedTo, action.assignedToEmpId)) {
+            continue;
         }
         actionOpen += 1;
     }

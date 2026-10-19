@@ -12,6 +12,7 @@ import { applyVehicleServiceNotificationCopy } from '../utils/vehicleServiceNoti
 import { resolveEmployeeEmail } from '../utils/resolveEmployeeEmail.js';
 import { isUserAdministrator } from '../services/permissionService.js';
 import { isJwtSystemSuperUser } from '../utils/systemSuperUser.js';
+import { isVehicleSold, SOLD_VEHICLE_LOCKED_MESSAGE } from '../utils/vehicleSoldGate.js';
 import {
     actorMayManageOilService,
     userIsOilServiceAdminOfficer,
@@ -1283,6 +1284,9 @@ export const respondVehicleServiceWorkflow = async (req, res) => {
 
         const asset = await AssetItem.findById(id).populate('assignedTo', 'firstName lastName employeeId');
         if (!asset) return res.status(404).json({ message: 'Asset not found' });
+        if (isVehicleSold(asset)) {
+            return res.status(400).json({ message: SOLD_VEHICLE_LOCKED_MESSAGE });
+        }
 
         const requestedServiceId = String(bodyServiceRecordId || bodyServiceId || '').trim();
         if (requestedServiceId) {
@@ -2364,6 +2368,9 @@ export const respondVehicleServiceScheduledPeriod = async (req, res) => {
 
         const asset = await AssetItem.findById(id).populate('assignedTo', 'firstName lastName employeeId');
         if (!asset) return res.status(404).json({ message: 'Asset not found' });
+        if (isVehicleSold(asset)) {
+            return res.status(400).json({ message: SOLD_VEHICLE_LOCKED_MESSAGE });
+        }
 
         const wf = asset.activeServiceWorkflow;
         if (wf?.stage !== STAGE.SCHEDULED) {

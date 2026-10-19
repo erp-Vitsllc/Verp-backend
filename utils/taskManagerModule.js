@@ -1031,7 +1031,7 @@ export async function loadTaskManagerInboxItems(assigneeClauses, moduleName, opt
 export async function syncManualTaskNotification(task) {
     if (!task?._id || !task.assignee) return null;
     const destination = moduleForText(task.taskName, task.description, task.taskType, task.requestType);
-    const closed = task.status === "Completed" || task.status === "Cancelled";
+    const closed = task.status === "Completed" || task.status === "Cancelled" || task.status === "Rejected";
     const extra3 = JSON.stringify({
         taskManager: true,
         module: destination.module,
@@ -1045,7 +1045,7 @@ export async function syncManualTaskNotification(task) {
             assignedToEmpId: task.assigneeEmpId || "",
             requestId: task._id,
             requestType: "Task Manager",
-            status: closed ? (task.status === "Cancelled" ? "Dismissed" : "Approved") : "Pending",
+            status: closed ? (task.status === "Cancelled" || task.status === "Rejected" ? "Dismissed" : "Approved") : "Pending",
             subjectEmployeeId: task.assigneeEmpId || "",
             subjectName: task.assigneeName || "",
             requestedByName: task.requestedByName || "",

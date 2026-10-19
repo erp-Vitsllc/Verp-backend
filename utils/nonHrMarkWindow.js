@@ -23,3 +23,16 @@ export function nonHrMarkableDateKeys(todayKey, _holidayDates, extraDays = 7) {
     }
     return allowed;
 }
+
+export function nextCalendarDateKey(todayKey) {
+    return shiftDateKey(todayKey, 1);
+}
+
+/** Non-HR may mark tomorrow only as Present (comp off). */
+export function isNextDayPresentMark(todayKey, dateKey, statusKeys = []) {
+    if (String(dateKey || '').trim() !== nextCalendarDateKey(todayKey)) return false;
+    const keys = (Array.isArray(statusKeys) ? statusKeys : [])
+        .map((key) => String(key || '').trim())
+        .filter(Boolean);
+    return keys.length > 0 && keys.every((key) => key === 'on_office');
+}

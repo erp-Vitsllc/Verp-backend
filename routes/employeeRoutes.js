@@ -30,6 +30,7 @@ import { deleteWorkDetailsCard } from "../controllers/employee/deleteWorkDetails
 import { deleteSignatureCard } from "../controllers/employee/deleteSignatureCard.js";
 import { deleteSalaryHistoryEntry } from "../controllers/employee/deleteSalaryHistoryEntry.js";
 import { updateWorkDetails } from "../controllers/employee/updateWorkDetails.js";
+import { setAttendanceSuspension } from "../controllers/employee/setAttendanceSuspension.js";
 import { addEducation } from "../controllers/employee/addEducation.js";
 import { updateEducation } from "../controllers/employee/updateEducation.js";
 import { deleteEducation } from "../controllers/employee/deleteEducation.js";
@@ -653,6 +654,7 @@ router.delete(
 
 // Update work details - requires edit permission
 router.patch("/work-details/:id", checkPermission('hrm_employees_view_work', 'edit'), updateWorkDetails);
+router.post("/:id/attendance-suspension", setAttendanceSuspension);
 router.delete("/work-details/:id", checkEmployeeCardDeletePermission('hrm_employees_view_work'), blockLeftUserWrites, deleteWorkDetailsCard);
 
 // Update passport - requires edit permission

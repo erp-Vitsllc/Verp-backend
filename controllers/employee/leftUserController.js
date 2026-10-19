@@ -34,13 +34,20 @@ export const markEmployeeLeftUser = async (req, res) => {
             return res.status(400).json({ message: "Employee is already marked as Left User." });
         }
 
+        if (req.body?.gratuityPaidConfirmed !== true) {
+            return res.status(400).json({
+                message: "Confirm that employee gratuity is paid before marking Left User.",
+            });
+        }
+
         const fullEmployee = await getCompleteEmployee(employee.employeeId);
-        const { eligible, blockers } = await checkLeftUserEligibility(fullEmployee);
+        const { eligible, blockers, checks } = await checkLeftUserEligibility(fullEmployee);
 
         if (!eligible) {
             return res.status(400).json({
                 message: blockers[0]?.message || "Employee cannot be marked as Left User.",
                 blockers,
+                checks,
             });
         }
 

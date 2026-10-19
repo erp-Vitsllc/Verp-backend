@@ -6,6 +6,7 @@ import AssetType from '../models/AssetType.js';
 import Company from '../models/Company.js';
 import { buildFleetVehicleMongoScope } from '../utils/fleetVehicleAssetId.js';
 import { isFleetVehicleAsset } from '../utils/assetApprovalHelpers.js';
+import { isVehicleSold, SOLD_VEHICLE_LOCKED_MESSAGE } from '../utils/vehicleSoldGate.js';
 import {
     getLocatorMonthStatsForDevice,
     getLocatorMonthStatsMap,
@@ -997,6 +998,9 @@ export async function addVehicleFuel(req, res) {
 
         const asset = await loadFleetVehicle(vehicleId);
         if (!asset) return res.status(404).json({ message: 'Vehicle not found.' });
+        if (isVehicleSold(asset)) {
+            return res.status(400).json({ message: SOLD_VEHICLE_LOCKED_MESSAGE });
+        }
 
         const monthlyLimit = resolveVehicleMonthlyLimit(asset, parseAmount(req.body?.monthlyLimit));
         if (monthlyLimit == null || monthlyLimit <= 0) {
@@ -1070,6 +1074,9 @@ export async function updateVehicleFuel(req, res) {
 
         const asset = await loadFleetVehicle(bill.vehicleId);
         if (!asset) return res.status(404).json({ message: 'Vehicle not found.' });
+        if (isVehicleSold(asset)) {
+            return res.status(400).json({ message: SOLD_VEHICLE_LOCKED_MESSAGE });
+        }
 
         const canEditMonthlyLimit = await actorCanEditFuelMonthlyLimit(req.user);
         const requestedLimit = parseAmount(req.body?.monthlyLimit);
@@ -1134,6 +1141,9 @@ export async function updateVehicleFuelEntry(req, res) {
 
         const asset = await loadFleetVehicle(bill.vehicleId);
         if (!asset) return res.status(404).json({ message: 'Vehicle not found.' });
+        if (isVehicleSold(asset)) {
+            return res.status(400).json({ message: SOLD_VEHICLE_LOCKED_MESSAGE });
+        }
 
         const canEditMonthlyLimit = await actorCanEditFuelMonthlyLimit(req.user);
         const requestedLimit = parseAmount(req.body?.monthlyLimit);
@@ -1280,6 +1290,9 @@ export async function deleteVehicleFuel(req, res) {
         if (!bill) return res.status(404).json({ message: 'Fuel bill not found.' });
 
         const asset = await loadFleetVehicle(bill.vehicleId);
+        if (asset && isVehicleSold(asset)) {
+            return res.status(400).json({ message: SOLD_VEHICLE_LOCKED_MESSAGE });
+        }
         const snapshot = typeof bill.toObject === 'function' ? bill.toObject() : { ...bill };
         const plate = plateOf(asset) || asset?.assetId || '—';
         const monthLabel = monthLabelFromKey(bill.monthKey);

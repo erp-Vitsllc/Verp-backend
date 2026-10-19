@@ -29,6 +29,7 @@ export const getReporteeOptions = async (req, res) => {
 
         const employees = await EmployeeBasic.find({
             employeeId: { $in: employeeIds },
+            status: { $ne: "Left User" },
         })
             .select("_id employeeId firstName lastName designation companyEmail workEmail email")
             .lean();

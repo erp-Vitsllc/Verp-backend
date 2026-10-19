@@ -4,6 +4,8 @@ import EmployeeHubRequest from '../../models/EmployeeHubRequest.js';
 import Attendance from '../../models/Attendance.js';
 import Loan from '../../models/Loan.js';
 import { hubRequestDisplayLabel } from '../../utils/employeeHubRequestTypes.js';
+import { leaveDashboardRequestObjectId } from '../../utils/notifyLeaveDashboardRequest.js';
+import { taskNumbersByRecordId } from '../stats/getTaskManagerNotifications.js';
 
 function isPendingStatus(raw) {
     const s = String(raw || "").trim().toLowerCase();
@@ -45,6 +47,39 @@ function leaveRequestLabel(row) {
     return { type, detail: range };
 }
 
+function clipText(value) {
+    return String(value || '').replace(/\s+/g, ' ').trim().slice(0, 180);
+}
+
+function dateKeyOf(value) {
+    const raw = String(value || '').trim();
+    if (/^\d{4}-\d{2}-\d{2}$/.test(raw)) return raw;
+    return '';
+}
+
+function markAttendanceHref(date, attendanceId) {
+    const day = dateKeyOf(date);
+    if (!day) return '';
+    const params = new URLSearchParams({ date: day });
+    const id = String(attendanceId || '').trim();
+    if (id) params.set('leaveAttendanceId', id);
+    return `/HRM/Attendance/mark?${params.toString()}`;
+}
+
+function hubDetailHref(row) {
+    const kind = String(row?.kind || '').trim();
+    const area = String(row?.assetType || '').trim();
+    const day = dateKeyOf(row?.requestedDate);
+    if (kind === 'leave') return markAttendanceHref(day) || '/HRM/Leave';
+    if (kind === 'loan' || kind === 'advance') return '/HRM/LoanAndAdvance';
+    if (kind === 'salary' || kind === 'certificate') return '/HRM/Salary';
+    if (kind === 'fine') return '/HRM/Fine';
+    if (kind === 'vehicle' || area === 'Vehicle') return '/HRM/Asset/Vehicle';
+    if (kind === 'utility' || area === 'Utility Bill') return '/HRM/Asset/UtilityBills';
+    if (kind === 'assets') return '/HRM/Asset';
+    return '/dashboard';
+}
+
 export async function getMyDashboardRequests(req, res) {
     try {
         if (mongoose.connection.readyState !== 1) return res.status(503).json({ message: 'Database not connected.' });
@@ -79,7 +114,17 @@ export async function getMyDashboardRequests(req, res) {
             const status = normalizeStatus(row.status);
             if (!isPendingStatus(status)) continue;
             const label = hubRequestDisplayLabel(row.kind, row.assetType);
-            requests.push({ id: String(row._id), source: 'hub', label: `${label} request`, detail: String(row.description || '').slice(0, 120), status, date: row.createdAt || null, href: `/dashboard?hubRequestId=${encodeURIComponent(String(row._id))}` });
+            requests.push({
+                id: String(row._id),
+                source: 'hub',
+                label: `${label} request`,
+                detail: String(row.description || '').slice(0, 120),
+                reason: clipText(row.reason || row.description),
+                lookupIds: [String(row._id)],
+                status,
+                date: row.requestedDate || row.createdAt || null,
+                href: hubDetailHref(row),
+            });
         }
         for (const row of attendanceRows || []) {
             const key = String(row.leaveRequestGroupId || row._id);
@@ -88,14 +133,41 @@ export async function getMyDashboardRequests(req, res) {
             const status = normalizeStatus(row.leaveRequestStatus);
             if (!isPendingStatus(status)) continue;
             const { type, detail } = leaveRequestLabel(row);
-            requests.push({ id: key, source: 'leave', label: type, detail, status, date: row.leaveRequestedAt || row.createdAt || null, href: '/dashboard?focusAttendance=1' });
+            const dashboardId = String(leaveDashboardRequestObjectId(row.leaveRequestGroupId, row._id));
+            requests.push({
+                id: key,
+                source: 'leave',
+                label: type,
+                detail,
+                reason: clipText(row.leaveRequestReason || row.reason || type),
+                lookupIds: [dashboardId, key, String(row._id)].filter(Boolean),
+                status,
+                date: row.leaveRequestedAt || row.createdAt || null,
+                href: markAttendanceHref(row.date || row.leaveRequestFromDate, row._id) || '/HRM/Attendance/mark',
+            });
         }
         for (const row of loanRows || []) {
             const statusRaw = String(row.approvalStatus || row.status || '').trim();
             const status = normalizeStatus(statusRaw);
             if (!isPendingStatus(status)) continue;
             const type = row.type === 'Advance' ? 'Advance' : 'Loan';
-            requests.push({ id: String(row._id), source: 'loan', label: `${type} request`, detail: row.loanId || row.reason || type, status, date: row.appliedDate || row.createdAt || null, href: `/HRM/LoanAndAdvance/${type.replace(/\s+/g, '-')}-${row._id}` });
+            requests.push({
+                id: String(row._id),
+                source: 'loan',
+                label: `${type} request`,
+                detail: row.loanId || row.reason || type,
+                reason: clipText(row.reason || type),
+                lookupIds: [String(row._id)],
+                status,
+                date: row.appliedDate || row.createdAt || null,
+                href: `/HRM/LoanAndAdvance/${type.replace(/\s+/g, '-')}-${row._id}`,
+            });
+        }
+
+        const numbers = await taskNumbersByRecordId(requests.flatMap((item) => item.lookupIds || []));
+        for (const item of requests) {
+            item.taskNo = (item.lookupIds || []).map((id) => numbers.get(id)).find(Boolean) || '';
+            delete item.lookupIds;
         }
 
         requests.sort((a, b) => new Date(b.date || 0).getTime() - new Date(a.date || 0).getTime());

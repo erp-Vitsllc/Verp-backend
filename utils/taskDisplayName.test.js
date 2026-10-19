@@ -44,7 +44,7 @@ test("expiry lists the document first, then the owner", () => {
             extra2: "Ahmed Khan (VITS001)",
             taskName: "Passport Expiry Reminder — Ahmed Khan",
         }),
-        { title: "Passport - Expiry", subject: "Ahmed Khan\nVITS001" },
+        { title: "Passport Expiry", subject: "Ahmed Khan\nVITS001" },
     );
     assert.deepEqual(
         formatTaskDisplayParts({
@@ -54,7 +54,7 @@ test("expiry lists the document first, then the owner", () => {
             vehicleNo: "Dubai A 12345",
             taskName: "Document Expiry",
         }),
-        { title: "Insurance - Expiry", subject: "Toyota Hilux\nDubai A 12345" },
+        { title: "Insurance Expiry", subject: "Toyota Hilux\nDubai A 12345" },
     );
     assert.deepEqual(
         formatTaskDisplayParts({
@@ -62,7 +62,7 @@ test("expiry lists the document first, then the owner", () => {
             extra1: "Expiry follow-up required: Insurance (Exp: 01 Nov 2026)",
             extra2: "Toyota Hilux (VEGA-VEH-014)",
         }),
-        { title: "Insurance - Expiry", subject: "Toyota Hilux\nVEGA-VEH-014" },
+        { title: "Insurance Expiry", subject: "Toyota Hilux\nVEGA-VEH-014" },
     );
     assert.deepEqual(
         formatTaskDisplayParts({
@@ -70,7 +70,7 @@ test("expiry lists the document first, then the owner", () => {
             extra1: "Expiry follow-up required: Trade License (Exp: 01 Jan 2027)",
             extra2: "Vega Technologies (C001)",
         }),
-        { title: "Trade License - Expiry", subject: "Vega Technologies\nC001" },
+        { title: "Trade License Expiry", subject: "Vega Technologies\nC001" },
     );
     assert.deepEqual(
         formatTaskDisplayParts({
@@ -79,7 +79,7 @@ test("expiry lists the document first, then the owner", () => {
             extra2: "Corolla (VEGA-VHCL-001)",
             taskName: "Corolla (VEGA-VHCL-001)",
         }),
-        { title: "Mulkia (Registration) - Expiry", subject: "Corolla\nVEGA-VHCL-001" },
+        { title: "Mulkia (Registration) Expiry", subject: "Corolla\nVEGA-VHCL-001" },
     );
 });
 
@@ -113,7 +113,7 @@ test("fine, not-renew, leave, and asset names list the task, then the person or 
             subjectName: "Ahmed Khan",
             subjectEmployeeId: "VITS001",
         }),
-        { title: "Visa - Not Renew", subject: "Ahmed Khan\nVITS001" },
+        { title: "Visa Not Renew", subject: "Ahmed Khan\nVITS001" },
     );
     assert.deepEqual(
         formatTaskDisplayParts({
@@ -127,7 +127,7 @@ test("fine, not-renew, leave, and asset names list the task, then the person or 
             }),
             subjectName: "Ahmed Khan",
         }),
-        { title: "Oct 1, 2026 – Oct 3, 2026 Comp Off", subject: "Ahmed Khan" },
+        { title: "Comp Off Request", subject: "Oct 1, 2026 – Oct 3, 2026\nAhmed Khan" },
     );
     assert.deepEqual(
         formatTaskDisplayParts({
@@ -144,7 +144,7 @@ test("fine, not-renew, leave, and asset names list the task, then the person or 
             subjectName: "Philipose K",
             taskName: "Philipose K, Attendance Change",
         }),
-        { title: "Oct 16, 2026 Late In", subject: "Philipose K" },
+        { title: "Late In Request", subject: "Oct 16, 2026\nPhilipose K" },
     );
     assert.deepEqual(
         formatTaskDisplayParts({
@@ -157,7 +157,7 @@ test("fine, not-renew, leave, and asset names list the task, then the person or 
             }),
             subjectName: "Vishnu Prasad",
         }),
-        { title: "Oct 2, 2026 Mispunch", subject: "Vishnu Prasad" },
+        { title: "Mispunch Request", subject: "Oct 2, 2026\nVishnu Prasad" },
     );
     assert.deepEqual(
         formatTaskDisplayParts({
@@ -172,7 +172,7 @@ test("fine, not-renew, leave, and asset names list the task, then the person or 
                 requestKind: "OT",
             },
         }),
-        { title: "Oct 16, 2026 OT", subject: "Philipose K" },
+        { title: "OT Request", subject: "Oct 16, 2026\nPhilipose K" },
     );
     assert.deepEqual(
         formatTaskDisplayParts({
@@ -180,7 +180,7 @@ test("fine, not-renew, leave, and asset names list the task, then the person or 
             extra1: "AST-12 — Drill",
             assetLabel: "AST-12 — Drill",
         }),
-        { title: "Assignment", subject: "AST-12 — Drill" },
+        { title: "Asset Assigning", subject: "AST-12 — Drill" },
     );
     assert.deepEqual(
         formatTaskDisplayParts({
@@ -188,7 +188,97 @@ test("fine, not-renew, leave, and asset names list the task, then the person or 
             hasPlate: true,
             vehicleNo: "Dubai B 99881",
         }),
-        { title: "Handover", subject: "Dubai B 99881" },
+        { title: "Vehicle Handover", subject: "Dubai B 99881" },
+    );
+});
+
+test("each task kind is named for what it is", () => {
+    assert.equal(
+        formatTaskDisplayParts({
+            requestType: "Asset Assignment Escalation",
+            assetLabel: "AST-4 — Laptop",
+        }).title,
+        "Force Assigning",
+    );
+    assert.equal(
+        formatTaskDisplayParts({
+            requestType: "Asset Transfer",
+            extra1: "AST-9 — Generator",
+        }).title,
+        "Transfer Asset",
+    );
+    assert.deepEqual(
+        formatTaskDisplayParts({
+            requestType: "Attendance Leave Request",
+            extra3: JSON.stringify({
+                from: "2026-10-12",
+                to: "2026-10-12",
+                requestedStatusKey: "sick_leave",
+            }),
+            subjectName: "Sajid",
+            subjectEmployeeId: "VITS014",
+        }),
+        { title: "Sick Leave Request", subject: "Oct 12, 2026\nSajid\nVITS014" },
+    );
+    assert.equal(
+        formatTaskDisplayParts({
+            requestType: "Employee Asset Request",
+            extra2: "Assets · Tools",
+        }).title,
+        "Tools Request",
+    );
+});
+
+test("one employee stored as a group fine stays an individual fine", () => {
+    assert.deepEqual(
+        formatTaskDisplayParts({
+            requestType: "Group Fine Request",
+            extra1: "Other Fines",
+            subjectName: "Group Fine - 2 Employees",
+            source: {
+                isGroup: false,
+                fineType: "Other Fines",
+                fineId: "VEGA-FINE-0010",
+                employeeName: "Sajid",
+                employeeId: "VITS014",
+            },
+        }),
+        { title: "Other Fines - Sajid - VEGA-FINE-0010", subject: "VITS014" },
+    );
+});
+
+test("a vehicle fine names the fine, the person, and the fine number", () => {
+    assert.deepEqual(
+        formatTaskDisplayParts({
+            requestType: "Fine",
+            extra1: "Vehicle Fine",
+            extra2: "AED 500",
+            subjectName: "Sajid",
+            subjectEmployeeId: "VITS014",
+            source: {
+                fineType: "Vehicle Fine",
+                fineId: "VEGA-FINE-0026",
+                employeeName: "Sajid",
+                employeeId: "VITS014",
+            },
+        }),
+        { title: "Vehicle Fine - Sajid - VEGA-FINE-0026", subject: "VITS014" },
+    );
+    assert.deepEqual(
+        formatTaskDisplayParts({
+            requestType: "Group Fine Request",
+            extra1: "Vehicle Fine",
+            subjectName: "Group Fine - 3 Employees",
+            source: { fineType: "Vehicle Fine", fineId: "VEGA-FINE-0026-A", employeeName: "Sajid, Ahmed, Ravi" },
+        }),
+        { title: "Group Fine - Vehicle Fine - 3 Employees - VEGA-FINE-0026-A", subject: "" },
+    );
+    assert.equal(
+        formatTaskDisplayParts({
+            requestType: "Employee Fine Request",
+            subjectName: "Sajid",
+        }).title,
+        "Fine Request - Sajid",
     );
 });
 

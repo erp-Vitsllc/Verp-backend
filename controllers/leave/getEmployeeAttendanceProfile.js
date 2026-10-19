@@ -19,6 +19,7 @@ import {
 } from '../../utils/scheduleDailyAtMidnight.js';
 import { hasPermission } from '../../services/permissionService.js';
 import { isReqUserSystemSuperUser } from '../../utils/systemSuperUser.js';
+import { isAttendanceSuspendedOn, overlaySuspendedAttendance } from '../../utils/attendanceSuspension.js';
 import { signOrKeepAttachmentUrl } from '../../utils/s3Upload.js';
 import {
     buildLeaveBalances,
@@ -794,7 +795,7 @@ export async function getEmployeeAttendanceProfile(req, res) {
 
         const employee = await EmployeeBasic.findById(id)
             .select(
-                '_id employeeId firstName lastName staffType profilePicture salary salaryDetails dateOfJoining joiningDate designation role department status profileStatus primaryReportee',
+                '_id employeeId firstName lastName staffType profilePicture salary salaryDetails dateOfJoining joiningDate designation role department status profileStatus primaryReportee attendanceAccountStatus attendanceSuspension',
             )
             .populate('primaryReportee', 'firstName lastName employeeId')
             .lean();
@@ -1287,6 +1288,20 @@ export async function getEmployeeAttendanceProfile(req, res) {
         const profilePicture = rawPhoto.startsWith('data:')
             ? rawPhoto
             : (await signOrKeepAttachmentUrl(rawPhoto)) || rawPhoto;
+        const attendanceSuspending = isAttendanceSuspendedOn(employee, todayKey);
+        const displayEvents = overlaySuspendedAttendance(events, employee, from, to).map((row) => {
+            if (String(row?.statusKey || '') !== 'suspended') return row;
+            return {
+                id: `${row.date}-suspended`,
+                date: row.date,
+                statusKey: 'suspended',
+                statusLabel: 'Suspended',
+                reason: row.reason || 'Attendance suspended',
+                attachmentName: '',
+                leavePayType: '',
+                historical: false,
+            };
+        });
 
         return res.status(200).json({
             year,
@@ -1301,6 +1316,9 @@ export async function getEmployeeAttendanceProfile(req, res) {
                 status: String(employee.status || '').trim(),
                 profileStatus: String(employee.profileStatus || '').trim(),
                 isActive,
+                attendanceSuspending,
+                attendanceAccountStatus: String(employee.attendanceAccountStatus || 'active'),
+                attendanceSuspension: employee.attendanceSuspension || null,
                 dateOfJoining: joinKey,
                 dateOfBirth: dobKey,
                 birthdayLabel: formatDayMonthLong(dobKey),
@@ -1387,7 +1405,7 @@ export async function getEmployeeAttendanceProfile(req, res) {
                 extraLateRules: (policy?.extraLateRules || []).map(publicDeductionRule).filter(Boolean),
                 missedPunchRule: publicDeductionRule(policy?.missedPunchRule),
             },
-            events,
+            events: displayEvents,
             financial: {
                 salary,
                 salaryHistory: mapSalaryHistoryItems(salaryDoc?.salaryHistory),

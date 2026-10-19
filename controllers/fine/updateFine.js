@@ -8,7 +8,7 @@ import { sendFineApprovalEmail } from "../../utils/sendFineApprovalEmail.js";
 import { getDepartmentHOD } from "../../utils/getDepartmentHOD.js";
 import { getManagementHOD } from "../../utils/getManagementHOD.js";
 import { isVehicleFinePayload, validateVehicleFinePayload } from "../../utils/validateVehicleFinePayload.js";
-import { canUserActOnFineStageAsync, fineStillNeedsApprovalInbox } from "../../utils/fineStageAuth.js";
+import { canUserActOnFineStageAsync, fineDashboardRequest, fineStillNeedsApprovalInbox } from "../../utils/fineStageAuth.js";
 import {
     isApprovedFineStatus,
     isUserHrForApprovedFineEdit,
@@ -802,9 +802,10 @@ export const updateFine = async (req, res) => {
                 : null;
             const subjectEmp = targetEmpId ? await EmployeeBasic.findOne({ employeeId: targetEmpId }) : null;
 
-            const isGroup = fines.length > 1;
-            const reqType = isGroup ? 'Group Fine Request' : 'Fine';
-            const subjectName = isGroup ? `Group Fine - ${fines.length} Employees` : undefined;
+            const kind = fineDashboardRequest(fines);
+            const isGroup = kind.isGroup;
+            const reqType = kind.requestType;
+            const subjectName = isGroup ? kind.subjectName : undefined;
 
             const stillNeedsApproval = fineStillNeedsApprovalInbox(updatedFine);
             // Never write raw fineStatus (e.g. "Pending Accounts") — DashboardAction

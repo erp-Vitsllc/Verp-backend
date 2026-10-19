@@ -935,10 +935,17 @@ export async function monthPayrollIsClear(monthKey) {
     return enrolled > 0 && pending.length === 0;
 }
 
+function currentSalaryYearMonth() {
+    const dubai = getZonedParts(new Date(), getScheduledEmailTimeZone());
+    return `${dubai.year}-${pad2(dubai.month)}`;
+}
+
 function employeeWorkedInMonth(emp, ym) {
     const join = toYearMonth(emp?.dateOfJoining);
     if (join && join > ym) return false;
     if (String(emp?.status || '') === 'Left User') {
+        // Current month and every later salary list stay empty for a Left User.
+        if (ym >= currentSalaryYearMonth()) return false;
         const exit = toYearMonth(emp?.noticeRequest?.exitDate);
         if (exit && exit < ym) return false;
     }

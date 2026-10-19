@@ -11,6 +11,7 @@ import { applyAllVehiclePendingProfileEdits, applyVehiclePendingProfileEditEntry
 import { pendingEditsChangeHtml } from '../utils/vehicleProfileChangeSummary.js';
 import { VEHICLE_PROFILE_ACTIVATION_SECTION_IDS } from '../utils/vehicleProfileCompletion.js';
 import { userCanManageFleetVehicleHandover } from '../utils/assetApprovalHelpers.js';
+import { isVehicleSold, SOLD_VEHICLE_LOCKED_MESSAGE } from '../utils/vehicleSoldGate.js';
 
 const PROTECTED_SECTIONS = new Set(VEHICLE_PROFILE_ACTIVATION_SECTION_IDS);
 
@@ -162,6 +163,9 @@ export const queueVehicleProfileEdit = async (req, res) => {
 
         const asset = await AssetItem.findById(id).populate('typeId', 'name').lean();
         if (!asset) return res.status(404).json({ message: 'Asset not found' });
+        if (isVehicleSold(asset)) {
+            return res.status(400).json({ message: SOLD_VEHICLE_LOCKED_MESSAGE });
+        }
         if (!isFleetVehicleAsset(asset)) {
             return res.status(400).json({ message: 'Not a fleet vehicle asset.' });
         }
@@ -224,6 +228,9 @@ export const submitVehicleProfileEdit = async (req, res) => {
 
         const asset = await AssetItem.findById(id).populate('typeId', 'name').lean();
         if (!asset) return res.status(404).json({ message: 'Asset not found' });
+        if (isVehicleSold(asset)) {
+            return res.status(400).json({ message: SOLD_VEHICLE_LOCKED_MESSAGE });
+        }
         if (!isFleetVehicleAsset(asset)) {
             return res.status(400).json({ message: 'Not a fleet vehicle asset.' });
         }
@@ -517,6 +524,9 @@ export const applyVehicleProfileSection = async (req, res) => {
 
         const asset = await AssetItem.findById(id).populate('typeId', 'name');
         if (!asset) return res.status(404).json({ message: 'Asset not found' });
+        if (isVehicleSold(asset)) {
+            return res.status(400).json({ message: SOLD_VEHICLE_LOCKED_MESSAGE });
+        }
         if (!isFleetVehicleAsset(asset)) {
             return res.status(400).json({ message: 'Not a fleet vehicle asset.' });
         }

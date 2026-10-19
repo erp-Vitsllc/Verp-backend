@@ -54,6 +54,10 @@ import {
     submitVehicleDispositionFinance,
 } from '../controllers/vehicleDispositionWorkflowController.js';
 import {
+    getVehicleSoldReadiness,
+    sellVehicleDirect,
+} from '../controllers/vehicleDirectSoldController.js';
+import {
     submitVehicleInspectionRequest,
     submitVehicleReinspectionRequest,
     submitInspectionHandoverForHr,
@@ -949,6 +953,8 @@ router.post('/:id/reject-vehicle-mortgage-close', protect, rejectVehicleMortgage
 router.post('/:id/request-vehicle-delete', protect, requireVehicleDeleteAccess, requestVehicleDelete);
 router.post('/:id/approve-vehicle-delete', protect, approveVehicleDelete);
 router.post('/:id/reject-vehicle-delete', protect, rejectVehicleDelete);
+router.get('/:id/sold-readiness', protect, getVehicleSoldReadiness);
+router.post('/:id/sell', protect, sellVehicleDirect);
 router.post('/:id/submit-vehicle-disposition-request', protect, submitVehicleDispositionRequest);
 router.post('/:id/respond-vehicle-disposition-hr', protect, respondVehicleDispositionHr);
 router.post('/:id/submit-vehicle-disposition-finance', protect, submitVehicleDispositionFinance);

@@ -3302,6 +3302,7 @@ export async function processOilServiceDueAutoCreate() {
         const items = await AssetItem.find({
             plateNumber: { $exists: true, $ne: '' },
             vehicleProfileActivationStatus: 'active',
+            vehicleDispositionStatus: { $nin: ['sold', 'total loss'] },
         })
             .select(
                 'assetId plateNumber plateEmirate services activeServiceWorkflow currentKilometer nextServiceDate assignedTo vehicleProfileActivationStatus typeId onServiceActive',

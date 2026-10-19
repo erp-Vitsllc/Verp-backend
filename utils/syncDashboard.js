@@ -346,12 +346,21 @@ export const syncDashboardAction = async (data) => {
                         ? JSON.stringify({ activationSubject: 'vehicle', activationViewerRole: 'flowchart_hr' })
                         : undefined;
 
-        const pendingUpsertFilter = {
-            requestId: requestId,
-            assignedTo: actualAssignedTo,
-            status: 'Pending',
-            ...(requestType ? { requestType } : {}),
-        };
+        const fineInboxType = requestType === 'Fine' || requestType === 'Group Fine Request';
+        // One open task per fine. Matching either fine type updates the existing row
+        // instead of leaving both "Fine" and "Group Fine Request" pending.
+        const pendingUpsertFilter = fineInboxType
+            ? {
+                requestId: requestId,
+                status: 'Pending',
+                requestType: { $in: ['Fine', 'Group Fine Request'] },
+            }
+            : {
+                requestId: requestId,
+                assignedTo: actualAssignedTo,
+                status: 'Pending',
+                ...(requestType ? { requestType } : {}),
+            };
         // Parallel disposition + inspection: separate bell rows per extra3.
         // Vehicle service: Admin create-track folds stage updates above; HR/Accounts keep extra3 rows.
         if (

@@ -7,7 +7,7 @@ import { sendFineApprovalEmail } from "../../utils/sendFineApprovalEmail.js";
 import { isVehicleFinePayload, validateVehicleFinePayload } from "../../utils/validateVehicleFinePayload.js";
 import { normalizeFineSourceSchedule } from "../../utils/normalizeFineSourceSchedule.js";
 import { parseFineCalendarDate } from "../../utils/fineCalendarDate.js";
-import { fineStillNeedsApprovalInbox } from "../../utils/fineStageAuth.js";
+import { fineDashboardRequest, fineStillNeedsApprovalInbox, realFineEmployeeIds } from "../../utils/fineStageAuth.js";
 
 async function persistFineAttachmentsList(attachments, folder) {
     if (!Array.isArray(attachments) || attachments.length === 0) return [];
@@ -492,15 +492,22 @@ export const addFine = async (req, res) => {
                 if (reporteeStep && fineStillNeedsApprovalInbox(firstFine)) {
                     try {
                         const { syncDashboardAction } = await import("../../utils/syncDashboard.js");
+                        const kind = fineDashboardRequest(createdFines);
+                        const primary = kind.primary || firstFine;
+                        const personId = realFineEmployeeIds([primary])[0] || realFineEmployeeIds(createdFines)[0];
+                        const subjectEmployee = !kind.isGroup && personId
+                            ? await EmployeeBasic.findOne({ employeeId: personId })
+                            : null;
                         await syncDashboardAction({
-                            requestId: firstFine._id, // Dashboard will link to the FIRST fine in the group
-                            requestType: 'Group Fine Request',
+                            requestId: primary._id,
+                            requestType: kind.requestType,
                             assignedTo: reporteeStep.assignedTo,
                             status: 'Pending',
-                            subjectName: `Group Fine - ${createdFines.length} Employees`,
+                            subjectEmployee,
+                            subjectName: kind.isGroup ? kind.subjectName : undefined,
                             requestedByName: req.user.name || '',
-                            extra1: firstFine.fineType,
-                            extra2: `Total: AED ${totalFine}`
+                            extra1: primary.fineType,
+                            extra2: kind.isGroup ? `Total: AED ${totalFine}` : `AED ${primary.fineAmount || totalFine}`
                         });
                     } catch (err) {
                         console.error('[AddFine] Error matching group dashboard action:', err);

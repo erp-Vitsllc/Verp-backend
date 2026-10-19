@@ -28,6 +28,7 @@ import {
 } from "../../utils/emailDispatch.js";
 import { resolveEmployeeEmailWithReporteeLoaded } from "../../utils/resolveEmployeeEmail.js";
 import {
+    alignOpenFineDashboardRows,
     displayStatus,
     taskCategory as categoryFromRequestType,
     displayRequesterName,
@@ -77,7 +78,7 @@ function dubaiDateKey(value) {
 }
 
 function detailDisplayStatus(task, action, manual) {
-    if (task?.status === "Completed" || task?.status === "Cancelled") return task.status;
+    if (task?.status === "Completed" || task?.status === "Cancelled" || task?.status === "Rejected") return task.status;
     if (task?.closeRequest?.reopenedAt && (task.status === "Pending" || task.status === "In Progress")) {
         const requested = manual ? task.createdAt : (action?.requestedDate || action?.createdAt || task.createdAt);
         return displayStatus(task.status, manual ? "" : action?.requestType, dubaiDateKey(requested), dubaiDateKey(new Date()));
@@ -94,7 +95,7 @@ function detailDisplayStatus(task, action, manual) {
 }
 
 const PRIORITIES = new Set(["High", "Medium", "Low"]);
-const STATUSES = new Set(["Pending", "In Progress", "Completed", "Cancelled"]);
+const STATUSES = new Set(["Pending", "In Progress", "Completed", "Cancelled", "Rejected"]);
 
 function parseCompletionDate(value) {
     const text = String(value || "").trim();
@@ -515,7 +516,7 @@ function isSystemRequester(name) {
 }
 
 function completionWindowOpen(task) {
-    if (!task || task.status === "Completed" || task.status === "Cancelled") return false;
+    if (!task || task.status === "Completed" || task.status === "Cancelled" || task.status === "Rejected") return false;
     const at = task.closeRequest?.completesAt ? new Date(task.closeRequest.completesAt).getTime() : 0;
     return Boolean(at) && at > Date.now();
 }
@@ -524,11 +525,12 @@ function scheduleCompletion(from = new Date()) {
     return new Date(from.getTime() + CLOSE_HOLD_MS);
 }
 
-async function viewerIsTaskRequester(task, viewer) {
-    if (!task) return false;
-    if (isSystemRequester(task.requestedByName)) return Boolean(viewer?.superUser);
-    if (task.requestedByUserId && viewer?.userId && String(task.requestedByUserId) === String(viewer.userId)) return true;
-    const requesterName = personBaseName(task.requestedByName);
+async function viewerIsTaskRequester(task, viewer, action = null) {
+    const requestedByName = task?.requestedByName || action?.requestedByName || "";
+    if (!task && !action) return false;
+    if (isSystemRequester(requestedByName)) return Boolean(viewer?.superUser);
+    if (task?.requestedByUserId && viewer?.userId && String(task.requestedByUserId) === String(viewer.userId)) return true;
+    const requesterName = personBaseName(requestedByName);
     const requester = await findEmployeeByName(requesterName);
     if (viewerMatchesEmployee(viewer, requester)) return true;
     const viewerName = personBaseName(viewer?.name).toLowerCase();
@@ -624,14 +626,17 @@ async function closeFlags(task, viewer, currentAssigneeId, assigneeEmpId, action
     });
     const original = reassigned ? await resolveOriginalAssignee(task) : null;
     const viewerIsOriginal = viewerMatchesEmployee(viewer, original);
-    const cancelled = task?.status === "Cancelled";
+    const cancelled = task?.status === "Cancelled" || task?.status === "Rejected";
     // A workflow request can be open before anyone edits it, so there is no task row yet.
     const open = task
         ? !completed && !cancelled
         : Boolean(action) && !dashboardActionIsClosed(action);
     const completionPending = Boolean(saved.completionRequestedAt) && !saved.completionConfirmedAt && !completed;
     const closeScheduled = completionWindowOpen(task);
-    const requesterViewer = await viewerIsTaskRequester(task, viewer);
+    const requesterViewer = await viewerIsTaskRequester(task, viewer, action);
+    const viewerIsReassignee = Boolean(reassigned && viewerIsAssignee && !viewerIsOriginal);
+    const viewerIsOriginalAssignee = reassigned ? viewerIsOriginal : viewerIsAssignee;
+    const alreadyRejected = cancelled || ["Rejected", "Cancelled", "Dismissed"].includes(String(action?.status || ""));
     let closeMessage = "";
     if (closeScheduled) {
         closeMessage = "This task is closed. The status becomes Completed after 2 days. Reopen Request is disabled once the status is Completed.";
@@ -657,6 +662,8 @@ async function closeFlags(task, viewer, currentAssigneeId, assigneeEmpId, action
         completionByName: saved.completionRequestedByName || "",
         completionNote: saved.completionNote || "",
         canComplete: false,
+        canMarkRejected: !alreadyRejected && (requesterViewer || viewerIsOriginalAssignee) && !viewerIsReassignee,
+        canMarkCompleted: open && viewerIsReassignee && !completionPending && !closeScheduled,
         canRequestClose: completed && reassigned && holder && !notified && !closed,
         canFinishClose: completed && requested && !closed && viewerIsOriginal,
         canReopen: closeScheduled && requesterViewer,
@@ -724,11 +731,12 @@ async function loadTaskSourceFacts(action) {
     try {
         if (type === "Fine" || type === "Group Fine Request") {
             const fine = await Fine.findById(id)
-                .select("fineType fineAmount description remarks companyDescription assignedEmployees assetId fineStatus")
+                .select("fineId fineType fineAmount description remarks companyDescription assignedEmployees assetId fineStatus")
                 .lean();
             if (!fine) return {};
             const people = fine.assignedEmployees || [];
             return {
+                fineId: fine.fineId || "",
                 fineType: fine.fineType || "",
                 amount: fine.fineAmount != null ? fine.fineAmount : "",
                 reason: [fine.description, fine.remarks, fine.companyDescription].filter(Boolean).join(". "),
@@ -1084,6 +1092,11 @@ export const getTaskManagerTask = async (req, res) => {
         await promoteDueTaskCompletions();
         const target = await loadTarget(req.params.taskKey);
         if (!target) return res.status(404).json({ message: "Task not found." });
+        if (target.action && /^(fine|group fine request)$/i.test(String(target.action.requestType || ""))) {
+            const overlays = new Map();
+            if (target.task) overlays.set(String(target.action._id), target.task);
+            await alignOpenFineDashboardRows([target.action], overlays);
+        }
         const viewer = await resolveTaskViewer(req);
         return res.status(200).json({ task: await buildDetail(target, viewer) });
     } catch (error) {
@@ -1786,8 +1799,42 @@ export const updateTaskManagerTaskStatus = async (req, res) => {
         const status = String(req.body?.status || "").trim();
         if (!STATUSES.has(status)) return res.status(400).json({ message: "Choose a valid status." });
         const viewer = await resolveTaskViewer(req);
-        const workflowLocked = target.kind === "dashboard" && target.action?.requestType !== "Task Manager";
         const current = assigneeOf(target);
+        if (status === "Rejected") {
+            const flags = await closeFlags(target.task, viewer, current.assigneeId, current.assigneeEmpId, target.action);
+            if (!flags.canMarkRejected) {
+                return res.status(403).json({ message: "Only the requester or the original assignee can reject this task." });
+            }
+            const task = target.task || (target.action ? blankOverlay(target.action) : null);
+            if (!task) return res.status(404).json({ message: "Task not found." });
+            const text = `${viewer.name} rejected this task.`;
+            task.status = "Rejected";
+            task.history = task.history || [];
+            task.history.push(historyEntry("Rejected", text, viewer.name));
+            await pushWorkUpdate(task, {
+                authorName: viewer.name,
+                authorRole: await authorRoleFor(viewer),
+                kind: "Rejected",
+                badge: "Rejected",
+                text,
+            }, SILENT_MAIL);
+            await task.save();
+            if (target.action && !["Rejected", "Cancelled", "Dismissed"].includes(String(target.action.status || ""))) {
+                target.action.status = "Rejected";
+                target.action.actionedDate = new Date();
+                target.action.comment = "Rejected from Task Manager";
+                await target.action.save();
+            }
+            try {
+                await closeReassignmentNotices(task);
+            } catch (noticeError) {
+                console.error("Reject notice clear failed:", noticeError);
+            }
+            if (!task.sourceDashboardActionId) await syncManualTaskNotification(task);
+            const fresh = await loadTarget(req.params.taskKey);
+            return res.status(200).json({ message: "Task rejected", task: await buildDetail(fresh, viewer) });
+        }
+        const workflowLocked = target.kind === "dashboard" && target.action?.requestType !== "Task Manager";
         const completingReassigned = workflowLocked
             && status === "Completed"
             && viewerIsCurrentAssignee(viewer, current)

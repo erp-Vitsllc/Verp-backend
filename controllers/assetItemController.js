@@ -132,6 +132,7 @@ import {
     supersedePreviousOilNextDueForNewRequest,
     bootstrapOilCashAfterInitiate,
 } from '../utils/oilServiceWorkflow.js';
+import { SOLD_VEHICLE_LOCKED_MESSAGE, isVehicleSold } from '../utils/vehicleSoldGate.js';
 import { activateShopServiceOnStartDate } from '../utils/vehicleShopServiceScheduled.js';
 import { syncVehicleServicePaymentStatusFromZoho } from '../utils/markVehicleGarageServicesPaidFromZoho.js';
 import {
@@ -5110,6 +5111,9 @@ export const updateAssetItem = async (req, res) => {
         if (!item) {
             return res.status(404).json({ message: 'Asset not found' });
         }
+        if (isVehicleSold(item)) {
+            return res.status(400).json({ message: SOLD_VEHICLE_LOCKED_MESSAGE });
+        }
 
         // Check if current user is the creator
         const currentUserId = req.user._id?.toString() || req.user.id?.toString();
@@ -6869,6 +6873,10 @@ export const assignAssetItem = async (req, res) => {
             typeName: item.typeId?.name,
         });
 
+        if (fleetVehicle && isVehicleSold(item)) {
+            return res.status(400).json({ message: SOLD_VEHICLE_LOCKED_MESSAGE });
+        }
+
         if (fleetVehicle && !isFleetVehicleProfileActive(item)) {
             return res.status(400).json({ message: FLEET_PROFILE_INACTIVE_ASSIGNMENT_MSG });
         }
@@ -7896,7 +7904,12 @@ export const bulkAssignAssetItems = async (req, res) => {
 
         const actionRequiredBy = autoAcceptOnAssign ? null : pendingActionActorId;
 
-        const existingItems = await AssetItem.find({ _id: { $in: assetIds } }).select('status assetId assetValue');
+        const existingItems = await AssetItem.find({ _id: { $in: assetIds } }).select(
+            'status assetId assetValue vehicleDispositionStatus',
+        );
+        if (existingItems.some((row) => isVehicleSold(row))) {
+            return res.status(400).json({ message: SOLD_VEHICLE_LOCKED_MESSAGE });
+        }
         if (existingItems.length !== assetIds.length) {
             return res.status(400).json({ message: 'One or more assets were not found.' });
         }
@@ -8296,7 +8309,12 @@ export const bulkAssignAssetItemsToCompany = async (req, res) => {
             updateData.assignedDays = parsedDays;
         }
 
-        const existingItems = await AssetItem.find({ _id: { $in: assetIds } }).select('status assetId assetValue');
+        const existingItems = await AssetItem.find({ _id: { $in: assetIds } }).select(
+            'status assetId assetValue vehicleDispositionStatus',
+        );
+        if (existingItems.some((row) => isVehicleSold(row))) {
+            return res.status(400).json({ message: SOLD_VEHICLE_LOCKED_MESSAGE });
+        }
         if (existingItems.length !== assetIds.length) {
             return res.status(400).json({ message: 'One or more assets were not found.' });
         }
@@ -13828,6 +13846,9 @@ export const addAssetDocument = async (req, res) => {
         if (!asset) {
             return res.status(404).json({ message: 'Asset not found' });
         }
+        if (isVehicleSold(asset)) {
+            return res.status(400).json({ message: SOLD_VEHICLE_LOCKED_MESSAGE });
+        }
 
         let documentUrl = null;
         if (document && document.data) {
@@ -13925,6 +13946,9 @@ export const updateAssetDocument = async (req, res) => {
         if (!asset) {
             return res.status(404).json({ message: 'Asset not found' });
         }
+        if (isVehicleSold(asset)) {
+            return res.status(400).json({ message: SOLD_VEHICLE_LOCKED_MESSAGE });
+        }
 
         // Find the document subdocument by _id
         const doc = asset.documents.id(docId);
@@ -14010,6 +14034,9 @@ export const deleteAssetDocument = async (req, res) => {
         const asset = await AssetItem.findById(id);
         if (!asset) {
             return res.status(404).json({ message: 'Asset not found' });
+        }
+        if (isVehicleSold(asset)) {
+            return res.status(400).json({ message: SOLD_VEHICLE_LOCKED_MESSAGE });
         }
 
         const fleetVehicle = isFleetVehicleAssetFields({ plateNumber: asset.plateNumber });
@@ -14118,6 +14145,9 @@ export const addAssetService = async (req, res) => {
         const asset = await AssetItem.findById(id).populate('typeId', 'name');
         if (!asset) {
             return res.status(404).json({ message: 'Asset not found' });
+        }
+        if (isVehicleSold(asset)) {
+            return res.status(400).json({ message: SOLD_VEHICLE_LOCKED_MESSAGE });
         }
 
         const isVehicleAssetForServiceGate = () => {
@@ -15605,6 +15635,9 @@ export const transferAsset = async (req, res) => {
         if (!asset) {
             return res.status(404).json({ message: 'Asset not found' });
         }
+        if (isVehicleSold(asset)) {
+            return res.status(400).json({ message: SOLD_VEHICLE_LOCKED_MESSAGE });
+        }
 
         const onLeaveBlock = assertAssetNotOnLeaveForTransfer(asset);
         if (!onLeaveBlock.ok) {
@@ -15678,6 +15711,9 @@ export const transferAssigneeAsset = async (req, res) => {
             .populate('assignedTo', 'firstName lastName employeeId companyEmail workEmail')
             .populate('assignedCompany', 'name companyId');
         if (!item) return res.status(404).json({ message: 'Asset not found' });
+        if (isVehicleSold(item)) {
+            return res.status(400).json({ message: SOLD_VEHICLE_LOCKED_MESSAGE });
+        }
 
         if (item.assignedToType !== 'Employee' || !item.assignedTo) {
             return res.status(400).json({ message: 'Assignee transfer is only available for employee-assigned assets.' });
@@ -16158,6 +16194,9 @@ export const requestAssetAction = async (req, res) => {
 
         if (!asset) {
             return res.status(404).json({ message: 'Asset not found' });
+        }
+        if (isVehicleSold(asset)) {
+            return res.status(400).json({ message: SOLD_VEHICLE_LOCKED_MESSAGE });
         }
 
         if (

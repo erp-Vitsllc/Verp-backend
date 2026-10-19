@@ -11,6 +11,7 @@ import {
     normalizeStaffType,
 } from '../utils/workingTimeHelpers.js';
 import { punchAttendanceKind } from '../utils/partialLeaveWindow.js';
+import { isAttendanceSuspendedOn } from '../utils/attendanceSuspension.js';
 import {
     attendanceApprovalLimitMessageFor,
     attendanceApprovalLimitText,
@@ -20,7 +21,10 @@ import {
 import {
     attendanceChangeQueuedMessage,
     openAttendanceChangeForEmployee,
+    supersedeOpenAttendanceChanges,
 } from '../utils/attendanceChangeApproval.js';
+import { attendanceMarkRoute, yellowMarkHours } from '../utils/attendanceMarkPolicy.js';
+import { sendAttendanceDirectChangeEmail } from '../utils/sendAttendanceLeaveEmails.js';
 
 const UNAUTH_TIMES = 2;
 
@@ -167,6 +171,54 @@ export function normalizeHourAdjustEdit(proposed = {}, body = {}) {
     return { hoursApproved: approvedHours, reason: flexible ? '' : nextReason };
 }
 
+async function emailDirectHourChange({ actor, hr, employee, record, previousLabel, nextLabel, reason }) {
+    try {
+        await sendAttendanceDirectChangeEmail({
+            recipients: [hr, employee?.primaryReportee].filter(Boolean),
+            actor,
+            employee,
+            date: record.date,
+            previousLabel: previousLabel || 'Not marked',
+            nextLabel,
+            timeIn: record.timeIn || '',
+            timeOut: record.timeOut || '',
+            reason: reason || '',
+            recordIds: [record._id],
+        });
+    } catch (err) {
+        console.error('[emailDirectHourChange]', err?.message || err);
+    }
+}
+
+function applyDirectZeroHour(record, { kind, reason, timeIn, timeOut }) {
+    record.hourAdjustStatus = '';
+    record.hourAdjustKind = '';
+    record.hoursTaken = 0;
+    record.hoursApproved = 0;
+    record.hoursMax = 0;
+    record.statusKey = STATUS_KEY[kind];
+    record.statusLabel = {
+        early_go: 'Early Go',
+        late_arrived: 'Late Arrival',
+        mispunch: 'Mispunch',
+    }[kind] || record.statusLabel;
+    if (reason) {
+        record.reason = reason;
+        record.hourAdjustReason = '';
+    }
+    if (kind !== 'mispunch') return;
+    const checkIn = storedPunchClock(timeIn);
+    const checkOut = storedPunchClock(timeOut);
+    if (checkIn) {
+        record.timeIn = checkIn;
+        record.punchSource = 'manual';
+    }
+    if (checkOut) {
+        record.timeOut = checkOut;
+        record.checkOutSource = 'manual';
+    }
+}
+
 export async function applyStoredHourAdjust(record, proposed = {}) {
     const kind = proposed.hourAdjustKind || hourAdjustKindOf(record);
     if (!kind || !STATUS_KEY[kind]) {
@@ -212,16 +264,6 @@ export async function requestHourAdjust(req, res) {
         }
         const kind = hourAdjustKindOf(record);
         if (!kind) return res.status(400).json({ message: 'This status cannot be sent for hour approval.' });
-        if (kind === 'late_arrived' || kind === 'early_go' || kind === 'mispunch') {
-            const limitMessage = await attendanceApprovalLimitMessageFor(
-                { _id: record.employeeMongoId, employeeId: record.employeeId },
-                {
-                    pool: kind === 'mispunch' ? 'mispunch' : 'late',
-                    requestDates: [record.date],
-                },
-            );
-            if (limitMessage) return res.status(400).json({ message: limitMessage });
-        }
 
         const week = await weekForRecord(record);
         const { taken, flexible } = hoursTakenOf(record, week, kind);
@@ -236,17 +278,67 @@ export async function requestHourAdjust(req, res) {
         }
 
         const isHr = await actorIsFlowchartHr(actor);
+        const employee = await EmployeeBasic.findById(record.employeeMongoId)
+            .select('_id employeeId firstName lastName staffType primaryReportee companyEmail workEmail email attendanceAccountStatus attendanceSuspension')
+            .populate('primaryReportee', 'firstName lastName employeeId companyEmail workEmail email')
+            .lean();
+        if (isAttendanceSuspendedOn(employee, record.date)) {
+            return res.status(403).json({ message: 'This employee is suspended on this date. Attendance cannot be changed.' });
+        }
+        const hr = await getDepartmentHOD('hr').catch(() => null);
+        const measured = await yellowMarkHours(employee || { _id: record.employeeMongoId }, record.date, {
+            statusKey: STATUS_KEY[kind],
+            timeIn: record.timeIn,
+            timeOut: record.timeOut,
+            reason,
+        });
+        const route = isHr
+            ? 'direct'
+            : attendanceMarkRoute({
+                statusKey: STATUS_KEY[kind],
+                clockHours: kind === 'mispunch' ? 0 : taken,
+                deductionHours: measured.deductionHours,
+                approvedHours,
+            });
         if (isHr) {
             applyApproved(record, { kind, approvedHours, taken, max, reason });
             await record.save();
             return res.status(200).json({ message: 'Hours approved.', record });
         }
-
-        const employee = await EmployeeBasic.findById(record.employeeMongoId)
-            .select('_id employeeId firstName lastName staffType primaryReportee companyEmail workEmail email')
-            .populate('primaryReportee', 'firstName lastName employeeId companyEmail workEmail email')
-            .lean();
-        const hr = await getDepartmentHOD('hr').catch(() => null);
+        if (route === 'direct') {
+            const previousLabel = record.statusLabel || 'Not marked';
+            applyDirectZeroHour(record, { kind, reason });
+            await record.save();
+            await supersedeOpenAttendanceChanges({
+                date: record.date,
+                employeeMongoId: String(record.employeeMongoId),
+                actorId: actor._id,
+            });
+            await emailDirectHourChange({
+                actor,
+                hr,
+                employee,
+                record,
+                previousLabel,
+                nextLabel: record.statusLabel || previousLabel,
+                reason,
+            });
+            return res.status(200).json({
+                message: 'Saved. The primary reportee and HR have been emailed.',
+                record,
+                applied: true,
+            });
+        }
+        if (kind === 'late_arrived' || kind === 'early_go' || kind === 'mispunch') {
+            const limitMessage = await attendanceApprovalLimitMessageFor(
+                { _id: record.employeeMongoId, employeeId: record.employeeId },
+                {
+                    pool: kind === 'mispunch' ? 'mispunch' : 'late',
+                    requestDates: [record.date],
+                },
+            );
+            if (limitMessage) return res.status(400).json({ message: limitMessage });
+        }
         const queued = await openAttendanceChangeForEmployee({
             employee,
             date: record.date,
@@ -417,6 +509,27 @@ export async function requestMispunch(req, res) {
         }
 
         const isHr = await actorIsFlowchartHr(actor);
+        const employee = await EmployeeBasic.findById(record.employeeMongoId)
+            .select('_id employeeId firstName lastName staffType primaryReportee companyEmail workEmail email attendanceAccountStatus attendanceSuspension')
+            .populate('primaryReportee', 'firstName lastName employeeId companyEmail workEmail email')
+            .lean();
+        if (isAttendanceSuspendedOn(employee, record.date)) {
+            return res.status(403).json({ message: 'This employee is suspended on this date. Attendance cannot be changed.' });
+        }
+        const hr = await getDepartmentHOD('hr').catch(() => null);
+        const measured = await yellowMarkHours(employee || { _id: record.employeeMongoId }, record.date, {
+            statusKey: 'mispunch',
+            timeIn,
+            timeOut,
+            reason,
+        });
+        const route = isHr
+            ? 'direct'
+            : attendanceMarkRoute({
+                statusKey: 'mispunch',
+                deductionHours: measured.deductionHours,
+                approvedHours: 0,
+            });
         if (isHr) {
             applyApproved(record, {
                 kind: 'mispunch',
@@ -430,12 +543,30 @@ export async function requestMispunch(req, res) {
             await record.save();
             return res.status(200).json({ message: 'Misspunch saved.', record });
         }
-
-        const employee = await EmployeeBasic.findById(record.employeeMongoId)
-            .select('_id employeeId firstName lastName staffType primaryReportee companyEmail workEmail email')
-            .populate('primaryReportee', 'firstName lastName employeeId companyEmail workEmail email')
-            .lean();
-        const hr = await getDepartmentHOD('hr').catch(() => null);
+        if (route === 'direct') {
+            const previousLabel = record.statusLabel || 'Not marked';
+            applyDirectZeroHour(record, { kind: 'mispunch', reason, timeIn, timeOut });
+            await record.save();
+            await supersedeOpenAttendanceChanges({
+                date: record.date,
+                employeeMongoId: String(record.employeeMongoId),
+                actorId: actor._id,
+            });
+            await emailDirectHourChange({
+                actor,
+                hr,
+                employee,
+                record,
+                previousLabel,
+                nextLabel: 'Mispunch',
+                reason,
+            });
+            return res.status(200).json({
+                message: 'Saved. The primary reportee and HR have been emailed.',
+                record,
+                applied: true,
+            });
+        }
         const queued = await openAttendanceChangeForEmployee({
             employee,
             date: record.date,

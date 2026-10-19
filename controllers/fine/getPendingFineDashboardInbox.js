@@ -13,6 +13,7 @@ import {
     resolveCurrentStageAssignee,
 } from '../../utils/fineStageAuth.js';
 import { openAccountsPaymentInbox } from '../../utils/fineAccountsPaymentFlow.js';
+import { collapsePendingFineDashboardRows } from '../stats/getTaskManagerNotifications.js';
 import { getDepartmentHOD } from '../../utils/getDepartmentHOD.js';
 import {
     buildAssigneeClauses,
@@ -207,7 +208,7 @@ export const getPendingFineDashboardInbox = async (req, res) => {
             return res.json({ count: hubItems.length, items: hubItems });
         }
 
-        const rows = await DashboardAction.find({
+        const foundRows = await DashboardAction.find({
             status: 'Pending',
             requestType: { $in: FINE_INBOX_TYPES },
             $or: assigneeClauses,
@@ -215,6 +216,7 @@ export const getPendingFineDashboardInbox = async (req, res) => {
             .sort({ requestedDate: -1 })
             .limit(200)
             .lean();
+        const rows = (await collapsePendingFineDashboardRows(foundRows)).rows;
 
         const fineIds = [...new Set(rows.map((r) => String(r.requestId)).filter(Boolean))];
         const fines = fineIds.length

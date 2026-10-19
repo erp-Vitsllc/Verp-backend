@@ -86,6 +86,32 @@ export function fineInboxIsGroup(fines = []) {
     return realFineEmployeeIds(fines).length > 1;
 }
 
+/** VEGA-FINE-0026-A and VEGA-FINE-0026 are the same fine. */
+export function fineBaseId(fineId = '') {
+    const id = String(fineId || '').trim();
+    const parts = id.split('-');
+    if (parts.length > 3) return parts.slice(0, 3).join('-');
+    return id;
+}
+
+/**
+ * Dashboard and Task Manager type for these fine records.
+ * More than one real employee is a group. One employee, even with a company share, is a Fine.
+ */
+export function fineDashboardRequest(fines = []) {
+    const list = (Array.isArray(fines) ? fines : [fines]).filter(Boolean);
+    const people = realFineEmployeeIds(list);
+    const isGroup = people.length > 1;
+    const primary = list.find((fine) => realFineEmployeeIds([fine]).length > 0) || list[0] || null;
+    return {
+        isGroup,
+        requestType: isGroup ? 'Group Fine Request' : 'Fine',
+        peopleCount: people.length,
+        primary,
+        subjectName: isGroup ? `Group Fine - ${people.length} Employees` : '',
+    };
+}
+
 /**
  * Stage changes used to clear only requestType Fine.
  * Vehicle fines are stored as Group Fine Request even for one person, so that row never moved.
@@ -446,7 +472,7 @@ export async function backfillFineApprovalInboxForViewer(ctx) {
 
     for (const group of byBase.values()) {
         const primary = group.find((f) => getFineBaseId(f.fineId) === f.fineId) || group[0];
-        const requestType = group.length > 1 ? 'Group Fine Request' : 'Fine';
+        const requestType = fineDashboardRequest(group).requestType;
         try {
             const assignee = await assigneeForFine(primary);
             await syncPendingFineAssigneeFromFlowchart(primary, { requestType, assignee });
@@ -461,9 +487,7 @@ export async function backfillFineApprovalInboxForViewer(ctx) {
 }
 
 function getFineBaseId(fineId = '') {
-    const parts = String(fineId).split('-');
-    if (parts.length > 3) return parts.slice(0, 3).join('-');
-    return fineId;
+    return fineBaseId(fineId);
 }
 
 function accountsAlreadyApproved(fine) {
@@ -537,16 +561,18 @@ export async function repairSkippedFineAccountsStage(fineDoc) {
     }
 
     try {
-        const targetEmpId = getTargetEmployeeIdFromFine(primary);
+        const kind = fineDashboardRequest(fines);
+        const inboxFine = kind.primary || primary;
+        const isGroup = kind.isGroup;
+        const reqType = kind.requestType;
+        const subjectName = isGroup ? kind.subjectName : undefined;
+        const targetEmpId = getTargetEmployeeIdFromFine(inboxFine);
         const subjectEmp = targetEmpId
             ? await EmployeeBasic.findOne({ employeeId: targetEmpId })
             : null;
-        const isGroup = fines.length > 1;
-        const reqType = isGroup ? 'Group Fine Request' : 'Fine';
-        const subjectName = isGroup ? `Group Fine - ${fines.length} Employees` : undefined;
 
         await syncDashboardAction({
-            requestId: primary._id,
+            requestId: inboxFine._id,
             requestType: reqType,
             assignedTo: null,
             status: 'Approved',
@@ -554,14 +580,14 @@ export async function repairSkippedFineAccountsStage(fineDoc) {
             subjectName,
         });
         await syncDashboardAction({
-            requestId: primary._id,
+            requestId: inboxFine._id,
             requestType: reqType,
             assignedTo: accountsUser._id,
             status: 'Pending',
             subjectEmployee: subjectEmp,
             subjectName,
-            extra1: primary.fineType,
-            extra2: `AED ${primary.fineAmount || 0}`,
+            extra1: inboxFine.fineType,
+            extra2: `AED ${inboxFine.fineAmount || 0}`,
         });
         console.log(`[repairSkippedFineAccountsStage] ${primary.fineId} → Pending Accounts (${accountsHOD?.employeeId || accountsUser._id})`);
     } catch (syncErr) {

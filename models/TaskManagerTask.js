@@ -33,7 +33,7 @@ const taskManagerTaskSchema = new mongoose.Schema(
         sourceDashboardActionId: { type: mongoose.Schema.Types.ObjectId, default: null },
         status: {
             type: String,
-            enum: ["Pending", "In Progress", "Completed", "Cancelled"],
+            enum: ["Pending", "In Progress", "Completed", "Cancelled", "Rejected"],
             default: "Pending",
         },
         comments: {

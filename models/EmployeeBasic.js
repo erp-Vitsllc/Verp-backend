@@ -35,6 +35,19 @@ const employeeBasicSchema = new mongoose.Schema(
         primaryReportee: { type: mongoose.Schema.Types.ObjectId, ref: "EmployeeBasic", default: null },
         secondaryReportee: { type: mongoose.Schema.Types.ObjectId, ref: "EmployeeBasic", default: null },
         overtime: { type: Boolean, default: false },
+        /** Attendance account. Active by default. Suspension is a date window and does not rewrite attendance rows. */
+        attendanceAccountStatus: {
+            type: String,
+            enum: ['active', 'suspended'],
+            default: 'active',
+        },
+        attendanceSuspension: {
+            fromDate: { type: String, default: '', trim: true },
+            untilDate: { type: String, default: '', trim: true },
+            description: { type: String, default: '', trim: true },
+            suspendedAt: { type: Date, default: null },
+            suspendedByName: { type: String, default: '', trim: true },
+        },
         profileApprovalStatus: {
             type: String,
             enum: ["draft", "submitted", "active", "rejected"],

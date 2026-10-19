@@ -164,8 +164,6 @@ export const getCompleteEmployee = async (id) => {
             salary = null;
         }
 
-        const salaryQueryPromise = Promise.resolve({ status: 'fulfilled', value: salary });
-        
         const [
             contactResult,
             personalResult,
@@ -175,7 +173,6 @@ export const getCompleteEmployee = async (id) => {
             labourCardResult,
             medicalInsuranceResult,
             drivingLicenseResult,
-            salaryResult,
             bankResult,
             educationResult,
             experienceResult,
@@ -191,7 +188,6 @@ export const getCompleteEmployee = async (id) => {
             EmployeeLabourCard.findOne({ employeeId }, null, queryOptions).select('-__v -labourCard.document.data').lean(),
             EmployeeMedicalInsurance.findOne({ employeeId }, null, queryOptions).select('-__v -medicalInsurance.document.data').lean(),
             EmployeeDrivingLicense.findOne({ employeeId }, null, queryOptions).select('-__v -drivingLicenceDetails.document.data').lean(),
-            salaryQueryPromise,
             EmployeeBank.findOne({ employeeId }, null, queryOptions).select('-__v -bankAttachment.data').lean(),
             EmployeeEducation.findOne({ employeeId }, null, queryOptions).select('-__v').lean(),
             EmployeeExperience.findOne({ employeeId }, null, queryOptions).select('-__v').lean(),
@@ -213,12 +209,6 @@ export const getCompleteEmployee = async (id) => {
         const labourCard = labourCardResult.status === 'fulfilled' ? labourCardResult.value : null;
         const medicalInsurance = medicalInsuranceResult.status === 'fulfilled' ? medicalInsuranceResult.value : null;
         const drivingLicense = drivingLicenseResult.status === 'fulfilled' ? drivingLicenseResult.value : null;
-        // Use salary from the query we ran above (not from Promise.allSettled since we ran it synchronously)
-        // But also check salaryResult in case there's a timing issue - UPDATE existing salary variable, don't redeclare
-        if (!salary && salaryResult.status === 'fulfilled') {
-            salary = salaryResult.value;
-        }
-
         const bank = bankResult.status === 'fulfilled' ? bankResult.value : null;
         const education = educationResult.status === 'fulfilled' ? educationResult.value : null;
         const experience = experienceResult.status === 'fulfilled' ? experienceResult.value : null;
@@ -232,17 +222,6 @@ export const getCompleteEmployee = async (id) => {
 
         // Actually, just handle it properly in the destruction
         // Re-assigning results to be clearer
-        const results = [
-            contactResult, personalResult, passportResult, visaResult, emiratesIdResult,
-            labourCardResult, medicalInsuranceResult, drivingLicenseResult, salaryResult,
-            bankResult, educationResult, experienceResult, emergencyContactResult, trainingResult,
-            userResult // The 15th promise
-        ];
-
-        // Let's rewrite the destruction to be safer
-
-
-        // Log any failed queries (but don't fail the entire request)
         const failedQueries = [
             { name: 'contact', result: contactResult },
             { name: 'personal', result: personalResult },
@@ -252,7 +231,6 @@ export const getCompleteEmployee = async (id) => {
             { name: 'labourCard', result: labourCardResult },
             { name: 'medicalInsurance', result: medicalInsuranceResult },
             { name: 'drivingLicense', result: drivingLicenseResult },
-            { name: 'salary', result: salaryResult },
             { name: 'bank', result: bankResult },
             { name: 'education', result: educationResult },
             { name: 'experience', result: experienceResult },
@@ -266,8 +244,7 @@ export const getCompleteEmployee = async (id) => {
             );
         }
 
-        // Log salary query results with detailed debugging
-        if (salaryResult.status === 'fulfilled' && !salaryResult.value) {
+        if (!salary) {
             // Try to find similar employeeIds in EmployeeSalary collection for debugging (only if no salary found)
             try {
                 const similarIds = await EmployeeSalary.find({}, 'employeeId').limit(20).lean();
@@ -289,13 +266,10 @@ export const getCompleteEmployee = async (id) => {
             } catch (debugError) {
                 // Ignore debug query errors
             }
-        } else if (salaryResult.status === 'rejected') {
-            console.error(`[getCompleteEmployee] ❌ Salary query failed for employee ${employeeId}:`, salaryResult.reason?.message || 'Unknown error');
-        } else if (salaryResult.status === 'fulfilled' && salaryResult.value) {
-            console.log(`[getCompleteEmployee] ✓ Salary data found for employee ${employeeId}: monthlySalary=${salaryResult.value.monthlySalary}, totalSalary=${salaryResult.value.totalSalary}, basic=${salaryResult.value.basic}`);
-            // Log the actual employeeId from salary record to verify match
-            if (salaryResult.value.employeeId && salaryResult.value.employeeId !== employeeId) {
-                console.log(`[getCompleteEmployee] ℹ Salary record employeeId="${salaryResult.value.employeeId}" (requested: "${employeeId}") - matched via fallback strategy`);
+        } else {
+            console.log(`[getCompleteEmployee] ✓ Salary data found for employee ${employeeId}: monthlySalary=${salary.monthlySalary}, totalSalary=${salary.totalSalary}, basic=${salary.basic}`);
+            if (salary.employeeId && salary.employeeId !== employeeId) {
+                console.log(`[getCompleteEmployee] ℹ Salary record employeeId="${salary.employeeId}" (requested: "${employeeId}") - matched via fallback strategy`);
             }
         }
 
