@@ -53,10 +53,11 @@ function money(value) {
     return Number.isFinite(n) ? n : 0;
 }
 
+/** Outstanding employee → company balance. Disbursement (`paidAmount`) does not clear it. */
 function loanRemaining(loan) {
     const amount = money(loan?.amount ?? loan?.loanAmount ?? loan?.totalAmount);
-    const paid = money(loan?.paidAmount);
-    return Math.max(0, amount - paid);
+    const repaid = money(loan?.repaidAmount);
+    return Math.max(0, amount - repaid);
 }
 
 function fineOutstanding(fine) {
@@ -127,7 +128,7 @@ async function moneyClearance(employee) {
             employeeId: empCode,
             status: { $in: OPEN_LOAN_STATUSES },
         })
-            .select("_id type loanId amount loanAmount totalAmount paidAmount status")
+            .select("_id type loanId amount loanAmount totalAmount paidAmount repaidAmount status")
             .lean()
         : [];
 
