@@ -1,5 +1,6 @@
 import EmployeeBasic from '../../models/EmployeeBasic.js';
 import { isJwtSystemSuperUser } from '../../utils/systemSuperUser.js';
+import { uploadDocumentToS3 } from '../../utils/s3Upload.js';
 
 function isDateKey(value) {
     return /^\d{4}-\d{2}-\d{2}$/.test(String(value || '').trim());
@@ -23,6 +24,7 @@ export async function setAttendanceSuspension(req, res) {
                 description: '',
                 suspendedAt: null,
                 suspendedByName: '',
+                attachments: [],
             };
             await employee.save();
             return res.json({
@@ -45,6 +47,26 @@ export async function setAttendanceSuspension(req, res) {
             return res.status(400).json({ message: 'Enter a description before suspending attendance.' });
         }
 
+        const incoming = Array.isArray(req.body?.attachments) ? req.body.attachments.slice(0, 5) : [];
+        const attachments = [];
+        for (const file of incoming) {
+            const data = String(file?.data || '').trim();
+            const name = String(file?.name || 'attachment').trim().slice(0, 180);
+            if (!data) continue;
+            const uploaded = await uploadDocumentToS3(
+                data,
+                `employee-attendance-suspension/${employee.employeeId || employee._id}`,
+                name,
+                'auto',
+            );
+            attachments.push({
+                name,
+                url: uploaded.url || uploaded.publicId,
+                publicId: uploaded.publicId,
+                mimeType: String(file?.mimeType || '').trim(),
+            });
+        }
+
         employee.attendanceAccountStatus = 'suspended';
         employee.attendanceSuspension = {
             mode,
@@ -53,6 +75,7 @@ export async function setAttendanceSuspension(req, res) {
             description,
             suspendedAt: new Date(),
             suspendedByName: String(req.user?.name || req.user?.username || 'Super User').trim(),
+            attachments,
         };
         await employee.save();
         return res.json({

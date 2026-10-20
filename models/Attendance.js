@@ -116,6 +116,16 @@ const attendanceSchema = new mongoose.Schema(
             default: '',
             trim: true,
         },
+        attachmentKey: {
+            type: String,
+            default: '',
+            trim: true,
+        },
+        attachmentMime: {
+            type: String,
+            default: '',
+            trim: true,
+        },
         /** HR review queue — pending marks show on Attendance bell + sidebar badge. */
         approvalStatus: {
             type: String,
@@ -338,6 +348,7 @@ const attendanceSchema = new mongoose.Schema(
         hoursMax: { type: Number, default: 0 },
         hoursApproved: { type: Number, default: 0 },
         hourAdjustReason: { type: String, default: '', trim: true },
+        hourAdjustMode: { type: String, enum: ['', 'authorized', 'custom'], default: '', trim: true },
         markedBy: {
             type: mongoose.Schema.Types.ObjectId,
             ref: 'User',

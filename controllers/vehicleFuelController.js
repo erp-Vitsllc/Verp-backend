@@ -245,7 +245,11 @@ async function loadFuelFleetVehicles(req) {
         .populate('typeId', 'name')
         .sort({ plateNumber: 1, assetId: 1 })
         .lean();
-    return items.filter(isFleetVehicleAsset);
+    return items.filter(
+        (item) =>
+            isFleetVehicleAsset(item) &&
+            String(item?.vehicleDispositionStatus || '').trim().toLowerCase() !== 'sold',
+    );
 }
 
 function fuelUsageRatio(amount, limit) {

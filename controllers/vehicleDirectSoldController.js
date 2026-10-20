@@ -1,4 +1,5 @@
 import AssetItem from '../models/AssetItem.js';
+import { uploadDocumentToS3 } from '../utils/s3Upload.js';
 import { isJwtSystemSuperUser } from '../utils/systemSuperUser.js';
 import {
     evaluateVehicleSoldChecks,
@@ -9,7 +10,7 @@ async function loadVehicle(id) {
     if (!id) return null;
     return AssetItem.findById(id)
         .select(
-            'plateNumber assignedTo assignedToType assignedCompany status pendingAction onServiceActive activeServiceWorkflow services vehicleDispositionStatus vehicleDispositionWorkflow nextServiceDate',
+            'plateNumber assignedTo assignedToType assignedCompany status pendingAction onServiceActive activeServiceWorkflow services vehicleDispositionStatus vehicleDispositionWorkflow nextServiceDate documents',
         )
         .populate('assignedTo', 'firstName lastName');
 }
@@ -53,6 +54,23 @@ export async function sellVehicleDirect(req, res) {
             });
         }
 
+        let soldAttachmentUrl = '';
+        const file = req.body?.attachment;
+        if (file?.data) {
+            try {
+                const uploaded = await uploadDocumentToS3(
+                    file.data,
+                    'asset-documents',
+                    file.name || 'sold-attachment',
+                );
+                soldAttachmentUrl = uploaded?.publicId || '';
+            } catch (uploadError) {
+                return res.status(500).json({
+                    message: uploadError?.message || 'Failed to upload the sold attachment.',
+                });
+            }
+        }
+
         const byName = String(req.user?.name || req.user?.username || 'Super User').trim();
         const priorHistory = Array.isArray(asset.vehicleDispositionWorkflow?.history)
             ? asset.vehicleDispositionWorkflow.history.slice(-20)
@@ -78,6 +96,16 @@ export async function sellVehicleDirect(req, res) {
         });
         asset.nextServiceDate = null;
         asset.onServiceActive = false;
+        if (soldAttachmentUrl) {
+            asset.documents = asset.documents || [];
+            asset.documents.push({
+                type: 'Sold',
+                issueDate: new Date(),
+                description: description,
+                attachment: soldAttachmentUrl,
+            });
+            asset.markModified('documents');
+        }
         await asset.save();
 
         return res.json({

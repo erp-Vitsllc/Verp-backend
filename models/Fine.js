@@ -335,6 +335,10 @@ const fineSchema = new mongoose.Schema(
         zohoBillNumber: { type: String, default: '' },
         billDate: { type: String, default: '' },
         zohoOrganizationId: { type: String, default: '' },
+        /** Zoho Books manual journal created from Make Payment → My Journal. */
+        zohoJournalId: { type: String, default: '' },
+        zohoJournalNumber: { type: String, default: '' },
+        zohoJournalStatus: { type: String, default: '' },
         zohoSyncedAt: { type: Date, default: null },
         zohoSyncError: { type: String, default: '' },
         /** Set when the fine supporting attachment was uploaded onto the Zoho bill. */

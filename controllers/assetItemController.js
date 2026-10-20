@@ -1773,11 +1773,13 @@ export const getVehicleFleetDashboard = async (req, res) => {
                 asset: it,
             });
 
-        const vehicles = items.filter(isVehicleAsset);
+        const allFleetVehicles = items.filter(isVehicleAsset);
+        const isDisposedFleetVehicle = (v) =>
+            String(v?.vehicleDispositionStatus || '').trim().toLowerCase() === 'sold';
 
         const registrationExpiry = (v) => resolveRegistrationExpiryDate(v);
 
-        const fleetRows = vehicles.map((v) => {
+        const fleetRows = allFleetVehicles.map((v) => {
             const serviceCosts = listOnly
                 ? []
                 : (v.services || [])
@@ -1953,11 +1955,13 @@ export const getVehicleFleetDashboard = async (req, res) => {
                 vehicleListFleetCache.set(listCacheKey, { at: Date.now(), payload });
             }
             console.log(
-                `[vehicle-fleet-dashboard] scope=list vehicles=${vehicles.length} find=${findMs}ms total=${Date.now() - startedAt}ms`,
+                `[vehicle-fleet-dashboard] scope=list vehicles=${allFleetVehicles.length} find=${findMs}ms total=${Date.now() - startedAt}ms`,
             );
             return res.json(payload);
         }
 
+        // Sold and total-loss vehicles stay on the fleet list, but not on operational dashboard cards/charts.
+        const vehicles = allFleetVehicles.filter((v) => !isDisposedFleetVehicle(v));
         const vehicleIds = vehicles.map((v) => v._id);
 
         const now = new Date();
@@ -2455,6 +2459,13 @@ export const getVehicleFleetDashboard = async (req, res) => {
         const serviceCostByMonth = monthKeys.slice(-12).map((k) => ({ label: k, total: monthTotals[k] }));
 
         const vehicleByMongoId = new Map(vehicles.map((v) => [String(v._id), v]));
+        const disposedVehicleIds = new Set();
+        for (const v of allFleetVehicles) {
+            if (!isDisposedFleetVehicle(v)) continue;
+            disposedVehicleIds.add(String(v._id));
+            const code = String(v.assetId || '').trim();
+            if (code) disposedVehicleIds.add(code);
+        }
         const vehicleByAssetCode = new Map();
         for (const v of vehicles) {
             const code = String(v.assetId || '').trim();
@@ -2473,6 +2484,14 @@ export const getVehicleFleetDashboard = async (req, res) => {
         };
         const finesGrouped = new Map();
         for (const fine of vehicleFineDocs || []) {
+            const fineObjectId = fine?.assetObjectId ? String(fine.assetObjectId) : '';
+            const fineVehicleKey = String(fine?.vehicleId || fine?.assetId || '').trim();
+            if (
+                (fineObjectId && disposedVehicleIds.has(fineObjectId)) ||
+                (fineVehicleKey && disposedVehicleIds.has(fineVehicleKey))
+            ) {
+                continue;
+            }
             const amount = Number(fine.totalFineAmount || fine.fineAmount || 0) || 0;
             const vehicle = resolveVehicleForFine(fine);
             const unmatchedKey = String(fine.vehicleId || fine.assetId || fine.assetName || 'unknown').trim() || 'unknown';
@@ -2719,7 +2738,7 @@ export const getVehicleFleetDashboard = async (req, res) => {
             handoverRequest: { pending: handoverPending, confirmed: handoverConfirmed },
             serviceCostByMonth,
             finesByVehicle,
-            vehicles: fleetRows,
+            vehicles: fleetRows.filter((row) => !isDisposedFleetVehicle(row)),
             modelYearDistribution,
             fleetAnalytics,
             usageByPeriod: {

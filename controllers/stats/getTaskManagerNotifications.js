@@ -1368,6 +1368,19 @@ function leaveRequestedByEmployee(action, { id, code, nameKey }) {
     return false;
 }
 
+/** Salary preparation follows the employee the leave is for, not the person who filed it. */
+function leaveSubjectIsProfileEmployee(action, { id, code, nameKey }) {
+    if (!PROFILE_LEAVE_TYPES.has(String(action?.requestType || ""))) return false;
+    const subjectId = String(action.subjectEmployeeId || "").trim();
+    if (code && subjectId && subjectId.toLowerCase() === code.toLowerCase()) return true;
+    if (id && subjectId === id) return true;
+    const meta = actionMeta(action.extra3);
+    const subjectMongo = String(meta.employeeMongoId || "").trim();
+    if (id && subjectMongo && subjectMongo === id) return true;
+    if (nameKey && personKey(action.subjectName) === nameKey) return true;
+    return false;
+}
+
 function leaveSubjectMongoId(action, meta) {
     const mongo = String(meta?.employeeMongoId || meta?.requesterMongoId || "").trim();
     if (isObjectId(mongo)) return mongo;
@@ -1604,7 +1617,12 @@ export async function listProfileEmployeeTasks({ employeeId, employeeCode, emplo
                 status: profileStatusLabel(status),
                 sortAt: new Date(requestedAt || 0).getTime(),
                 href: leaveTask ? leaveReviewHref(action) : "",
-                leaveCard: leaveTask ? leaveCardFromAction(action, assigneeName, { ownRequest: requesterMatch, reassigned }) : null,
+                leaveCard: leaveTask
+                    ? leaveCardFromAction(action, assigneeName, {
+                        ownRequest: leaveSubjectIsProfileEmployee(action, { id, code, nameKey }),
+                        reassigned,
+                    })
+                    : null,
             });
         }
 

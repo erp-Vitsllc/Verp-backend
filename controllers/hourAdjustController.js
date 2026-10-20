@@ -2,7 +2,7 @@ import mongoose from 'mongoose';
 import Attendance from '../models/Attendance.js';
 import EmployeeBasic from '../models/EmployeeBasic.js';
 import { getDepartmentHOD } from '../utils/getDepartmentHOD.js';
-import { flexibleExactLossHours } from '../utils/flexibleAttendance.js';
+import { flexibleExactLossHours, requiredHoursForDate } from '../utils/flexibleAttendance.js';
 import {
     getScheduledPunchMinutes,
     getWeekForStaffType,
@@ -45,7 +45,13 @@ const STATUS_KEY = {
 function roundHours(value) {
     const hours = Number(value);
     if (!Number.isFinite(hours) || hours < 0) return 0;
-    return Math.round(hours * 100) / 100;
+    return Math.round(hours * 1e6) / 1e6;
+}
+
+function clockToSeconds(value) {
+    const match = /^(\d{1,2}):(\d{2})(?::(\d{2}))?/.exec(String(value || '').trim());
+    if (!match) return null;
+    return Number(match[1]) * 3600 + Number(match[2]) * 60 + Number(match[3] || 0);
 }
 
 function clockToMinutes(value) {
@@ -81,6 +87,21 @@ export function hourAdjustKindOf(record) {
 
 function hoursTakenOf(record, week, kind) {
     if (isFlexibleTiming(week)) {
+        const required = requiredHoursForDate(week, record?.date);
+        const start = clockToSeconds(record?.timeIn);
+        const end = clockToSeconds(record?.timeOut);
+        if (required > 0 && start != null && end != null) {
+            const outDate = String(record?.timeOutDate || '').trim();
+            const date = String(record?.date || '').trim();
+            let seconds = end - start;
+            if (outDate && date && outDate > date) {
+                const days = Math.round((new Date(`${outDate}T12:00:00.000Z`) - new Date(`${date}T12:00:00.000Z`)) / 86400000);
+                seconds += days * 86400;
+            } else if (seconds < 0) {
+                seconds += 86400;
+            }
+            return { taken: roundHours(Math.max(0, required * 3600 - seconds) / 3600), dayHours: required, flexible: true };
+        }
         return { taken: roundHours(flexibleExactLossHours(record, week)), dayHours: 0, flexible: true };
     }
     const schedule = getScheduledPunchMinutes(week, record?.date);
@@ -90,13 +111,12 @@ function hoursTakenOf(record, week, kind) {
           ? Math.max(0, (schedule.endMinutes - schedule.startMinutes) / 60)
           : 8;
     const safeDay = dayHours > 0 ? dayHours : 8;
-    if (kind === 'early_go' && schedule?.endMinutes != null) {
-        const out = clockToMinutes(record?.timeOut);
-        if (out != null) return { taken: roundHours(Math.max(0, (schedule.endMinutes - out) / 60)), dayHours: safeDay };
-    }
-    if (kind === 'late_arrived' && schedule?.startMinutes != null) {
-        const inn = clockToMinutes(record?.timeIn);
-        if (inn != null) return { taken: roundHours(Math.max(0, (inn - schedule.startMinutes) / 60)), dayHours: safeDay };
+    if ((kind === 'early_go' || kind === 'late_arrived') && schedule?.startMinutes != null && schedule?.endMinutes != null) {
+        const inn = clockToSeconds(record?.timeIn);
+        const out = clockToSeconds(record?.timeOut);
+        const late = inn == null ? 0 : Math.max(0, inn - schedule.startMinutes * 60);
+        const early = out == null ? 0 : Math.max(0, schedule.endMinutes * 60 - out);
+        return { taken: roundHours((late + early) / 3600), dayHours: safeDay };
     }
     return { taken: roundHours(safeDay), dayHours: safeDay };
 }
@@ -116,12 +136,13 @@ function storedPunchClock(value) {
     return `${String(hour).padStart(2, '0')}:${String(minute).padStart(2, '0')}:00`;
 }
 
-function applyApproved(record, { kind, approvedHours, taken, max, reason, timeIn, timeOut }) {
+function applyApproved(record, { kind, approvedHours, taken, max, reason, mode, timeIn, timeOut }) {
     record.hourAdjustStatus = 'approved';
     record.hourAdjustKind = kind;
     record.hoursTaken = taken;
     record.hoursMax = max;
     record.hoursApproved = approvedHours;
+    record.hourAdjustMode = mode === 'custom' || mode === 'authorized' ? mode : '';
     if (reason != null) record.hourAdjustReason = reason;
     record.statusKey = STATUS_KEY[kind];
     record.statusLabel = APPROVED_LABEL[kind];
@@ -164,11 +185,16 @@ export function normalizeHourAdjustEdit(proposed = {}, body = {}) {
     if (approvedHours > max + 0.001) {
         return { error: `Approved hours cannot be more than ${max}.` };
     }
-    if (flexible && approvedHours === 0 && !nextReason) {
-        return { error: 'A reason is required when approved hours are 0.' };
+    const mode = body?.hourAdjustMode === 'custom' ? 'custom' : body?.hourAdjustMode === 'authorized' ? 'authorized' : '';
+    if (!nextReason && (mode === 'authorized' || mode === 'custom' || approvedHours === 0)) {
+        return { error: 'A reason is required.' };
     }
-    if (!flexible && !nextReason) return { error: 'Description is required.' };
-    return { hoursApproved: approvedHours, reason: flexible && approvedHours > 0 ? '' : nextReason };
+    const taken = roundHours(proposed?.hoursTaken);
+    const storedHours = mode === 'authorized' ? taken : approvedHours;
+    if (storedHours > max + 0.001) {
+        return { error: `Approved hours cannot be more than ${max}.` };
+    }
+    return { hoursApproved: storedHours, reason: nextReason, hourAdjustMode: mode };
 }
 
 async function emailDirectHourChange({ actor, hr, employee, record, previousLabel, nextLabel, reason }) {
@@ -219,6 +245,19 @@ function applyDirectZeroHour(record, { kind, reason, timeIn, timeOut }) {
     }
 }
 
+export async function exactHourProposal(record, proposed = {}) {
+    const kind = proposed.hourAdjustKind || hourAdjustKindOf(record);
+    const week = await weekForRecord(record);
+    const { taken, flexible } = hoursTakenOf(record, week, kind);
+    return {
+        ...proposed,
+        hourAdjustKind: kind,
+        hourAdjustFlexible: flexible,
+        hoursTaken: taken,
+        hoursMax: roundHours(taken * UNAUTH_TIMES),
+    };
+}
+
 export async function applyStoredHourAdjust(record, proposed = {}) {
     const kind = proposed.hourAdjustKind || hourAdjustKindOf(record);
     if (!kind || !STATUS_KEY[kind]) {
@@ -232,6 +271,7 @@ export async function applyStoredHourAdjust(record, proposed = {}) {
         taken: roundHours(proposed.hoursTaken),
         max: roundHours(proposed.hoursMax),
         reason: proposed.reason,
+        mode: proposed.hourAdjustMode,
         timeIn: proposed.timeIn,
         timeOut: proposed.timeOut,
     });
@@ -272,8 +312,10 @@ export async function requestHourAdjust(req, res) {
             return res.status(400).json({ message: 'A reason is required when approved hours are 0.' });
         }
         if (!flexible && !reason) return res.status(400).json({ message: 'Description is required.' });
-        const max = flexible ? taken : roundHours(taken * UNAUTH_TIMES);
-        if (approvedHours > max + 0.001) {
+        const max = roundHours(taken * UNAUTH_TIMES);
+        const mode = req.body?.hourAdjustMode === 'custom' ? 'custom' : req.body?.hourAdjustMode === 'authorized' ? 'authorized' : '';
+        const storedHours = mode === 'authorized' ? taken : approvedHours;
+        if (storedHours > max + 0.001) {
             return res.status(400).json({ message: `Approved hours cannot be more than ${max}.` });
         }
 
@@ -292,17 +334,17 @@ export async function requestHourAdjust(req, res) {
             timeOut: record.timeOut,
             reason,
         });
-        const zeroNeedsBothApprovers = flexible && approvedHours === 0;
+        const zeroNeedsBothApprovers = flexible && storedHours === 0;
         const route = isHr
             ? 'direct'
             : attendanceMarkRoute({
                 statusKey: STATUS_KEY[kind],
                 clockHours: kind === 'mispunch' ? 0 : taken,
                 deductionHours: measured.deductionHours,
-                approvedHours,
+                approvedHours: storedHours,
             });
         if (isHr && !zeroNeedsBothApprovers) {
-            applyApproved(record, { kind, approvedHours, taken, max, reason });
+            applyApproved(record, { kind, approvedHours: storedHours, taken, max, reason, mode });
             await record.save();
             return res.status(200).json({ message: 'Hours approved.', record });
         }
@@ -353,7 +395,8 @@ export async function requestHourAdjust(req, res) {
                 hourAdjustKind: kind,
                 hoursTaken: taken,
                 hoursMax: max,
-                hoursApproved: approvedHours,
+                hoursApproved: storedHours,
+                hourAdjustMode: mode,
                 hourAdjustFlexible: flexible,
             },
             previous: {
@@ -416,6 +459,15 @@ export async function decideHourAdjust(req, res) {
         }
 
         const kind = record.hourAdjustKind || hourAdjustKindOf(record);
+        const measured = await exactHourProposal(record, {
+            hourAdjustKind: kind,
+            hoursTaken: record.hoursTaken,
+            hoursMax: record.hoursMax,
+            hoursApproved: record.hoursApproved,
+            reason: record.hourAdjustReason,
+        });
+        record.hoursTaken = measured.hoursTaken;
+        record.hoursMax = measured.hoursMax;
         const edited = normalizeHourAdjustEdit(
             {
                 hoursTaken: record.hoursTaken,
@@ -426,6 +478,7 @@ export async function decideHourAdjust(req, res) {
             {
                 approvedHours: req.body?.approvedHours,
                 hourReason: req.body?.hourReason ?? req.body?.reason,
+                hourAdjustMode: req.body?.hourAdjustMode,
             },
         );
         if (edited.error) return res.status(400).json({ message: edited.error });
@@ -435,6 +488,7 @@ export async function decideHourAdjust(req, res) {
             taken: roundHours(record.hoursTaken),
             max: roundHours(record.hoursMax),
             reason: edited.reason,
+            mode: edited.hourAdjustMode,
             timeIn: req.body?.timeIn,
             timeOut: req.body?.timeOut,
         });

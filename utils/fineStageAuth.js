@@ -49,7 +49,8 @@ export function fineStillNeedsApprovalInbox(fine) {
 export function fineAccountsSettlementDone(fine) {
     if (!fine) return false;
     const path = String(fine.accountsPaymentPath || '').trim().toLowerCase();
-    if (path === 'zoho' || path === 'employee') return true;
+    if (path === 'zoho' || path === 'employee' || path === 'journal') return true;
+    if (String(fine.zohoJournalId || '').trim() || String(fine.zohoJournalNumber || '').trim()) return true;
     if (String(fine.vendorBillStatus || '').toLowerCase() === 'paid') return true;
     return Boolean(
         String(fine.zohoBillId || '').trim() || String(fine.zohoBillNumber || '').trim(),

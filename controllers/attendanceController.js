@@ -19,6 +19,7 @@ import {
     weekdayKeyFromDateKey,
 } from '../utils/workingTimeHelpers.js';
 import { addDaysKey, dayWorkedMinutes, evaluateFlexibleDay, flexibleOtFieldsFromDuration, isOvertimePunchTime, mapPunchWithoutOvertime, requiredHoursForDate } from '../utils/flexibleAttendance.js';
+import { ensureAttachmentPersistedToS3, signOrKeepAttachmentUrl } from '../utils/s3Upload.js';
 import { settleFulfilledLeaveRequest } from '../utils/leaveRequestSettlement.js';
 import { dropMappedOvertime, flexibleOtManualUpdate, refreshFlexibleOtRecords } from '../utils/syncFlexibleOt.js';
 import {
@@ -125,7 +126,7 @@ import {
     supersedeOpenAttendanceChanges,
 } from '../utils/attendanceChangeApproval.js';
 import { approveFlexibleOvertimeRecord } from './flexibleOtController.js';
-import { applyStoredHourAdjust, normalizeHourAdjustEdit } from './hourAdjustController.js';
+import { applyStoredHourAdjust, exactHourProposal, normalizeHourAdjustEdit } from './hourAdjustController.js';
 import {
     applyOverlayCounts,
     applyOverlayCountsToBalances,
@@ -777,7 +778,7 @@ function attendanceListPerson(emp, row, date) {
         employeeMongoId: String(row?.employeeMongoId || emp?._id || ''),
         employeeId: String(row?.employeeId || emp?.employeeId || ''),
         name: String(row?.employeeName || fromEmp || 'Employee').trim(),
-        companyName: String(emp?.company?.name || '').trim(),
+        companyName: String(emp?.company?.nickName || emp?.company?.name || '').trim(),
         date,
     };
 }
@@ -802,8 +803,9 @@ function headerPeopleForDay({ roster, dayRecords, peopleById, dateKey, isWeeklyO
         const key = String(row?.statusKey || '').trim();
         const hours = addedOtHours(row);
         if (hours > 0) ot.push({ ...person, hours });
-        if (key === 'on_office') present.push(person);
-        else if (key === 'late_arrived') late.push(person);
+        // Comp off is paid time off that still counts as present for the day.
+        if (key === 'on_office' || key === 'compoff_leave') present.push(person);
+        if (key === 'late_arrived') late.push(person);
         else if (HEADER_LEAVE_KEYS.has(key)) leave.push({ ...person, bucket: headerLeaveBucket(key) });
         else if (key === 'mispunch') missed.push(person);
         else if (!isWeeklyOffDay && HEADER_ABSENT_KEYS.has(key)) {
@@ -1058,7 +1060,7 @@ export async function getAttendanceByDate(req, res) {
         return res.status(200).json({
             message: 'Attendance fetched successfully',
             date,
-            records: shownRecords.map(presentAuthorizedLeaveRecord),
+            records: await attachLeaveFileUrls(shownRecords.map(presentAuthorizedLeaveRecord)),
             pendingChanges,
             approvalHistory,
         });
@@ -1124,7 +1126,7 @@ export async function getAttendanceCalendarSummary(req, res) {
                 ...REAL_EMPLOYEE_MONGO_FILTER,
             })
                 .select('_id employeeId staffType firstName lastName status company')
-                .populate('company', 'name')
+                .populate('company', 'name nickName')
                 .lean(),
             Attendance.find({ date: { $gte: from, $lte: to } }).lean(),
             loadWorkingTimeDoc(),
@@ -1291,6 +1293,8 @@ async function resolveManualMarkPayload({
     timeOut,
     reason,
     attachmentName,
+    attachmentKey = '',
+    attachmentMime = '',
 }) {
     let finalStatusKey = statusKey;
     let finalStatusLabel =
@@ -1345,7 +1349,34 @@ async function resolveManualMarkPayload({
         timeOut,
         reason: finalReason,
         attachmentName: String(attachmentName || '').trim(),
+        attachmentKey: String(attachmentKey || '').trim(),
+        attachmentMime: String(attachmentMime || '').trim(),
     };
+}
+
+async function storeLeaveAttachment(data, name) {
+    const raw = String(data || '').trim();
+    if (!raw) return null;
+    const persisted = await ensureAttachmentPersistedToS3(
+        { data: raw, name: name || 'sick-leave' },
+        { folder: 'leave-attachments', fileName: name || 'sick-leave' },
+    );
+    if (!persisted?.publicId) return null;
+    return {
+        attachmentName: persisted.name || name || '',
+        attachmentKey: persisted.publicId,
+        attachmentMime: persisted.mimeType || '',
+    };
+}
+
+async function attachLeaveFileUrls(rows) {
+    return Promise.all((rows || []).map(async (row) => {
+        const plain = row?.toObject ? row.toObject() : { ...row };
+        const key = String(plain.attachmentKey || '').trim();
+        if (!key) return plain;
+        plain.attachmentUrl = (await signOrKeepAttachmentUrl(key)) || '';
+        return plain;
+    }));
 }
 
 async function commitManualAttendanceMark({
@@ -1382,6 +1413,8 @@ async function commitManualAttendanceMark({
                 timeOut: payload.timeOut,
                 reason: payload.reason,
                 attachmentName: payload.attachmentName,
+                attachmentKey: payload.attachmentKey || '',
+                attachmentMime: payload.attachmentMime || '',
                 approvalStatus: approvalStatusForMark(payload.statusKey),
                 punchSource: 'manual',
                 checkOutSource: payload.timeOut ? 'manual' : '',
@@ -1514,6 +1547,8 @@ async function queueOrApplyManualMark(ctx, {
     timeOut,
     reason,
     attachmentName,
+    attachmentKey = '',
+    attachmentMime = '',
     markedBy,
     employeeId = '',
     employeeName = '',
@@ -1529,6 +1564,8 @@ async function queueOrApplyManualMark(ctx, {
         timeOut,
         reason,
         attachmentName,
+        attachmentKey,
+        attachmentMime,
     });
     const existing = id ? await Attendance.findOne({ date, employeeMongoId: id }).lean() : null;
 
@@ -1736,6 +1773,7 @@ export async function markAttendance(req, res) {
             const timeIn = raw?.timeIn != null && raw.timeIn !== '—' ? String(raw.timeIn).trim() : '';
             const timeOut = raw?.timeOut != null && raw.timeOut !== '—' ? String(raw.timeOut).trim() : '';
             const reason = String(raw?.reason || '').trim();
+            const storedFile = await storeLeaveAttachment(raw?.attachmentData, raw?.attachmentName);
 
             const result = await queueOrApplyManualMark(approvalCtx, {
                 employee: markEmployee,
@@ -1746,7 +1784,9 @@ export async function markAttendance(req, res) {
                 timeIn,
                 timeOut,
                 reason,
-                attachmentName: String(raw?.attachmentName || '').trim(),
+                attachmentName: storedFile?.attachmentName || String(raw?.attachmentName || '').trim(),
+                attachmentKey: storedFile?.attachmentKey || '',
+                attachmentMime: storedFile?.attachmentMime || '',
                 markedBy,
                 employeeId: String(raw?.employeeId || raw?.empNo || markEmployee?.employeeId || '').trim(),
                 employeeName: String(raw?.employeeName || raw?.name || '').trim(),
@@ -1998,7 +2038,7 @@ export async function getMyAttendanceMonth(req, res) {
                 office: workingTime.office,
                 extra: workingTime.extra || {},
             },
-            records: displayRecords,
+            records: await attachLeaveFileUrls(displayRecords),
             todayRecord: displayToday,
             openFlexiblePunch: isAttendanceSuspendedOn(employee, todayKey) ? false : session.openFlexiblePunch,
         });
@@ -3327,6 +3367,7 @@ export async function markTeamAttendance(req, res) {
                 : '';
         const reason = String(req.body?.reason || '').trim();
         const attachmentName = String(req.body?.attachmentName || '').trim();
+        const storedFile = await storeLeaveAttachment(req.body?.attachmentData, attachmentName);
         const markedBy = req.user?.id || null;
         const approvalCtx = await loadChangeApprovalContext(req);
         const saved = [];
@@ -3810,13 +3851,25 @@ export async function decideAttendanceChangeRequest(req, res) {
         }
 
         if (request.action === 'hour_adjust') {
+            const attendanceId = String(request.proposed?.attendanceId || '').trim();
+            const source = mongoose.Types.ObjectId.isValid(attendanceId)
+                ? await Attendance.findById(attendanceId)
+                : null;
+            if (source) {
+                const measured = await exactHourProposal(source, request.proposed || {});
+                request.proposed.hoursTaken = measured.hoursTaken;
+                request.proposed.hoursMax = measured.hoursMax;
+                request.proposed.hourAdjustFlexible = measured.hourAdjustFlexible;
+            }
             const edited = normalizeHourAdjustEdit(request.proposed || {}, {
                 approvedHours: req.body?.approvedHours,
                 hourReason: req.body?.hourReason ?? req.body?.reason,
+                hourAdjustMode: req.body?.hourAdjustMode,
             });
             if (edited.error) return res.status(400).json({ message: edited.error });
             request.proposed.hoursApproved = edited.hoursApproved;
             request.proposed.reason = edited.reason;
+            request.proposed.hourAdjustMode = edited.hourAdjustMode;
             request.proposed.statusLabel =
                 request.proposed.hourAdjustKind === 'mispunch'
                     ? 'Misspunch request'
@@ -3965,6 +4018,8 @@ export async function decideAttendanceChangeRequest(req, res) {
             timeOut: request.proposed?.timeOut || '',
             reason: request.proposed?.reason || '',
             attachmentName: request.proposed?.attachmentName || '',
+            attachmentKey: request.proposed?.attachmentKey || '',
+            attachmentMime: request.proposed?.attachmentMime || '',
         };
         if (!ATTENDANCE_STATUS_KEYS.includes(payload.statusKey) && payload.statusKey !== 'not_marked') {
             return res.status(400).json({ message: 'This attendance change is no longer valid.' });
@@ -4035,6 +4090,7 @@ export async function requestAttendanceLeave(req, res) {
         const requestedStatusKey = String(req.body?.requestedStatusKey || '').trim();
         const reason = String(req.body?.reason || '').trim();
         const attachmentName = String(req.body?.attachmentName || '').trim();
+        const storedFile = await storeLeaveAttachment(req.body?.attachmentData, attachmentName);
         const isLateArrival = requestedStatusKey === 'late_arrived';
         const usesDayPart = isLateArrival || requestedStatusKey === 'authorized_leave';
         const requestedPart = String(req.body?.dayPart || 'full').trim();
@@ -4191,7 +4247,11 @@ export async function requestAttendanceLeave(req, res) {
         record.leaveDayFraction = dayPart ? partialLeavePortion(dayPart) : 0;
         record.leaveRequestTimeIn = partialLeave ? partialLeave.workStart || '' : requestedTimeIn;
         record.leaveRequestTimeOut = partialLeave ? partialLeave.workEnd || '' : requestedTimeOut;
-        record.attachmentName = attachmentName || record.attachmentName || '';
+        record.attachmentName = storedFile?.attachmentName || attachmentName || record.attachmentName || '';
+        if (storedFile?.attachmentKey) {
+            record.attachmentKey = storedFile.attachmentKey;
+            record.attachmentMime = storedFile.attachmentMime || '';
+        }
         record.leaveRequestStatus = 'pending';
         record.leaveApprovalStage = opening.stage;
         record.leaveRequestedAt = new Date();
@@ -4245,6 +4305,7 @@ export async function requestAttendanceYellow(req, res) {
         const date = String(req.body?.date || '').trim();
         const reason = String(req.body?.reason || '').trim();
         const attachmentName = String(req.body?.attachmentName || '').trim();
+        const storedFile = await storeLeaveAttachment(req.body?.attachmentData, attachmentName);
 
         if (!isValidDateKey(date)) {
             return res.status(400).json({ message: 'A valid date (yyyy-MM-dd) is required.' });
@@ -4327,7 +4388,11 @@ export async function requestAttendanceYellow(req, res) {
         record.requestedStatusLabel = 'Present';
         record.leaveRequestReason = reason;
         record.leaveRequestKind = 'yellow';
-        record.attachmentName = attachmentName || record.attachmentName || '';
+        record.attachmentName = storedFile?.attachmentName || attachmentName || record.attachmentName || '';
+        if (storedFile?.attachmentKey) {
+            record.attachmentKey = storedFile.attachmentKey;
+            record.attachmentMime = storedFile.attachmentMime || '';
+        }
         record.leaveRequestStatus = 'pending';
         record.leaveApprovalStage = opening.stage;
         record.leaveRequestedAt = new Date();
@@ -4453,6 +4518,7 @@ export async function requestAttendanceFuture(req, res) {
         const kind = String(req.body?.kind || 'leave').trim() || 'leave';
         const reason = String(req.body?.reason || '').trim();
         const attachmentName = String(req.body?.attachmentName || '').trim();
+        const storedFile = await storeLeaveAttachment(req.body?.attachmentData, attachmentName);
         const isMultiDay = fromDate !== toDate;
         const isAnnualLeave = kind === 'annual_leave';
         const requestedPart = String(req.body?.dayPart || 'full').trim();
@@ -4671,7 +4737,11 @@ export async function requestAttendanceFuture(req, res) {
             record.requestedStatusLabel = requestedStatusLabel;
             record.leaveRequestReason = reason;
             record.leaveRequestKind = spec.leaveRequestKind;
-            record.attachmentName = attachmentName;
+            record.attachmentName = storedFile?.attachmentName || attachmentName;
+            if (storedFile?.attachmentKey) {
+                record.attachmentKey = storedFile.attachmentKey;
+                record.attachmentMime = storedFile.attachmentMime || '';
+            }
             record.leaveRequestStatus = 'pending';
             record.leaveApprovalStage = opening.stage;
             record.leaveRequestDayPart = dayPart;

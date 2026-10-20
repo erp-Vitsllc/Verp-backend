@@ -811,7 +811,7 @@ export async function getEmployeeAttendanceProfile(req, res) {
             await Promise.all([
             Attendance.find({ employeeMongoId, date: { $gte: from, $lte: to } })
                 .select(
-                    'date statusKey statusLabel reason timeIn timeOut flexibleFromOtDate attachmentName leavePayType leaveDayFraction leaveRequestDayPart leaveRequestSession leaveDeductionTimes leaveRequestReason leaveRequestStatus requestedStatusKey requestedStatusLabel previousStatusKey leaveRequestKind leaveRequestGroupId leaveRequestFromDate leaveRequestToDate leaveRequestedAt leaveRequestTimeOut hourAdjustStatus hourAdjustKind hoursTaken hoursMax hoursApproved',
+                    'date statusKey statusLabel reason timeIn timeOut flexibleFromOtDate attachmentName attachmentKey leavePayType leaveDayFraction leaveRequestDayPart leaveRequestSession leaveDeductionTimes leaveRequestReason leaveRequestStatus requestedStatusKey requestedStatusLabel previousStatusKey leaveRequestKind leaveRequestGroupId leaveRequestFromDate leaveRequestToDate leaveRequestedAt leaveRequestTimeOut hourAdjustStatus hourAdjustKind hoursTaken hoursMax hoursApproved',
                 )
                 .sort({ date: -1 })
                 .lean(),
@@ -973,6 +973,16 @@ export async function getEmployeeAttendanceProfile(req, res) {
                 historical: true,
             });
         }
+        const fileByDate = new Map();
+        for (const row of attendanceRows) {
+            const key = String(row.attachmentKey || '').trim();
+            if (key) fileByDate.set(String(row.date || ''), key);
+        }
+        await Promise.all(events.map(async (event) => {
+            const key = fileByDate.get(String(event.date || ''));
+            if (!key) return;
+            event.attachmentUrl = (await signOrKeepAttachmentUrl(key)) || '';
+        }));
         Object.assign(counts, applyOverlayCounts(counts, overlay.extraCounts));
         lastAnnualLeaveDate = lastOverlayAnnualLeaveDate(overlay.entries, lastAnnualLeaveDate);
 
@@ -1227,6 +1237,76 @@ export async function getEmployeeAttendanceProfile(req, res) {
             yearFrom: from,
             yearTo: to,
         });
+        const moneyWaiting = (value) => {
+            const status = String(value || '').trim();
+            if (!status || /draft|reject|cancel/i.test(status)) return '';
+            return /pending/i.test(status) ? status : '';
+        };
+        const waitingParty = (status) => {
+            if (/accounts|payment/i.test(status)) return 'Accounts';
+            if (/authorization/i.test(status)) return 'Authorization';
+            return 'HR';
+        };
+        const pushMoneyPending = (row) => {
+            const createdKey = toDateKey(row.createdAt);
+            pendingHrRequests.push({
+                id: row.id,
+                title: row.title,
+                subtitle: row.subtitle,
+                appliedKey: row.appliedKey,
+                status: row.status,
+                owner: waitingParty(row.status),
+                fromDate: createdKey,
+                toDate: createdKey,
+                dateKey: createdKey,
+                dateLabel: formatDayMonthYear(createdKey),
+                badge: daysAgoLabel(createdKey, todayKey),
+                daysAgo: daysAgoCount(createdKey, todayKey),
+                spanAllMonths: true,
+                href: row.href,
+            });
+        };
+        for (const item of loans || []) {
+            const status = moneyWaiting(item.approvalStatus) || moneyWaiting(item.status);
+            if (!status) continue;
+            const kind = item.type === 'Advance' ? 'Advance' : 'Loan';
+            pushMoneyPending({
+                id: `${kind.toLowerCase()}-${item._id}`,
+                title: `${kind} request`,
+                subtitle: item.loanId || kind,
+                appliedKey: kind.toLowerCase(),
+                status,
+                href: `/HRM/LoanAndAdvance/${item._id}`,
+                createdAt: item.createdAt,
+            });
+        }
+        for (const item of rewards || []) {
+            const status = moneyWaiting(item.rewardStatus) || moneyWaiting(item.approvalStatus);
+            if (!status) continue;
+            pushMoneyPending({
+                id: `reward-${item._id}`,
+                title: 'Reward request',
+                subtitle: [item.rewardId, item.rewardType].filter(Boolean).join(' · ') || 'Reward',
+                appliedKey: 'reward',
+                status,
+                href: `/HRM/Reward/${item._id}`,
+                createdAt: item.createdAt,
+            });
+        }
+        for (const item of fines || []) {
+            const assignee = (item.assignedEmployees || []).find((entry) => entry.employeeId === employeeCode);
+            const status = moneyWaiting(item.fineStatus) || moneyWaiting(assignee?.approvalStatus);
+            if (!status) continue;
+            pushMoneyPending({
+                id: `fine-${item._id}`,
+                title: 'Fine request',
+                subtitle: [item.fineId, item.fineType].filter(Boolean).join(' · ') || 'Fine',
+                appliedKey: 'fine',
+                status,
+                href: `/HRM/Fine/${item._id}`,
+                createdAt: item.createdAt,
+            });
+        }
         for (const bill of utilityBills || []) {
             const status = String(bill.status || '');
             if (status !== 'Pending HR' && status !== 'Pending Accounts') continue;
@@ -1256,8 +1336,8 @@ export async function getEmployeeAttendanceProfile(req, res) {
         );
         const extraLeave = [];
         for (const card of employeeTasks.leaveCards || []) {
-            // Salary preparation and the calendar link belong only to the employee who
-            // requested the leave. The assignee and anyone who reassigned the task do not get it.
+            // Salary preparation belongs to the employee the leave is for.
+            // The person who filed it, and anyone it was reassigned to, do not get it on their profile.
             if (card.reassigned || !card.ownRequest) continue;
             if (!leaveCardMatchesOpenRequest(card, {
                 attendanceRows: prepAttendance,

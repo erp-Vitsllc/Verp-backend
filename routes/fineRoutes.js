@@ -6,6 +6,10 @@ import { updateFine } from "../controllers/fine/updateFine.js";
 import { deleteFine } from "../controllers/fine/deleteFine.js";
 import { approveFine } from "../controllers/fine/approveFine.js";
 import { accountsFinePayment } from "../controllers/fine/accountsFinePayment.js";
+import {
+    postFineMyJournal,
+    uploadFineJournalAttachments,
+} from "../controllers/fine/postFineMyJournal.js";
 import { postFineVendorCredit } from "../controllers/fine/postFineVendorCredit.js";
 import { protect } from "../middleware/authMiddleware.js";
 import {
@@ -33,6 +37,12 @@ router.get("/:id/pdf", checkFineViewPermission(), downloadFinePdf);
 // Workflow + Accounts (parent Fine View) — same pattern as Loan party-payable / status
 router.put("/:id/approve", checkFineViewPermission(), approveFine);
 router.put("/:id/accounts-payment", checkFineViewPermission(), accountsFinePayment);
+router.post(
+    "/:id/my-journal",
+    checkFineViewPermission(),
+    uploadFineJournalAttachments,
+    postFineMyJournal,
+);
 router.post("/:id/vendor-credit", checkFineViewPermission(), postFineVendorCredit);
 router.put("/:id/reject", checkFineViewPermission(), (req, res) => {
     req.body = { ...(req.body || {}), fineStatus: "Rejected" };

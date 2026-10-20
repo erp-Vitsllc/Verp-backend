@@ -841,9 +841,82 @@ export async function createVendorPayment(payload = {}) {
 }
 
 /**
- * Create a balanced Zoho manual journal (debit + credit against Chart of Accounts).
- * OAuth: ZohoBooks.accountants.CREATE
+ * Latest journal entry number in this org, used to preview the next Journal#.
  */
+export async function fetchLatestJournalEntryNumber() {
+    const data = await requestZohoBooks('/journals', {
+        params: {
+            page: 1,
+            per_page: 1,
+            sort_column: 'created_time',
+            sort_order: 'D',
+        },
+        timeout: 20000,
+    });
+    const row = Array.isArray(data?.journals) ? data.journals[0] : null;
+    const raw = String(row?.entry_number || row?.journal_number || '').trim();
+    const match = raw.match(/(\d+)\s*$/);
+    if (!match) return raw ? { last: raw, next: '' } : { last: '', next: '' };
+    const width = match[1].length;
+    const nextNum = String(Number(match[1]) + 1).padStart(width, '0');
+    const next = raw.slice(0, match.index) + nextNum;
+    return { last: raw, next };
+}
+
+/**
+ * Upload a file onto a Zoho Books manual journal.
+ * POST /journals/{journal_id}/attachment
+ */
+export async function uploadJournalAttachment(
+    journalId,
+    { buffer, filename = 'attachment.pdf', mimeType = 'application/pdf' } = {},
+) {
+    const id = String(journalId || '').trim();
+    if (!id) throw new Error('Journal id is required.');
+    if (!Buffer.isBuffer(buffer) || buffer.length === 0) {
+        throw new Error('Attachment file is empty.');
+    }
+
+    const safeName = String(filename || 'attachment.pdf')
+        .replace(/[\\"\r\n]/g, '_')
+        .trim()
+        .slice(0, 200) || 'attachment.pdf';
+    const contentType = String(mimeType || 'application/octet-stream').trim() || 'application/octet-stream';
+    const boundary = `----ZohoJournalAttachment${Date.now()}${Math.random().toString(36).slice(2)}`;
+    const preamble = Buffer.from(
+        `--${boundary}\r\n` +
+            `Content-Disposition: form-data; name="attachment"; filename="${safeName}"\r\n` +
+            `Content-Type: ${contentType}\r\n\r\n`,
+        'utf8',
+    );
+    const epilogue = Buffer.from(`\r\n--${boundary}--\r\n`, 'utf8');
+    const body = Buffer.concat([preamble, buffer, epilogue]);
+
+    const { organizationId, booksApiBase, accessToken } = await getBooksRequestContext();
+    const pathname = `/journals/${encodeURIComponent(id)}/attachment`;
+
+    const response = await axios({
+        method: 'post',
+        url: `${booksApiBase}${pathname}`,
+        params: { organization_id: organizationId },
+        data: body,
+        headers: {
+            Authorization: `Zoho-oauthtoken ${accessToken}`,
+            'Content-Type': `multipart/form-data; boundary=${boundary}`,
+            'Content-Length': body.length,
+        },
+        timeout: 90000,
+        maxBodyLength: Infinity,
+        maxContentLength: Infinity,
+    });
+
+    const responseBody = response.data || {};
+    if (Number(responseBody.code) !== 0) {
+        throw new Error(responseBody.message || 'Zoho journal attachment upload failed');
+    }
+    return responseBody;
+}
+
 export async function createZohoJournal(payload = {}) {
     try {
         const response = await requestZohoBooks('/journals', {

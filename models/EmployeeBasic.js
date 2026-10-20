@@ -48,6 +48,12 @@ const employeeBasicSchema = new mongoose.Schema(
             description: { type: String, default: '', trim: true },
             suspendedAt: { type: Date, default: null },
             suspendedByName: { type: String, default: '', trim: true },
+            attachments: [{
+                name: { type: String, default: '' },
+                url: { type: String, default: '' },
+                publicId: { type: String, default: '' },
+                mimeType: { type: String, default: '' },
+            }],
         },
         profileApprovalStatus: {
             type: String,

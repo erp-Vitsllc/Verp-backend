@@ -22,6 +22,7 @@ import {
     uploadZohoBillAttachmentMiddleware,
 } from '../controllers/zoho/postZohoBillAttachment.js';
 import { postZohoExpense } from '../controllers/zoho/postZohoExpense.js';
+import { getZohoJournalSupport } from '../controllers/zoho/getZohoJournalSupport.js';
 import { postZohoVendor } from '../controllers/zoho/postZohoVendor.js';
 import { getZohoVendorById } from '../controllers/zoho/getZohoVendorById.js';
 import {
@@ -66,6 +67,7 @@ router.post('/bills', postZohoBill);
 router.post('/vendorcredits', postZohoVendorCredit);
 router.put('/bills/:billId', putZohoBill);
 router.get('/expenses/support', getZohoExpenseSupport);
+router.get('/journals/support', getZohoJournalSupport);
 router.get('/bankaccounts', getZohoBankAccounts);
 router.get('/expenses', getZohoExpenses);
 router.post('/expenses', postZohoExpense);

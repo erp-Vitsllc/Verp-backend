@@ -194,14 +194,18 @@ function serviceTypeKey(service) {
 }
 
 async function loadFleetVehicles(req, select, populate = []) {
+    const selectWithDisposition = `${select || ''} vehicleDispositionStatus`.trim();
     let query = AssetItem.find({
         $and: [draftVisibilityQuery(req.user), buildFleetVehicleMongoScope()],
-    }).select(select);
+    }).select(selectWithDisposition);
     for (const pop of populate) {
         query = query.populate(pop);
     }
     const vehicles = await query.lean();
-    return vehicles.filter((v) => String(v.plateNumber || '').trim() || String(v.assetId || '').startsWith('VEGA-VHCL-'));
+    return vehicles.filter((v) => {
+        if (String(v?.vehicleDispositionStatus || '').trim().toLowerCase() === 'sold') return false;
+        return String(v.plateNumber || '').trim() || String(v.assetId || '').startsWith('VEGA-VHCL-');
+    });
 }
 
 /**

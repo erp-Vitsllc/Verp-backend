@@ -55,6 +55,8 @@ const attendanceChangeRequestSchema = new mongoose.Schema(
             punchSessions: { type: Array, default: [] },
             reason: { type: String, default: '', trim: true },
             attachmentName: { type: String, default: '', trim: true },
+            attachmentKey: { type: String, default: '', trim: true },
+            attachmentMime: { type: String, default: '', trim: true },
             punchSource: { type: String, default: '', trim: true },
             checkOutSource: { type: String, default: '', trim: true },
             punchMappedFromEmployeeMongoId: { type: String, default: '', trim: true },
