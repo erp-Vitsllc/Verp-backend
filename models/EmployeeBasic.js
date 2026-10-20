@@ -42,6 +42,7 @@ const employeeBasicSchema = new mongoose.Schema(
             default: 'active',
         },
         attendanceSuspension: {
+            mode: { type: String, enum: ['permanent', 'range', ''], default: '' },
             fromDate: { type: String, default: '', trim: true },
             untilDate: { type: String, default: '', trim: true },
             description: { type: String, default: '', trim: true },

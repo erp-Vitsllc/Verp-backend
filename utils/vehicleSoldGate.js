@@ -1,9 +1,8 @@
 import VehicleFuelBill from '../models/VehicleFuelBill.js';
+import { isPendingVehicleService } from './vehicleServicePendingStatus.js';
 
 export const SOLD_VEHICLE_LOCKED_MESSAGE =
     'This vehicle is sold. It cannot be assigned, serviced, fuelled, or changed.';
-
-const CLOSED_SERVICE_STAGES = new Set(['', 'complete', 'completed', 'rejected']);
 
 export function dubaiMonthKey(date = new Date()) {
     return new Intl.DateTimeFormat('en-CA', {
@@ -28,16 +27,7 @@ function vehicleIsAssigned(asset) {
 }
 
 function vehicleHasPendingService(asset) {
-    if (asset?.onServiceActive === true) return true;
-    const activeStage = String(asset?.activeServiceWorkflow?.stage || '').trim().toLowerCase();
-    if (activeStage && !CLOSED_SERVICE_STAGES.has(activeStage)) return true;
-    for (const row of asset?.services || []) {
-        const snap = String(row?.workflowSnapshot?.stage || '').trim().toLowerCase();
-        if (snap && !CLOSED_SERVICE_STAGES.has(snap)) return true;
-        const remark = String(row?.remark || '');
-        if (/"requestStatus"\s*:\s*"(draft|pending|submitted)"/i.test(remark)) return true;
-    }
-    return false;
+    return (asset?.services || []).some((row) => isPendingVehicleService(asset, row));
 }
 
 export async function evaluateVehicleSoldChecks(asset) {

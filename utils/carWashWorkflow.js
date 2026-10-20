@@ -305,7 +305,7 @@ export async function advanceCarWashBillingAfterAccountsApprove(asset, wf, actor
     wf.stage = CAR_WASH_STAGE_BILLED;
     liveRemark.workflowStage = CAR_WASH_STAGE_BILLED;
     liveRemark.billingStatus = 'billed';
-    liveRemark.carWashPaymentStatus = CAR_WASH_PAYMENT_BILLED;
+    liveRemark.carWashPaymentStatus = 'paid';
     liveRemark.vehicleServiceCompleted = 'live';
     liveRemark.vehicleServiceCompletedAt = new Date().toISOString();
     liveRemark.accountsBillingApprovedAt = new Date().toISOString();

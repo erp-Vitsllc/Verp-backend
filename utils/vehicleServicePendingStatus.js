@@ -15,7 +15,8 @@ const VEHICLE_SERVICE_TYPES = new Set([
 ]);
 
 function parseServiceRemark(service) {
-    if (!service?.remark || typeof service.remark !== 'string') return {};
+    if (!service?.remark) return {};
+    if (typeof service.remark === 'object') return service.remark;
     try {
         const parsed = JSON.parse(service.remark);
         return parsed && typeof parsed === 'object' ? parsed : {};

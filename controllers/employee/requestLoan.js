@@ -12,6 +12,7 @@ import {
     collectLoanEligibilityBlocks,
     loanRepaymentMonthCap,
     primaryVisaFromDetails,
+    requesterCanOverrideLoanEligibility,
 } from "../../utils/loanEligibilityValidation.js";
 import { assertSameTypeRequestAllowed } from "../../utils/loanRepaymentGate.js";
 import { rememberSentEmail } from "../../utils/emailDispatch.js";
@@ -179,17 +180,36 @@ export const requestLoan = async (req, res) => {
         // --- VALIDATION: Salary Checks ---
         const salaryRecord = await EmployeeSalary.findOne({ employeeId: employeeBasic.employeeId });
 
-        if (req.selfServiceLoan) {
+        {
             const salary = Number(salaryRecord?.monthlySalary) || Number(salaryRecord?.totalSalary) || 0;
             const advanceRequest = Boolean(type && type.includes('Advance'));
             const maxAmount = advanceRequest ? salary / 2 : salary * 3;
-            if (Number(amount) > maxAmount) {
+            if (salary > 0 && Number(amount) > maxAmount) {
                 const formatted = Number(maxAmount).toLocaleString(undefined, { maximumFractionDigits: 2 });
                 const label = advanceRequest ? '50% of Salary' : '3x Salary';
-                return res.status(400).json(validationBlock(withChecks({
-                    message: `Maximum allowed amount is ${formatted} (${label})`,
-                    canContinue: false,
-                })));
+                const salaryCapMessage = `Maximum allowed amount is ${formatted} (${label})`;
+                // Employees cannot exceed the cap. Flowchart HR may confirm and continue.
+                if (req.selfServiceLoan) {
+                    return res.status(400).json(validationBlock(withChecks({
+                        message: salaryCapMessage,
+                        canContinue: false,
+                    })));
+                }
+                const wantsOverride = req.body?.hrEligibilityOverride === true;
+                if (wantsOverride) {
+                    const allowed = await requesterCanOverrideLoanEligibility(req);
+                    if (!allowed) {
+                        return res.status(403).json(validationBlock({
+                            message: 'Only the flowchart HR assigned user can override eligibility warnings.',
+                        }));
+                    }
+                    continuedNotes.push(salaryCapMessage);
+                } else {
+                    return res.status(400).json(validationBlock(withChecks({
+                        message: salaryCapMessage,
+                        canContinue: true,
+                    })));
+                }
             }
         }
 

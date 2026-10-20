@@ -17,6 +17,7 @@ export async function setAttendanceSuspension(req, res) {
         if (action === 'activate') {
             employee.attendanceAccountStatus = 'active';
             employee.attendanceSuspension = {
+                mode: '',
                 fromDate: '',
                 untilDate: '',
                 description: '',
@@ -31,10 +32,13 @@ export async function setAttendanceSuspension(req, res) {
             });
         }
 
-        const fromDate = String(req.body?.fromDate || '').trim();
-        const untilDate = String(req.body?.untilDate || '').trim();
+        const mode = String(req.body?.mode || 'range').trim().toLowerCase() === 'permanent'
+            ? 'permanent'
+            : 'range';
+        const fromDate = mode === 'permanent' ? '' : String(req.body?.fromDate || '').trim();
+        const untilDate = mode === 'permanent' ? '' : String(req.body?.untilDate || '').trim();
         const description = String(req.body?.description || '').trim();
-        if (!isDateKey(fromDate) || !isDateKey(untilDate) || untilDate < fromDate) {
+        if (mode === 'range' && (!isDateKey(fromDate) || !isDateKey(untilDate) || untilDate < fromDate)) {
             return res.status(400).json({ message: 'Choose a from date and an until date.' });
         }
         if (description.length < 3) {
@@ -43,6 +47,7 @@ export async function setAttendanceSuspension(req, res) {
 
         employee.attendanceAccountStatus = 'suspended';
         employee.attendanceSuspension = {
+            mode,
             fromDate,
             untilDate,
             description,

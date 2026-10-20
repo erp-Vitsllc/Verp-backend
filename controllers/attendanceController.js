@@ -1017,8 +1017,13 @@ export async function getAttendanceByDate(req, res) {
         );
         const suspendedEmployees = await EmployeeBasic.find({
             attendanceAccountStatus: 'suspended',
-            'attendanceSuspension.fromDate': { $lte: date },
-            'attendanceSuspension.untilDate': { $gte: date },
+            $or: [
+                { 'attendanceSuspension.mode': 'permanent' },
+                {
+                    'attendanceSuspension.fromDate': { $lte: date },
+                    'attendanceSuspension.untilDate': { $gte: date },
+                },
+            ],
         })
             .select('_id employeeId firstName lastName attendanceAccountStatus attendanceSuspension')
             .lean();
