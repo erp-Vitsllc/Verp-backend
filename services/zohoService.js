@@ -843,24 +843,48 @@ export async function createVendorPayment(payload = {}) {
 /**
  * Latest journal entry number in this org, used to preview the next Journal#.
  */
-export async function fetchLatestJournalEntryNumber() {
-    const data = await requestZohoBooks('/journals', {
-        params: {
-            page: 1,
-            per_page: 1,
-            sort_column: 'created_time',
-            sort_order: 'D',
-        },
-        timeout: 20000,
-    });
-    const row = Array.isArray(data?.journals) ? data.journals[0] : null;
-    const raw = String(row?.entry_number || row?.journal_number || '').trim();
-    const match = raw.match(/(\d+)\s*$/);
-    if (!match) return raw ? { last: raw, next: '' } : { last: '', next: '' };
+function nextJournalEntryNumber(raw) {
+    const value = String(raw || '').trim();
+    const match = value.match(/(\d+)\s*$/);
+    if (!match) return '';
     const width = match[1].length;
     const nextNum = String(Number(match[1]) + 1).padStart(width, '0');
-    const next = raw.slice(0, match.index) + nextNum;
-    return { last: raw, next };
+    return value.slice(0, match.index) + nextNum;
+}
+
+export async function fetchLatestJournalEntryNumber() {
+    let data;
+    try {
+        data = await requestZohoBooks('/journals', {
+            params: {
+                page: 1,
+                per_page: 200,
+                sort_column: 'journal_date',
+                sort_order: 'D',
+            },
+            timeout: 20000,
+        });
+    } catch {
+        data = await requestZohoBooks('/journals', {
+            params: { page: 1, per_page: 200 },
+            timeout: 20000,
+        });
+    }
+    const rows = Array.isArray(data?.journals) ? data.journals : [];
+    let last = '';
+    let lastNum = -1;
+    for (const row of rows) {
+        const raw = String(row?.entry_number || row?.journal_number || '').trim();
+        const match = raw.match(/(\d+)\s*$/);
+        if (!match) continue;
+        const num = Number(match[1]);
+        if (num > lastNum) {
+            lastNum = num;
+            last = raw;
+        }
+    }
+    if (!last) return { last: '', next: '' };
+    return { last, next: nextJournalEntryNumber(last) };
 }
 
 /**

@@ -145,6 +145,9 @@ function buildJournalPayload(body) {
     const reference = String(body.referenceNumber || body.reference_number || '').trim();
     if (reference) payload.reference_number = reference;
 
+    const entryNumber = String(body.journalNumber || body.entry_number || '').trim();
+    if (entryNumber) payload.entry_number = entryNumber;
+
     const currencyId = String(body.currencyId || body.currency_id || '').trim();
     if (currencyId) payload.currency_id = currencyId;
 
