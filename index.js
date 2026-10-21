@@ -37,6 +37,7 @@ import whatsappRoute from "./routes/whatsappRoutes.js";
 import notificationEmailPermissionRoute from "./routes/notificationEmailPermissionRoutes.js";
 import { startLocatorWebSocket } from "./services/locatorWebSocketService.js";
 import { syncLocatorToErpDatabase } from "./services/locatorSnapshotService.js";
+import { syncZohoIntoErp, ZOHO_ERP_SYNC_MS } from "./services/zohoHourlySync.js";
 import { commonLimiter } from "./middleware/rateLimitMiddleware.js";
 import { activityAuditMiddleware } from "./middleware/activityAuditMiddleware.js";
 import { resolveFrontendBaseUrl, runWithRequestFrontendBaseUrl } from "./utils/resolveFrontendBaseUrl.js";
@@ -413,6 +414,18 @@ async function startServer() {
                 console.error('[LocatorSync] scheduled sync failed:', e?.message || e),
             );
         }, LOCATOR_ERP_SYNC_MS);
+
+        // Zoho Books → ERP cache every hour. Screens reload ERP after this finishes.
+        setTimeout(() => {
+            syncZohoIntoErp().catch((e) =>
+                console.error('[ZohoSync] startup refresh failed:', e?.message || e),
+            );
+        }, 90 * 1000);
+        setInterval(() => {
+            syncZohoIntoErp().catch((e) =>
+                console.error('[ZohoSync] hourly refresh failed:', e?.message || e),
+            );
+        }, ZOHO_ERP_SYNC_MS);
         subscribeWhatsAppWaba()
             .then((result) => {
                 console.log('[WhatsApp] WABA subscribed_apps', {

@@ -5,6 +5,7 @@ import { syncDashboardAction } from './syncDashboard.js';
 import { sendAttendanceLeaveRequestEmail } from './sendAttendanceLeaveEmails.js';
 import { resolveFlowchartHrEmployee } from './resolveFlowchartHrEmployee.js';
 import { LEAVE_STAGE_HR, LEAVE_STAGE_REPORTEE } from './leaveRequestApproval.js';
+import { normalizeStaffTypeKey } from './workLocationHelpers.js';
 
 export const LEAVE_DASHBOARD_REQUEST_TYPE = 'Employee Leave Request';
 
@@ -31,7 +32,22 @@ export function leaveDashboardRequestObjectId(groupId, attendanceId) {
     return attendanceId;
 }
 
-export function leaveDashboardReviewPath({ from, to, attendanceId } = {}) {
+export function leaveDashboardReviewPath({
+    from,
+    to,
+    attendanceId,
+    requestedStatusKey = '',
+    staffType = '',
+    employeeMongoId = '',
+} = {}) {
+    if (String(requestedStatusKey || '') === 'sick_leave') {
+        const params = new URLSearchParams();
+        if (from) params.set('date', from);
+        params.set('staffType', normalizeStaffTypeKey(staffType) || 'office');
+        if (employeeMongoId) params.set('blinkEmployee', String(employeeMongoId));
+        if (attendanceId) params.set('leaveAttendanceId', String(attendanceId));
+        return `/HRM/Attendance/mark?${params.toString()}`;
+    }
     const params = new URLSearchParams();
     if (from) params.set('from', from);
     if (to) params.set('to', to);
@@ -93,6 +109,8 @@ export async function notifyLeaveRequestApprover({
     const requestId = leaveDashboardRequestObjectId(groupId, attendanceId);
     const hrStep = stage === LEAVE_STAGE_HR;
     const waitingLabel = hrStep ? 'Pending with HR' : 'Pending with primary reportee';
+    const staffType = normalizeStaffTypeKey(employee?.staffType) || 'office';
+    const sickLeave = String(requestedStatusKey || '') === 'sick_leave';
 
     await syncDashboardAction({
         requestId,
@@ -109,6 +127,7 @@ export async function notifyLeaveRequestApprover({
             from: start,
             to: end,
             requestedStatusKey,
+            staffType,
             leaveRequestKind,
             leaveRequestGroupId: String(groupId || ''),
             leaveDashboard: true,
@@ -130,8 +149,11 @@ export async function notifyLeaveRequestApprover({
             from: start,
             to: end,
             attendanceId,
+            requestedStatusKey,
+            staffType,
+            employeeMongoId: employee?._id,
         }),
-        buttonLabel: 'Open Leave Approval',
+        buttonLabel: sickLeave ? 'Open attendance' : 'Open Leave Approval',
         emailTitle: hrStep ? `${label} — HR approval` : `${label} Request`,
         recordIds: await mailIdsForRequest({
             requestId,
@@ -217,6 +239,9 @@ export async function notifyFlowchartHrOfIneligibleAnnualLeave({
             from: start,
             to: end,
             attendanceId,
+            requestedStatusKey,
+            staffType: employee?.staffType,
+            employeeMongoId: employee?._id,
         }),
         buttonLabel: 'Open Leave Approval',
         emailTitle: `${label} — not eligible`,

@@ -1381,6 +1381,13 @@ export const respondVehicleServiceWorkflow = async (req, res) => {
                 allowed = await isUserInFlowchart(req.user, roleKey).catch(() => false);
             }
         }
+        if (
+            !allowed &&
+            action === 'save' &&
+            (stage === STAGE.ACCOUNTS || stage === 'pending_billing')
+        ) {
+            allowed = await isUserInFlowchart(req.user, 'hr').catch(() => false);
+        }
         if (!allowed) {
             return res.status(403).json({
                 message: oilCashAtPaymentStage

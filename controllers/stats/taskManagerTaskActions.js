@@ -78,7 +78,13 @@ function dubaiDateKey(value) {
     return DUBAI_DATE.format(date);
 }
 
+function isGeneralTask(task) {
+    return String(task?.taskType || "") === "General Task" && !task?.sourceDashboardActionId;
+}
+
 function detailDisplayStatus(task, action, manual) {
+    if (task?.closeRequest?.reviewPending && task?.status !== "Completed") return "Pending Review";
+    if (task?.closeRequest?.reviewReturned && (task?.status === "Pending" || task?.status === "In Progress")) return "Open";
     if (task?.status === "Completed" || task?.status === "Cancelled" || task?.status === "Rejected") return task.status;
     if (task?.closeRequest?.reopenedAt && (task.status === "Pending" || task.status === "In Progress")) {
         const requested = manual ? task.createdAt : (action?.requestedDate || action?.createdAt || task.createdAt);
@@ -653,7 +659,9 @@ async function closeFlags(task, viewer, currentAssigneeId, assigneeEmpId, action
         closeMessage = `${saved.requestedByName || "The reassigned employee"} completed this task. The assignee can close this request.`;
     }
     const holder = viewer?.superUser || viewerIsAssignee;
-    return {
+    const general = isGeneralTask(task);
+    const reviewPending = Boolean(saved.reviewPending) && !completed;
+    const flags = {
         reassigned,
         canReassign: open && (viewer?.superUser || viewerIsAssignee || viewerIsOriginal),
         canReturn: open && reassigned && viewerIsAssignee && !viewerIsOriginal,
@@ -672,6 +680,27 @@ async function closeFlags(task, viewer, currentAssigneeId, assigneeEmpId, action
         closeScheduled,
         closeState: closed ? "closed" : completionPending ? "confirm" : notified ? "requested" : "none",
         closeMessage,
+        canCompleteGeneral: false,
+        canApproveGeneral: false,
+        canRejectGeneral: false,
+    };
+    if (!general) return flags;
+    if (reviewPending) {
+        flags.closeMessage = `${saved.completionRequestedByName || saved.returnAssigneeName || "The assignee"} completed this task. Approve to close it, or reject it with a reason.`;
+    } else if (saved.reviewReturned && open) {
+        flags.closeMessage = "This task was rejected and is open again for the assignee.";
+    }
+    return {
+        ...flags,
+        canSubmitCompletion: false,
+        canConfirmComplete: false,
+        canMarkRejected: flags.canMarkRejected && !reviewPending,
+        canMarkCompleted: false,
+        canRequestClose: false,
+        canFinishClose: false,
+        canCompleteGeneral: open && (viewerIsAssignee || viewer?.superUser) && !reviewPending,
+        canApproveGeneral: reviewPending && (requesterViewer || viewer?.superUser),
+        canRejectGeneral: reviewPending && (requesterViewer || viewer?.superUser),
     };
 }
 
@@ -1545,6 +1574,12 @@ export const returnTaskManagerTask = async (req, res) => {
     }
 };
 
+async function resolveTaskRequesterEmployee(task) {
+    const byName = await findEmployeeByName(personBaseName(task?.requestedByName));
+    if (byName) return byName;
+    return null;
+}
+
 export const submitTaskCompletion = async (req, res) => {
     try {
         if (!(await denyUnlessViewer(req, res))) return;
@@ -1554,6 +1589,83 @@ export const submitTaskCompletion = async (req, res) => {
         if (!target?.task) return res.status(404).json({ message: "Task not found." });
         const viewer = await resolveTaskViewer(req);
         const task = target.task;
+        if (isGeneralTask(task)) {
+            if (task.status === "Completed" || task.status === "Cancelled" || task.status === "Rejected") {
+                return res.status(400).json({ message: "This task is already closed." });
+            }
+            const saved = closeSnapshot(task);
+            if (saved.reviewPending) {
+                return res.status(400).json({ message: "This task is already with the requester for review." });
+            }
+            const current = assigneeOf(target);
+            if (!viewer?.superUser && !viewerIsCurrentAssignee(viewer, current)) {
+                return res.status(403).json({ message: "Only the assignee can complete this task." });
+            }
+            const requester = await resolveTaskRequesterEmployee(task);
+            if (!requester?._id) {
+                return res.status(400).json({ message: "The original requester could not be found." });
+            }
+            const requesterName = personName(requester) || personBaseName(task.requestedByName) || "the requester";
+            const assigneeName = task.assigneeName || viewer.name || "The assignee";
+            task.closeRequest = {
+                ...saved,
+                reviewPending: true,
+                reviewReturned: false,
+                reviewNote: note.text,
+                completionRequestedAt: new Date(),
+                completionRequestedByName: viewer.name,
+                completionNote: note.text,
+                returnAssigneeId: task.assignee || null,
+                returnAssigneeEmpId: task.assigneeEmpId || "",
+                returnAssigneeName: assigneeName,
+                completesAt: null,
+            };
+            task.markModified("closeRequest");
+            task.assignee = requester._id;
+            task.assigneeEmpId = requester.employeeId || "";
+            task.assigneeName = requesterName;
+            task.status = "Pending";
+            task.history = task.history || [];
+            task.history.push(historyEntry("Pending Review", `${viewer.name} completed this task. ${note.text}`, viewer.name));
+            await pushWorkUpdate(task, {
+                authorName: viewer.name,
+                authorRole: await authorRoleFor(viewer),
+                kind: "Work Update",
+                badge: "Pending Review",
+                text: note.text,
+            }, SILENT_MAIL);
+            await task.save();
+            await syncManualTaskNotification(task);
+            let emailSent = false;
+            try {
+                const sent = await mailEmployee(requester, {
+                    subject: `Review completed task: ${task.taskName || "Task"}`,
+                    html: taskActionHtml({
+                        hello: requesterName,
+                        lines: [
+                            `${viewer.name} completed this task and sent it to you for review.`,
+                            "Approve to close it, or reject it with a reason.",
+                        ],
+                        taskName: task.taskName,
+                        description: note.text,
+                        link: taskDetailLink(target),
+                    }),
+                    recordId: String(task._id || ""),
+                    emailType: "Task review",
+                });
+                emailSent = Boolean(sent?.sent);
+            } catch (mailError) {
+                console.error("General task review email failed:", mailError);
+            }
+            const fresh = await loadTarget(req.params.taskKey);
+            return res.status(200).json({
+                message: emailSent
+                    ? "Sent to the requester for review. They were emailed."
+                    : "Sent to the requester for review. The requester email could not be sent.",
+                emailSent,
+                task: await buildDetail(fresh, viewer),
+            });
+        }
         if (!taskWasReassigned(task)) {
             return res.status(400).json({ message: "Close confirmation is for a task that was reassigned." });
         }
@@ -1639,6 +1751,120 @@ export const submitTaskCompletion = async (req, res) => {
     } catch (error) {
         console.error("Submit close error:", error);
         return res.status(500).json({ message: "Failed to send the close" });
+    }
+};
+
+export const reviewGeneralTask = async (req, res) => {
+    try {
+        if (!(await denyUnlessViewer(req, res))) return;
+        const decision = String(req.body?.decision || "").trim().toLowerCase();
+        if (decision !== "approve" && decision !== "reject") {
+            return res.status(400).json({ message: "Choose approve or reject." });
+        }
+        const target = await loadTarget(req.params.taskKey);
+        if (!target?.task || !isGeneralTask(target.task)) {
+            return res.status(400).json({ message: "This review is for a General Task." });
+        }
+        const viewer = await resolveTaskViewer(req);
+        const task = target.task;
+        const saved = closeSnapshot(task);
+        if (!saved.reviewPending || task.status === "Completed") {
+            return res.status(400).json({ message: "This task is not waiting for review." });
+        }
+        if (!(await viewerIsTaskRequester(task, viewer)) && !viewer?.superUser) {
+            return res.status(403).json({ message: "Only the original requester can review this task." });
+        }
+        if (decision === "approve") {
+            task.status = "Completed";
+            task.closeRequest = {
+                ...saved,
+                reviewPending: false,
+                reviewReturned: false,
+                closedAt: new Date(),
+                closedByName: viewer.name,
+                completionConfirmedAt: new Date(),
+                completesAt: null,
+            };
+            task.markModified("closeRequest");
+            task.history = task.history || [];
+            task.history.push(historyEntry("Approved", `${viewer.name} approved this task. It is closed.`, viewer.name));
+            await pushWorkUpdate(task, {
+                authorName: viewer.name,
+                authorRole: await authorRoleFor(viewer),
+                kind: "Work Update",
+                badge: "Completed",
+                text: `${viewer.name} approved this task. It is closed.`,
+            }, SILENT_MAIL);
+            await task.save();
+            await syncManualTaskNotification(task);
+            const fresh = await loadTarget(req.params.taskKey);
+            return res.status(200).json({
+                message: "Task approved and closed.",
+                task: await buildDetail(fresh, viewer),
+            });
+        }
+        const note = readDescription(req.body);
+        if (note.error) return res.status(400).json({ message: "A rejection reason is required." });
+        const assignee = isObjectId(saved.returnAssigneeId) ? await findAssignee(String(saved.returnAssigneeId)) : null;
+        if (!assignee?._id) {
+            return res.status(400).json({ message: "The assigned user could not be found." });
+        }
+        const assigneeName = personName(assignee) || saved.returnAssigneeName || "the assignee";
+        task.status = "Pending";
+        task.assignee = assignee._id;
+        task.assigneeEmpId = assignee.employeeId || saved.returnAssigneeEmpId || "";
+        task.assigneeName = assigneeName;
+        task.closeRequest = {
+            ...saved,
+            reviewPending: false,
+            reviewReturned: true,
+            reviewNote: note.text,
+            completionConfirmedAt: null,
+            completesAt: null,
+        };
+        task.markModified("closeRequest");
+        task.history = task.history || [];
+        task.history.push(historyEntry("Rejected", `${viewer.name} rejected this task. ${note.text}`, viewer.name));
+        await pushWorkUpdate(task, {
+            authorName: viewer.name,
+            authorRole: await authorRoleFor(viewer),
+            kind: "Work Update",
+            badge: "Open",
+            text: note.text,
+        }, SILENT_MAIL);
+        await task.save();
+        await syncManualTaskNotification(task);
+        let emailSent = false;
+        try {
+            const sent = await mailEmployee(assignee, {
+                subject: `Task returned: ${task.taskName || "Task"}`,
+                html: taskActionHtml({
+                    hello: assigneeName,
+                    lines: [
+                        `${viewer.name} rejected this task. It is open again for you to correct and resubmit.`,
+                    ],
+                    taskName: task.taskName,
+                    description: note.text,
+                    link: taskDetailLink(target),
+                }),
+                recordId: String(task._id || ""),
+                emailType: "Task rejected",
+            });
+            emailSent = Boolean(sent?.sent);
+        } catch (mailError) {
+            console.error("General task reject email failed:", mailError);
+        }
+        const fresh = await loadTarget(req.params.taskKey);
+        return res.status(200).json({
+            message: emailSent
+                ? "Task rejected and returned to the assignee. They were emailed."
+                : "Task rejected and returned to the assignee. The assignee email could not be sent.",
+            emailSent,
+            task: await buildDetail(fresh, viewer),
+        });
+    } catch (error) {
+        console.error("Review general task error:", error);
+        return res.status(500).json({ message: "Failed to review the task" });
     }
 };
 
@@ -1871,6 +2097,11 @@ export const updateTaskManagerTaskStatus = async (req, res) => {
         if (status === "Completed" && taskWasReassigned(task)) {
             return res.status(400).json({
                 message: "The reassigned employee closes first. The original assignee confirms close after that.",
+            });
+        }
+        if (status === "Completed" && isGeneralTask(task)) {
+            return res.status(400).json({
+                message: "Complete the task with a reply. The requester reviews it before it closes.",
             });
         }
         if (status === "Completed") {

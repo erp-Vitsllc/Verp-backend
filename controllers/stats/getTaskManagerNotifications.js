@@ -1156,13 +1156,18 @@ export const getTaskManagerNotifications = async (req, res) => {
             const requestedKey = dubaiDateKey(requestedAt);
             const dueKey = dubaiDateKey(row.completionDate);
             const open = row.status !== "Completed" && row.status !== "Cancelled";
+            const generalReview = String(row.taskType || "") === "General Task" && !row.sourceDashboardActionId;
             const status = row.status === "Completed"
                 ? "Completed"
                 : row.status === "Cancelled"
                     ? "Cancelled"
-                    : open && daysBetween(requestedKey, todayKey) >= 2
-                        ? "Pending Due"
-                        : "Pending";
+                    : generalReview && row.closeRequest?.reviewPending
+                        ? "Pending Review"
+                        : generalReview && row.closeRequest?.reviewReturned
+                            ? "Open"
+                            : open && daysBetween(requestedKey, todayKey) >= 2
+                                ? "Pending Due"
+                                : "Pending";
             const assignee = byId.get(String(row.assignee || "")) || null;
             const assigneeName = personName(assignee) || row.assigneeName || row.assigneeEmpId || "Unassigned";
             const requesterBase = String(row.requestedByName || "").trim() || "System";
@@ -1173,7 +1178,7 @@ export const getTaskManagerNotifications = async (req, res) => {
 
             summary.total += 1;
             bump("total", requestMonth);
-            if (status === "Pending" || status === "Pending Due") {
+            if (status === "Pending" || status === "Pending Due" || status === "Pending Review" || status === "Open") {
                 summary.pending += 1;
                 bump("pending", requestMonth);
                 if (status === "Pending Due") {

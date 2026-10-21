@@ -10,6 +10,91 @@ import { withZohoOrganization } from './zohoOrgContext.js';
 import { resolveZohoVendorIdByProvider } from './syncUtilityBillToZoho.js';
 import { resolveZohoBillSerialNumber } from './zohoPurchaseMappers.js';
 import { downloadS3ObjectBytes } from './s3Upload.js';
+import AssetItem from '../models/AssetItem.js';
+
+function normalizeBillNo(value) {
+    return String(value || '').trim().toLowerCase();
+}
+
+export function billNumbersFromRemark(remark = {}) {
+    const nums = [];
+    const push = (value) => {
+        const text = String(value || '').trim();
+        if (text) nums.push(text);
+    };
+    push(remark.billNumber);
+    for (const bill of Array.isArray(remark.zohoBills) ? remark.zohoBills : []) {
+        push(bill?.billNumber);
+    }
+    return [...new Set(nums)];
+}
+
+/** Exact bill-number matches on other vehicle services. */
+export async function findDuplicateServiceBillNumbers(billNumbers = [], excludeServiceId = '') {
+    const wanted = [...new Set((billNumbers || []).map(normalizeBillNo).filter(Boolean))];
+    if (!wanted.length) return [];
+    const exclude = String(excludeServiceId || '');
+    const or = wanted.map((number) => ({
+        'services.remark': {
+            $regex: number.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'),
+            $options: 'i',
+        },
+    }));
+    const assets = await AssetItem.find({ $or: or })
+        .select('assetId services._id services.remark services.serviceType')
+        .lean();
+    const hits = [];
+    const seen = new Set();
+    for (const asset of assets) {
+        for (const row of asset.services || []) {
+            if (exclude && String(row._id) === exclude) continue;
+            let remark = {};
+            try {
+                remark = row.remark ? JSON.parse(row.remark) : {};
+            } catch {
+                remark = {};
+            }
+            for (const number of billNumbersFromRemark(remark)) {
+                const key = normalizeBillNo(number);
+                if (!wanted.includes(key)) continue;
+                const id = `${key}|${row._id}`;
+                if (seen.has(id)) continue;
+                seen.add(id);
+                hits.push({
+                    billNumber: number,
+                    assetId: asset.assetId || '',
+                    serviceType: row.serviceType || '',
+                    serviceId: String(row._id),
+                });
+            }
+        }
+    }
+    return hits;
+}
+
+export async function checkServiceInvoiceDuplicates(req, res) {
+    try {
+        const billNumbers = Array.isArray(req.body?.billNumbers) ? req.body.billNumbers : [];
+        const duplicates = await findDuplicateServiceBillNumbers(billNumbers, req.body?.serviceId);
+        return res.json({ duplicates });
+    } catch (err) {
+        return res.status(500).json({ message: err?.message || 'Could not check duplicate invoices.' });
+    }
+}
+
+export async function assertUniqueServiceBillNumbers(billNumbers = [], excludeServiceId = '') {
+    const numbers = (billNumbers || []).map((value) => String(value || '').trim()).filter(Boolean);
+    const folded = numbers.map(normalizeBillNo);
+    if (new Set(folded).size !== folded.length) {
+        throw new Error('Duplicate invoice numbers in this submission. Nothing was sent to Zoho.');
+    }
+    const duplicates = await findDuplicateServiceBillNumbers(numbers, excludeServiceId);
+    if (!duplicates.length) return;
+    const list = [...new Set(duplicates.map((row) => row.billNumber))].join(', ');
+    throw new Error(
+        `Duplicate invoice ${list} is already used on another service. It was not sent to Zoho.`,
+    );
+}
 
 function parseRemark(service) {
     try {
@@ -238,6 +323,7 @@ async function createOneGarageZohoBill({
     if (!enteredBillDate) {
         throw new Error('Date is required before creating the Zoho bill.');
     }
+    await assertUniqueServiceBillNumbers([enteredBillNumber], service?._id);
 
     let vendorId = String(billSource.zohoVendorId || remark.zohoVendorId || '').trim();
     if (!vendorId) {

@@ -187,9 +187,17 @@ function entryEligibleForBillMonth(entry, billMonth) {
     return true;
 }
 
+function zohoStatusIsPaid(bill) {
+    const status = String(bill?.zohoBillStatus || '')
+        .trim()
+        .toLowerCase()
+        .replace(/\s+/g, '_');
+    return status === 'paid' || status === 'fully_paid';
+}
+
 /**
- * A saved month is settled when it is Paid, already in Zoho, or the entered
- * amount is 0. Zoho cannot take a zero bill, and there is nothing to pay.
+ * A saved month is settled only when it is Paid (ERP or Zoho bill status)
+ * or the entered amount is 0. A Zoho upload by itself is not paid.
  */
 export function utilityMonthBillIsSettled(bills = []) {
     const rows = (Array.isArray(bills) ? bills : []).filter(
@@ -198,10 +206,18 @@ export function utilityMonthBillIsSettled(bills = []) {
     if (!rows.length) return false;
     return rows.some((bill) => {
         if (String(bill.status || '') === 'Paid') return true;
-        if (utilityBillHasZohoLink(bill)) return true;
+        if (zohoStatusIsPaid(bill)) return true;
         const amount = Number(bill.amount);
         return Number.isFinite(amount) && amount <= 0;
     });
+}
+
+/** True when this month already has a bill updated in Zoho. */
+export function utilityMonthBillIsInZoho(bills = []) {
+    const rows = (Array.isArray(bills) ? bills : []).filter(
+        (bill) => String(bill?.status || '') !== 'Rejected',
+    );
+    return rows.some((bill) => utilityBillHasZohoLink(bill));
 }
 
 export async function isUtilityMonthBillSettled(entryId, billMonth) {
@@ -214,10 +230,28 @@ export async function isUtilityMonthBillSettled(entryId, billMonth) {
         billMonth: ym,
         status: { $ne: 'Rejected' },
     })
-        .select('status amount zohoBillId zohoBillIds zohoLineItems zohoSyncedAt')
+        .select(
+            'status amount zohoBillId zohoBillIds zohoBillNumber zohoBillStatus zohoLineItems zohoSyncedAt',
+        )
         .lean();
 
     return utilityMonthBillIsSettled(bills);
+}
+
+export async function isUtilityMonthBillInZoho(entryId, billMonth) {
+    const id = String(entryId || '').trim();
+    const ym = normalizeUtilityBillMonth(billMonth);
+    if (!id || !ym) return false;
+
+    const bills = await UtilityBillPayment.find({
+        entryId: id,
+        billMonth: ym,
+        status: { $ne: 'Rejected' },
+    })
+        .select('status zohoBillId zohoBillIds zohoBillNumber zohoLineItems')
+        .lean();
+
+    return utilityMonthBillIsInZoho(bills);
 }
 
 /**
@@ -283,8 +317,9 @@ export async function clearUtilityBillPaymentDayRemindersForBills(
 
 /**
  * Scan Pending reminders and clear when:
- * - that month's bill is Paid / in Zoho, OR
+ * - that month's bill is Paid in ERP or Zoho, OR
  * - utility account deleted / no Active payment-day row
+ * A Zoho upload does not clear the task.
  */
 export async function clearSettledUtilityBillPaymentDayReminders() {
     const pending = await DashboardAction.find({
@@ -320,7 +355,9 @@ export async function clearSettledUtilityBillPaymentDayReminders() {
             } else if (String(dayRow.status || '') !== 'Active') {
                 reason = 'Payment day inactive — reminder cleared';
             } else if (ym && (await isUtilityMonthBillSettled(entryId, ym))) {
-                reason = 'Month bill paid or sent to Zoho';
+                reason = 'Month bill paid in Zoho';
+            } else if (ym && !(await isUtilityMonthBillInZoho(entryId, ym))) {
+                reason = 'Accounts task waits until the bill is updated in Zoho';
             }
         }
 
@@ -475,11 +512,56 @@ async function createAccountsBell({ record, dueDate, accounts, yearMonth }) {
 }
 
 /**
+ * After a utility bill is updated in Zoho: if the payable day has arrived
+ * and Zoho has not marked it Paid, open the Accounts task immediately.
+ * The daily job keeps it Pending until Paid.
+ */
+export async function notifyAccountsAfterUtilityZohoUpdate(billDoc) {
+    const entryId = String(billDoc?.entryId || '').trim();
+    const billMonth = normalizeUtilityBillMonth(billDoc?.billMonth);
+    if (!entryId || !billMonth) return { created: false };
+    if (!utilityBillHasZohoLink(billDoc)) return { created: false };
+    if (utilityMonthBillIsSettled([billDoc])) {
+        await clearUtilityBillPaymentDayReminderForMonth(
+            entryId,
+            billMonth,
+            'Month bill paid in Zoho',
+        );
+        return { created: false, cleared: true };
+    }
+
+    const dayRow = await UtilityBillPaymentDay.findOne({ entryId, status: 'Active' }).lean();
+    const paymentDay = Number(dayRow?.paymentDay ?? billDoc?.paymentDay);
+    if (!Number.isInteger(paymentDay) || paymentDay < 1) return { created: false };
+
+    const dueDate = dueDateForBillMonth(paymentDay, billMonth);
+    if (!dueDate || !isDueOnOrBeforeToday(dueDate)) return { created: false };
+
+    const accounts = await getDepartmentHOD('accounts');
+    if (!accounts?._id) return { created: false };
+
+    await createAccountsBell({
+        record: {
+            entryId,
+            paymentDay,
+            utilityType: dayRow?.utilityType || billDoc?.utilityType,
+            accountNo: dayRow?.accountNo || billDoc?.accountNo,
+        },
+        dueDate,
+        accounts,
+        yearMonth: billMonth,
+    });
+    return { created: true };
+}
+
+/**
  * Daily:
- * 1) Clear reminders when that month's bill is Paid or sent to Zoho
- * 2) Current month's bill is payable next month on the payment day
+ * 1) Clear reminders only when that month's bill is Paid (ERP or Zoho status)
+ * 2) Accounts task is created only after the bill is updated in Zoho
+ * 3) Current month's bill is payable next month on the payment day
  *    (June bill → July payment day). Scan current + previous bill months.
- * 3) On that payable day == today → Accounts email (once per bill month)
+ * 4) On that payable day == today → Accounts email (once per bill month)
+ * The task stays Pending until Zoho bill status is Paid.
  */
 export async function processUtilityBillPaymentDayReminders() {
     try {
@@ -538,7 +620,16 @@ export async function processUtilityBillPaymentDayReminders() {
                         await clearUtilityBillPaymentDayReminderForMonth(
                             record.entryId,
                             billMonth,
-                            'Month bill already paid or in Zoho',
+                            'Month bill paid in Zoho',
+                        );
+                        continue;
+                    }
+
+                    if (!(await isUtilityMonthBillInZoho(record.entryId, billMonth))) {
+                        await clearUtilityBillPaymentDayReminderForMonth(
+                            record.entryId,
+                            billMonth,
+                            'Accounts task waits until the bill is updated in Zoho',
                         );
                         continue;
                     }

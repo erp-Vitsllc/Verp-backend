@@ -321,10 +321,16 @@ export const addPayment = async (req, res) => {
                     message: `This ${kindLabel} is already fully repaid.`,
                 });
             }
-            if (Math.abs(entered - expected) > 0.009) {
+            if (entered <= 0.009) {
                 return res.status(400).json({
                     success: false,
-                    message: `Amount Pay must equal the outstanding ${kindLabel} amount (AED ${expected.toFixed(2)}).`,
+                    message: 'Amount Pay is required.',
+                });
+            }
+            if (entered - expected > 0.009) {
+                return res.status(400).json({
+                    success: false,
+                    message: `Amount Pay cannot be more than the outstanding ${kindLabel} amount (AED ${expected.toFixed(2)}).`,
                 });
             }
             const settleId = String(

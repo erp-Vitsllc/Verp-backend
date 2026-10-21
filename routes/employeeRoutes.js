@@ -187,6 +187,7 @@ import {
     reassignTaskManagerTask,
     reopenTaskManagerTask,
     returnTaskManagerTask,
+    reviewGeneralTask,
     submitTaskCompletion,
     updateTaskManagerNotifications,
     updateTaskManagerReminders,
@@ -616,6 +617,7 @@ router.delete("/task-manager/tasks/:taskKey", deleteTaskManagerTask);
 router.post("/task-manager/tasks/:taskKey/reassign", reassignTaskManagerTask);
 router.post("/task-manager/tasks/:taskKey/return", returnTaskManagerTask);
 router.post("/task-manager/tasks/:taskKey/completion", submitTaskCompletion);
+router.post("/task-manager/tasks/:taskKey/review", reviewGeneralTask);
 router.post("/task-manager/tasks/:taskKey/confirm-completion", confirmTaskCompletion);
 router.post("/task-manager/tasks/:taskKey/reopen", reopenTaskManagerTask);
 router.post("/task-manager/tasks/:taskKey/status", updateTaskManagerTaskStatus);

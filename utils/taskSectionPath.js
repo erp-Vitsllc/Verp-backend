@@ -35,11 +35,15 @@ function requestTypeOf(meta, requestType) {
 
 export function buildAttendanceSectionPath({ meta = {}, requestId = "", requestType = "", subjectEmployeeId = "" } = {}) {
     const type = requestTypeOf(meta, requestType).toLowerCase();
+    const sickLeave =
+        clean(meta.requestedStatusKey) === "sick_leave" ||
+        /sick leave/i.test(`${type} ${clean(meta.requestedStatusLabel)}`);
     const markTask =
         type === "attendance leave request" ||
         type === "attendance change request" ||
         type === "hour approval request" ||
         type === "flexible ot request" ||
+        (type === "employee leave request" && sickLeave) ||
         meta.attendanceChange === true;
     if (!markTask) return "";
 

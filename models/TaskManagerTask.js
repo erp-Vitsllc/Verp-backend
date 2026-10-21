@@ -107,6 +107,12 @@ const taskManagerTaskSchema = new mongoose.Schema(
             completionNote: { type: String, default: "" },
             completionConfirmedAt: { type: Date, default: null },
             completesAt: { type: Date, default: null },
+            reviewPending: { type: Boolean, default: false },
+            reviewReturned: { type: Boolean, default: false },
+            reviewNote: { type: String, default: "" },
+            returnAssigneeId: { type: mongoose.Schema.Types.ObjectId, ref: "EmployeeBasic", default: null },
+            returnAssigneeEmpId: { type: String, default: "" },
+            returnAssigneeName: { type: String, default: "" },
             reassignmentNotices: {
                 type: [
                     {
