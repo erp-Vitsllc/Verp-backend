@@ -6,6 +6,7 @@ import EmployeeHubRequest from "../../models/EmployeeHubRequest.js";
 import Fine from "../../models/Fine.js";
 import TaskManagerTask from "../../models/TaskManagerTask.js";
 import User from "../../models/User.js";
+import { getSignedFileUrl, isPresignedUrlStillFresh } from "../../utils/s3Upload.js";
 import {
     isVehicleServicePendingTitle,
     personRequesterName,
@@ -1264,6 +1265,30 @@ export const getTaskManagerNotifications = async (req, res) => {
             Dismissed: 7,
         };
         const priorityRank = { High: 0, Medium: 1, Low: 2 };
+        const signedPhotos = new Map();
+        const signPhoto = async (raw) => {
+            const text = String(raw || "").trim().replace(/^\/+/, "");
+            if (!text) return "";
+            if (signedPhotos.has(text)) return signedPhotos.get(text);
+            let url = "";
+            if (text.startsWith("http") && isPresignedUrlStillFresh(text)) {
+                url = text;
+            } else {
+                try {
+                    const signed = await getSignedFileUrl(text);
+                    url = signed && String(signed).startsWith("http") ? signed : "";
+                } catch {
+                    url = "";
+                }
+            }
+            signedPhotos.set(text, url);
+            return url;
+        };
+        await Promise.all(tasks.map(async (task) => {
+            task.requesterPhoto = await signPhoto(task.requesterPhoto);
+            task.assigneePhoto = await signPhoto(task.assigneePhoto);
+        }));
+
         tasks.sort((a, b) => {
             const priorityGap = (priorityRank[a.priority] ?? 9) - (priorityRank[b.priority] ?? 9);
             if (priorityGap) return priorityGap;

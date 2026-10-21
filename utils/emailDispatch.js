@@ -187,7 +187,7 @@ function emailIdentityText(row) {
  * Workflow mail is often stored on the asset id, so tire change, oil service,
  * and document expiry would otherwise appear on the same task.
  */
-export function emailBelongsToVehicleService(row, { serviceRecordId = '', serviceReqNo = '', serviceType = '', assetId = '' } = {}) {
+export function emailBelongsToVehicleService(row, { serviceRecordId = '', serviceReqNo = '', serviceType = '', assetId = '', assetCode = '' } = {}) {
     const recordId = String(row?.recordId || '').trim();
     const identity = emailIdentityText(row);
     if (/document expiry|expiry reminder|expiry follow-up/.test(identity)) return false;
@@ -210,7 +210,8 @@ export function emailBelongsToVehicleService(row, { serviceRecordId = '', servic
     });
     if (otherFirst) return false;
     const asset = String(assetId || '').trim();
-    return !recordId || recordId === asset || recordId === serviceRecordId;
+    const code = String(assetCode || '').trim();
+    return !recordId || recordId === asset || recordId === serviceRecordId || (code && recordId === code);
 }
 
 const EXPIRY_RECORD_TYPES = [
@@ -481,7 +482,51 @@ function assignmentEmailHtml({ parsed, recipientName, category, buttonUrl, pendi
     `;
 }
 
-/** Older assignment logs stored the subject only. Rebuild the same message for the task email view. */
+function parseVehicleServiceSubject(subject) {
+    const text = String(subject || '').replace(/^\[VeRP\]\s*/i, '').trim();
+    const match = text.match(/^Vehicle service\s+[—–-]\s+(.+?):\s*(.+)$/i);
+    if (!match) return null;
+    const actionLabel = match[1].trim();
+    const tail = match[2].trim();
+    const assetCode = tail.split(/\s*[·|]\s*/)[0].trim();
+    const serviceType = actionLabel.split(/\s+pending with\s+/i)[0].trim() || 'service';
+    const stageLabel = actionLabel.includes('—')
+        ? actionLabel.split('—').pop().trim()
+        : actionLabel;
+    return { actionLabel, assetCode, serviceType, stageLabel };
+}
+
+function vehicleServiceEmailHtml({ parsed, recipientName, asset, link }) {
+    const esc = (value) => escapeHtmlText(value);
+    const plate = [asset?.plateEmirate, asset?.plateNumber].filter(Boolean).join(' ').trim();
+    const assetLine = `${parsed.assetCode || asset?.assetId || ''}${asset?.name ? ` — ${asset.name}` : ''}`.trim();
+    const rows = [
+        ['Asset', assetLine],
+        plate ? ['Plate', plate] : null,
+    ].filter(Boolean);
+    const table = rows
+        .map(([label, value]) => `<tr><td style="padding:10px 14px;font-size:12px;color:#64748b;vertical-align:top;white-space:nowrap;">${esc(label)}</td><td style="padding:10px 14px;font-weight:600;color:#0f172a;">${esc(value)}</td></tr>`)
+        .join('');
+    const hello = esc(recipientName || 'there');
+    const detail = `You have ${parsed.stageLabel} pending. Please complete it to continue this ${parsed.serviceType}.`;
+    return `
+        <div style="font-family:Segoe UI,sans-serif;color:#1e293b;line-height:1.6;max-width:600px;margin:0 auto;border:1px solid #e2e8f0;border-radius:12px;overflow:hidden;">
+            <div style="background:#0d9488;color:#fff;padding:18px 24px;">
+                <h1 style="margin:0;font-size:18px;">${esc(parsed.actionLabel)}</h1>
+                <p style="margin:8px 0 0;font-size:13px;opacity:.95;">${esc(parsed.stageLabel)}</p>
+            </div>
+            <div style="padding:24px;">
+                <p>Hello <strong>${hello}</strong>,</p>
+                <p style="color:#475569;">${esc(detail)}</p>
+                <table style="width:100%;margin:16px 0;background:#f8fafc;border-radius:8px;border:1px solid #e2e8f0;border-collapse:collapse;">${table}</table>
+                <p style="text-align:center;margin:28px 0;">
+                    <a href="${esc(link)}" style="background:#0d9488;color:#fff;padding:12px 24px;text-decoration:none;border-radius:8px;font-weight:700;display:inline-block;">Open vehicle</a>
+                </p>
+            </div>
+        </div>`;
+}
+
+/** Older logs stored the subject only. Rebuild the message for the task email view. */
 async function restoreUnsavedEmailCopies(rows) {
     const missing = rows.filter((row) => !String(row.html || '').trim() && parseAssignmentSubject(row.subject));
     if (!missing.length) return rows;
@@ -529,6 +574,36 @@ async function restoreUnsavedEmailCopies(rows) {
             buttonUrl,
             pending,
         });
+    }
+
+    const serviceMails = rows.filter((row) => !String(row.html || '').trim() && parseVehicleServiceSubject(row.subject));
+    if (serviceMails.length) {
+        const AssetItem = (await import('../models/AssetItem.js')).default;
+        const EmployeeBasic = (await import('../models/EmployeeBasic.js')).default;
+        const frontendUrl = emailFrontendUrl();
+        for (const row of serviceMails) {
+            const parsed = parseVehicleServiceSubject(row.subject);
+            if (!parsed?.assetCode) continue;
+            const asset = await AssetItem.findOne({ assetId: parsed.assetCode })
+                .select('assetId name plateEmirate plateNumber')
+                .lean()
+                .catch(() => null);
+            const recipientEmail = normalizeEmailAddress(Array.isArray(row.to) ? row.to[0] : '');
+            const person = recipientEmail
+                ? await EmployeeBasic.findOne({
+                    $or: [{ companyEmail: recipientEmail }, { workEmail: recipientEmail }],
+                }).select('firstName lastName').lean().catch(() => null)
+                : null;
+            const first = String(person?.firstName || '').trim();
+            row.html = vehicleServiceEmailHtml({
+                parsed,
+                recipientName: first || employeeDisplayName(person),
+                asset,
+                link: asset?._id
+                    ? `${frontendUrl}/HRM/Asset/Vehicle/details/${asset._id}`
+                    : `${frontendUrl}/HRM/Asset/Vehicle`,
+            });
+        }
     }
     return rows;
 }

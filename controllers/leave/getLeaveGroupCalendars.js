@@ -71,6 +71,7 @@ function slimGroupAttendanceRecord(row, todayKey) {
         hourAdjustStatus: row.hourAdjustStatus || '',
         leaveRequestStatus: row.leaveRequestStatus || '',
         flexibleOtStatus: row.flexibleOtStatus || '',
+        flexibleOtApprovedHours: row.flexibleOtApprovedHours || 0,
         approvalStatus: row.approvalStatus || '',
         hoursApproved: row.hoursApproved,
         hoursTaken: row.hoursTaken,
