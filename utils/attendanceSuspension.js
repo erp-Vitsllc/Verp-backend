@@ -15,9 +15,14 @@ export function suspensionWindow(employee) {
     const fromDate = String(employee?.attendanceSuspension?.fromDate || '').trim();
     const untilDate = String(employee?.attendanceSuspension?.untilDate || '').trim();
     const description = String(employee?.attendanceSuspension?.description || '').trim();
-    const permanent = mode === 'permanent' || (mode !== 'range' && !fromDate && !untilDate);
+    const permanent = mode === 'permanent' || (mode !== 'range' && !untilDate);
     if (permanent) {
-        return { permanent: true, fromDate: '', untilDate: '', description };
+        return {
+            permanent: true,
+            fromDate: /^\d{4}-\d{2}-\d{2}$/.test(fromDate) ? fromDate : '',
+            untilDate: '',
+            description,
+        };
     }
     if (!/^\d{4}-\d{2}-\d{2}$/.test(fromDate) || !/^\d{4}-\d{2}-\d{2}$/.test(untilDate)) return null;
     if (untilDate < fromDate) return null;
@@ -28,7 +33,7 @@ export function isAttendanceSuspendedOn(employee, dateKey) {
     const window = suspensionWindow(employee);
     const day = String(dateKey || '').trim();
     if (!window || !/^\d{4}-\d{2}-\d{2}$/.test(day)) return false;
-    if (window.permanent) return true;
+    if (window.permanent) return !window.fromDate || day >= window.fromDate;
     return day >= window.fromDate && day <= window.untilDate;
 }
 
@@ -54,9 +59,8 @@ export function overlaySuspendedAttendance(records, employee, from, to) {
     const window = suspensionWindow(employee);
     const list = Array.isArray(records) ? records : [];
     if (!window) return list;
-    const start = window.permanent
-        ? from
-        : (from && from > window.fromDate ? from : window.fromDate);
+    const windowStart = window.permanent ? (window.fromDate || from) : window.fromDate;
+    const start = from && from > windowStart ? from : windowStart;
     const end = window.permanent
         ? to
         : (to && to < window.untilDate ? to : window.untilDate);
@@ -66,8 +70,9 @@ export function overlaySuspendedAttendance(records, employee, from, to) {
     const covered = new Set();
     const next = list.map((row) => {
         const day = String(row?.date || '').trim();
-        if (!window.permanent && (day < window.fromDate || day > window.untilDate)) return row;
-        if (window.permanent && (day < start || day > end)) return row;
+        if (window.fromDate && day < window.fromDate) return row;
+        if (!window.permanent && day > window.untilDate) return row;
+        if (day < start || day > end) return row;
         covered.add(day);
         return suspendedAttendanceView(employee, day);
     });

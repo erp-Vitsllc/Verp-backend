@@ -39,7 +39,20 @@ function candidateStorageKeys(raw) {
         pushKey(keys, `asset-documents/${normalized}`);
     }
 
-    return keys.slice(0, 8);
+    const handoverFolders = ['asset-history', 'asset-accessories', 'asset-photos', 'asset-documents'];
+    for (const folder of handoverFolders) {
+        const marker = `${folder}/`;
+        const index = normalized.indexOf(marker);
+        if (index > 0) pushKey(keys, normalized.slice(index));
+    }
+    const baseName = normalized.split('/').pop();
+    if (baseName && baseName !== normalized) {
+        for (const folder of handoverFolders) {
+            pushKey(keys, `${folder}/${baseName}`);
+        }
+    }
+
+    return keys.slice(0, 16);
 }
 
 /**

@@ -24,13 +24,14 @@ test('default active employees are not suspended', () => {
     assert.equal(isAttendanceSuspendedOn({}, '2026-10-17'), false);
 });
 
-test('permanent suspension applies on every date', () => {
+test('permanent suspension starts on the from date and does not end', () => {
     const permanent = {
         attendanceAccountStatus: 'suspended',
-        attendanceSuspension: { mode: 'permanent', description: 'Hold' },
+        attendanceSuspension: { mode: 'permanent', fromDate: '2026-10-17', description: 'Hold' },
     };
-    assert.equal(isAttendanceSuspendedOn(permanent, '2020-01-01'), true);
+    assert.equal(isAttendanceSuspendedOn(permanent, '2026-10-16'), false);
     assert.equal(isAttendanceSuspendedOn(permanent, '2026-10-17'), true);
+    assert.equal(isAttendanceSuspendedOn(permanent, '2027-01-01'), true);
 });
 
 test('suspension is inclusive and does not apply outside the window', () => {

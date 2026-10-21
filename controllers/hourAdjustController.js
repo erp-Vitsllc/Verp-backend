@@ -174,10 +174,8 @@ export function normalizeHourAdjustEdit(proposed = {}, body = {}) {
     const max = roundHours(proposed?.hoursMax);
     const hasHours = body?.approvedHours != null && String(body.approvedHours).trim() !== '';
     const requestedHours = hasHours ? Number(body.approvedHours) : roundHours(proposed?.hoursApproved);
-    const nextReason =
-        body?.hourReason == null
-            ? String(proposed?.reason || '').trim()
-            : String(body.hourReason || '').trim();
+    const editedReason = body?.hourReason == null ? '' : String(body.hourReason || '').trim();
+    const nextReason = editedReason || String(proposed?.reason || '').trim();
     if (!Number.isFinite(requestedHours) || requestedHours < 0) {
         return { error: 'Approved hours cannot be negative.' };
     }
@@ -186,9 +184,6 @@ export function normalizeHourAdjustEdit(proposed = {}, body = {}) {
         return { error: `Approved hours cannot be more than ${max}.` };
     }
     const mode = body?.hourAdjustMode === 'custom' ? 'custom' : body?.hourAdjustMode === 'authorized' ? 'authorized' : '';
-    if (!nextReason && (mode === 'authorized' || mode === 'custom' || approvedHours === 0)) {
-        return { error: 'A reason is required.' };
-    }
     const taken = roundHours(proposed?.hoursTaken);
     const storedHours = mode === 'authorized' ? taken : approvedHours;
     if (storedHours > max + 0.001) {
@@ -308,10 +303,7 @@ export async function requestHourAdjust(req, res) {
         const week = await weekForRecord(record);
         const { taken, flexible } = hoursTakenOf(record, week, kind);
         const approvedHours = roundHours(requestedHours);
-        if (flexible && approvedHours === 0 && !reason) {
-            return res.status(400).json({ message: 'A reason is required when approved hours are 0.' });
-        }
-        if (!flexible && !reason) return res.status(400).json({ message: 'Description is required.' });
+        if (!reason) return res.status(400).json({ message: 'Reason is required.' });
         const max = roundHours(taken * UNAUTH_TIMES);
         const mode = req.body?.hourAdjustMode === 'custom' ? 'custom' : req.body?.hourAdjustMode === 'authorized' ? 'authorized' : '';
         const storedHours = mode === 'authorized' ? taken : approvedHours;

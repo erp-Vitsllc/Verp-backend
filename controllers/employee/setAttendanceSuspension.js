@@ -37,11 +37,14 @@ export async function setAttendanceSuspension(req, res) {
         const mode = String(req.body?.mode || 'range').trim().toLowerCase() === 'permanent'
             ? 'permanent'
             : 'range';
-        const fromDate = mode === 'permanent' ? '' : String(req.body?.fromDate || '').trim();
+        const fromDate = String(req.body?.fromDate || '').trim();
         const untilDate = mode === 'permanent' ? '' : String(req.body?.untilDate || '').trim();
         const description = String(req.body?.description || '').trim();
-        if (mode === 'range' && (!isDateKey(fromDate) || !isDateKey(untilDate) || untilDate < fromDate)) {
-            return res.status(400).json({ message: 'Choose a from date and an until date.' });
+        if (!isDateKey(fromDate)) {
+            return res.status(400).json({ message: 'Choose the date attendance becomes suspended.' });
+        }
+        if (mode === 'range' && (!isDateKey(untilDate) || untilDate < fromDate)) {
+            return res.status(400).json({ message: 'Choose a to date on or after the from date.' });
         }
         if (description.length < 3) {
             return res.status(400).json({ message: 'Enter a description before suspending attendance.' });

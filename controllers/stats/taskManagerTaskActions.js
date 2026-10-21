@@ -4,6 +4,7 @@ import Payment from "../../models/Payment.js";
 import AssetHistory from "../../models/AssetHistory.js";
 import AssetItem from "../../models/AssetItem.js";
 import Attendance from "../../models/Attendance.js";
+import AttendanceChangeRequest from "../../models/AttendanceChangeRequest.js";
 import { attendanceFactsByActionId } from "../../utils/loadAttendanceTaskFacts.js";
 import { isAttendanceTaskType } from "../../utils/attendanceTaskCopy.js";
 import EmployeeBasic from "../../models/EmployeeBasic.js";
@@ -903,6 +904,27 @@ async function buildDetail(target, viewer) {
     const broadRecord = !documentExpiry && /expiry|reminder/i.test(requestType);
     const vehicleService = requestType === "Vehicle Service Request";
     const exactIds = [action?._id, mailAction?._id, task?._id, task?.sourceDashboardActionId];
+    const requestIds = [mailAction?.requestId, action?.requestId].map((id) => String(id || "").trim()).filter((id) => isObjectId(id));
+    if (requestIds.length) {
+        const siblings = await DashboardAction.find({ requestId: { $in: requestIds } }).select("_id requestId").lean();
+        for (const row of siblings) exactIds.push(row._id);
+        const changes = await AttendanceChangeRequest.find({
+            $or: [
+                { _id: { $in: requestIds } },
+                { "proposed.attendanceId": { $in: requestIds.map(String) } },
+            ],
+        }).select("_id proposed.attendanceId").lean();
+        const changeIds = [];
+        for (const row of changes) {
+            exactIds.push(row._id);
+            if (row.proposed?.attendanceId) exactIds.push(row.proposed.attendanceId);
+            changeIds.push(row._id);
+        }
+        if (changeIds.length) {
+            const changeActions = await DashboardAction.find({ requestId: { $in: changeIds } }).select("_id").lean();
+            for (const row of changeActions) exactIds.push(row._id);
+        }
+    }
     const taskEmails = await findEmailsForTask({ ids: exactIds });
     let recordEmails = [];
     if (vehicleService) {
@@ -2408,7 +2430,106 @@ async function buildTaskWorkflow(target, viewer) {
     const assignee = stepPerson(assigneeEmp, assigneeName);
     const steps = [];
 
-    for (const key of keys) {
+    let changeRequest = null;
+    if (!manual && isObjectId(action?.requestId)) {
+        const changeSelect = "stage reporteeId reporteeName hrId hrName decidedAtReportee decidedAtHr";
+        changeRequest = await AttendanceChangeRequest.findById(action.requestId).select(changeSelect).lean();
+        if (!changeRequest) {
+            changeRequest = await AttendanceChangeRequest.findOne({
+                "proposed.attendanceId": String(action.requestId),
+                stage: { $ne: "superseded" },
+            })
+                .sort({ updatedAt: -1 })
+                .select(changeSelect)
+                .lean();
+        }
+    }
+
+    async function employeeStep(id, fallbackName) {
+        let emp = null;
+        if (isObjectId(id)) {
+            emp = await EmployeeBasic.findById(id)
+                .select("firstName lastName employeeId designation companyEmail profilePicture status")
+                .lean();
+        }
+        return stepPerson(emp, fallbackName);
+    }
+
+    async function slotPeople(base, active) {
+        const person = {
+            ...base,
+            role: base.personRole || "Assignee",
+            at: base.at || null,
+            current: false,
+        };
+        if (!active || !person.personName) return person.personName ? [person] : [];
+        const handoff = await handoffPeople(task?.history, person.personName);
+        if (handoff.length <= 1) return [{ ...person, current: true }];
+        return handoff.map((row, index) => ({
+            ...row,
+            current: index === handoff.length - 1,
+        }));
+    }
+
+    if (changeRequest && (changeRequest.reporteeName || changeRequest.reporteeId || changeRequest.hrName || changeRequest.hrId)) {
+        steps.push({
+            key: "created",
+            title: "Task Created",
+            detail: `By ${requester.personName || "System"} (Requester)`,
+            ...requester,
+            at: requestDate,
+        });
+        const reportee = await employeeStep(changeRequest.reporteeId, changeRequest.reporteeName);
+        const hrPerson = await employeeStep(changeRequest.hrId, changeRequest.hrName);
+        const reporteeActive = changeRequest.stage === "pending_reportee";
+        const hrActive = changeRequest.stage === "pending_hr";
+        const reporteeChain = await slotPeople(
+            { ...reportee, personRole: reportee.personRole || "Primary reportee", at: changeRequest.decidedAtReportee },
+            reporteeActive,
+        );
+        reporteeChain.forEach((person, index) => {
+            const first = index === 0;
+            steps.push({
+                key: first ? "reportee" : "reassigned",
+                title: first
+                    ? `Reportee ${person.personName}`
+                    : `Reassigned to ${person.personName}`,
+                detail: first
+                    ? "Approves the request, then it goes to HR"
+                    : `Passed from ${reporteeChain[index - 1]?.personName || "the previous approver"}`,
+                ...person,
+                at: person.at || null,
+            });
+        });
+        const hrChain = await slotPeople(
+            { ...hrPerson, personRole: hrPerson.personRole || "HR", at: changeRequest.decidedAtHr },
+            hrActive,
+        );
+        hrChain.forEach((person, index) => {
+            const first = index === 0;
+            steps.push({
+                key: first ? "hr" : "reassigned",
+                title: first
+                    ? `HR ${person.personName}`
+                    : `Reassigned to ${person.personName}`,
+                detail: first
+                    ? "Final approval on the Attendance page"
+                    : `Passed from ${hrChain[index - 1]?.personName || "the previous approver"}`,
+                ...person,
+                at: person.at || null,
+            });
+        });
+        steps.push({
+            key: "done",
+            title: "Completed",
+            detail: "Pending",
+            personId: "",
+            personName: "",
+            personRole: "",
+            personPhoto: "",
+            at: null,
+        });
+    } else for (const key of keys) {
         if (key === "created") {
             steps.push({
                 key,
