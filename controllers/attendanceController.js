@@ -1,0 +1,5295 @@
+import mongoose from 'mongoose';
+import Attendance, { ATTENDANCE_STATUS_KEYS } from '../models/Attendance.js';
+import EmployeeBasic from '../models/EmployeeBasic.js';
+import Holiday from '../models/Holiday.js';
+import SalaryEnrollment from '../models/SalaryEnrollment.js';
+import SalaryHistoricalProfile from '../models/SalaryHistoricalProfile.js';
+import { getScheduledEmailTimeZone, getZonedParts } from '../utils/scheduleDailyAtMidnight.js';
+import {
+    getOffWeekdayKeys,
+    getScheduledPunchMinutes,
+    clockTimeToMinutes,
+    isWeekOffForStaff,
+    holidayAppliesToStaff,
+    loadWorkingTimeDoc,
+    normalizeStaffType,
+    getWeekForStaffType,
+    resolveStatusFromPunches,
+    isFlexibleTiming,
+    weekdayKeyFromDateKey,
+} from '../utils/workingTimeHelpers.js';
+import { addDaysKey, dayWorkedMinutes, evaluateFlexibleDay, flexibleOtFieldsFromDuration, isOvertimePunchTime, mapPunchWithoutOvertime, requiredHoursForDate } from '../utils/flexibleAttendance.js';
+import { ensureAttachmentPersistedToS3, signOrKeepAttachmentUrl } from '../utils/s3Upload.js';
+import { settleFulfilledLeaveRequest } from '../utils/leaveRequestSettlement.js';
+import { dropMappedOvertime, flexibleOtManualUpdate, refreshFlexibleOtRecords } from '../utils/syncFlexibleOt.js';
+import {
+    nonWorkingAttendanceMark,
+    repairBlankNonWorkingRows,
+    restoreClearedAttendance,
+} from '../utils/attendanceNonWorkingDay.js';
+import { isNextDayPresentMark, nonHrMarkableDateKeys } from '../utils/nonHrMarkWindow.js';
+import { attendanceMarkRoute, yellowMarkHours } from '../utils/attendanceMarkPolicy.js';
+import {
+    isAttendanceSuspendedOn,
+    overlaySuspendedAttendance,
+    suspendedAttendanceView,
+} from '../utils/attendanceSuspension.js';
+import { describePartialLeave, partialLeaveOutcome, partialLeavePortion, storedPunchGapPatch } from '../utils/partialLeaveWindow.js';
+import { attachAttendanceDeductionDays } from '../utils/attachAttendanceDeductionDays.js';
+import {
+    approvalEventPool,
+    attendanceApprovalLimitMessageFor,
+    closedMissingCheckout,
+} from '../utils/attendanceApprovalAllowance.js';
+import { staffTypeMongoClause } from '../utils/workLocationHelpers.js';
+import { getDepartmentHOD } from '../utils/getDepartmentHOD.js';
+import { syncDashboardAction } from '../utils/syncDashboard.js';
+import {
+    sendAttendanceLeaveDecisionEmail,
+    sendAttendanceDirectChangeEmail,
+} from '../utils/sendAttendanceLeaveEmails.js';
+import {
+    isCompanyShellEmployee,
+    REAL_EMPLOYEE_MONGO_FILTER,
+} from '../utils/attendanceEmployeeFilters.js';
+import {
+    bestDayRecord,
+    employeeAttendanceMatch,
+    preferPunchedRows,
+    punchTimeSet,
+} from '../utils/attendanceDayLookup.js';
+import { resolveFlowchartHrEmployee } from '../utils/resolveFlowchartHrEmployee.js';
+import { isUserActiveInFlowchart } from '../utils/getDepartmentHOD.js';
+import {
+    buildAssigneeClauses,
+    resolveDashboardAssigneeContext,
+} from '../utils/resolveDashboardAssigneeContext.js';
+import { loadTaskManagerInboxItems } from '../utils/taskManagerModule.js';
+import { isReqUserSystemSuperUser } from '../utils/systemSuperUser.js';
+import {
+    isLeaveDashboardAttendanceRow,
+    LEAVE_DASHBOARD_REQUEST_TYPE,
+    leaveDashboardRequestObjectId,
+    notifyLeaveRequestApprover,
+} from '../utils/notifyLeaveDashboardRequest.js';
+import { dismissDecidedLeaveBells } from '../utils/dismissDecidedLeaveBells.js';
+import {
+    inferLeaveApprovalStage,
+    isTwoStepLeaveKind,
+    LEAVE_STAGE_HR,
+    LEAVE_STAGE_REPORTEE,
+    leaveApprovalPersonName,
+    leaveApproverCanDecide,
+    openingLeaveApprovalStage,
+} from '../utils/leaveRequestApproval.js';
+import {
+    parsePunchLocation,
+    resolvePunchSource,
+} from '../utils/attendancePunchMeta.js';
+import { employeeHasMobileReviewBypass } from '../utils/userMobileDevice.js';
+import {
+    loadPunchContactFlags,
+    rejectIfMissingPunchContact,
+} from '../utils/attendanceContactGate.js';
+import {
+    daysUntilProcessingStart,
+    firstOfProcessingMonth,
+    isSalaryMonthOpen,
+    keepAttendanceForProcessingStart,
+    loadEnrolledLeaveVisibilityByMongoId,
+    processingMonthFromStart,
+    processingStartFromEnrollment,
+    resolveSalaryProcessingStartDate,
+    salaryOpensFromMessage,
+} from '../utils/leaveSalaryVisibility.js';
+import {
+    checkEmployeeLeaveAllowance,
+    leavePolicyEntitlements,
+    loadEmployeeLeaveBalances,
+    resolveEmployeePayrollPolicy,
+    resolveSickOverflowStatuses,
+} from '../utils/employeeLeavePolicy.js';
+import AttendanceChangeRequest from '../models/AttendanceChangeRequest.js';
+import {
+    approvalStageForAttendanceChange,
+    attendanceMarksMatch,
+    bounceHourAttendanceChange,
+    closeAttendanceChangeRequest,
+    describeAttendanceSave,
+    forwardAttendanceChangeToHr,
+    loadAttendanceChangeInboxItems,
+    loadDayApprovalHistory,
+    loadPendingAttendanceChanges,
+    openAttendanceChangeForEmployee,
+    resubmitHourAttendanceChange,
+    submitAttendanceChange,
+    supersedeOpenAttendanceChanges,
+} from '../utils/attendanceChangeApproval.js';
+import { approveFlexibleOvertimeRecord } from './flexibleOtController.js';
+import { applyStoredHourAdjust, exactHourProposal, normalizeHourAdjustEdit } from './hourAdjustController.js';
+import {
+    applyOverlayCounts,
+    applyOverlayCountsToBalances,
+    lastOverlayAnnualLeaveDate,
+    loadHistoricalLeaveProfile,
+    overlayHistoricalLeave,
+} from '../utils/historicalLeaveAttendanceOverlay.js';
+import {
+    applyLeaveCoverIndex,
+    enrollmentCoverIndexForEmployee,
+    loadLeaveCoverIndex,
+} from '../utils/attendanceLeaveDayCover.js';
+import { loadCurrentLeaveCycleEligibility } from '../utils/loadLeaveTicketEntitlement.js';
+
+const LEAVE_REQUEST_STATUS_KEYS = new Set([
+    'unauthorized_leave',
+    'authorized_leave',
+    'sick_leave',
+    'compoff_leave',
+    'on_leave',
+]);
+
+/** Employee red-day request: authorized, sick, other leave, or late arrival. */
+const EMPLOYEE_LEAVE_REQUEST_KEYS = new Set(['sick_leave', 'on_leave', 'authorized_leave', 'late_arrived']);
+
+/** Reportee sets the final day status on approve. */
+const REPORTEE_APPROVE_LEAVE_KEYS = new Set([
+    'unauthorized_leave',
+    'authorized_leave',
+    'sick_leave',
+    'compoff_leave',
+]);
+
+const YELLOW_REQUEST_STATUS_KEYS = new Set(['late_arrived', 'early_go', 'mispunch']);
+
+const RED_LEAVE_STATUS_KEYS = new Set(['unauthorized_leave', 'on_leave']);
+
+const LEAVE_STATUS_LABELS = {
+    unauthorized_leave: 'Unauthorized Leave',
+    authorized_leave: 'Authorized Leave',
+    sick_leave: 'Sick Leave',
+    compoff_leave: 'Comp Off Leave',
+    on_leave: 'On Leave',
+    on_office: 'Present',
+    work_from_home: 'Work from home',
+    late_arrived: 'Late Arrival',
+    early_go: 'Early Go',
+    mispunch: 'Mispunched',
+};
+
+const LEAVE_PAY_TYPES = new Set(['paid', 'unpaid']);
+
+function normalizeLeavePayType(value) {
+    const pay = String(value || '').trim().toLowerCase();
+    return LEAVE_PAY_TYPES.has(pay) ? pay : '';
+}
+
+function authorizedLeaveLabel() {
+    return 'Authorized Leave';
+}
+
+function leavePayTypeForStatus(statusKey) {
+    return String(statusKey || '').trim() === 'authorized_leave' ? 'unpaid' : '';
+}
+
+function presentAuthorizedLeaveRecord(record) {
+    if (!record || String(record.statusKey || '').trim() !== 'authorized_leave') return record;
+    const raw = String(record.statusLabel || '');
+    if (/\(Approved\)/i.test(raw)) return record;
+    const halfAt = raw.indexOf('·');
+    return {
+        ...record,
+        leavePayType: 'unpaid',
+        statusLabel: halfAt >= 0 ? `Authorized Leave ${raw.slice(halfAt).trim()}` : 'Authorized Leave',
+    };
+}
+
+function leaveStatusLabel(statusKey, fallback = '', payType = '') {
+    const key = String(statusKey || '').trim();
+    if (key === 'authorized_leave') return authorizedLeaveLabel(payType);
+    return LEAVE_STATUS_LABELS[key] || fallback || key || '—';
+}
+
+function isMispunchReasonText(reason) {
+    return String(reason || '')
+        .toLowerCase()
+        .includes('mispunch');
+}
+
+/** Yellow calendar days eligible for clarification → Present. */
+function isYellowClarificationEligible(record) {
+    if (!record) return false;
+    const key = String(record.statusKey || '').trim();
+    if (YELLOW_REQUEST_STATUS_KEYS.has(key)) return true;
+    if (key === 'unauthorized_leave' && isMispunchReasonText(record.reason)) return true;
+    if (record.timeIn && !record.timeOut && (key === 'on_office' || key === 'late_arrived' || key === 'work_from_home')) {
+        return true;
+    }
+    return false;
+}
+
+function isValidDateKey(value) {
+    return typeof value === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(value);
+}
+
+function formatDateKeyFromParts({ year, month, day }) {
+    return `${year}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
+}
+
+function getDubaiNowParts() {
+    return getZonedParts(new Date(), getScheduledEmailTimeZone());
+}
+
+function getDubaiDateKey(date = new Date()) {
+    const p = getZonedParts(date, getScheduledEmailTimeZone());
+    return formatDateKeyFromParts(p);
+}
+
+function inclusiveDateCount(fromDate, toDate) {
+    if (!isValidDateKey(fromDate) || !isValidDateKey(toDate) || toDate < fromDate) return 0;
+    const [fromYear, fromMonth, fromDay] = fromDate.split('-').map(Number);
+    const [toYear, toMonth, toDay] = toDate.split('-').map(Number);
+    return (
+        Math.round(
+            (Date.UTC(toYear, toMonth - 1, toDay) - Date.UTC(fromYear, fromMonth - 1, fromDay)) / 86400000,
+        ) + 1
+    );
+}
+
+function nextDateKey(dateKey) {
+    return shiftDateKey(dateKey, 1);
+}
+
+function shiftDateKey(dateKey, deltaDays) {
+    const [year, month, day] = String(dateKey).split('-').map(Number);
+    const dt = new Date(Date.UTC(year, month - 1, day + deltaDays, 12, 0, 0));
+    return formatDateKeyFromParts({
+        year: dt.getUTCFullYear(),
+        month: dt.getUTCMonth() + 1,
+        day: dt.getUTCDate(),
+    });
+}
+
+function leaveRequestSentMessage(stage) {
+    if (stage === LEAVE_STAGE_HR) return 'Request sent to HR for approval.';
+    return 'Request sent to your primary reportee. HR is notified after they accept.';
+}
+
+async function resolveOpeningLeaveApprover(employee) {
+    const hrResolved = await resolveFlowchartHrEmployee();
+    const hrEmployee = hrResolved?.employee || null;
+    const reportee = employee?.primaryReportee || null;
+    const stage = openingLeaveApprovalStage(reportee?._id || reportee, hrEmployee?._id);
+    const approver = stage === LEAVE_STAGE_HR ? hrEmployee : reportee;
+    return {
+        stage,
+        approver,
+        hrEmployee,
+        reportee,
+        hrError: hrResolved?.error ? hrResolved : null,
+    };
+}
+
+async function viewerIsFlowchartHr(req) {
+    try {
+        const actor = await resolveLinkedEmployee(req);
+        return await isUserActiveInFlowchart(
+            {
+                employeeObjectId: actor?._id || req.user?.employeeObjectId || null,
+                employeeId: actor?.employeeId || req.user?.employeeId || '',
+            },
+            'hr',
+        );
+    } catch (error) {
+        console.error('[viewerIsFlowchartHr]', error);
+        return false;
+    }
+}
+
+const NON_HR_MARK_WINDOW_MESSAGE =
+    'Only the flowchart HR assignee can mark attendance outside today and the seven previous days. The next day can be marked Present (comp off) only. Holidays are included.';
+const NEXT_DAY_PRESENT_ONLY_MESSAGE = 'The next day can only be marked Present (comp off).';
+
+/**
+ * Flowchart HR may mark any status on any past or future day.
+ * Other users may mark any status today and on the seven previous calendar days.
+ * Holidays are included and count as one of those days.
+ * @returns {Promise<boolean>} true when the response was already sent
+ */
+async function rejectIfMarkWindowClosed(req, res, { date, entries }) {
+    const today = getDubaiDateKey();
+    if (await viewerIsFlowchartHr(req)) return false;
+
+    const requested = Array.isArray(entries) ? entries : [];
+    const triesClear = requested.some((entry) => {
+        const statusKey = String(entry?.statusKey || '').trim();
+        return statusKey === 'clear_attendance' || statusKey === 'clear';
+    });
+    if (triesClear) {
+        res.status(403).json({
+            message: 'Only the flowchart HR assignee can clear attendance.',
+        });
+        return true;
+    }
+
+    if (date === shiftDateKey(today, 1)) {
+        const statusKeys = requested.map((entry) => String(entry?.statusKey || '').trim());
+        if (isNextDayPresentMark(today, date, statusKeys)) return false;
+        res.status(403).json({ message: NEXT_DAY_PRESENT_ONLY_MESSAGE });
+        return true;
+    }
+
+    if (!isValidDateKey(date) || date > today) {
+        res.status(403).json({ message: NON_HR_MARK_WINDOW_MESSAGE });
+        return true;
+    }
+
+    const ids = [
+        ...new Set(
+            requested.map((entry) => String(entry?.employeeMongoId || '').trim()).filter(Boolean),
+        ),
+    ];
+    const validIds = ids.filter((id) => mongoose.Types.ObjectId.isValid(id));
+    const employees = validIds.length
+        ? await EmployeeBasic.find({ _id: { $in: validIds } }).select('_id staffType').lean()
+        : [];
+    const staffById = new Map(
+        (employees || []).map((row) => [String(row._id), normalizeStaffType(row.staffType)]),
+    );
+    const staffTypes = ids.length
+        ? [...new Set(ids.map((id) => staffById.get(id) || 'office'))]
+        : ['office'];
+
+    const holidayRows = await Holiday.find({
+        date: { $gte: shiftDateKey(today, -60), $lte: today },
+    })
+        .select('date appliesTo')
+        .lean();
+
+    const allowedByStaff = new Map();
+    for (const staffType of staffTypes) {
+        const holidayDates = (holidayRows || [])
+            .filter((row) => holidayAppliesToStaff(row, staffType))
+            .map((row) => String(row.date || '').trim())
+            .filter(Boolean);
+        allowedByStaff.set(staffType, nonHrMarkableDateKeys(today, holidayDates));
+    }
+
+    const dateAllowed = ids.length
+        ? ids.every((id) => allowedByStaff.get(staffById.get(id) || 'office')?.has(date))
+        : [...allowedByStaff.values()].every((set) => set.has(date));
+    if (!dateAllowed) {
+        res.status(403).json({ message: NON_HR_MARK_WINDOW_MESSAGE });
+        return true;
+    }
+
+    return false;
+}
+
+function isNonWorkingDate(dateKey, holidaySet, offWeekdays) {
+    if (holidaySet?.has(dateKey)) return true;
+    const weekday = weekdayKeyFromDateKey(dateKey);
+    return Boolean(weekday && offWeekdays?.has(weekday));
+}
+
+/** Skip tomorrow and all holidays/weekends; first allowed date is the 2nd working day from today. */
+function firstEligibleAdvanceRequestDate(todayKey, holidaySet, offWeekdays) {
+    let cursor = todayKey;
+    let workingSeen = 0;
+    for (let i = 0; i < 90; i += 1) {
+        cursor = nextDateKey(cursor);
+        if (isNonWorkingDate(cursor, holidaySet, offWeekdays)) continue;
+        workingSeen += 1;
+        if (workingSeen >= 2) return cursor;
+    }
+    return null;
+}
+
+async function loadHolidaySet(fromKey, toKey, staffType = null) {
+    const rows = await Holiday.find({
+        date: { $gte: fromKey, $lte: toKey },
+    })
+        .select('date appliesTo')
+        .lean();
+    return new Set(
+        (rows || [])
+            .filter((row) => !staffType || holidayAppliesToStaff(row, staffType))
+            .map((row) => String(row.date || '').trim())
+            .filter(Boolean),
+    );
+}
+
+/** Exact local clock time HH:mm:ss in company TZ */
+function getDubaiClockTime(date = new Date()) {
+    const p = getZonedParts(date, getScheduledEmailTimeZone());
+    return `${String(p.hour).padStart(2, '0')}:${String(p.minute).padStart(2, '0')}:${String(p.second).padStart(2, '0')}`;
+}
+
+const SALARY_ENROLL_REQUIRED =
+    'Enroll to salary first. Attendance, check-in/out, and leave unlock after Enroll Status is Enrolled.';
+
+function salaryLockPayload(gate) {
+    return {
+        message: gate.lockMessage,
+        lockMessage: gate.lockMessage,
+        salaryEnrolled: gate.enrolled,
+        attendanceLocked: true,
+        lockKind: gate.enrolled ? 'processing' : 'enroll',
+        processingStartMonth: gate.processingStartMonth || '',
+        processingStartDate: gate.processingStartDate || '',
+        daysRemaining: gate.daysRemaining || 0,
+    };
+}
+
+async function loadSalaryAttendanceGate(employee, { monthKey, dateKey } = {}) {
+    if (await employeeHasMobileReviewBypass(employee)) {
+        return {
+            enrolled: true,
+            liveOpen: true,
+            requestedOpen: true,
+            attendanceLocked: false,
+            lockMessage: '',
+            processingStartMonth: '',
+            processingStartDate: '',
+            daysRemaining: 0,
+        };
+    }
+    const enrollRequired = {
+        enrolled: false,
+        liveOpen: false,
+        requestedOpen: false,
+        attendanceLocked: true,
+        lockMessage: SALARY_ENROLL_REQUIRED,
+        processingStartMonth: '',
+        processingStartDate: '',
+        daysRemaining: 0,
+    };
+    const employeeId = String(employee?.employeeId || '').trim();
+    if (!employeeId) return enrollRequired;
+
+    const [enrollment, profile] = await Promise.all([
+        SalaryEnrollment.findOne({ employeeId }).select('fromMonth salaryDate processDate').lean(),
+        SalaryHistoricalProfile.findOne({ employeeId }).select('verpStartDate').lean(),
+    ]);
+    if (!enrollment) return enrollRequired;
+
+    const rawStart =
+        resolveSalaryProcessingStartDate({
+            verpStartDate: profile?.verpStartDate,
+            enrollment,
+        }) || processingStartFromEnrollment(enrollment);
+    const processingStartMonth =
+        processingMonthFromStart(rawStart) || processingMonthFromStart(enrollment.fromMonth);
+    const processingStartDate = firstOfProcessingMonth(processingStartMonth);
+    const todayKey = getDubaiDateKey();
+    const todayMonth = todayKey.slice(0, 7);
+    const requestedMonth =
+        processingMonthFromStart(monthKey) || processingMonthFromStart(dateKey) || todayMonth;
+    const liveOpen = isSalaryMonthOpen(todayMonth, processingStartMonth);
+    const requestedOpen = isSalaryMonthOpen(requestedMonth, processingStartMonth);
+    const daysRemaining = liveOpen ? 0 : daysUntilProcessingStart(todayKey, processingStartDate);
+    return {
+        enrolled: true,
+        liveOpen,
+        requestedOpen,
+        attendanceLocked: !liveOpen,
+        lockMessage: !liveOpen ? salaryOpensFromMessage(processingStartDate, todayKey) : '',
+        processingStartMonth,
+        processingStartDate,
+        daysRemaining,
+    };
+}
+
+async function rejectIfNotSalaryEnrolled(res, employee, opts = {}) {
+    const gate = await loadSalaryAttendanceGate(employee, opts);
+    if (gate.enrolled && gate.liveOpen && gate.requestedOpen) return false;
+    res.status(403).json(salaryLockPayload({ ...gate, attendanceLocked: true }));
+    return true;
+}
+
+async function resolveLinkedEmployee(req) {
+    let employee = null;
+
+    const selectFields = '_id employeeId firstName lastName companyEmail workEmail email staffType attendanceAccountStatus attendanceSuspension';
+
+    if (req.user?.employeeObjectId) {
+        try {
+            employee = await EmployeeBasic.findById(req.user.employeeObjectId)
+                .select(selectFields)
+                .lean();
+        } catch {
+            employee = null;
+        }
+    }
+
+    if (!employee && req.user?.employeeId) {
+        employee = await EmployeeBasic.findOne({ employeeId: req.user.employeeId })
+            .select(selectFields)
+            .lean();
+    }
+
+    const emailCandidates = [
+        req.user?.companyEmail,
+        req.user?.email,
+    ]
+        .map((e) => String(e || '').trim().toLowerCase())
+        .filter(Boolean);
+
+    if (!employee && emailCandidates.length) {
+        employee = await EmployeeBasic.findOne({
+            $or: [
+                { companyEmail: { $in: emailCandidates } },
+                { workEmail: { $in: emailCandidates } },
+                { email: { $in: emailCandidates } },
+            ],
+        })
+            .select(selectFields)
+            .lean();
+
+        // Case-insensitive fallback
+        if (!employee) {
+            const escaped = emailCandidates.map((e) =>
+                e.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'),
+            );
+            employee = await EmployeeBasic.findOne({
+                $or: escaped.flatMap((e) => [
+                    { companyEmail: { $regex: `^${e}$`, $options: 'i' } },
+                    { workEmail: { $regex: `^${e}$`, $options: 'i' } },
+                    { email: { $regex: `^${e}$`, $options: 'i' } },
+                ]),
+            })
+                .select(selectFields)
+                .lean();
+        }
+    }
+
+    return employee;
+}
+
+/** True if targetEmpId is the manager or anywhere under them via primaryReportee. */
+async function isEmployeeInTeamTree(managerMongoId, targetMongoId) {
+    const managerId = String(managerMongoId);
+    const targetId = String(targetMongoId);
+    if (managerId === targetId) return true;
+
+    const rows = await EmployeeBasic.aggregate([
+        { $match: { _id: new mongoose.Types.ObjectId(String(managerId)) } },
+        {
+            $graphLookup: {
+                from: 'employeebasics',
+                startWith: '$_id',
+                connectFromField: '_id',
+                connectToField: 'primaryReportee',
+                as: 'team',
+                depthField: 'depth',
+            },
+        },
+        { $project: { teamIds: '$team._id' } },
+    ]);
+
+    const teamIds = (rows[0]?.teamIds || []).map((id) => String(id));
+    return teamIds.includes(targetId);
+}
+
+/** HR Leave / Attendance viewers (and super users) may open any employee's calendar. */
+async function canViewHrEmployeeAttendance(req) {
+    if (await isReqUserSystemSuperUser(req.user)) return true;
+    const userId = req.user?.id;
+    if (!userId) return false;
+    const { hasPermission } = await import('../services/permissionService.js');
+    return (
+        (await hasPermission(userId, 'hrm_leave', 'view')) ||
+        (await hasPermission(userId, 'hrm_attendance', 'view'))
+    );
+}
+
+function buildTeamTree(manager, flatList) {
+    if (!manager) return [];
+    const list = Array.isArray(flatList) ? flatList : [];
+    const seenIds = new Set();
+
+    const getChildren = (parentId, visited = new Set()) => {
+        const parentKey = String(parentId);
+        if (visited.has(parentKey)) return [];
+        const nextVisited = new Set(visited);
+        nextVisited.add(parentKey);
+
+        return list
+            .filter((e) => {
+                const id = String(e._id);
+                if (seenIds.has(id) || nextVisited.has(id)) return false;
+                return String(e.primaryReportee) === parentKey;
+            })
+            .map((child) => {
+                const id = String(child._id);
+                seenIds.add(id);
+                return {
+                    ...child,
+                    children: getChildren(child._id, nextVisited),
+                };
+            });
+    };
+
+    return [
+        {
+            _id: manager._id,
+            firstName: manager.firstName,
+            lastName: manager.lastName,
+            employeeId: manager.employeeId,
+            designation: manager.designation,
+            department: manager.department,
+            profilePicture: manager.profilePicture,
+            primaryReportee: null,
+            children: getChildren(manager._id),
+        },
+    ];
+}
+
+/** Empty day bucket used by calendar summary aggregation. */
+function emptyDayStats(totalStaff = 0) {
+    return {
+        activeEmployees: totalStaff,
+        present: 0,
+        onLeave: 0,
+        lateArrived: 0,
+        sickLeave: 0,
+        workFromHome: 0,
+        missedPunch: 0,
+        compOffLeave: 0,
+        earlyGo: 0,
+        halfDay: 0,
+        // Nobody is marked yet, so the whole roster is not marked.
+        notMarked: totalStaff,
+        holiday: 0,
+        weeklyOff: 0,
+        isWeeklyOff: false,
+        officePresent: 0,
+        officeTotal: totalStaff,
+        sitePresent: 0,
+        siteTotal: 0,
+        totalPresent: 0,
+        absentAuthorized: 0,
+        absentUnauthorized: totalStaff,
+        otHours: 0,
+    };
+}
+
+/** Approved overtime that still shows as OT hours. A next-day present mark is not leftover OT. */
+function addedOtHours(row) {
+    if (String(row?.flexibleOtStatus || '') !== 'approved') return 0;
+    const approved = Number(row?.flexibleOtApprovedHours) || 0;
+    if (!(approved > 0)) return 0;
+    const nextDay = String(row?.flexibleOtNextDayDate || '').trim();
+    const required = Number(row?.flexibleRequiredHours) || 0;
+    if (nextDay || (!required && approved > 10)) return 0;
+    return Math.floor(approved + 1e-9);
+}
+
+function headerLeaveBucket(statusKey) {
+    const key = String(statusKey || '').trim();
+    if (key === 'sick_leave') return 'sick';
+    if (key === 'unauthorized_leave' || key === 'not_marked' || key === 'absent' || key === '') return 'unauth';
+    if (key === 'on_leave' || key === 'authorized_leave' || key === 'compoff_leave') return 'auth';
+    return '';
+}
+
+/**
+ * Aggregate attendance marks for one calendar day.
+ * unauthorized_leave counts with not_marked (same bucket).
+ */
+function isHalfDayAttendance(row) {
+    const part = String(row?.leaveRequestDayPart || '').trim().toLowerCase();
+    if (part === 'half') return true;
+    if (Number(row?.leaveDayFraction) === 0.5) return true;
+    return /half\s*day/i.test(String(row?.statusLabel || ''));
+}
+
+function buildDayStatsFromRecords(records, totalStaff = 0, { isWeeklyOffDay = false } = {}) {
+    const rows = Array.isArray(records) ? records : [];
+    const counts = {
+        on_office: 0,
+        on_leave: 0,
+        sick_leave: 0,
+        compoff_leave: 0,
+        authorized_leave: 0,
+        work_from_home: 0,
+        late_arrived: 0,
+        not_marked: 0,
+        unauthorized_leave: 0,
+        holiday: 0,
+        weekly_off: 0,
+        mispunch: 0,
+    };
+
+    let earlyGo = 0;
+    let halfDay = 0;
+    let otHours = 0;
+    for (const row of rows) {
+        const key = String(row?.statusKey || '').trim();
+        if (Object.prototype.hasOwnProperty.call(counts, key)) {
+            counts[key] += 1;
+        }
+        if (key === 'early_go') earlyGo += 1;
+        else if (key !== 'on_office' && key !== 'late_arrived' && isHalfDayAttendance(row)) halfDay += 1;
+        otHours += addedOtHours(row);
+    }
+
+    const markedCount = rows.length;
+    const offOrHolidayCount = counts.holiday + counts.weekly_off;
+    // People with a holiday or weekly-off mark are already inside markedCount.
+    const implicitNotMarked = Math.max(0, totalStaff - markedCount);
+    const notMarked = isWeeklyOffDay
+        ? counts.not_marked + counts.unauthorized_leave
+        : counts.not_marked + counts.unauthorized_leave + implicitNotMarked;
+    const authorizedLeaveTotal = counts.on_leave + counts.authorized_leave;
+    const weeklyOff = isWeeklyOffDay ? Math.max(offOrHolidayCount, totalStaff) : counts.weekly_off;
+    const holiday = counts.holiday;
+
+    return {
+        activeEmployees: totalStaff,
+        present: counts.on_office,
+        onLeave: authorizedLeaveTotal,
+        lateArrived: counts.late_arrived,
+        sickLeave: counts.sick_leave,
+        workFromHome: counts.work_from_home,
+        missedPunch: counts.mispunch,
+        compOffLeave: counts.compoff_leave,
+        earlyGo,
+        halfDay,
+        notMarked: isWeeklyOffDay ? 0 : notMarked,
+        holiday,
+        weeklyOff,
+        isWeeklyOff: Boolean(isWeeklyOffDay),
+        officePresent: counts.on_office,
+        officeTotal: totalStaff,
+        sitePresent: 0,
+        siteTotal: 0,
+        totalPresent: counts.on_office,
+        absentAuthorized: authorizedLeaveTotal,
+        // Same value as notMarked — unauthorized and not marked are one category.
+        absentUnauthorized: isWeeklyOffDay ? 0 : notMarked,
+        otHours,
+    };
+}
+
+function attendanceListPerson(emp, row, date) {
+    const fromEmp = [emp?.firstName, emp?.lastName].filter(Boolean).join(' ').trim();
+    return {
+        employeeMongoId: String(row?.employeeMongoId || emp?._id || ''),
+        employeeId: String(row?.employeeId || emp?.employeeId || ''),
+        name: String(row?.employeeName || fromEmp || 'Employee').trim(),
+        companyName: String(emp?.company?.nickName || emp?.company?.name || '').trim(),
+        date,
+    };
+}
+
+const HEADER_LEAVE_KEYS = new Set(['on_leave', 'authorized_leave', 'sick_leave', 'compoff_leave']);
+const HEADER_ABSENT_KEYS = new Set(['not_marked', 'unauthorized_leave', 'absent', '']);
+
+/** Names behind each header row, using the same buckets as the counts. */
+function headerPeopleForDay({ roster, dayRecords, peopleById, dateKey, isWeeklyOffDay }) {
+    const present = [];
+    const late = [];
+    const leave = [];
+    const missed = [];
+    const absent = [];
+    const ot = [];
+    const seen = new Set();
+    for (const row of dayRecords || []) {
+        const id = String(row?.employeeMongoId || '');
+        if (!id) continue;
+        seen.add(id);
+        const person = attendanceListPerson(peopleById.get(id), row, dateKey);
+        const key = String(row?.statusKey || '').trim();
+        const hours = addedOtHours(row);
+        if (hours > 0) ot.push({ ...person, hours });
+        // Comp off is paid time off that still counts as present for the day.
+        if (key === 'on_office' || key === 'compoff_leave') present.push(person);
+        if (key === 'late_arrived') late.push(person);
+        else if (HEADER_LEAVE_KEYS.has(key)) leave.push({ ...person, bucket: headerLeaveBucket(key) });
+        else if (key === 'mispunch') missed.push(person);
+        else if (!isWeeklyOffDay && HEADER_ABSENT_KEYS.has(key)) {
+            absent.push({ ...person, bucket: 'unauth' });
+        }
+    }
+    const total = [];
+    for (const id of roster || []) {
+        const person = attendanceListPerson(peopleById.get(id), null, dateKey);
+        total.push(person);
+        if (!isWeeklyOffDay && !seen.has(id)) absent.push({ ...person, bucket: 'unauth' });
+    }
+    const byName = (a, b) => String(a.name).localeCompare(String(b.name));
+    present.sort(byName);
+    absent.sort(byName);
+    late.sort(byName);
+    leave.sort(byName);
+    missed.sort(byName);
+    ot.sort(byName);
+    total.sort(byName);
+    return { present, absent, late, leave, missed, ot, total };
+}
+
+function resolveStaffTypeFilter(raw) {
+    const value = String(raw || '').trim().toLowerCase();
+    if (!value || value === 'all') return null;
+    if (value === 'staff') return 'site';
+    return normalizeStaffType(value);
+}
+
+/** Holiday / weekly off do not need HR approval queue. */
+function approvalStatusForMark(statusKey) {
+    const key = String(statusKey || '').trim();
+    if (!key || key === 'holiday' || key === 'weekly_off' || key === 'clear_attendance' || key === 'clear') {
+        return '';
+    }
+    return 'pending';
+}
+
+const APPROVED_LEAVE_DAY_KEYS = new Set([
+    'on_leave',
+    'authorized_leave',
+    'sick_leave',
+    'compoff_leave',
+]);
+
+/** Approved annual, authorized, sick, or comp-off leave owns that day. */
+function isApprovedLeaveDay(record) {
+    if (!record) return false;
+    if (String(record.leaveRequestStatus || '').trim() !== 'approved') return false;
+    return APPROVED_LEAVE_DAY_KEYS.has(String(record.statusKey || '').trim());
+}
+
+/**
+ * GET /api/Attendance/mark-roster
+ * Lean active-employee list for Mark Attendance (no heavy Employee list aggregation).
+ * Query: staffType=office|site (optional), date=yyyy-MM-dd
+ * Only employees enrolled on or before that month are returned.
+ */
+export async function getAttendanceMarkRoster(req, res) {
+    try {
+        if (mongoose.connection.readyState !== 1) {
+            return res.status(503).json({ message: 'Database not connected.' });
+        }
+
+        const requestedDate = String(req.query.date || '').trim();
+        const dateKey = isValidDateKey(requestedDate) ? requestedDate : getDubaiDateKey();
+        const monthKey = dateKey.slice(0, 7);
+        const staffType = resolveStaffTypeFilter(req.query.staffType);
+        const filter = {
+            profileStatus: 'active',
+            status: { $ne: 'Left User' },
+            employeeId: { $ne: 'VEGA-HR-0000' },
+            ...REAL_EMPLOYEE_MONGO_FILTER,
+        };
+
+        if (staffType) {
+            Object.assign(filter, staffTypeMongoClause(staffType));
+        }
+
+        const rows = await EmployeeBasic.find(filter)
+            .select('_id employeeId firstName lastName staffType primaryReportee profileStatus status attendanceAccountStatus attendanceSuspension')
+            .sort({ firstName: 1, lastName: 1 })
+            .lean()
+            .maxTimeMS(8000);
+
+        const activeRows = (rows || []).filter((e) => !isCompanyShellEmployee(e));
+        const reporteeIds = [
+            ...new Set(
+                activeRows
+                    .map((row) => String(row.primaryReportee || '').trim())
+                    .filter((id) => mongoose.Types.ObjectId.isValid(id)),
+            ),
+        ];
+        const reporteeNames = new Map();
+        if (reporteeIds.length) {
+            const people = await EmployeeBasic.find({ _id: { $in: reporteeIds } })
+                .select('firstName lastName')
+                .lean();
+            for (const person of people || []) {
+                reporteeNames.set(
+                    String(person._id),
+                    [person.firstName, person.lastName].filter(Boolean).join(' ').trim(),
+                );
+            }
+        }
+        const enrolledFrom = await loadEnrolledLeaveVisibilityByMongoId(activeRows);
+        const employees = activeRows
+            .filter((e) => {
+                const start = enrolledFrom.get(String(e._id));
+                if (!start) return false;
+                return isSalaryMonthOpen(monthKey, start);
+            })
+            .map((e) => ({
+                _id: String(e._id),
+                id: String(e._id),
+                employeeId: e.employeeId || '',
+                firstName: e.firstName || '',
+                lastName: e.lastName || '',
+                name: [e.firstName, e.lastName].filter(Boolean).join(' ').trim(),
+                staffType: normalizeStaffType(e.staffType),
+                primaryReportee: e.primaryReportee ? String(e.primaryReportee) : '',
+                primaryReporteeName: reporteeNames.get(String(e.primaryReportee || '')) || '',
+                profileStatus: e.profileStatus || 'active',
+                status: e.status || '',
+                attendanceSuspended: isAttendanceSuspendedOn(e, dateKey),
+                attendanceSuspension: e.attendanceSuspension || null,
+            }));
+
+        return res.status(200).json({
+            message: 'Attendance mark roster fetched successfully',
+            count: employees.length,
+            date: dateKey,
+            staffType: staffType || 'all',
+            employees,
+        });
+    } catch (error) {
+        console.error('[getAttendanceMarkRoster]', error);
+        return res.status(500).json({
+            message: error.message || 'Failed to load attendance roster.',
+        });
+    }
+}
+
+/** GET /api/Attendance?date=yyyy-MM-dd */
+async function rewriteStoredPunchGaps(rows) {
+    const jobs = [];
+    for (const row of rows || []) {
+        const patch = storedPunchGapPatch(row);
+        if (!patch || !row?._id) continue;
+        Object.assign(row, patch);
+        jobs.push(
+            Attendance.updateOne({ _id: row._id }, { $set: patch }).catch((err) => {
+                console.error('[rewriteStoredPunchGaps]', err?.message || err);
+            }),
+        );
+    }
+    if (jobs.length) await Promise.all(jobs);
+}
+
+/** A past day with check-in and no check-out is stored and shown as Mispunch. */
+async function rewriteMissingCheckouts(rows) {
+    const today = getDubaiDateKey();
+    const jobs = [];
+    for (const row of rows || []) {
+        if (!closedMissingCheckout(row, today) || String(row?.statusKey || '').trim() === 'mispunch') continue;
+        const patch = {
+            statusKey: 'mispunch',
+            statusLabel: 'Mispunch',
+            reason: String(row?.reason || '').trim() || 'Mispunched — forgot to check out',
+        };
+        Object.assign(row, patch);
+        if (!row?._id) continue;
+        jobs.push(
+            Attendance.updateOne({ _id: row._id }, { $set: patch }).catch((err) => {
+                console.error('[rewriteMissingCheckouts]', err?.message || err);
+            }),
+        );
+    }
+    if (jobs.length) await Promise.all(jobs);
+}
+
+export async function getAttendanceByDate(req, res) {
+    try {
+        if (mongoose.connection.readyState !== 1) {
+            return res.status(503).json({ message: 'Database not connected.' });
+        }
+
+        const date = String(req.query.date || '').trim();
+        if (!isValidDateKey(date)) {
+            return res.status(400).json({ message: 'Valid date (yyyy-MM-dd) is required.' });
+        }
+
+        const [storedRecords, coverIndex] = await Promise.all([
+            Attendance.find({
+                date,
+                employeeName: { $not: /\(company\)\s*$/i },
+            })
+                .sort({ employeeName: 1 })
+                .lean(),
+            loadLeaveCoverIndex({ from: date, to: date }),
+        ]);
+        try {
+            await repairBlankNonWorkingRows(storedRecords);
+            await refreshFlexibleOtRecords(storedRecords);
+        } catch (otErr) {
+            console.error('[getAttendanceByDate] flexible OT refresh failed:', otErr);
+        }
+        const records = applyLeaveCoverIndex(storedRecords, coverIndex).filter(
+            (row) => String(row?.date || '') === date,
+        );
+        const suspendedEmployees = await EmployeeBasic.find({
+            attendanceAccountStatus: 'suspended',
+            $or: [
+                { 'attendanceSuspension.mode': 'permanent' },
+                {
+                    'attendanceSuspension.fromDate': { $lte: date },
+                    'attendanceSuspension.untilDate': { $gte: date },
+                },
+            ],
+        })
+            .select('_id employeeId firstName lastName attendanceAccountStatus attendanceSuspension')
+            .lean();
+        const suspendedIds = new Set((suspendedEmployees || []).map((row) => String(row._id)));
+        const editableRecords = records.filter((row) => !suspendedIds.has(String(row.employeeMongoId || '')));
+        try {
+            await rewriteStoredPunchGaps(editableRecords);
+            await rewriteMissingCheckouts(editableRecords);
+        } catch (gapErr) {
+            console.error('[getAttendanceByDate] punch gap rewrite failed:', gapErr);
+        }
+        const visibleRecords = editableRecords.filter((r) => !isCompanyShellEmployee(r.employeeName));
+        let deductionRecords = visibleRecords;
+        try {
+            deductionRecords = await attachAttendanceDeductionDays(visibleRecords);
+        } catch (deductionErr) {
+            console.error('[getAttendanceByDate] deduction days failed:', deductionErr);
+            deductionRecords = visibleRecords.map((row) => ({ ...row, deductionDays: 0 }));
+        }
+        const suspendedViews = (suspendedEmployees || []).map((row) => suspendedAttendanceView(row, date));
+        const shownRecords = [...deductionRecords, ...suspendedViews];
+        const [pendingChanges, approvalHistory] = await Promise.all([
+            loadPendingAttendanceChanges(date).catch((err) => {
+                console.error('[getAttendanceByDate] pending changes failed:', err);
+                return [];
+            }),
+            loadDayApprovalHistory(date, visibleRecords).catch((err) => {
+                console.error('[getAttendanceByDate] approval history failed:', err);
+                return [];
+            }),
+        ]);
+        return res.status(200).json({
+            message: 'Attendance fetched successfully',
+            date,
+            records: await attachLeaveFileUrls(shownRecords.map(presentAuthorizedLeaveRecord)),
+            pendingChanges,
+            approvalHistory,
+        });
+    } catch (error) {
+        console.error('[getAttendanceByDate]', error);
+        return res.status(500).json({ message: error.message || 'Failed to fetch attendance.' });
+    }
+}
+
+/**
+ * GET /api/Attendance/calendar?month=yyyy-MM
+ * Optional: from=yyyy-MM-dd&to=yyyy-MM-dd (overrides month bounds when both valid).
+ * Optional: staffType=office|site — day counts are that group only.
+ * totalStaffAll is every group combined. totalStaff is the selected group.
+ */
+export async function getAttendanceCalendarSummary(req, res) {
+    try {
+        if (mongoose.connection.readyState !== 1) {
+            return res.status(503).json({ message: 'Database not connected.' });
+        }
+
+        const month = String(req.query.month || '').trim();
+        const fromQuery = String(req.query.from || '').trim();
+        const toQuery = String(req.query.to || '').trim();
+        const staffType = resolveStaffTypeFilter(req.query.staffType);
+        const includePeople = String(req.query.includePeople || '') === '1';
+
+        let from;
+        let to;
+        let monthKey;
+
+        if (isValidDateKey(fromQuery) && isValidDateKey(toQuery) && fromQuery <= toQuery) {
+            from = fromQuery;
+            to = toQuery;
+            monthKey = from.slice(0, 7);
+        } else {
+            let year;
+            let monthNum;
+            if (/^\d{4}-\d{2}$/.test(month)) {
+                year = Number(month.slice(0, 4));
+                monthNum = Number(month.slice(5, 7));
+            } else {
+                const p = getDubaiNowParts();
+                year = p.year;
+                monthNum = p.month;
+            }
+
+            if (!Number.isFinite(year) || !Number.isFinite(monthNum) || monthNum < 1 || monthNum > 12) {
+                return res.status(400).json({ message: 'Valid month (yyyy-MM) is required.' });
+            }
+
+            from = `${year}-${String(monthNum).padStart(2, '0')}-01`;
+            const lastDay = new Date(Date.UTC(year, monthNum, 0)).getUTCDate();
+            to = `${year}-${String(monthNum).padStart(2, '0')}-${String(lastDay).padStart(2, '0')}`;
+            monthKey = `${year}-${String(monthNum).padStart(2, '0')}`;
+        }
+
+        const [employeeRows, storedRecords, workingTime] = await Promise.all([
+            EmployeeBasic.find({
+                profileStatus: 'active',
+                status: { $ne: 'Left User' },
+                employeeId: { $ne: 'VEGA-HR-0000' },
+                ...REAL_EMPLOYEE_MONGO_FILTER,
+            })
+                .select('_id employeeId staffType firstName lastName status company')
+                .populate('company', 'name nickName')
+                .lean(),
+            Attendance.find({ date: { $gte: from, $lte: to } }).lean(),
+            loadWorkingTimeDoc(),
+        ]);
+        const people = (employeeRows || []).filter(
+            (emp) => !isCompanyShellEmployee(emp) && String(emp.employeeId || '').trim() !== 'VEGA-HR-0000',
+        );
+        const coverIndex = await loadLeaveCoverIndex({
+            from,
+            to,
+            employees: people,
+        });
+        const records = applyLeaveCoverIndex(storedRecords, coverIndex);
+        const processingStartById = await loadEnrolledLeaveVisibilityByMongoId(people);
+        // Same people as Mark Attendance: enrolled, and that month is open. Others are not staff for the day.
+        const enrolledPeople = people.filter((emp) => processingStartById.has(String(emp._id)));
+        const peopleById = new Map(enrolledPeople.map((emp) => [String(emp._id), emp]));
+
+        const idsByGroup = new Map();
+        for (const emp of enrolledPeople) {
+            const key = normalizeStaffType(emp.staffType);
+            if (!idsByGroup.has(key)) idsByGroup.set(key, []);
+            idsByGroup.get(key).push(String(emp._id));
+        }
+
+        const anchorMonth = (to < getDubaiDateKey() ? to : getDubaiDateKey()).slice(0, 7);
+        const rosterIdsForMonth = (monthKey, group) =>
+            enrolledPeople
+                .filter((emp) => {
+                    if (group && normalizeStaffType(emp.staffType) !== group) return false;
+                    const start = processingStartById.get(String(emp._id));
+                    return Boolean(start) && isSalaryMonthOpen(monthKey, start);
+                })
+                .map((emp) => String(emp._id));
+
+        const groupCounts = {};
+        let totalStaffAll = 0;
+        const groups = new Set([...idsByGroup.keys(), ...(staffType ? [staffType] : [])]);
+        for (const key of groups) {
+            const count = rosterIdsForMonth(anchorMonth, key).length;
+            groupCounts[key] = count;
+            totalStaffAll += count;
+        }
+        if (!staffType) {
+            totalStaffAll = rosterIdsForMonth(anchorMonth, null).length;
+        }
+
+        const selectedIds = staffType
+            ? idsByGroup.get(staffType) || []
+            : [...idsByGroup.values()].flat();
+        const totalStaff = rosterIdsForMonth(anchorMonth, staffType).length;
+        const staffIdSet = new Set(selectedIds);
+        const scheduleWeek = getWeekForStaffType(workingTime, staffType);
+
+        const byDate = new Map();
+        for (const row of records) {
+            const employeeId = String(row?.employeeMongoId || '');
+            if (!staffIdSet.has(employeeId)) continue;
+            const key = String(row?.date || '').trim();
+            if (!isValidDateKey(key)) continue;
+            if (!byDate.has(key)) byDate.set(key, []);
+            byDate.get(key).push(row);
+        }
+
+        const days = {};
+        const start = new Date(`${from}T12:00:00.000Z`);
+        const end = new Date(`${to}T12:00:00.000Z`);
+        for (let cursor = start; cursor <= end; cursor.setUTCDate(cursor.getUTCDate() + 1)) {
+            const dateKey = cursor.toISOString().slice(0, 10);
+            const roster = new Set(rosterIdsForMonth(dateKey.slice(0, 7), staffType));
+            const dayRecords = [];
+            for (const row of byDate.get(dateKey) || []) {
+                const id = String(row?.employeeMongoId || '');
+                if (!roster.has(id)) continue;
+                if (!keepAttendanceForProcessingStart(row, processingStartById.get(id) || '')) continue;
+                dayRecords.push(row);
+            }
+            const dayStaff = roster.size;
+            const isWeeklyOffDay = staffType
+                ? isWeekOffForStaff(scheduleWeek, dateKey)
+                : false;
+            const stats =
+                dayRecords.length > 0 || isWeeklyOffDay
+                    ? buildDayStatsFromRecords(dayRecords, dayStaff, { isWeeklyOffDay })
+                    : emptyDayStats(dayStaff);
+
+            if (isWeeklyOffDay) {
+                stats.isWeeklyOff = true;
+                stats.weeklyOff = Math.max(Number(stats.weeklyOff) || 0, dayStaff);
+                stats.notMarked = 0;
+                stats.absentUnauthorized = 0;
+            }
+
+            // When filtered to one staff group, mirror totals into that group's present/total fields.
+            if (staffType === 'office') {
+                stats.officePresent = stats.totalPresent;
+                stats.officeTotal = dayStaff;
+                stats.sitePresent = 0;
+                stats.siteTotal = 0;
+            } else if (staffType === 'site') {
+                stats.sitePresent = stats.totalPresent;
+                stats.siteTotal = dayStaff;
+                stats.officePresent = 0;
+                stats.officeTotal = 0;
+            }
+
+            if (includePeople) {
+                stats.people = headerPeopleForDay({
+                    roster,
+                    dayRecords,
+                    peopleById,
+                    dateKey,
+                    isWeeklyOffDay,
+                });
+            }
+
+            days[dateKey] = stats;
+        }
+
+        return res.status(200).json({
+            message: 'Attendance calendar fetched successfully',
+            month: monthKey,
+            from,
+            to,
+            staffType: staffType || 'all',
+            totalStaff,
+            totalStaffAll,
+            groupCounts,
+            offWeekdays: staffType ? getOffWeekdayKeys(scheduleWeek) : [],
+            days,
+        });
+    } catch (error) {
+        console.error('[getAttendanceCalendarSummary]', error);
+        return res.status(500).json({ message: error.message || 'Failed to fetch attendance calendar.' });
+    }
+}
+
+function previousAttendanceSnapshot(existing) {
+    if (!existing) {
+        return {
+            statusKey: '',
+            statusLabel: 'Not marked',
+            timeIn: '',
+            timeOut: '',
+            reason: '',
+        };
+    }
+    return {
+        statusKey: existing.statusKey || '',
+        statusLabel: existing.statusLabel || 'Not marked',
+        timeIn: existing.timeIn || '',
+        timeOut: existing.timeOut || '',
+        reason: existing.reason || '',
+    };
+}
+
+async function resolveManualMarkPayload({
+    employee,
+    employeeMongoId,
+    date,
+    statusKey,
+    statusLabel,
+    timeIn,
+    timeOut,
+    reason,
+    attachmentName,
+    attachmentKey = '',
+    attachmentMime = '',
+}) {
+    let finalStatusKey = statusKey;
+    let finalStatusLabel =
+        statusKey === 'authorized_leave' ? authorizedLeaveLabel() : statusLabel;
+    let finalReason = String(reason || '').trim();
+    try {
+        const staffType = normalizeStaffType(employee?.staffType);
+        const workingTime = await loadWorkingTimeDoc();
+        const week = getWeekForStaffType(workingTime, staffType);
+        const schedule = getScheduledPunchMinutes(week, date);
+        const resolved = resolveStatusFromPunches({
+            timeIn,
+            timeOut,
+            startMinutes: schedule.startMinutes,
+            endMinutes: schedule.endMinutes,
+            isOffDay: schedule.isOffDay,
+            baseStatusKey: statusKey,
+            baseStatusLabel:
+                statusKey === 'authorized_leave' ? authorizedLeaveLabel() : statusLabel,
+            baseReason: finalReason,
+        });
+        finalStatusKey = resolved.statusKey;
+        finalStatusLabel = resolved.statusLabel;
+        if (resolved.reason !== undefined) finalReason = resolved.reason;
+    } catch (scheduleErr) {
+        console.error('[resolveManualMarkPayload] schedule punch rules failed:', scheduleErr);
+    }
+
+    if (finalStatusKey === 'sick_leave') {
+        const overflowMap = await resolveSickOverflowStatuses(
+            employee || { _id: employeeMongoId },
+            [date],
+        );
+        if (overflowMap.get(date) === 'authorized_leave') {
+            finalStatusKey = 'authorized_leave';
+            finalStatusLabel = authorizedLeaveLabel();
+            finalReason = finalReason
+                ? `${finalReason} · Sick allowance used`
+                : 'Converted from sick leave after the allowance from last annual leave was used';
+        }
+    }
+
+    if (finalStatusKey === 'authorized_leave') {
+        finalStatusLabel = authorizedLeaveLabel();
+    }
+
+    return {
+        statusKey: finalStatusKey,
+        statusLabel: finalStatusLabel,
+        leavePayType: leavePayTypeForStatus(finalStatusKey),
+        timeIn,
+        timeOut,
+        reason: finalReason,
+        attachmentName: String(attachmentName || '').trim(),
+        attachmentKey: String(attachmentKey || '').trim(),
+        attachmentMime: String(attachmentMime || '').trim(),
+    };
+}
+
+async function storeLeaveAttachment(data, name) {
+    const raw = String(data || '').trim();
+    if (!raw) return null;
+    const persisted = await ensureAttachmentPersistedToS3(
+        { data: raw, name: name || 'sick-leave' },
+        { folder: 'leave-attachments', fileName: name || 'sick-leave' },
+    );
+    if (!persisted?.publicId) return null;
+    return {
+        attachmentName: persisted.name || name || '',
+        attachmentKey: persisted.publicId,
+        attachmentMime: persisted.mimeType || '',
+    };
+}
+
+async function attachLeaveFileUrls(rows) {
+    return Promise.all((rows || []).map(async (row) => {
+        const plain = row?.toObject ? row.toObject() : { ...row };
+        const key = String(plain.attachmentKey || '').trim();
+        if (!key) return plain;
+        plain.attachmentUrl = (await signOrKeepAttachmentUrl(key)) || '';
+        return plain;
+    }));
+}
+
+async function commitManualAttendanceMark({
+    employee,
+    employeeMongoId,
+    date,
+    payload,
+    markedBy,
+    employeeId = '',
+    employeeName = '',
+}) {
+    const otUpdate = await flexibleOtManualUpdate({
+        employee: employee || { _id: employeeMongoId, staffType: 'office' },
+        date,
+        timeIn: payload.timeIn,
+        timeOut: payload.timeOut,
+        statusKey: payload.statusKey,
+    });
+    const resolvedName =
+        String(employeeName || '').trim() ||
+        [employee?.firstName, employee?.lastName].filter(Boolean).join(' ').trim();
+    return Attendance.findOneAndUpdate(
+        { date, employeeMongoId },
+        {
+            $set: {
+                date,
+                employeeMongoId,
+                employeeId: String(employeeId || employee?.employeeId || '').trim(),
+                employeeName: resolvedName,
+                statusKey: payload.statusKey,
+                statusLabel: payload.statusLabel,
+                leavePayType: payload.leavePayType,
+                timeIn: payload.timeIn,
+                timeOut: payload.timeOut,
+                reason: payload.reason,
+                attachmentName: payload.attachmentName,
+                attachmentKey: payload.attachmentKey || '',
+                attachmentMime: payload.attachmentMime || '',
+                approvalStatus: approvalStatusForMark(payload.statusKey),
+                punchSource: 'manual',
+                checkOutSource: payload.timeOut ? 'manual' : '',
+                markedBy,
+                ...otUpdate,
+            },
+            $unset: {
+                checkInLocation: 1,
+                checkOutLocation: 1,
+                punchMappedFromEmployeeMongoId: 1,
+                ...(payload.statusKey === 'compoff_leave' ? {} : { compOff: 1 }),
+            },
+        },
+        { upsert: true, new: true, setDefaultsOnInsert: true },
+    );
+}
+
+function storedPunchLocation(location) {
+    if (location?.latitude == null || location?.longitude == null) return null;
+    return {
+        latitude: location.latitude,
+        longitude: location.longitude,
+        accuracy: location.accuracy ?? null,
+        label: location.label || '',
+        source: location.source || '',
+    };
+}
+
+async function commitMappedAttendanceChange({ request, markedBy }) {
+    const proposed = request?.proposed || {};
+    const punch = mapPunchWithoutOvertime({
+        timeIn: proposed.timeIn,
+        timeOut: proposed.timeOut,
+        timeOutDate: proposed.timeOutDate,
+    });
+    const statusKey = proposed.statusKey || 'on_office';
+    const statusLabel = proposed.statusLabel || 'Present';
+    const checkInLocation = storedPunchLocation(proposed.checkInLocation);
+    const checkOutLocation = punch.timeOut ? storedPunchLocation(proposed.checkOutLocation) : null;
+    const sessions = mappedPunchSessions(proposed.punchSessions);
+    await dropMappedOvertime(request.employeeMongoId, request.date);
+    const set = {
+        date: request.date,
+        employeeMongoId: request.employeeMongoId,
+        employeeId: request.employeeId || '',
+        employeeName: request.employeeName || '',
+        statusKey,
+        statusLabel,
+        leavePayType: leavePayTypeForStatus(statusKey),
+        timeIn: punch.timeIn || '',
+        timeOut: punch.timeOut || '',
+        timeOutDate: punch.timeOut ? punch.timeOutDate || '' : '',
+        punchSessions: sessions,
+        reason: proposed.reason || '',
+        punchSource: punchChannel(proposed.punchSource) || 'manual',
+        checkOutSource: punch.timeOut ? punchChannel(proposed.checkOutSource) : '',
+        approvalStatus: punch.timeIn ? approvalStatusForMark(statusKey) : '',
+        punchMappedFromEmployeeMongoId: proposed.punchMappedFromEmployeeMongoId || '',
+        markedBy,
+        ...CLEARED_MAPPED_OT,
+    };
+    if (checkInLocation) set.checkInLocation = checkInLocation;
+    if (checkOutLocation) set.checkOutLocation = checkOutLocation;
+    const unset = {};
+    if (!checkInLocation) unset.checkInLocation = 1;
+    if (!checkOutLocation) unset.checkOutLocation = 1;
+    return Attendance.findOneAndUpdate(
+        { date: request.date, employeeMongoId: request.employeeMongoId },
+        {
+            $set: set,
+            ...(Object.keys(unset).length ? { $unset: unset } : {}),
+        },
+        { upsert: true, new: true, setDefaultsOnInsert: true },
+    );
+}
+
+async function loadChangeApprovalContext(req) {
+    const [actor, actorIsHr, hr] = await Promise.all([
+        resolveLinkedEmployee(req),
+        viewerIsFlowchartHr(req),
+        getDepartmentHOD('hr').catch(() => null),
+    ]);
+    return {
+        actor,
+        actorIsHr,
+        hr: hr?._id ? hr : null,
+    };
+}
+
+const CHANGE_REPORTEE_SELECT = 'firstName lastName employeeId companyEmail workEmail email';
+
+async function emailDirectAttendanceChange({
+    actor,
+    hr,
+    employee,
+    date,
+    previousLabel,
+    nextLabel,
+    timeIn,
+    timeOut,
+    reason,
+    attendanceId = '',
+}) {
+    const reportee = employee?.primaryReportee;
+    try {
+        await sendAttendanceDirectChangeEmail({
+            recipients: [hr, reportee].filter(Boolean),
+            actor,
+            employee,
+            date,
+            previousLabel,
+            nextLabel,
+            timeIn,
+            timeOut,
+            reason,
+            recordIds: [attendanceId],
+        });
+    } catch (err) {
+        console.error('[emailDirectAttendanceChange]', err?.message || err);
+    }
+}
+
+async function queueOrApplyManualMark(ctx, {
+    employee,
+    employeeMongoId,
+    date,
+    statusKey,
+    statusLabel,
+    timeIn,
+    timeOut,
+    reason,
+    attachmentName,
+    attachmentKey = '',
+    attachmentMime = '',
+    markedBy,
+    employeeId = '',
+    employeeName = '',
+}) {
+    const id = String(employee?._id || employeeMongoId || '').trim();
+    const payload = await resolveManualMarkPayload({
+        employee,
+        employeeMongoId: id,
+        date,
+        statusKey,
+        statusLabel,
+        timeIn,
+        timeOut,
+        reason,
+        attachmentName,
+        attachmentKey,
+        attachmentMime,
+    });
+    const existing = id ? await Attendance.findOne({ date, employeeMongoId: id }).lean() : null;
+
+    if (isAttendanceSuspendedOn(employee, date)) {
+        return { error: 'This employee is suspended on this date. Attendance cannot be changed.' };
+    }
+
+    if (!ctx.actorIsHr && attendanceMarksMatch(existing, payload)) {
+        return { applied: existing, pending: null };
+    }
+
+    const reporteeRef = employee?.primaryReportee;
+    const reporteeId = reporteeRef?._id || reporteeRef || '';
+    const stage = approvalStageForAttendanceChange({
+        actorIsHr: ctx.actorIsHr,
+        actorId: ctx.actor?._id,
+        reporteeId,
+        hrId: ctx.hr?._id,
+    });
+    const hours = ctx.actorIsHr ? { clockHours: 0, deductionHours: 0 } : await yellowMarkHours(employee, date, payload);
+    const route = ctx.actorIsHr
+        ? 'direct'
+        : attendanceMarkRoute({
+            statusKey: payload.statusKey,
+            clockHours: hours.clockHours,
+            deductionHours: hours.deductionHours,
+        });
+    if (!ctx.actorIsHr && date === shiftDateKey(getDubaiDateKey(), 1) && payload.statusKey === 'on_office') {
+        payload.statusLabel = 'Present (Comp off)';
+    }
+
+    // HR writes the day. Other users write present and zero-hour yellow marks immediately.
+    // Leave and any deduction hours wait for the primary reportee, then HR.
+    if (route === 'direct') {
+        const doc = await commitManualAttendanceMark({
+            employee,
+            employeeMongoId: id,
+            date,
+            payload,
+            markedBy,
+            employeeId,
+            employeeName,
+        });
+        try {
+            await settleFulfilledLeaveRequest(doc);
+        } catch (settleErr) {
+            console.error('[queueOrApplyManualMark] leave request settle failed:', settleErr);
+        }
+        await supersedeOpenAttendanceChanges({
+            date,
+            employeeMongoId: id,
+            actorId: ctx.actor?._id,
+        });
+        if (!ctx.actorIsHr) {
+            await emailDirectAttendanceChange({
+                actor: ctx.actor,
+                hr: ctx.hr,
+                employee,
+                date,
+                previousLabel: existing?.statusLabel || 'Not marked',
+                nextLabel: payload.statusLabel || statusLabel,
+                timeIn: payload.timeIn || '',
+                timeOut: payload.timeOut || '',
+                reason: payload.reason || reason || '',
+                attendanceId: doc?._id,
+            });
+        }
+        return { applied: doc, pending: null };
+    }
+
+    if (!employee?._id) {
+        return { error: 'Employee not found, so this attendance change cannot be sent for approval.' };
+    }
+    if (stage === 'pending_hr' && !ctx.hr?._id) {
+        return { error: 'Flowchart HR is not set, so this attendance change cannot be sent for approval.' };
+    }
+
+    let reportee = null;
+    if (reporteeRef && typeof reporteeRef === 'object' && reporteeRef._id) {
+        reportee = reporteeRef;
+    } else if (reporteeId) {
+        reportee = await EmployeeBasic.findById(reporteeId).select(CHANGE_REPORTEE_SELECT).lean();
+    }
+    if (stage === 'pending_reportee' && !reportee?._id) {
+        return { error: 'This employee has no primary reportee, so the change cannot be sent for approval.' };
+    }
+
+    const pending = await submitAttendanceChange({
+        employee,
+        date,
+        proposed: payload,
+        previous: previousAttendanceSnapshot(existing),
+        stage,
+        actor: ctx.actor,
+        reportee,
+        hr: ctx.hr,
+    });
+    return { applied: null, pending };
+}
+
+async function queueOrApplyClear(ctx, { employee, employeeMongoId, date, markedBy }) {
+    if (isAttendanceSuspendedOn(employee, date)) {
+        return { error: 'This employee is suspended on this date. Attendance cannot be changed.' };
+    }
+    const id = String(employee?._id || employeeMongoId || '').trim();
+    if (ctx.actorIsHr) {
+        const restored = await restoreClearedAttendance({
+            employeeMongoId: id,
+            date,
+            markedBy,
+        });
+        await supersedeOpenAttendanceChanges({
+            date,
+            employeeMongoId: id,
+            actorId: ctx.actor?._id,
+        });
+        return { applied: restored, pending: null };
+    }
+    const existing = id ? await Attendance.findOne({ date, employeeMongoId: id }).lean() : null;
+    return openAttendanceChangeForEmployee({
+        employee,
+        date,
+        proposed: {
+            statusKey: 'clear_attendance',
+            statusLabel: 'Clear attendance',
+            timeIn: '',
+            timeOut: '',
+            reason: '',
+        },
+        previous: previousAttendanceSnapshot(existing),
+        actor: ctx.actor,
+        hr: ctx.hr,
+        action: 'clear',
+    });
+}
+
+/** POST /api/Attendance/mark — upsert one or many marks for a day */
+export async function markAttendance(req, res) {
+    try {
+        if (mongoose.connection.readyState !== 1) {
+            return res.status(503).json({ message: 'Database not connected.' });
+        }
+
+        const date = String(req.body?.date || '').trim();
+        const marks = Array.isArray(req.body?.marks) ? req.body.marks : [];
+
+        if (!isValidDateKey(date)) {
+            return res.status(400).json({ message: 'Valid date (yyyy-MM-dd) is required.' });
+        }
+        if (marks.length === 0) {
+            return res.status(400).json({ message: 'At least one mark is required.' });
+        }
+
+        const windowClosed = await rejectIfMarkWindowClosed(req, res, {
+            date,
+            entries: marks.map((raw) => ({
+                employeeMongoId: String(raw?.employeeMongoId || raw?.id || '').trim(),
+                statusKey: String(raw?.statusKey || raw?.markKey || '').trim(),
+            })),
+        });
+        if (windowClosed) return;
+
+        const markedBy = req.user?.id || null;
+        const approvalCtx = await loadChangeApprovalContext(req);
+        const saved = [];
+        const pending = [];
+
+        for (const raw of marks) {
+            const employeeMongoId = String(raw?.employeeMongoId || raw?.id || '').trim();
+            const statusKey = String(raw?.statusKey || raw?.markKey || '').trim();
+            const statusLabel = String(raw?.statusLabel || raw?.markLabel || '').trim();
+
+            if (!employeeMongoId) {
+                return res.status(400).json({ message: 'employeeMongoId is required for each mark.' });
+            }
+
+            const markEmployee = await EmployeeBasic.findById(employeeMongoId)
+                .select(
+                    '_id employeeId firstName lastName staffType primaryReportee companyEmail workEmail email attendanceAccountStatus attendanceSuspension',
+                )
+                .populate('primaryReportee', CHANGE_REPORTEE_SELECT)
+                .lean();
+
+            // Clear attendance. A holiday or weekly off returns to that status after approval.
+            if (statusKey === 'clear_attendance' || statusKey === 'clear') {
+                const cleared = await queueOrApplyClear(approvalCtx, {
+                    employee: markEmployee,
+                    employeeMongoId,
+                    date,
+                    markedBy,
+                });
+                if (cleared.error) return res.status(400).json({ message: cleared.error });
+                if (cleared.applied) saved.push(cleared.applied);
+                if (cleared.pending) pending.push(cleared.pending);
+                continue;
+            }
+
+            if (!ATTENDANCE_STATUS_KEYS.includes(statusKey)) {
+                return res.status(400).json({ message: `Invalid statusKey: ${statusKey}` });
+            }
+            if (!statusLabel) {
+                return res.status(400).json({ message: 'statusLabel is required for each mark.' });
+            }
+
+            const timeIn = raw?.timeIn != null && raw.timeIn !== '—' ? String(raw.timeIn).trim() : '';
+            const timeOut = raw?.timeOut != null && raw.timeOut !== '—' ? String(raw.timeOut).trim() : '';
+            const reason = String(raw?.reason || '').trim();
+            const storedFile = await storeLeaveAttachment(raw?.attachmentData, raw?.attachmentName);
+
+            const result = await queueOrApplyManualMark(approvalCtx, {
+                employee: markEmployee,
+                employeeMongoId,
+                date,
+                statusKey,
+                statusLabel,
+                timeIn,
+                timeOut,
+                reason,
+                attachmentName: storedFile?.attachmentName || String(raw?.attachmentName || '').trim(),
+                attachmentKey: storedFile?.attachmentKey || '',
+                attachmentMime: storedFile?.attachmentMime || '',
+                markedBy,
+                employeeId: String(raw?.employeeId || raw?.empNo || markEmployee?.employeeId || '').trim(),
+                employeeName: String(raw?.employeeName || raw?.name || '').trim(),
+            });
+            if (result.error) {
+                return res.status(400).json({ message: result.error });
+            }
+            if (result.applied) saved.push(result.applied);
+            if (result.pending) pending.push(result.pending);
+        }
+
+        return res.status(200).json({
+            message: describeAttendanceSave({ savedCount: saved.length, pending }),
+            date,
+            records: saved,
+            pending,
+        });
+    } catch (error) {
+        console.error('[markAttendance]', error);
+        return res.status(500).json({ message: error.message || 'Failed to save attendance.' });
+    }
+}
+
+/** GET /api/Attendance/me?month=yyyy-MM&forEmployeeId=optionalMongoId */
+
+/** Checked-in days must be Present. Older punches were stored as not_marked. */
+function presentFromOpenPunch(record, todayKey) {
+    if (!record || !punchTimeSet(record.timeIn)) return record;
+    const key = String(record.statusKey || '').trim();
+    if (key !== 'not_marked' && key !== 'absent' && key !== '') return record;
+    const closed = punchTimeSet(record.timeOut);
+    if (!closed && record.date !== todayKey) return record;
+    return {
+        ...record,
+        statusKey: 'on_office',
+        statusLabel: 'Present',
+    };
+}
+
+async function openFlexibleSession(employee, todayKey, todayRecord) {
+    const workingTime = await loadWorkingTimeDoc();
+    const week = getWeekForStaffType(workingTime, normalizeStaffType(employee?.staffType));
+    if (!isFlexibleTiming(week)) return { todayRecord, openFlexiblePunch: false };
+    const open = await Attendance.findOne({
+        employeeMongoId: String(employee._id),
+        date: { $gte: addDaysKey(todayKey, -7), $lte: todayKey },
+        timeIn: { $gt: '' },
+        $or: [{ timeOut: '' }, { timeOut: null }],
+    })
+        .sort({ date: -1 })
+        .lean();
+    if (!open || !String(open.timeIn || '').trim() || String(open.timeOut || '').trim()) {
+        return { todayRecord, openFlexiblePunch: false };
+    }
+    return { todayRecord: open, openFlexiblePunch: true };
+}
+
+export async function getMyAttendanceMonth(req, res) {
+    try {
+        if (mongoose.connection.readyState !== 1) {
+            return res.status(503).json({ message: 'Database not connected.' });
+        }
+
+        const self = await resolveLinkedEmployee(req);
+        const forEmployeeId = String(req.query.forEmployeeId || '').trim();
+        const hrOverride = forEmployeeId ? await canViewHrEmployeeAttendance(req) : false;
+
+        if (!self && !hrOverride) {
+            return res.status(404).json({ message: 'No linked employee profile found for this user.' });
+        }
+
+        let employee = self;
+        if (forEmployeeId && (!self || forEmployeeId !== String(self._id))) {
+            if (self && !hrOverride) {
+                const allowed = await isEmployeeInTeamTree(self._id, forEmployeeId);
+                if (!allowed) {
+                    return res.status(403).json({ message: 'You can only view attendance for your team.' });
+                }
+            }
+            const target = await EmployeeBasic.findById(forEmployeeId)
+                .select('_id employeeId firstName lastName staffType companyEmail attendanceAccountStatus attendanceSuspension')
+                .lean();
+            if (!target) {
+                return res.status(404).json({ message: 'Employee not found.' });
+            }
+            employee = target;
+        } else if (self) {
+            employee = await EmployeeBasic.findById(self._id)
+                .select('_id employeeId firstName lastName staffType companyEmail attendanceAccountStatus attendanceSuspension')
+                .lean();
+            if (!employee) employee = self;
+        }
+
+        if (!employee) {
+            return res.status(404).json({ message: 'Employee not found.' });
+        }
+
+        const month = String(req.query.month || '').trim();
+        let year;
+        let monthNum;
+        if (/^\d{4}-\d{2}$/.test(month)) {
+            year = Number(month.slice(0, 4));
+            monthNum = Number(month.slice(5, 7));
+        } else {
+            const p = getDubaiNowParts();
+            year = p.year;
+            monthNum = p.month;
+        }
+
+        const from = `${year}-${String(monthNum).padStart(2, '0')}-01`;
+        const lastDay = new Date(Date.UTC(year, monthNum, 0)).getUTCDate();
+        const to = `${year}-${String(monthNum).padStart(2, '0')}-${String(lastDay).padStart(2, '0')}`;
+        const todayKey = getDubaiDateKey();
+        const employeeMongoId = String(employee._id);
+        const isSelf = Boolean(self) && employeeMongoId === String(self._id);
+        const staffType = normalizeStaffType(employee.staffType);
+
+        const requestedMonth = `${year}-${String(monthNum).padStart(2, '0')}`;
+        const [gate, contactGate] = await Promise.all([
+            loadSalaryAttendanceGate(employee, { monthKey: requestedMonth }),
+            loadPunchContactFlags(employee),
+        ]);
+        const employeePayload = {
+            id: employeeMongoId,
+            employeeId: employee.employeeId,
+            name: [employee.firstName, employee.lastName].filter(Boolean).join(' ').trim(),
+            staffType,
+            hasCompanyEmail: contactGate.hasCompanyEmail,
+            hasWhatsappNumber: contactGate.hasWhatsappNumber,
+            portalApp: contactGate.portalApp,
+            web: contactGate.web,
+            attendanceSuspended: isAttendanceSuspendedOn(employee, todayKey),
+            attendanceSuspension: employee.attendanceSuspension || null,
+        };
+        const attendanceMatch = employeeAttendanceMatch(employee);
+        const loadTodayPunch = async () => {
+            const rows = await Attendance.find({ date: todayKey, ...attendanceMatch }).lean();
+            return presentFromOpenPunch(bestDayRecord(rows, todayKey), todayKey);
+        };
+
+        if (gate.attendanceLocked || !gate.requestedOpen) {
+            const loadedToday = await loadTodayPunch();
+            const session = await openFlexibleSession(employee, todayKey, loadedToday);
+            const locked = Boolean(gate.attendanceLocked);
+            return res.status(200).json({
+                ...(locked ? salaryLockPayload(gate) : {
+                    message: 'Attendance fetched successfully',
+                    salaryEnrolled: true,
+                    attendanceLocked: false,
+                    processingStartMonth: gate.processingStartMonth || '',
+                    processingStartDate: gate.processingStartDate || '',
+                }),
+                month: requestedMonth,
+                from,
+                to,
+                today: todayKey,
+                isSelf,
+                employee: employeePayload,
+                contactGate,
+                offWeekdays: [],
+                workingTime: { site: {}, office: {}, extra: {} },
+                records: isAttendanceSuspendedOn(employee, todayKey)
+                    ? [suspendedAttendanceView(employee, todayKey)]
+                    : (session.todayRecord ? [session.todayRecord] : []),
+                todayRecord: isAttendanceSuspendedOn(employee, todayKey)
+                    ? suspendedAttendanceView(employee, todayKey)
+                    : session.todayRecord,
+                openFlexiblePunch: isAttendanceSuspendedOn(employee, todayKey) ? false : session.openFlexiblePunch,
+            });
+        }
+
+        const [rawRecords, workingTime, coverIndex] = await Promise.all([
+            Attendance.find({
+                ...attendanceMatch,
+                date: { $gte: from, $lte: to },
+            }).lean(),
+            loadWorkingTimeDoc(),
+            loadLeaveCoverIndex({ from, to, employees: [employee] }),
+        ]);
+        const records = preferPunchedRows(rawRecords);
+        const mergedRecords = applyLeaveCoverIndex(records, coverIndex).map((row) =>
+            presentFromOpenPunch(row, todayKey),
+        );
+        const openForRewrite = mergedRecords.filter(
+            (row) => !isAttendanceSuspendedOn(employee, row?.date),
+        );
+        try {
+            await rewriteStoredPunchGaps(openForRewrite);
+        } catch (gapErr) {
+            console.error('[getMyAttendanceMonth] punch gap rewrite failed:', gapErr);
+        }
+        const promoteIds = openForRewrite
+            .filter(
+                (row) =>
+                    row?._id &&
+                    punchTimeSet(row.timeIn) &&
+                    row.statusKey === 'on_office' &&
+                    row.statusLabel === 'Present',
+            )
+            .map((row) => row._id);
+        const alreadyPresentIds = new Set(
+            records
+                .filter((row) => row.statusKey === 'on_office' && row.statusLabel === 'Present')
+                .map((row) => String(row._id)),
+        );
+        const idsToSave = promoteIds.filter(
+            (id) =>
+                mongoose.Types.ObjectId.isValid(id) &&
+                String(id).length === 24 &&
+                !alreadyPresentIds.has(String(id)),
+        );
+        if (idsToSave.length) {
+            try {
+                await Attendance.updateMany(
+                    { _id: { $in: idsToSave } },
+                    { $set: { statusKey: 'on_office', statusLabel: 'Present' } },
+                );
+            } catch (promoteErr) {
+                console.error('[getMyAttendanceMonth] present promote failed:', promoteErr);
+            }
+        }
+        const scheduleWeek = getWeekForStaffType(workingTime, staffType);
+        const offWeekdays = getOffWeekdayKeys(scheduleWeek);
+        const loadedToday = presentFromOpenPunch(bestDayRecord(mergedRecords, todayKey), todayKey);
+        const session = await openFlexibleSession(employee, todayKey, loadedToday);
+
+        const displayRecords = overlaySuspendedAttendance(mergedRecords, employee, from, to);
+        const displayToday = isAttendanceSuspendedOn(employee, todayKey)
+            ? suspendedAttendanceView(employee, todayKey)
+            : session.todayRecord;
+
+        return res.status(200).json({
+            message: 'Attendance fetched successfully',
+            salaryEnrolled: true,
+            attendanceLocked: Boolean(gate.attendanceLocked),
+            processingStartMonth: gate.processingStartMonth || '',
+            processingStartDate: gate.processingStartDate || '',
+            month: requestedMonth,
+            from,
+            to,
+            today: todayKey,
+            isSelf,
+            employee: employeePayload,
+            contactGate,
+            offWeekdays,
+            scheduleWeek,
+            workingTime: {
+                site: workingTime.site,
+                office: workingTime.office,
+                extra: workingTime.extra || {},
+            },
+            records: await attachLeaveFileUrls(displayRecords),
+            todayRecord: displayToday,
+            openFlexiblePunch: isAttendanceSuspendedOn(employee, todayKey) ? false : session.openFlexiblePunch,
+        });
+    } catch (error) {
+        console.error('[getMyAttendanceMonth]', error);
+        return res.status(500).json({ message: error.message || 'Failed to fetch attendance.' });
+    }
+}
+
+const YEAR_SUMMARY_KEYS = [
+    'on_leave',
+    'sick_leave',
+    'compoff_leave',
+    'authorized_leave',
+    'unauthorized_leave',
+    'work_from_home',
+    'on_office',
+    'late_arrived',
+    'early_go',
+    'mispunch',
+    'holiday',
+    'weekly_off',
+];
+
+function emptyYearCounts() {
+    return Object.fromEntries(YEAR_SUMMARY_KEYS.map((key) => [key, 0]));
+}
+
+const YEAR_SUMMARY_DETAIL_KEYS = [
+    'on_leave',
+    'sick_leave',
+    'compoff_leave',
+    'authorized_leave',
+    'unauthorized_leave',
+    'work_from_home',
+    'on_office',
+    'late_arrived',
+    'early_go',
+    'mispunch',
+    'holiday',
+];
+
+function serializeYearSummaryEntry(row) {
+    const statusKey = String(row?.statusKey || '').trim();
+    const requestStatus = String(row?.leaveRequestStatus || '').trim();
+    const groupId = String(row?.leaveRequestGroupId || '').trim();
+    const source =
+        requestStatus || groupId || String(row?.leaveRequestKind || '').trim()
+            ? 'Leave request'
+            : 'Attendance';
+    return {
+        date: String(row?.date || '').trim(),
+        statusKey,
+        statusLabel: leaveStatusLabel(
+            statusKey,
+            row?.statusLabel || '',
+            statusKey === 'authorized_leave' ? 'unpaid' : row?.leavePayType,
+        ),
+        leavePayType:
+            statusKey === 'authorized_leave' ? 'unpaid' : normalizeLeavePayType(row?.leavePayType),
+        leaveRequestStatus: requestStatus,
+        leaveRequestKind: String(row?.leaveRequestKind || '').trim(),
+        leaveRequestGroupId: groupId,
+        fromDate: String(row?.leaveRequestFromDate || row?.date || '').trim(),
+        toDate: String(row?.leaveRequestToDate || row?.date || '').trim(),
+        reason: String(row?.leaveRequestReason || row?.reason || '').trim(),
+        source,
+    };
+}
+
+function lastDateKeyOfMonth(year, monthNum) {
+    const lastDay = new Date(Date.UTC(year, monthNum, 0)).getUTCDate();
+    return `${year}-${String(monthNum).padStart(2, '0')}-${String(lastDay).padStart(2, '0')}`;
+}
+
+function countScheduleDays(from, to, holidaySet, offWeekdays) {
+    let workingDays = 0;
+    let holidayCount = 0;
+    let weeklyOffCount = 0;
+    for (let cursor = from; cursor <= to; cursor = nextDateKey(cursor)) {
+        if (holidaySet.has(cursor)) {
+            holidayCount += 1;
+            continue;
+        }
+        const weekday = weekdayKeyFromDateKey(cursor);
+        if (weekday && offWeekdays.has(weekday)) {
+            weeklyOffCount += 1;
+            continue;
+        }
+        workingDays += 1;
+    }
+    return { workingDays, holidayCount, weeklyOffCount };
+}
+
+function serializeLeavePolicy(entitlements) {
+    if (!entitlements) return null;
+    return {
+        annualAllowedDays: entitlements.annualAllowedDays,
+        sickEnabled: entitlements.sickEnabled,
+        sickAllowedDays: entitlements.sickAllowedDays,
+        allowedSickLeaveDaysPerYear: entitlements.allowedSickLeaveDaysPerYear,
+        sandwichLeave: entitlements.sandwichLeave,
+        authorizedDeductionDays: entitlements.multipliers?.authorized,
+        unauthorizedDeductionDays: entitlements.multipliers?.unauthorized,
+    };
+}
+
+function requestStatsFromEnroll(enrollUsed = {}, enrollAttendance = {}) {
+    const keys = [
+        'on_leave',
+        'sick_leave',
+        'authorized_leave',
+        'unauthorized_leave',
+        'compoff_leave',
+        'late_arrived',
+        'early_go',
+        'late_early',
+        'mispunch',
+    ];
+    const stats = {};
+    for (const key of keys) {
+        const approved = Math.max(0, Number(enrollUsed?.[key]) || 0);
+        stats[key] = {
+            total: approved,
+            request: 0,
+            approved,
+            rejected: 0,
+            present: 0,
+        };
+    }
+    const late = Math.max(0, Number(enrollAttendance?.late) || 0);
+    const early = Math.max(0, Number(enrollAttendance?.early) || 0);
+    const mispunch = Math.max(0, Number(enrollAttendance?.mispunch) || 0);
+    stats.late_arrived.total = late;
+    stats.late_arrived.approved = late;
+    stats.early_go.total = early;
+    stats.early_go.approved = early;
+    stats.late_early.total = late + early;
+    stats.late_early.approved = late + early;
+    stats.mispunch.total = mispunch;
+    stats.mispunch.approved = mispunch;
+    return stats;
+}
+
+function applyEnrollUsedToLeaveBalances(leaveBalances, enrollUsed = {}, entitlements = {}) {
+    const next = { ...(leaveBalances || {}) };
+    for (const statusKey of [
+        'on_leave',
+        'sick_leave',
+        'authorized_leave',
+        'unauthorized_leave',
+        'compoff_leave',
+    ]) {
+        const row = next[statusKey];
+        if (!row) continue;
+        const taken = Number(enrollUsed[statusKey]) || 0;
+        const allowed =
+            statusKey === 'on_leave' && entitlements.leaveEligible === false
+                ? 0
+                : row.allowed != null
+                  ? row.allowed
+                  : statusKey === 'sick_leave'
+                    ? entitlements.sickAllowedDays
+                    : statusKey === 'on_leave'
+                      ? entitlements.annualAllowedDays
+                      : null;
+        const multiplier = Number(row.multiplier) || 1;
+        next[statusKey] = {
+            ...row,
+            taken,
+            allowed,
+            remaining: allowed == null ? null : Math.max(0, Number(allowed) - taken),
+            deductionDays: Number((taken * multiplier).toFixed(2)),
+        };
+    }
+    return next;
+}
+
+async function leavePolicyForEmployee(employee) {
+    try {
+        const policy = await resolveEmployeePayrollPolicy(employee);
+        return serializeLeavePolicy(leavePolicyEntitlements(policy));
+    } catch {
+        return null;
+    }
+}
+
+/**
+ * GET /api/Attendance/me/year-summary
+ * Logged-in employee's attendance counts for a year, or a month when month=yyyy-MM.
+ */
+export async function getMyAttendanceYearSummary(req, res) {
+    try {
+        if (mongoose.connection.readyState !== 1) {
+            return res.status(503).json({ message: 'Database not connected.' });
+        }
+
+        const self = await resolveLinkedEmployee(req);
+        if (!self) {
+            return res.status(404).json({ message: 'No linked employee profile found for this user.' });
+        }
+
+        const dubai = getDubaiNowParts();
+        const monthRaw = String(req.query.month || '').trim();
+        const requestedYear = Number(req.query.year);
+        let year;
+        let monthNum = 0;
+        let from;
+        let to;
+
+        if (/^\d{4}-\d{2}$/.test(monthRaw)) {
+            year = Number(monthRaw.slice(0, 4));
+            monthNum = Number(monthRaw.slice(5, 7));
+            from = `${year}-${String(monthNum).padStart(2, '0')}-01`;
+            to = lastDateKeyOfMonth(year, monthNum);
+        } else {
+            year =
+                Number.isInteger(requestedYear) && requestedYear >= 2000 && requestedYear <= 2100
+                    ? requestedYear
+                    : dubai.year;
+            from = `${year}-01-01`;
+            to = `${year}-12-31`;
+        }
+
+        const todayKey = getDubaiDateKey();
+        const countTo = to > todayKey ? todayKey : to;
+        const periodOpen = countTo < to;
+
+        const todayMonth = `${dubai.year}-${String(dubai.month).padStart(2, '0')}`;
+        const yearEndMonth = `${year}-12`;
+        const summaryMonth = monthNum
+            ? `${year}-${String(monthNum).padStart(2, '0')}`
+            : yearEndMonth < todayMonth
+                ? yearEndMonth
+                : todayMonth;
+        const gate = await loadSalaryAttendanceGate(self, { monthKey: summaryMonth });
+        const leavePolicy = await leavePolicyForEmployee(self);
+        if (gate.attendanceLocked) {
+            const counts = emptyYearCounts();
+            counts.authorized_leave_paid = 0;
+            counts.authorized_leave_unpaid = 0;
+            counts.not_marked = 0;
+            counts.absent = 0;
+            return res.status(200).json({
+                ...salaryLockPayload(gate),
+                year,
+                month: monthNum ? `${year}-${String(monthNum).padStart(2, '0')}` : '',
+                from,
+                to,
+                counts,
+                leaveTotal: 0,
+                presentDays: 0,
+                absentDays: 0,
+                absentAuth: 0,
+                absentSick: 0,
+                absentUnauthorized: 0,
+                workingDays: 0,
+                holidayCount: 0,
+                weeklyOffCount: 0,
+                lastAnnualLeaveDate: '',
+                countedTo: countTo,
+                periodOpen,
+                entries: [],
+                leaveBalances: {},
+                leavePolicy,
+            });
+        }
+        if (!gate.requestedOpen) {
+            const counts = emptyYearCounts();
+            counts.authorized_leave_paid = 0;
+            counts.authorized_leave_unpaid = 0;
+            counts.not_marked = 0;
+            counts.absent = 0;
+            return res.status(200).json({
+                message: 'Year summary fetched successfully',
+                salaryEnrolled: true,
+                attendanceLocked: false,
+                processingStartMonth: gate.processingStartMonth || '',
+                processingStartDate: gate.processingStartDate || '',
+                year,
+                month: monthNum ? `${year}-${String(monthNum).padStart(2, '0')}` : '',
+                from,
+                to,
+                counts,
+                leaveTotal: 0,
+                presentDays: 0,
+                absentDays: 0,
+                absentAuth: 0,
+                absentSick: 0,
+                absentUnauthorized: 0,
+                workingDays: 0,
+                holidayCount: 0,
+                weeklyOffCount: 0,
+                lastAnnualLeaveDate: '',
+                countedTo: countTo,
+                periodOpen,
+                entries: [],
+                leaveBalances: {},
+                leavePolicy,
+            });
+        }
+
+        const counts = emptyYearCounts();
+        counts.authorized_leave_paid = 0;
+        counts.authorized_leave_unpaid = 0;
+        counts.not_marked = 0;
+        counts.absent = 0;
+        const attendanceFrom =
+            gate.processingStartDate && from < gate.processingStartDate
+                ? gate.processingStartDate
+                : from;
+
+        const [grouped, holidayRows, employee, workingTime, lastAnnualLeave, detailRows, historicalProfile] =
+            await Promise.all([
+            Attendance.aggregate([
+                {
+                    $match: {
+                        employeeMongoId: String(self._id),
+                        date: { $gte: attendanceFrom, $lte: countTo },
+                    },
+                },
+                {
+                    $group: {
+                        _id: { statusKey: '$statusKey', leavePayType: '$leavePayType' },
+                        count: { $sum: 1 },
+                    },
+                },
+            ]),
+            Holiday.find({ date: { $gte: attendanceFrom, $lte: countTo } }).select('date appliesTo').lean(),
+            EmployeeBasic.findById(self._id).select('staffType').lean(),
+            loadWorkingTimeDoc(),
+            Attendance.findOne({
+                employeeMongoId: String(self._id),
+                statusKey: 'on_leave',
+                date: { $gte: attendanceFrom, $lte: countTo },
+            })
+                .sort({ date: -1 })
+                .select('date')
+                .lean(),
+            Attendance.find({
+                employeeMongoId: String(self._id),
+                date: { $gte: attendanceFrom, $lte: countTo },
+                statusKey: { $in: YEAR_SUMMARY_DETAIL_KEYS },
+            })
+                .select(
+                    'date statusKey statusLabel leavePayType leaveRequestStatus requestedStatusKey leaveRequestKind leaveRequestGroupId leaveRequestFromDate leaveRequestToDate reason leaveRequestReason',
+                )
+                .sort({ date: 1 })
+                .lean(),
+            loadHistoricalLeaveProfile(self.employeeId),
+        ]);
+
+        for (const row of grouped) {
+            const key = String(row?._id?.statusKey || '').trim();
+            const n = Number(row.count) || 0;
+            if (Object.prototype.hasOwnProperty.call(counts, key)) {
+                counts[key] += n;
+            }
+            if (key === 'authorized_leave') {
+                counts.authorized_leave_unpaid += n;
+            }
+        }
+
+        const periodOverlay = overlayHistoricalLeave(historicalProfile, {
+            from: attendanceFrom,
+            to: countTo,
+            includeCountOnly: monthNum === 0,
+        });
+        const balanceOverlay = monthNum
+            ? overlayHistoricalLeave(historicalProfile, {
+                  from: `${year}-01-01`,
+                  to: `${year}-12-31`,
+                  includeCountOnly: true,
+              })
+            : periodOverlay;
+        Object.assign(counts, applyOverlayCounts(counts, periodOverlay.extraCounts));
+        const yearCover = enrollmentCoverIndexForEmployee(
+            historicalProfile,
+            self,
+            attendanceFrom,
+            countTo,
+        );
+        const paintedDetails = applyLeaveCoverIndex(detailRows, yearCover, { fillMissing: false });
+        let movedOffUnauthorized = 0;
+        for (const row of detailRows || []) {
+            const date = String(row?.date || '').trim();
+            if (String(row?.statusKey || '') !== 'unauthorized_leave' || !date) continue;
+            if (!yearCover.has(`${String(self._id)}|${date}`)) continue;
+            const punched = Boolean(String(row?.timeIn || '').trim() || String(row?.timeOut || '').trim());
+            if (!punched) movedOffUnauthorized += 1;
+        }
+        if (movedOffUnauthorized) {
+            counts.unauthorized_leave = Math.max(0, (counts.unauthorized_leave || 0) - movedOffUnauthorized);
+        }
+
+        const staffType = normalizeStaffType(employee?.staffType || self.staffType);
+        const scheduleWeek = getWeekForStaffType(workingTime, staffType);
+        const offWeekdays = new Set(getOffWeekdayKeys(scheduleWeek));
+        const holidaySet = new Set(
+            (holidayRows || [])
+                .filter((row) => holidayAppliesToStaff(row, staffType))
+                .map((row) => String(row.date || '').trim())
+                .filter(Boolean),
+        );
+        const schedule = countScheduleDays(attendanceFrom, countTo, holidaySet, offWeekdays);
+
+        const presentDays =
+            counts.on_office +
+            counts.work_from_home +
+            counts.late_arrived +
+            counts.early_go +
+            counts.mispunch;
+        const absentAuth = counts.authorized_leave;
+        const absentSick = counts.sick_leave;
+        const absentCompoff = counts.compoff_leave;
+        const absentUnauthorized = counts.unauthorized_leave;
+        const absentDays = absentAuth + absentSick + absentCompoff + absentUnauthorized;
+
+        const leaveTotal =
+            counts.on_leave +
+            counts.sick_leave +
+            counts.compoff_leave +
+            counts.authorized_leave +
+            counts.unauthorized_leave;
+
+        const { types: rawLeaveBalances, entitlements, policy } = await loadEmployeeLeaveBalances(
+            { _id: self._id, employeeId: self.employeeId, staffType },
+            { year },
+        );
+        const leaveCycle = await loadCurrentLeaveCycleEligibility({
+            employee: { _id: self._id, employeeId: self.employeeId, staffType },
+            profile: historicalProfile,
+            policy,
+            attendanceRecords: paintedDetails,
+        });
+        const enrollUsed = leaveCycle.used || {};
+        const enrollAttendance = leaveCycle.attendance || {};
+        const leaveBalances = applyEnrollUsedToLeaveBalances(
+            applyOverlayCountsToBalances(rawLeaveBalances, balanceOverlay.extraCounts),
+            enrollUsed,
+            { ...entitlements, leaveEligible: Boolean(leaveCycle.leaveEligible) },
+        );
+
+        return res.status(200).json({
+            message: 'Year summary fetched successfully',
+            salaryEnrolled: true,
+            attendanceLocked: Boolean(gate.attendanceLocked),
+            processingStartMonth: gate.processingStartMonth || '',
+            processingStartDate: gate.processingStartDate || '',
+            year,
+            month: monthNum ? `${year}-${String(monthNum).padStart(2, '0')}` : '',
+            from,
+            to,
+            counts,
+            leaveTotal,
+            presentDays,
+            absentDays,
+            absentAuth,
+            absentSick,
+            absentUnauthorized,
+            workingDays: schedule.workingDays,
+            holidayCount: schedule.holidayCount,
+            weeklyOffCount: schedule.weeklyOffCount,
+            holidayDates: [...holidaySet].sort(),
+            countedTo: countTo,
+            periodOpen,
+            lastAnnualLeaveDate: lastOverlayAnnualLeaveDate(
+                periodOverlay.entries,
+                lastAnnualLeave?.date || '',
+            ),
+            entries: [
+                ...(paintedDetails || []).map(serializeYearSummaryEntry),
+                ...periodOverlay.entries,
+            ],
+            leaveBalances,
+            leavePolicy: serializeLeavePolicy(entitlements) || leavePolicy,
+            enrollAttendance,
+            requestStats: requestStatsFromEnroll(enrollUsed, enrollAttendance),
+            annualLeave: {
+                eligible: Boolean(leaveCycle.leaveEligible),
+                leaveEligible: Boolean(leaveCycle.leaveEligible),
+                completedCycles: Number(leaveCycle.completedCycles) || 0,
+                requiredPresentDays: Number(leaveCycle.requiredPresentDays) || 0,
+                eligibleDays: Number(leaveCycle.eligibleDays) || 0,
+                remainingDays: Number(leaveCycle.remainingDays) || 0,
+            },
+        });
+    } catch (error) {
+        console.error('[getMyAttendanceYearSummary]', error);
+        return res.status(500).json({ message: error.message || 'Failed to fetch year summary.' });
+    }
+}
+
+/**
+ * GET /api/Attendance/team-tree
+ * Root = logged-in employee; children = primaryReportee chain (full tree).
+ */
+export async function getAttendanceTeamTree(req, res) {
+    try {
+        if (mongoose.connection.readyState !== 1) {
+            return res.status(503).json({ message: 'Database not connected.' });
+        }
+
+        const manager = await resolveLinkedEmployee(req);
+        if (!manager) {
+            return res.status(404).json({ message: 'No linked employee profile found for this user.' });
+        }
+
+        const managerFull = await EmployeeBasic.findById(manager._id)
+            .select('_id firstName lastName employeeId designation department profilePicture')
+            .lean();
+
+        const rows = await EmployeeBasic.aggregate([
+            { $match: { _id: manager._id } },
+            {
+                $graphLookup: {
+                    from: 'employeebasics',
+                    startWith: '$_id',
+                    connectFromField: '_id',
+                    connectToField: 'primaryReportee',
+                    as: 'team',
+                    depthField: 'depth',
+                },
+            },
+            { $unwind: '$team' },
+            {
+                $project: {
+                    _id: '$team._id',
+                    firstName: '$team.firstName',
+                    lastName: '$team.lastName',
+                    employeeId: '$team.employeeId',
+                    designation: '$team.designation',
+                    department: '$team.department',
+                    profilePicture: '$team.profilePicture',
+                    primaryReportee: '$team.primaryReportee',
+                    depth: '$team.depth',
+                },
+            },
+            { $sort: { depth: 1, firstName: 1 } },
+        ]);
+
+        const tree = buildTeamTree(managerFull, rows);
+
+        return res.status(200).json({
+            message: 'Team tree fetched successfully',
+            manager: managerFull,
+            hierarchy: rows,
+            tree,
+        });
+    } catch (error) {
+        console.error('[getAttendanceTeamTree]', error);
+        return res.status(500).json({ message: error.message || 'Failed to fetch team tree.' });
+    }
+}
+
+/** Resolve self or a team member (forEmployeeId) the manager is allowed to mark. */
+async function resolveMarkTargetEmployee(req) {
+    const self = await resolveLinkedEmployee(req);
+    if (!self) return { error: { status: 404, message: 'No linked employee profile found for this user.' } };
+
+    const forEmployeeId = String(
+        req.body?.forEmployeeId || req.query?.forEmployeeId || '',
+    ).trim();
+
+    if (!forEmployeeId || forEmployeeId === String(self._id)) {
+        return { self, employee: self, isSelf: true };
+    }
+
+    const allowed = await isEmployeeInTeamTree(self._id, forEmployeeId);
+    if (!allowed) {
+        return { error: { status: 403, message: 'You can only mark attendance for your team.' } };
+    }
+
+    const target = await EmployeeBasic.findById(forEmployeeId)
+        .select('_id employeeId firstName lastName staffType companyEmail attendanceAccountStatus attendanceSuspension')
+        .lean();
+    if (!target) {
+        return { error: { status: 404, message: 'Employee not found.' } };
+    }
+
+    return { self, employee: target, isSelf: false };
+}
+
+/** POST /api/Attendance/me/check-in — store exact Time In for today (self or team) */
+export async function checkInMyAttendance(req, res) {
+    try {
+        if (mongoose.connection.readyState !== 1) {
+            return res.status(503).json({ message: 'Database not connected.' });
+        }
+
+        const resolved = await resolveMarkTargetEmployee(req);
+        if (resolved.error) {
+            return res.status(resolved.error.status).json({ message: resolved.error.message });
+        }
+
+        const { employee } = resolved;
+        if (isAttendanceSuspendedOn(employee, getDubaiDateKey())) {
+            return res.status(403).json({
+                message: 'Suspended account.',
+                attendanceSuspended: true,
+            });
+        }
+        const date = getDubaiDateKey();
+        const timeIn = getDubaiClockTime();
+        const employeeMongoId = String(employee._id);
+        const employeeName = [employee.firstName, employee.lastName].filter(Boolean).join(' ').trim();
+
+        const dayRows = await Attendance.find({
+            date,
+            ...employeeAttendanceMatch(employee),
+        }).lean();
+        const existingPunch = bestDayRecord(dayRows, date);
+        if (punchTimeSet(existingPunch?.timeIn) && !punchTimeSet(existingPunch?.timeOut)) {
+            return res.status(400).json({
+                message: 'Already checked in for today.',
+                date,
+                timeIn: existingPunch.timeIn,
+                record: existingPunch,
+            });
+        }
+        if (await rejectIfNotSalaryEnrolled(res, employee)) return;
+        const existing =
+            dayRows.find((row) => String(row.employeeMongoId) === employeeMongoId) || existingPunch;
+        const reopening = punchTimeSet(existing?.timeIn) && punchTimeSet(existing?.timeOut);
+        const firstArrival = reopening
+            ? String(existing?.punchSessions?.[0]?.timeIn || existing.timeIn || timeIn).trim()
+            : timeIn;
+
+        // Punch-in vs Flowchart HR Working Time (15-minute grace).
+        // Flexible groups ignore the clock and keep the session open until checkout.
+        // A closed session, flexible or scheduled, can be checked in again the same day.
+        let statusKey = 'on_office';
+        let statusLabel = 'Present';
+        let reason = '';
+        try {
+            const staffType = normalizeStaffType(employee.staffType);
+            const workingTime = await loadWorkingTimeDoc();
+            const week = getWeekForStaffType(workingTime, staffType);
+            if (isFlexibleTiming(week)) {
+                const openFrom = addDaysKey(date, -7);
+                const open = await Attendance.findOne({
+                    employeeMongoId,
+                    date: { $gte: openFrom, $lte: date },
+                    timeIn: { $gt: '' },
+                    $or: [{ timeOut: '' }, { timeOut: null }],
+                })
+                    .sort({ date: -1 })
+                    .lean();
+                if (open && String(open.timeIn || '').trim() && !String(open.timeOut || '').trim()) {
+                    return res.status(400).json({
+                        message: 'Check out the open check-in before checking in again.',
+                        date: open.date,
+                        timeIn: open.timeIn,
+                    });
+                }
+            } else {
+                const { startMinutes, isOffDay } = getScheduledPunchMinutes(week, date);
+                const actualMinutes = clockTimeToMinutes(firstArrival);
+                if (!isOffDay && startMinutes != null && actualMinutes != null) {
+                    const graceLimit = startMinutes + 15;
+                    if (actualMinutes > graceLimit) {
+                        const lateMinutes = actualMinutes - startMinutes;
+                        statusKey = 'late_arrived';
+                        statusLabel = 'Late Arrival';
+                        reason = `${lateMinutes} minute${lateMinutes === 1 ? '' : 's'} late`;
+                    }
+                }
+            }
+        } catch (scheduleErr) {
+            console.error('[checkInMyAttendance] schedule lookup failed:', scheduleErr);
+        }
+
+        const punchSource = resolvePunchSource(req, 'web');
+        if (await rejectIfMissingPunchContact(res, employee, punchSource, 'check in')) return;
+        let checkInLocation = parsePunchLocation(req.body, punchSource);
+        if (!checkInLocation && await employeeHasMobileReviewBypass(employee)) {
+            checkInLocation = {
+                latitude: 25.2048,
+                longitude: 55.2708,
+                accuracy: null,
+                label: 'App Store Review',
+                source: punchSource === 'app' ? 'app' : 'web',
+            };
+        }
+        if (!checkInLocation) {
+            return res.status(400).json({
+                message: 'Location is off. Turn on location, then check in.',
+            });
+        }
+        const keepPartialLeave = isApprovedPartialLeave(existing);
+        if (keepPartialLeave) {
+            statusKey = existing.statusKey;
+            statusLabel = existing.statusLabel || statusLabel;
+            reason = existing.reason || '';
+        }
+        const checkInSet = {
+            date,
+            employeeMongoId,
+            employeeId: String(employee.employeeId || ''),
+            employeeName,
+            statusKey,
+            statusLabel,
+            timeIn,
+            timeOut: '',
+            timeOutDate: '',
+            reason,
+            attachmentName: existing?.attachmentName || '',
+            approvalStatus: keepPartialLeave
+                ? existing.approvalStatus || 'approved'
+                : approvalStatusForMark(statusKey),
+            punchSource,
+            checkOutSource: '',
+            markedBy: req.user?.id || null,
+            checkInLocation,
+        };
+
+        // Self check-in is allowed even if HR previously marked leave for the day —
+        // checking in means the employee is present and starts the timer.
+        const priorSession = reopening
+            ? {
+                timeIn: String(existing.timeIn || '').trim(),
+                timeOut: String(existing.timeOut || '').trim(),
+                timeOutDate: String(existing.timeOutDate || '').trim(),
+                punchSource: existing.punchSource || '',
+                checkOutSource: existing.checkOutSource || '',
+                checkInLocation: plainPunchLocation(existing.checkInLocation) || undefined,
+                checkOutLocation: plainPunchLocation(existing.checkOutLocation) || undefined,
+            }
+            : null;
+        const doc = await Attendance.findOneAndUpdate(
+            existing?._id ? { _id: existing._id } : { date, employeeMongoId },
+            {
+                $set: checkInSet,
+                $unset: { checkOutLocation: 1, punchMappedFromEmployeeMongoId: 1 },
+                ...(priorSession ? { $push: { punchSessions: priorSession } } : {}),
+            },
+            { upsert: !existing?._id, new: true, setDefaultsOnInsert: true },
+        );
+
+        try {
+            await syncPunchMapTargets(doc);
+        } catch (mapErr) {
+            console.error('[checkInMyAttendance] punch map sync failed:', mapErr);
+        }
+
+        return res.status(200).json({
+            message: 'Checked in successfully',
+            date,
+            timeIn,
+            record: doc,
+        });
+    } catch (error) {
+        console.error('[checkInMyAttendance]', error);
+        return res.status(500).json({ message: error.message || 'Failed to check in.' });
+    }
+}
+
+const PRESENCE_STATUS_KEYS = new Set(['on_office', 'late_arrived', 'early_go']);
+
+function plainPunchLocation(loc) {
+    if (!loc) return null;
+    const latitude = loc.latitude ?? null;
+    const longitude = loc.longitude ?? null;
+    const label = String(loc.label || '').trim();
+    if (latitude == null && longitude == null && !label) return null;
+    const source = String(loc.source || '').trim();
+    return {
+        latitude,
+        longitude,
+        accuracy: loc.accuracy ?? null,
+        label,
+        source: source === 'app' || source === 'web' || source === 'manual' ? source : '',
+    };
+}
+
+function employeeFullName(emp) {
+    return [emp?.firstName, emp?.lastName].filter(Boolean).join(' ').trim();
+}
+
+function punchChannel(value) {
+    const source = String(value || '').trim();
+    return source === 'app' || source === 'web' || source === 'manual' ? source : '';
+}
+
+function mappedPunchSessions(sessions) {
+    return (Array.isArray(sessions) ? sessions : [])
+        .map((session) => {
+            const punch = mapPunchWithoutOvertime({
+                timeIn: session?.timeIn,
+                timeOut: session?.timeOut,
+                timeOutDate: session?.timeOutDate,
+            });
+            if (!punch.timeIn) return null;
+            const checkInLocation = plainPunchLocation(session.checkInLocation);
+            const checkOutLocation = punch.timeOut ? plainPunchLocation(session.checkOutLocation) : null;
+            return {
+                timeIn: punch.timeIn,
+                timeOut: punch.timeOut,
+                timeOutDate: punch.timeOut ? punch.timeOutDate : '',
+                punchSource: punchChannel(session.punchSource),
+                checkOutSource: punch.timeOut ? punchChannel(session.checkOutSource) : '',
+                ...(checkInLocation ? { checkInLocation } : {}),
+                ...(checkOutLocation ? { checkOutLocation } : {}),
+            };
+        })
+        .filter(Boolean);
+}
+
+const CLEARED_MAPPED_OT = {
+    flexibleOtHours: 0,
+    flexibleOtStatus: '',
+    flexibleOtApprovedHours: 0,
+    flexibleOtReason: '',
+    flexibleOtNextDayDate: '',
+    flexibleFromOtDate: '',
+};
+
+function attendanceStatusForMap(sourceRecord) {
+    const sourceStatus = String(sourceRecord?.statusKey || '').trim();
+    if (PRESENCE_STATUS_KEYS.has(sourceStatus)) {
+        return {
+            statusKey: sourceStatus,
+            statusLabel: sourceRecord.statusLabel || 'Present',
+            reason: String(sourceRecord.reason || '').trim(),
+        };
+    }
+    return { statusKey: 'on_office', statusLabel: 'Present', reason: '' };
+}
+
+function applyMappedPunch(target, punch, sourceRecord) {
+    if (!punch?.timeIn) return false;
+    const checkInLocation = plainPunchLocation(sourceRecord.checkInLocation);
+    const checkOutLocation = punch.timeOut ? plainPunchLocation(sourceRecord.checkOutLocation) : null;
+    const status = attendanceStatusForMap(sourceRecord);
+    const sessions = mappedPunchSessions(sourceRecord.punchSessions);
+    const sameTimes =
+        String(target.timeIn || '') === punch.timeIn &&
+        String(target.timeOut || '') === (punch.timeOut || '') &&
+        String(target.timeOutDate || '') === (punch.timeOut ? punch.timeOutDate || '' : '') &&
+        String(target.statusKey || '') === status.statusKey &&
+        Number(target.flexibleOtHours) === 0 &&
+        !String(target.flexibleOtStatus || '').trim() &&
+        !String(target.flexibleOtNextDayDate || '').trim() &&
+        sessions.length === (Array.isArray(target.punchSessions) ? target.punchSessions.length : 0);
+    if (sameTimes) return false;
+
+    target.timeIn = punch.timeIn;
+    target.timeOut = punch.timeOut || '';
+    target.timeOutDate = punch.timeOut ? punch.timeOutDate || '' : '';
+    target.punchSessions = sessions;
+    target.punchSource = punchChannel(sourceRecord.punchSource) || target.punchSource || 'manual';
+    target.checkOutSource = punch.timeOut ? punchChannel(sourceRecord.checkOutSource) : '';
+    target.statusKey = status.statusKey;
+    target.statusLabel = status.statusLabel;
+    target.reason = status.reason;
+    target.approvalStatus = approvalStatusForMark(status.statusKey);
+    if (checkInLocation) target.checkInLocation = checkInLocation;
+    if (punch.timeOut && checkOutLocation) target.checkOutLocation = checkOutLocation;
+    const otStatus = String(target.flexibleOtStatus || '');
+    if (otStatus !== 'approved' && otStatus !== 'pending') {
+        Object.assign(target, CLEARED_MAPPED_OT);
+    }
+    return true;
+}
+
+/** Copy a later check-in or check-out onto employees mapped from this person. Added overtime stays. */
+async function syncPunchMapTargets(sourceRecord) {
+    const sourceId = String(sourceRecord?.employeeMongoId || '').trim();
+    const date = String(sourceRecord?.date || '').trim();
+    if (!sourceId || !isValidDateKey(date)) return;
+    if (isOvertimePunchTime(sourceRecord.timeIn)) return;
+
+    const targets = await Attendance.find({
+        date,
+        punchMappedFromEmployeeMongoId: sourceId,
+    });
+    if (!targets.length) return;
+
+    for (const target of targets) {
+        const punch = mapPunchWithoutOvertime({
+            timeIn: sourceRecord.timeIn,
+            timeOut: sourceRecord.timeOut,
+            timeOutDate: sourceRecord.timeOutDate,
+        });
+        if (punch.overtimeOnly || !punch.timeIn) continue;
+        if (!applyMappedPunch(target, punch, sourceRecord)) continue;
+        await dropMappedOvertime(target.employeeMongoId, date);
+        await target.save();
+    }
+}
+
+/**
+ * POST /api/Attendance/map-punch
+ * Copy one employee's check-in, check-out, and location for this date onto another employee.
+ * A later check-out on the source employee is copied to the mapped employee for this date only.
+ */
+export async function mapAttendanceFromEmployee(req, res) {
+    try {
+        if (mongoose.connection.readyState !== 1) {
+            return res.status(503).json({ message: 'Database not connected.' });
+        }
+
+        const date = String(req.body?.date || '').trim();
+        const targetId = String(req.body?.targetEmployeeMongoId || '').trim();
+        const sourceId = String(req.body?.sourceEmployeeMongoId || '').trim();
+
+        if (!isValidDateKey(date)) {
+            return res.status(400).json({ message: 'Valid date (yyyy-MM-dd) is required.' });
+        }
+        if (!targetId || !sourceId) {
+            return res.status(400).json({ message: 'Select an employee to map.' });
+        }
+        if (targetId === sourceId) {
+            return res.status(400).json({ message: 'Choose a different employee.' });
+        }
+
+        const windowClosed = await rejectIfMarkWindowClosed(req, res, {
+            date,
+            entries: [{ employeeMongoId: targetId, statusKey: 'on_office' }],
+        });
+        if (windowClosed) return;
+
+        const [targetEmp, sourceEmp] = await Promise.all([
+            EmployeeBasic.findById(targetId)
+                .select('_id employeeId firstName lastName staffType primaryReportee companyEmail workEmail email')
+                .populate('primaryReportee', CHANGE_REPORTEE_SELECT)
+                .lean(),
+            EmployeeBasic.findById(sourceId).select('_id employeeId firstName lastName').lean(),
+        ]);
+        if (!targetEmp || !sourceEmp) {
+            return res.status(404).json({ message: 'Employee not found.' });
+        }
+
+        const sourceRows = await Attendance.find({
+            date,
+            ...employeeAttendanceMatch(sourceEmp),
+        }).lean();
+        const realRows = sourceRows.filter((row) => {
+            const inn = String(row?.timeIn || '').trim();
+            return inn && inn !== 'OT';
+        });
+        const sourceRow = bestDayRecord(realRows.length ? realRows : sourceRows, date);
+        const punch = mapPunchWithoutOvertime({
+            timeIn: sourceRow?.timeIn,
+            timeOut: sourceRow?.timeOut,
+            timeOutDate: sourceRow?.timeOutDate,
+        });
+        if (punch.overtimeOnly) {
+            return res.status(400).json({ message: 'That day is overtime, so it cannot be mapped.' });
+        }
+        if (!punch.timeIn) {
+            return res.status(400).json({ message: 'That employee has no check-in to map.' });
+        }
+        const hasOut = Boolean(punch.timeOut);
+        const status = attendanceStatusForMap(sourceRow);
+        const checkInLocation = plainPunchLocation(sourceRow?.checkInLocation);
+        const checkOutLocation = hasOut ? plainPunchLocation(sourceRow?.checkOutLocation) : null;
+        const sessions = mappedPunchSessions(sourceRow?.punchSessions);
+
+        const set = {
+            date,
+            employeeMongoId: targetId,
+            employeeId: String(targetEmp.employeeId || '').trim(),
+            employeeName: employeeFullName(targetEmp),
+            statusKey: status.statusKey,
+            statusLabel: status.statusLabel,
+            reason: status.reason,
+            timeIn: punch.timeIn,
+            timeOut: hasOut ? punch.timeOut : '',
+            timeOutDate: hasOut ? punch.timeOutDate || '' : '',
+            punchSessions: sessions,
+            punchSource: punchChannel(sourceRow?.punchSource) || 'manual',
+            checkOutSource: hasOut ? punchChannel(sourceRow?.checkOutSource) : '',
+            approvalStatus: approvalStatusForMark(status.statusKey),
+            punchMappedFromEmployeeMongoId: sourceId,
+            markedBy: req.user?.id || null,
+            ...CLEARED_MAPPED_OT,
+        };
+        if (checkInLocation) set.checkInLocation = checkInLocation;
+        if (checkOutLocation) set.checkOutLocation = checkOutLocation;
+
+        const unset = {};
+        if (!checkInLocation) unset.checkInLocation = 1;
+        if (!checkOutLocation) unset.checkOutLocation = 1;
+
+        const approvalCtx = await loadChangeApprovalContext(req);
+        const existing = await Attendance.findOne({ date, employeeMongoId: targetId }).lean();
+
+        await dropMappedOvertime(targetId, date);
+        const doc = await Attendance.findOneAndUpdate(
+            { date, employeeMongoId: targetId },
+            {
+                $set: set,
+                ...(Object.keys(unset).length ? { $unset: unset } : {}),
+            },
+            { upsert: true, new: true, setDefaultsOnInsert: true },
+        );
+        await supersedeOpenAttendanceChanges({
+            date,
+            employeeMongoId: targetId,
+            actorId: approvalCtx.actor?._id,
+        });
+        if (!approvalCtx.actorIsHr) {
+            await emailDirectAttendanceChange({
+                actor: approvalCtx.actor,
+                hr: approvalCtx.hr,
+                employee: targetEmp,
+                date,
+                previousLabel: existing?.statusLabel || 'Not marked',
+                nextLabel: `Mapped from ${employeeFullName(sourceEmp)}`,
+                timeIn: set.timeIn || '',
+                timeOut: set.timeOut || '',
+                reason: set.reason || '',
+                attendanceId: doc?._id,
+            });
+        }
+
+        return res.status(200).json({
+            message: hasOut
+                ? 'Check-in and check-out copied. Apply OT and next day present stay until overtime is added.'
+                : 'Check-in copied. Their later check-out is copied here too. Apply OT stays until overtime is added.',
+            date,
+            record: doc,
+        });
+    } catch (error) {
+        console.error('[mapAttendanceFromEmployee]', error);
+        return res.status(500).json({ message: error.message || 'Failed to map attendance.' });
+    }
+}
+
+/** POST /api/Attendance/me/check-out — store exact Time Out for today (self or team) */
+export async function checkOutMyAttendance(req, res) {
+    try {
+        if (mongoose.connection.readyState !== 1) {
+            return res.status(503).json({ message: 'Database not connected.' });
+        }
+
+        const resolved = await resolveMarkTargetEmployee(req);
+        if (resolved.error) {
+            return res.status(resolved.error.status).json({ message: resolved.error.message });
+        }
+
+        const { employee } = resolved;
+        if (isAttendanceSuspendedOn(employee, getDubaiDateKey())) {
+            return res.status(403).json({
+                message: 'Suspended account.',
+                attendanceSuspended: true,
+            });
+        }
+        const date = getDubaiDateKey();
+        const timeOut = getDubaiClockTime();
+        const staffType = normalizeStaffType(employee.staffType);
+        const workingTime = await loadWorkingTimeDoc();
+        const week = getWeekForStaffType(workingTime, staffType);
+        const flexible = isFlexibleTiming(week);
+
+        let existing;
+        if (flexible) {
+            const openFrom = addDaysKey(date, -7);
+            existing = await Attendance.findOne({
+                employeeMongoId: String(employee._id),
+                date: { $gte: openFrom, $lte: date },
+                timeIn: { $gt: '' },
+                $or: [{ timeOut: '' }, { timeOut: null }],
+            }).sort({ date: -1 });
+            if (!existing?.timeIn) {
+                if (await rejectIfNotSalaryEnrolled(res, employee)) return;
+                return res.status(400).json({ message: 'Check in first before checking out.' });
+            }
+            if (punchTimeSet(existing.timeOut)) {
+                return res.status(400).json({
+                    message: 'Already checked out.',
+                    record: existing,
+                });
+            }
+        } else {
+            const dayRows = await Attendance.find({
+                date,
+                ...employeeAttendanceMatch(employee),
+            });
+            existing =
+                dayRows.find((row) => punchTimeSet(row.timeIn) && !punchTimeSet(row.timeOut)) ||
+                dayRows.find((row) => punchTimeSet(row.timeIn)) ||
+                null;
+            if (!existing?.timeIn) {
+                if (await rejectIfNotSalaryEnrolled(res, employee)) return;
+                return res.status(400).json({ message: 'Check in first before checking out.' });
+            }
+            if (punchTimeSet(existing.timeOut)) {
+                return res.status(400).json({
+                    message: 'Already checked out for today.',
+                    record: existing,
+                });
+            }
+        }
+
+        existing.timeOut = timeOut;
+        existing.punchMappedFromEmployeeMongoId = '';
+        existing.markedBy = req.user?.id || existing.markedBy || null;
+        const punchSource = resolvePunchSource(req, 'web');
+        if (await rejectIfMissingPunchContact(res, employee, punchSource, 'check out')) return;
+        existing.checkOutSource = punchSource;
+        if (!existing.punchSource) existing.punchSource = punchSource;
+        let checkOutLocation = parsePunchLocation(req.body, punchSource);
+        if (!checkOutLocation && await employeeHasMobileReviewBypass(employee)) {
+            checkOutLocation = {
+                latitude: 25.2048,
+                longitude: 55.2708,
+                accuracy: null,
+                label: 'App Store Review',
+                source: punchSource === 'app' ? 'app' : 'web',
+            };
+        }
+        if (!checkOutLocation) {
+            return res.status(400).json({
+                message: 'Location is off. Turn on location, then check out.',
+            });
+        }
+        existing.checkOutLocation = checkOutLocation;
+
+        if (String(existing.hourAdjustStatus || '') === 'approved') {
+            await existing.save();
+            try {
+                await syncPunchMapTargets(existing);
+            } catch (mapErr) {
+                console.error('[checkOutMyAttendance] punch map sync failed:', mapErr);
+            }
+            return res.status(200).json({
+                message: 'Checked out successfully',
+                date: existing.date,
+                timeOut,
+                record: existing,
+            });
+        }
+
+        if (flexible) {
+            existing.timeOut = timeOut;
+            existing.timeOutDate = date !== existing.date ? date : '';
+            const workedMinutes = dayWorkedMinutes({
+                date: existing.date,
+                timeIn: existing.timeIn,
+                timeOut,
+                timeOutDate: existing.timeOutDate,
+                punchSessions: existing.punchSessions,
+            });
+            const keepPartial = isApprovedPartialLeave(existing);
+            const keptLabel = existing.statusLabel;
+            const keptReason = existing.reason;
+            const result = evaluateFlexibleDay({
+                workedMinutes,
+                requiredHours: requiredHoursForDate(week, existing.date),
+            });
+            const nonWorking = Boolean(await nonWorkingAttendanceMark(employee, existing.date));
+            const otFields = flexibleOtFieldsFromDuration({
+                isFlexible: true,
+                nonWorking,
+                date: existing.date,
+                timeIn: existing.timeIn,
+                timeOut,
+                timeOutDate: existing.timeOutDate,
+                requiredHours: result.requiredHours,
+                statusKey: result.statusKey,
+                workedMinutes,
+            });
+            existing.statusKey = result.statusKey;
+            existing.statusLabel = result.statusLabel;
+            existing.reason = result.reason;
+            existing.flexibleWorkedHours = otFields.flexibleWorkedHours;
+            existing.flexibleRequiredHours = otFields.flexibleRequiredHours;
+            existing.flexibleOtHours = otFields.flexibleOtHours;
+            existing.flexibleOtStatus = '';
+            existing.flexibleOtApprovedHours = 0;
+            existing.flexibleOtReason = '';
+            if (keepPartial) {
+                existing.statusKey = 'authorized_leave';
+                existing.statusLabel = keptLabel;
+                existing.reason = keptReason;
+                const outcome = partialLeaveOutcome(existing.toObject(), week);
+                if (outcome?.leaveDeductionTimes) existing.leaveDeductionTimes = outcome.leaveDeductionTimes;
+            }
+            existing.approvalStatus = keepPartial
+                ? 'approved'
+                : approvalStatusForMark(existing.statusKey);
+            await existing.save();
+            try {
+                await syncPunchMapTargets(existing);
+            } catch (mapErr) {
+                console.error('[checkOutMyAttendance] punch map sync failed:', mapErr);
+            }
+            return res.status(200).json({
+                message: 'Checked out successfully',
+                date: existing.date,
+                timeOut,
+                record: existing,
+            });
+        }
+
+        const wasLate = existing.statusKey === 'late_arrived';
+        const lateReason = wasLate ? String(existing.reason || '').trim() : '';
+
+        // Punch-out vs Flowchart HR Working Time — early go = yellow.
+        let earlyGo = false;
+        try {
+            const staffType = normalizeStaffType(employee.staffType);
+            const workingTime = await loadWorkingTimeDoc();
+            const week = getWeekForStaffType(workingTime, staffType);
+            const { endMinutes, isOffDay } = getScheduledPunchMinutes(week, date);
+            const actualOut = clockTimeToMinutes(timeOut);
+            if (!isOffDay && endMinutes != null && actualOut != null && actualOut < endMinutes) {
+                earlyGo = true;
+            }
+        } catch (scheduleErr) {
+            console.error('[checkOutMyAttendance] schedule lookup failed:', scheduleErr);
+        }
+
+        if (isApprovedPartialLeave(existing)) {
+            const outcome = partialLeaveOutcome(existing.toObject(), week);
+            if (outcome?.leaveDeductionTimes) existing.leaveDeductionTimes = outcome.leaveDeductionTimes;
+        } else if (earlyGo) {
+            existing.statusKey = 'early_go';
+            existing.statusLabel = 'Early Go';
+            existing.reason = lateReason
+                ? `${lateReason}; Early go`
+                : 'Punched out before scheduled punch-out';
+        } else if (wasLate) {
+            existing.statusKey = 'late_arrived';
+            existing.statusLabel = 'Late Arrival';
+            existing.reason = lateReason;
+        } else {
+            existing.statusKey = 'on_office';
+            existing.statusLabel = 'Present';
+            if (String(existing.reason || '').toLowerCase().includes('mispunch')) {
+                existing.reason = '';
+            }
+        }
+        existing.approvalStatus = isApprovedPartialLeave(existing)
+            ? existing.approvalStatus || 'approved'
+            : approvalStatusForMark(existing.statusKey);
+
+        await existing.save();
+        try {
+            await syncPunchMapTargets(existing);
+        } catch (mapErr) {
+            console.error('[checkOutMyAttendance] punch map sync failed:', mapErr);
+        }
+
+        return res.status(200).json({
+            message: 'Checked out successfully',
+            date,
+            timeOut,
+            record: existing,
+        });
+    } catch (error) {
+        console.error('[checkOutMyAttendance]', error);
+        return res.status(500).json({ message: error.message || 'Failed to check out.' });
+    }
+}
+
+/**
+ * POST /api/Attendance/team/mark
+ * Mark one or many team members for a date (manager tree only).
+ * Body: { date?, employeeMongoIds: [], statusKey, statusLabel, timeIn?, timeOut?, reason? }
+ */
+export async function markTeamAttendance(req, res) {
+    try {
+        if (mongoose.connection.readyState !== 1) {
+            return res.status(503).json({ message: 'Database not connected.' });
+        }
+
+        const self = await resolveLinkedEmployee(req);
+        if (!self) {
+            return res.status(404).json({ message: 'No linked employee profile found for this user.' });
+        }
+
+        const date = String(req.body?.date || getDubaiDateKey()).trim();
+        if (!isValidDateKey(date)) {
+            return res.status(400).json({ message: 'Valid date (yyyy-MM-dd) is required.' });
+        }
+
+        const statusKey = String(req.body?.statusKey || req.body?.markKey || '').trim();
+        const statusLabel = String(req.body?.statusLabel || req.body?.markLabel || '').trim();
+        const isClear = statusKey === 'clear_attendance' || statusKey === 'clear';
+        if (!isClear && (!ATTENDANCE_STATUS_KEYS.includes(statusKey) || !statusLabel)) {
+            return res.status(400).json({ message: 'Valid statusKey and statusLabel are required.' });
+        }
+
+        let ids = Array.isArray(req.body?.employeeMongoIds)
+            ? req.body.employeeMongoIds.map((id) => String(id || '').trim()).filter(Boolean)
+            : [];
+
+        // Mark entire team tree (excluding optional flag)
+        if (req.body?.markAllTeam === true) {
+            const treeRes = await EmployeeBasic.aggregate([
+                { $match: { _id: self._id } },
+                {
+                    $graphLookup: {
+                        from: 'employeebasics',
+                        startWith: '$_id',
+                        connectFromField: '_id',
+                        connectToField: 'primaryReportee',
+                        as: 'team',
+                    },
+                },
+                { $project: { teamIds: '$team._id' } },
+            ]);
+            ids = (treeRes[0]?.teamIds || []).map((id) => String(id));
+            // Include self when markAllTeam
+            ids = Array.from(new Set([String(self._id), ...ids]));
+        }
+
+        if (ids.length === 0) {
+            return res.status(400).json({ message: 'At least one employee is required.' });
+        }
+
+        const windowClosed = await rejectIfMarkWindowClosed(req, res, {
+            date,
+            entries: ids.map((employeeMongoId) => ({ employeeMongoId, statusKey })),
+        });
+        if (windowClosed) return;
+
+        const timeIn =
+            req.body?.timeIn != null && req.body.timeIn !== '—' ? String(req.body.timeIn).trim() : '';
+        const timeOut =
+            req.body?.timeOut != null && req.body.timeOut !== '—'
+                ? String(req.body.timeOut).trim()
+                : '';
+        const reason = String(req.body?.reason || '').trim();
+        const attachmentName = String(req.body?.attachmentName || '').trim();
+        const storedFile = await storeLeaveAttachment(req.body?.attachmentData, attachmentName);
+        const markedBy = req.user?.id || null;
+        const approvalCtx = await loadChangeApprovalContext(req);
+        const saved = [];
+        const pending = [];
+
+        for (const employeeMongoId of ids) {
+            const allowed = await isEmployeeInTeamTree(self._id, employeeMongoId);
+            if (!allowed) {
+                return res.status(403).json({
+                    message: `Not allowed to mark employee ${employeeMongoId}.`,
+                });
+            }
+
+            const emp = await EmployeeBasic.findById(employeeMongoId)
+                .select(
+                    '_id employeeId firstName lastName staffType primaryReportee companyEmail workEmail email attendanceAccountStatus attendanceSuspension',
+                )
+                .populate('primaryReportee', CHANGE_REPORTEE_SELECT)
+                .lean();
+            if (!emp) continue;
+
+            if (isClear) {
+                const cleared = await queueOrApplyClear(approvalCtx, {
+                    employee: emp,
+                    employeeMongoId,
+                    date,
+                    markedBy,
+                });
+                if (cleared.error) return res.status(400).json({ message: cleared.error });
+                if (cleared.applied) saved.push(cleared.applied);
+                if (cleared.pending) pending.push(cleared.pending);
+                continue;
+            }
+
+            const result = await queueOrApplyManualMark(approvalCtx, {
+                employee: emp,
+                employeeMongoId,
+                date,
+                statusKey,
+                statusLabel,
+                timeIn,
+                timeOut,
+                reason,
+                attachmentName,
+                markedBy,
+                employeeId: emp.employeeId || '',
+                employeeName: [emp.firstName, emp.lastName].filter(Boolean).join(' ').trim(),
+            });
+            if (result.error) {
+                return res.status(400).json({ message: result.error });
+            }
+            if (result.applied) saved.push(result.applied);
+            if (result.pending) pending.push(result.pending);
+        }
+
+        return res.status(200).json({
+            message: describeAttendanceSave({ savedCount: saved.length, pending }),
+            date,
+            count: saved.length,
+            records: saved,
+            pending,
+        });
+    } catch (error) {
+        console.error('[markTeamAttendance]', error);
+        return res.status(500).json({ message: error.message || 'Failed to mark team attendance.' });
+    }
+}
+
+/**
+ * GET /api/Attendance/dashboard/pending-inbox
+ * Attendance leave requests waiting on this employee (or ?targetUserId= for Team Performance).
+ */
+export async function getAttendancePendingInbox(req, res) {
+    try {
+        if (mongoose.connection.readyState !== 1) {
+            return res.status(503).json({ message: 'Database not connected.' });
+        }
+
+        // Safety: remove any attendance rows for company shell accounts.
+        // Do not hold the Attendance bell on this cleanup.
+        void Attendance.deleteMany({ employeeName: /\(company\)\s*$/i }).catch(() => {});
+
+        const ctx = await resolveDashboardAssigneeContext(req);
+        if (!ctx.ok) {
+            return res.status(ctx.status || 401).json({
+                message: ctx.message || 'Unauthorized',
+                count: 0,
+                items: [],
+            });
+        }
+
+        const self = ctx.employee;
+        if (!self) {
+            return res.status(200).json({
+                message: 'Attendance pending inbox fetched successfully',
+                count: 0,
+                items: [],
+            });
+        }
+
+        const reportees = await EmployeeBasic.find({ primaryReportee: self._id })
+            .select('_id')
+            .lean();
+        const reporteeIds = (reportees || []).map((r) => String(r._id));
+        const hr = await getDepartmentHOD('hr').catch(() => null);
+        const viewerIsHr = hr && String(hr._id) === String(self._id);
+        const otRows = viewerIsHr
+            ? await Attendance.find({ flexibleOtStatus: 'pending' })
+                .sort({ updatedAt: -1 })
+                .limit(100)
+                .lean()
+            : [];
+        const otEmployeeIds = [...new Set((otRows || []).map((row) => String(row.employeeMongoId || '')).filter(Boolean))];
+        const otEmployees = otEmployeeIds.length
+            ? await EmployeeBasic.find({ _id: { $in: otEmployeeIds } }).select('staffType').lean()
+            : [];
+        const otStaffById = new Map((otEmployees || []).map((row) => [String(row._id), normalizeStaffType(row.staffType)]));
+        const hourRows = viewerIsHr
+            ? await Attendance.find({ hourAdjustStatus: 'pending' })
+                .sort({ updatedAt: -1 })
+                .limit(100)
+                .lean()
+            : [];
+        const hourEmployeeIds = [...new Set((hourRows || []).map((row) => String(row.employeeMongoId || '')).filter(Boolean))];
+        const hourEmployees = hourEmployeeIds.length
+            ? await EmployeeBasic.find({ _id: { $in: hourEmployeeIds } }).select('staffType').lean()
+            : [];
+        const hourStaffById = new Map((hourEmployees || []).map((row) => [String(row._id), normalizeStaffType(row.staffType)]));
+        const hourItems = (hourRows || []).map((r) => ({
+            id: String(r._id),
+            dashboardActionId: String(r._id),
+            requestType: 'Hour Approval Request',
+            requestObjectId: String(r._id),
+            date: r.date,
+            employeeMongoId: r.employeeMongoId,
+            employeeId: r.employeeId || '',
+            subjectName: r.employeeName || 'Employee',
+            staffType: hourStaffById.get(String(r.employeeMongoId)) || 'office',
+            leaveRequestKind: 'hour_adjust',
+            timeIn: r.timeIn || '',
+            timeOut: r.timeOut || '',
+            reason: r.hourAdjustReason || '',
+            status: 'Pending',
+            extra1: r.date,
+            extra2: `Hour request ${r.date}: ${r.hoursApproved || 0} hr`,
+            message: `Hour approval for ${r.employeeName || 'employee'} on ${r.date}`,
+        }));
+
+        const otItems = (otRows || []).map((r) => ({
+            id: String(r._id),
+            dashboardActionId: String(r._id),
+            requestType: 'Flexible OT Request',
+            requestObjectId: String(r._id),
+            date: r.date,
+            employeeMongoId: r.employeeMongoId,
+            employeeId: r.employeeId || '',
+            subjectName: r.employeeName || 'Employee',
+            staffType: otStaffById.get(String(r.employeeMongoId)) || 'office',
+            leaveRequestKind: 'flexible_ot',
+            timeIn: r.timeIn || '',
+            timeOut: r.timeOut || '',
+            reason: r.flexibleOtReason || '',
+            flexibleOtApprovedHours: r.flexibleOtApprovedHours || 0,
+            flexibleOtHours: r.flexibleOtHours || 0,
+            flexibleWorkedHours: r.flexibleWorkedHours || 0,
+            status: 'Pending',
+            extra1: r.date,
+            extra2: `OT request ${r.date}: ${r.flexibleOtApprovedHours || 0} hr`,
+            message: `OT request for ${r.employeeName || 'employee'} on ${r.date}`,
+        }));
+
+        const attendanceTaskItems = await loadTaskManagerInboxItems(
+            buildAssigneeClauses(ctx.relevantIds || [], ctx.employeeIdCode),
+            'attendance',
+        );
+        const changeItems = await loadAttendanceChangeInboxItems({
+            viewerId: self._id,
+            viewerIsHr,
+            reporteeIds,
+        });
+
+        if (!reporteeIds.length) {
+            return res.status(200).json({
+                message: 'Attendance pending inbox fetched successfully',
+                count: otItems.length + hourItems.length + attendanceTaskItems.length + changeItems.length,
+                items: [...changeItems, ...otItems, ...hourItems, ...attendanceTaskItems],
+            });
+        }
+
+        const rows = await Attendance.find({
+            leaveRequestStatus: 'pending',
+            employeeMongoId: { $in: reporteeIds },
+            employeeName: { $not: /\(company\)\s*$/i },
+        })
+            .sort({ leaveRequestedAt: -1, date: -1 })
+            .limit(500)
+            .lean();
+
+        const items = (rows || [])
+            .filter((r) => !isCompanyShellEmployee(r.employeeName) && !isCompanyShellEmployee(r))
+            .filter((r) => !isLeaveDashboardAttendanceRow(r) && !isTwoStepLeaveKind(r.leaveRequestKind))
+            .map((r) => {
+                const kind = String(r.leaveRequestKind || '');
+                const isYellow = kind === 'yellow';
+                const isFuture = kind.startsWith('future_');
+                const currentLabel =
+                    r.previousStatusLabel || r.statusLabel || leaveStatusLabel(r.statusKey);
+                const requestedLabel =
+                    r.requestedStatusLabel ||
+                    (isYellow ? 'Present' : leaveStatusLabel(r.requestedStatusKey));
+                const rangeLabel =
+                    r.leaveRequestFromDate &&
+                    r.leaveRequestToDate &&
+                    r.leaveRequestFromDate !== r.leaveRequestToDate
+                        ? `${r.leaveRequestFromDate} → ${r.leaveRequestToDate}`
+                        : r.date;
+                const dayPartLabel =
+                    r.leaveRequestDayPart === 'half' || r.leaveRequestDayPart === 'quarter'
+                        ? ` · ${partialDayLabel(r.leaveRequestDayPart, r.leaveRequestSession, {
+                            flexible: !r.leaveRequestTimeIn,
+                            workStart: r.leaveRequestTimeIn,
+                            workEnd: r.leaveRequestTimeOut,
+                        })}`
+                        : '';
+                const summary = isYellow
+                    ? `Clarification: mark ${r.date} as Present (currently ${currentLabel})`
+                    : isFuture
+                        ? `${requestedLabel} request for ${rangeLabel}${dayPartLabel}`
+                        : `Leave change: mark ${r.date} as ${requestedLabel} (currently ${currentLabel})`;
+
+                return {
+                    id: String(r._id),
+                    dashboardActionId: String(r._id),
+                    requestType: 'Attendance Leave Request',
+                    requestObjectId: String(r._id),
+                    date: r.date,
+                    employeeMongoId: r.employeeMongoId,
+                    employeeId: r.employeeId || '',
+                    subjectName: r.employeeName || 'Employee',
+                    statusKey: r.statusKey,
+                    statusLabel: r.statusLabel,
+                    requestedStatusKey: r.requestedStatusKey || '',
+                    requestedStatusLabel: requestedLabel,
+                    previousStatusKey: r.previousStatusKey || '',
+                    previousStatusLabel: currentLabel,
+                    leaveRequestKind: r.leaveRequestKind || 'leave',
+                    leaveRequestFromDate: r.leaveRequestFromDate || '',
+                    leaveRequestToDate: r.leaveRequestToDate || '',
+                    leaveRequestDayPart: r.leaveRequestDayPart || '',
+                    leaveRequestTimeIn: r.leaveRequestTimeIn || '',
+                    leaveRequestTimeOut: r.leaveRequestTimeOut || '',
+                    timeIn: r.timeIn || '',
+                    timeOut: r.timeOut || '',
+                    reason: r.leaveRequestReason || r.reason || '',
+                    attachmentName: r.attachmentName || '',
+                    leaveRequestStatus: r.leaveRequestStatus || 'pending',
+                    approvalStatus: r.leaveRequestStatus || 'pending',
+                    status: 'Pending',
+                    extra1: r.date,
+                    extra2: summary,
+                    message: summary,
+                };
+            });
+
+        return res.status(200).json({
+            message: 'Attendance pending inbox fetched successfully',
+            count: items.length + otItems.length + hourItems.length + attendanceTaskItems.length + changeItems.length,
+            items: [...changeItems, ...otItems, ...hourItems, ...items, ...attendanceTaskItems],
+        });
+    } catch (error) {
+        console.error('[getAttendancePendingInbox]', error);
+        return res.status(500).json({ message: error.message || 'Failed to fetch pending attendance.' });
+    }
+}
+
+/**
+ * POST /api/Attendance/dashboard/approve-pending
+ * Body: { ids: string[] } — approve pending leave requests for reportees.
+ */
+export async function approveAttendancePending(req, res) {
+    try {
+        if (mongoose.connection.readyState !== 1) {
+            return res.status(503).json({ message: 'Database not connected.' });
+        }
+
+        const self = await resolveLinkedEmployee(req);
+        if (!self) {
+            return res.status(404).json({ message: 'No linked employee profile found for this user.' });
+        }
+
+        const ids = Array.isArray(req.body?.ids)
+            ? req.body.ids.map((id) => String(id || '').trim()).filter(Boolean)
+            : [];
+        if (ids.length === 0) {
+            return res.status(400).json({ message: 'At least one pending attendance id is required.' });
+        }
+
+        let modifiedCount = 0;
+        for (const id of ids) {
+            const result = await decideLeaveRequestInternal({
+                attendanceId: id,
+                decision: 'approved',
+                actor: self,
+            });
+            if (result?.ok) modifiedCount += 1;
+        }
+
+        return res.status(200).json({
+            message: 'Attendance leave requests approved successfully',
+            modifiedCount,
+        });
+    } catch (error) {
+        console.error('[approveAttendancePending]', error);
+        return res.status(500).json({ message: error.message || 'Failed to approve attendance.' });
+    }
+}
+
+/**
+ * GET /api/Attendance/open-target
+ * Resolve a notification id to the attendance day, staff group, and employee.
+ */
+export async function getAttendanceOpenTarget(req, res) {
+    try {
+        if (mongoose.connection.readyState !== 1) {
+            return res.status(503).json({ message: 'Database not connected.' });
+        }
+
+        const changeRequestId = String(req.query?.changeRequestId || '').trim();
+        const attendanceId = String(
+            req.query?.hourAttendanceId || req.query?.leaveAttendanceId || req.query?.otAttendanceId || '',
+        ).trim();
+
+        let date = '';
+        let employeeMongoId = '';
+        if (mongoose.Types.ObjectId.isValid(changeRequestId)) {
+            const request = await AttendanceChangeRequest.findById(changeRequestId)
+                .select('date employeeMongoId proposed.confirmNextDay proposed.targetDate')
+                .lean();
+            if (request) {
+                const target = String(request.proposed?.targetDate || '').trim();
+                date =
+                    request.proposed?.confirmNextDay === true && /^\d{4}-\d{2}-\d{2}$/.test(target)
+                        ? target
+                        : String(request.date || '').trim();
+                employeeMongoId = String(request.employeeMongoId || '').trim();
+            }
+        }
+        if (!date && mongoose.Types.ObjectId.isValid(attendanceId)) {
+            const record = await Attendance.findById(attendanceId).select('date employeeMongoId').lean();
+            if (record) {
+                date = String(record.date || '').trim();
+                employeeMongoId = String(record.employeeMongoId || '').trim();
+            }
+        }
+        if (!/^\d{4}-\d{2}-\d{2}$/.test(date) || !employeeMongoId) {
+            return res.status(404).json({ message: 'Attendance request was not found.' });
+        }
+
+        const employee = mongoose.Types.ObjectId.isValid(employeeMongoId)
+            ? await EmployeeBasic.findById(employeeMongoId).select('staffType').lean()
+            : null;
+
+        return res.status(200).json({
+            date,
+            staffType: normalizeStaffType(employee?.staffType) || 'office',
+            employeeMongoId,
+        });
+    } catch (error) {
+        console.error('[getAttendanceOpenTarget]', error);
+        return res.status(500).json({ message: error.message || 'Failed to open this attendance request.' });
+    }
+}
+
+/**
+ * POST /api/Attendance/change-request/decide
+ * Primary reportee approval forwards the edit to HR.
+ * HR approval writes the attendance day.
+ * Body: { id, decision: 'approved' | 'rejected' }
+ */
+export async function decideAttendanceChangeRequest(req, res) {
+    try {
+        if (mongoose.connection.readyState !== 1) {
+            return res.status(503).json({ message: 'Database not connected.' });
+        }
+
+        const actor = await resolveLinkedEmployee(req);
+        if (!actor) {
+            return res.status(404).json({ message: 'No linked employee profile found for this user.' });
+        }
+
+        const id = String(req.body?.id || '').trim();
+        const decision = String(req.body?.decision || '').trim().toLowerCase();
+        if (!mongoose.Types.ObjectId.isValid(id)) {
+            return res.status(400).json({ message: 'Attendance change id is required.' });
+        }
+        if (decision !== 'approved' && decision !== 'rejected') {
+            return res.status(400).json({ message: 'Decision must be approved or rejected.' });
+        }
+
+        const request = await AttendanceChangeRequest.findById(id);
+        if (!request || !['pending_reportee', 'pending_hr', 'pending_requester'].includes(request.stage)) {
+            return res.status(404).json({ message: 'Pending attendance change not found.' });
+        }
+
+        const employee = await EmployeeBasic.findById(request.employeeMongoId)
+            .select('_id employeeId firstName lastName staffType primaryReportee companyEmail workEmail email')
+            .populate('primaryReportee', CHANGE_REPORTEE_SELECT)
+            .lean();
+        const liveReporteeId = employee?.primaryReportee?._id || employee?.primaryReportee || '';
+        const actorIsReportee =
+            String(actor._id) === String(request.reporteeId || '') ||
+            String(actor._id) === String(liveReporteeId || '');
+        const actorIsHr = await viewerIsFlowchartHr(req);
+        const actorIsRequester = String(actor._id) === String(request.requestedBy || '');
+
+        if (request.stage === 'pending_reportee' && !actorIsReportee) {
+            return res.status(403).json({ message: 'Only the primary reportee can approve this change.' });
+        }
+        if (request.stage === 'pending_hr' && !actorIsHr) {
+            return res.status(403).json({ message: 'Only flowchart HR can approve this change.' });
+        }
+        if (
+            request.stage === 'pending_requester' &&
+            (!['hour_adjust', 'flexible_ot'].includes(request.action) || !actorIsRequester)
+        ) {
+            return res.status(403).json({ message: 'Only the requester can update this request.' });
+        }
+
+        const summaryEmployee = employee || {
+            _id: request.employeeMongoId,
+            employeeId: request.employeeId,
+            firstName: request.employeeName,
+            staffType: request.staffType || '',
+        };
+
+        if (decision === 'rejected') {
+            const rejectReason = String(req.body?.rejectReason || '').trim();
+            if (!rejectReason) {
+                return res.status(400).json({ message: 'Reject reason is required.' });
+            }
+            if (request.action === 'hour_adjust' || request.action === 'flexible_ot') {
+                const bounced = await bounceHourAttendanceChange({
+                    request,
+                    actor,
+                    employee: summaryEmployee,
+                    reason: rejectReason,
+                    noun: request.action === 'flexible_ot' ? 'OT' : 'hour',
+                });
+                if (bounced.error) return res.status(400).json({ message: bounced.error });
+                if (request.action === 'flexible_ot' && request.stage === 'rejected') {
+                    const attendanceId = String(request.proposed?.attendanceId || '').trim();
+                    if (mongoose.Types.ObjectId.isValid(attendanceId)) {
+                        const otRow = await Attendance.findById(attendanceId);
+                        const otStatus = String(otRow?.flexibleOtStatus || '');
+                        if (otRow && otStatus !== 'approved') {
+                            if (otStatus === 'pending') otRow.flexibleOtStatus = 'rejected';
+                            if (otRow.isModified?.()) await otRow.save();
+                            await refreshFlexibleOtRecords([otRow]);
+                        }
+                    }
+                }
+                return res.status(200).json({ message: bounced.message });
+            }
+
+            const waitingOnHr = request.stage === 'pending_hr';
+            request.rejectReason = rejectReason;
+            request.rejectedByName = [actor.firstName, actor.lastName].filter(Boolean).join(' ').trim();
+            request.stage = 'rejected';
+            if (waitingOnHr) {
+                request.decidedByHr = actor._id;
+                request.decidedAtHr = new Date();
+            } else {
+                request.decidedByReportee = actor._id;
+                request.decidedAtReportee = new Date();
+            }
+            await request.save();
+            await closeAttendanceChangeRequest(request, { status: 'Rejected', actorId: actor._id });
+            return res.status(200).json({
+                message: 'Attendance change rejected. The day was not updated.',
+            });
+        }
+
+        if (request.action === 'hour_adjust') {
+            const attendanceId = String(request.proposed?.attendanceId || '').trim();
+            const source = mongoose.Types.ObjectId.isValid(attendanceId)
+                ? await Attendance.findById(attendanceId)
+                : null;
+            if (source) {
+                const measured = await exactHourProposal(source, request.proposed || {});
+                request.proposed.hoursTaken = measured.hoursTaken;
+                request.proposed.hoursMax = measured.hoursMax;
+                request.proposed.hourAdjustFlexible = measured.hourAdjustFlexible;
+            }
+            const edited = normalizeHourAdjustEdit(request.proposed || {}, {
+                approvedHours: req.body?.approvedHours,
+                hourReason: req.body?.hourReason ?? req.body?.reason,
+                hourAdjustMode: req.body?.hourAdjustMode,
+            });
+            if (edited.error) return res.status(400).json({ message: edited.error });
+            request.proposed.hoursApproved = edited.hoursApproved;
+            request.proposed.reason = edited.reason;
+            request.proposed.hourAdjustMode = edited.hourAdjustMode;
+            request.proposed.statusLabel =
+                request.proposed.hourAdjustKind === 'mispunch'
+                    ? 'Misspunch request'
+                    : `Hour approval ${edited.hoursApproved} hr`;
+            request.markModified('proposed');
+            request.rejectReason = '';
+            request.rejectedByName = '';
+        }
+
+        const proposed = request.proposed && typeof request.proposed === 'object' ? request.proposed : {};
+        const nextIn = String(req.body?.timeIn || '').trim();
+        const nextOut = String(req.body?.timeOut || '').trim();
+        let proposedChanged = false;
+        if (nextIn) {
+            proposed.timeIn = nextIn;
+            proposedChanged = true;
+        }
+        if (nextOut) {
+            proposed.timeOut = nextOut;
+            proposedChanged = true;
+        }
+        const editedOtHours = Number(req.body?.approvedHours);
+        if (request.action === 'flexible_ot') {
+            const nextReason = String(req.body?.reason || '').trim();
+            if (nextReason) {
+                proposed.reason = nextReason;
+                proposedChanged = true;
+            }
+            if (Number.isFinite(editedOtHours) && editedOtHours > 0) {
+                proposed.flexibleOtApprovedHours = editedOtHours;
+                proposed.statusLabel = `OT Approval ${editedOtHours} hr`;
+                proposedChanged = true;
+            }
+        }
+        if (proposedChanged) {
+            request.proposed = proposed;
+            request.markModified('proposed');
+        }
+
+        if (request.stage === 'pending_requester') {
+            const hr = await getDepartmentHOD('hr').catch(() => null);
+            const sent = await resubmitHourAttendanceChange({
+                request,
+                actor,
+                employee: summaryEmployee,
+                hr,
+            });
+            if (sent.error) return res.status(400).json({ message: sent.error });
+            return res.status(200).json({ message: sent.message });
+        }
+
+        if (request.stage === 'pending_reportee') {
+            const hr = await getDepartmentHOD('hr').catch(() => null);
+            if (!hr?._id) {
+                return res.status(400).json({
+                    message: 'Flowchart HR is not set, so this change cannot move forward.',
+                });
+            }
+            await forwardAttendanceChangeToHr({
+                request,
+                actor,
+                hr,
+                employee: employee || {
+                    _id: request.employeeMongoId,
+                    employeeId: request.employeeId,
+                    firstName: request.employeeName,
+                },
+            });
+            return res.status(200).json({
+                message: 'Approved. Sent to HR. Attendance stays unchanged until HR approves.',
+            });
+        }
+
+        const finishApproved = async (record, message = 'Attendance change approved.') => {
+            request.stage = 'approved';
+            request.decidedByHr = actor._id;
+            request.decidedAtHr = new Date();
+            await request.save();
+            await closeAttendanceChangeRequest(request, { status: 'Approved', actorId: actor._id });
+            return res.status(200).json({
+                message,
+                record,
+            });
+        };
+
+        if (request.action === 'clear') {
+            const restored = await restoreClearedAttendance({
+                employeeMongoId: request.employeeMongoId,
+                date: request.date,
+                markedBy: req.user?.id || null,
+            });
+            return finishApproved(restored);
+        }
+
+        if (request.action === 'flexible_ot') {
+            const attendanceId = String(request.proposed?.attendanceId || '').trim();
+            const record = mongoose.Types.ObjectId.isValid(attendanceId)
+                ? await Attendance.findById(attendanceId)
+                : null;
+            if (!record) {
+                return res.status(404).json({ message: 'The overtime day for this request was not found.' });
+            }
+            const approvedIn = normalizeClockHHmm(request.proposed?.timeIn);
+            const approvedOut = normalizeClockHHmm(request.proposed?.timeOut);
+            if (approvedIn) record.timeIn = `${approvedIn}:00`;
+            if (approvedOut) record.timeOut = `${approvedOut}:00`;
+            const applied = await approveFlexibleOvertimeRecord(record, {
+                approvedHours: request.proposed?.flexibleOtApprovedHours,
+                reason: request.proposed?.reason,
+                confirmNextDay: request.proposed?.confirmNextDay === true,
+                targetDate: request.proposed?.targetDate,
+                actor,
+            });
+            if (applied.status !== 200) {
+                return res.status(applied.status).json(applied.body);
+            }
+            return finishApproved(
+                applied.body?.record || record,
+                'Overtime approved. The employee is notified on WhatsApp.',
+            );
+        }
+
+        if (request.action === 'hour_adjust') {
+            const attendanceId = String(request.proposed?.attendanceId || '').trim();
+            const record = mongoose.Types.ObjectId.isValid(attendanceId)
+                ? await Attendance.findById(attendanceId)
+                : null;
+            if (!record) {
+                return res.status(404).json({ message: 'The attendance day for this hour request was not found.' });
+            }
+            try {
+                await applyStoredHourAdjust(record, request.proposed || {});
+            } catch (hourErr) {
+                const status = hourErr.statusCode || 500;
+                if (status >= 500) throw hourErr;
+                return res.status(status).json({ message: hourErr.message || 'Could not approve these hours.' });
+            }
+            return finishApproved(record);
+        }
+
+        const payload = {
+            statusKey: request.proposed?.statusKey,
+            statusLabel: request.proposed?.statusLabel,
+            leavePayType: request.proposed?.leavePayType || '',
+            timeIn: request.proposed?.timeIn || '',
+            timeOut: request.proposed?.timeOut || '',
+            reason: request.proposed?.reason || '',
+            attachmentName: request.proposed?.attachmentName || '',
+            attachmentKey: request.proposed?.attachmentKey || '',
+            attachmentMime: request.proposed?.attachmentMime || '',
+        };
+        if (!ATTENDANCE_STATUS_KEYS.includes(payload.statusKey) && payload.statusKey !== 'not_marked') {
+            return res.status(400).json({ message: 'This attendance change is no longer valid.' });
+        }
+        if (request.action === 'map') {
+            const mappedPunch = mapPunchWithoutOvertime({
+                timeIn: request.proposed?.timeIn,
+                timeOut: request.proposed?.timeOut,
+                timeOutDate: request.proposed?.timeOutDate,
+            });
+            if (!mappedPunch.timeIn) {
+                return res.status(400).json({ message: 'That day has no check-in to map.' });
+            }
+        }
+        const record =
+            request.action === 'map'
+                ? await commitMappedAttendanceChange({
+                    request,
+                    markedBy: req.user?.id || null,
+                })
+                : await commitManualAttendanceMark({
+                    employee,
+                    employeeMongoId: request.employeeMongoId,
+                    date: request.date,
+                    payload,
+                    markedBy: req.user?.id || null,
+                    employeeId: request.employeeId,
+                    employeeName: request.employeeName,
+                });
+        try {
+            await settleFulfilledLeaveRequest(record);
+        } catch (settleErr) {
+            console.error('[decideAttendanceChangeRequest] leave request settle failed:', settleErr);
+        }
+        request.stage = 'approved';
+        request.decidedByHr = actor._id;
+        request.decidedAtHr = new Date();
+        await request.save();
+        await closeAttendanceChangeRequest(request, { status: 'Approved', actorId: actor._id });
+        return res.status(200).json({
+            message: 'Attendance change approved.',
+            record,
+        });
+    } catch (error) {
+        console.error('[decideAttendanceChangeRequest]', error);
+        return res.status(500).json({ message: error.message || 'Failed to decide the attendance change.' });
+    }
+}
+
+/**
+ * POST /api/Attendance/me/leave-request
+ * Employee requests Sick or Other leave on a red day.
+ * Body: { date, requestedStatusKey, reason, attachmentName }
+ */
+export async function requestAttendanceLeave(req, res) {
+    try {
+        if (mongoose.connection.readyState !== 1) {
+            return res.status(503).json({ message: 'Database not connected.' });
+        }
+
+        const self = await resolveLinkedEmployee(req);
+        if (!self) {
+            return res.status(404).json({ message: 'No linked employee profile found for this user.' });
+        }
+        if (await rejectIfNotSalaryEnrolled(res, self, { dateKey: String(req.body?.date || '').trim() })) return;
+
+        const date = String(req.body?.date || '').trim();
+        const requestedStatusKey = String(req.body?.requestedStatusKey || '').trim();
+        const reason = String(req.body?.reason || '').trim();
+        const attachmentName = String(req.body?.attachmentName || '').trim();
+        const storedFile = await storeLeaveAttachment(req.body?.attachmentData, attachmentName);
+        const isLateArrival = requestedStatusKey === 'late_arrived';
+        const usesDayPart = isLateArrival || requestedStatusKey === 'authorized_leave';
+        const requestedPart = String(req.body?.dayPart || 'full').trim();
+        const dayPart =
+            usesDayPart && (requestedPart === 'half' || requestedPart === 'quarter')
+                ? requestedPart
+                : usesDayPart
+                  ? 'full'
+                  : '';
+        const session =
+            dayPart === 'half' || dayPart === 'quarter'
+                ? String(req.body?.session || '').trim().toLowerCase() === 'pm'
+                    ? 'pm'
+                    : String(req.body?.session || '').trim().toLowerCase() === 'am'
+                      ? 'am'
+                      : ''
+                : '';
+
+        if (!isValidDateKey(date)) {
+            return res.status(400).json({ message: 'A valid date (yyyy-MM-dd) is required.' });
+        }
+        if (!EMPLOYEE_LEAVE_REQUEST_KEYS.has(requestedStatusKey)) {
+            return res.status(400).json({
+                message: 'Choose authorized leave, sick leave, or late arrival.',
+            });
+        }
+        if (!reason) {
+            return res.status(400).json({ message: 'Reason is required.' });
+        }
+        if ((dayPart === 'half' || dayPart === 'quarter') && !session) {
+            return res.status(400).json({ message: 'Choose AM or PM for a half day or quarter day.' });
+        }
+
+        const todayKey = getDubaiDateKey();
+        if (date > todayKey) {
+            return res.status(400).json({ message: 'Cannot request leave for a future date.' });
+        }
+
+        const employee = await EmployeeBasic.findById(self._id)
+            .select(
+                '_id employeeId firstName lastName companyEmail workEmail email primaryReportee staffType',
+            )
+            .populate(
+                'primaryReportee',
+                'firstName lastName employeeId companyEmail workEmail email',
+            )
+            .lean();
+
+        const opening = await resolveOpeningLeaveApprover(employee);
+        if (!opening.approver?._id) {
+            return res.status(400).json({
+                message:
+                    opening.stage === LEAVE_STAGE_HR
+                        ? opening.hrError?.message || 'HR is not configured in the Flowchart.'
+                        : 'Primary reportee is required before requesting a leave status change.',
+            });
+        }
+
+        let record = await Attendance.findOne({
+            employeeMongoId: String(employee._id),
+            date,
+        });
+
+        if (!record) {
+            return res.status(400).json({
+                message: 'No attendance mark found for this date. Only red leave days can be requested.',
+            });
+        }
+
+        if (!RED_LEAVE_STATUS_KEYS.has(record.statusKey)) {
+            return res.status(400).json({
+                message: 'Leave change can only be requested on Unauthorized / Leave (red) days.',
+            });
+        }
+
+        if (record.leaveRequestStatus === 'pending') {
+            return res.status(400).json({
+                message: 'A leave request is already pending for this date.',
+                record,
+            });
+        }
+
+        const requestedTimeIn = normalizeClockHHmm(req.body?.timeIn);
+        const requestedTimeOut = normalizeClockHHmm(req.body?.timeOut);
+        if (isLateArrival) {
+            if (!requestedTimeIn || !requestedTimeOut) {
+                return res.status(400).json({ message: 'Check-in time and check-out time are required.' });
+            }
+            if (requestedTimeOut <= requestedTimeIn) {
+                return res.status(400).json({ message: 'Check-out time must be after check-in time.' });
+            }
+            const limitMessage = await attendanceApprovalLimitMessageFor(employee, {
+                pool: 'late',
+                requestDates: [date],
+            });
+            if (limitMessage) return res.status(400).json({ message: limitMessage });
+        }
+
+        if (!isLateArrival) {
+            const allowanceError = await checkEmployeeLeaveAllowance(employee, {
+                statusKey: requestedStatusKey,
+                extraDates: [date],
+            });
+            if (allowanceError) {
+                return res.status(400).json({ message: allowanceError });
+            }
+        }
+
+        let partialLeave = null;
+        if (dayPart === 'half' || dayPart === 'quarter') {
+            const workingTime = await loadWorkingTimeDoc();
+            const scheduleWeek = getWeekForStaffType(workingTime, employee.staffType);
+            partialLeave = describePartialLeave({
+                week: scheduleWeek,
+                dateKey: date,
+                dayPart,
+                session,
+            });
+            if (!partialLeave) {
+                return res.status(400).json({
+                    message: 'This working day has no hours for a half day or quarter day.',
+                });
+            }
+        }
+
+        let resolvedStatusKey = requestedStatusKey;
+        if (requestedStatusKey === 'sick_leave') {
+            const overflowMap = await resolveSickOverflowStatuses(employee, [date]);
+            resolvedStatusKey = overflowMap.get(date) || 'sick_leave';
+        }
+
+        const empName =
+            [employee.firstName, employee.lastName].filter(Boolean).join(' ').trim() ||
+            record.employeeName ||
+            'Employee';
+        const requestedStatusLabel = leaveStatusLabel(resolvedStatusKey);
+        const previousStatusKey = record.statusKey;
+        const previousStatusLabel =
+            record.statusLabel || leaveStatusLabel(record.statusKey);
+
+        record.previousStatusKey = previousStatusKey;
+        record.previousStatusLabel = previousStatusLabel;
+        record.requestedStatusKey = resolvedStatusKey;
+        record.requestedStatusLabel = requestedStatusLabel;
+        record.leaveRequestReason =
+            resolvedStatusKey === 'authorized_leave' && requestedStatusKey === 'sick_leave'
+                ? reason
+                    ? `${reason} · Sick allowance used`
+                    : 'Converted from sick leave after the allowance from last annual leave was used'
+                : reason;
+        record.leaveRequestKind = isLateArrival ? 'past_late' : 'leave';
+        record.leaveRequestDayPart = dayPart;
+        record.leaveRequestSession = session;
+        record.leaveDayFraction = dayPart ? partialLeavePortion(dayPart) : 0;
+        record.leaveRequestTimeIn = partialLeave ? partialLeave.workStart || '' : requestedTimeIn;
+        record.leaveRequestTimeOut = partialLeave ? partialLeave.workEnd || '' : requestedTimeOut;
+        record.attachmentName = storedFile?.attachmentName || attachmentName || record.attachmentName || '';
+        if (storedFile?.attachmentKey) {
+            record.attachmentKey = storedFile.attachmentKey;
+            record.attachmentMime = storedFile.attachmentMime || '';
+        }
+        record.leaveRequestStatus = 'pending';
+        record.leaveApprovalStage = opening.stage;
+        record.leaveRequestedAt = new Date();
+        record.leaveDecidedAt = null;
+        record.leaveDecidedBy = null;
+        record.employeeId = employee.employeeId || record.employeeId || '';
+        record.employeeName = empName;
+        await record.save();
+
+        await notifyLeaveRequestApprover({
+            employee,
+            approver: opening.approver,
+            stage: opening.stage,
+            from: date,
+            to: date,
+            attendanceId: record._id,
+            requestedLabel: requestedStatusLabel,
+            requestedStatusKey: resolvedStatusKey,
+            leaveRequestKind: record.leaveRequestKind,
+            reason,
+            attachmentName,
+        });
+
+        return res.status(200).json({
+            message: leaveRequestSentMessage(opening.stage),
+            record,
+        });
+    } catch (error) {
+        console.error('[requestAttendanceLeave]', error);
+        return res.status(500).json({ message: error.message || 'Failed to submit leave request.' });
+    }
+}
+
+/**
+ * POST /api/Attendance/me/yellow-request
+ * Employee clarifies a yellow day (late / early / mispunch) → asks Present.
+ * Body: { date, reason, attachmentName? }
+ */
+export async function requestAttendanceYellow(req, res) {
+    try {
+        if (mongoose.connection.readyState !== 1) {
+            return res.status(503).json({ message: 'Database not connected.' });
+        }
+
+        const self = await resolveLinkedEmployee(req);
+        if (!self) {
+            return res.status(404).json({ message: 'No linked employee profile found for this user.' });
+        }
+        if (await rejectIfNotSalaryEnrolled(res, self, { dateKey: String(req.body?.date || '').trim() })) return;
+
+        const date = String(req.body?.date || '').trim();
+        const reason = String(req.body?.reason || '').trim();
+        const attachmentName = String(req.body?.attachmentName || '').trim();
+        const storedFile = await storeLeaveAttachment(req.body?.attachmentData, attachmentName);
+
+        if (!isValidDateKey(date)) {
+            return res.status(400).json({ message: 'A valid date (yyyy-MM-dd) is required.' });
+        }
+        if (!reason) {
+            return res.status(400).json({ message: 'Reason is required for yellow day clarification.' });
+        }
+
+        const todayKey = getDubaiDateKey();
+        if (date > todayKey) {
+            return res.status(400).json({ message: 'Cannot request clarification for a future date.' });
+        }
+
+        const employee = await EmployeeBasic.findById(self._id)
+            .select(
+                '_id employeeId firstName lastName companyEmail workEmail email primaryReportee staffType',
+            )
+            .populate(
+                'primaryReportee',
+                'firstName lastName employeeId companyEmail workEmail email',
+            )
+            .lean();
+
+        const opening = await resolveOpeningLeaveApprover(employee);
+        if (!opening.approver?._id) {
+            return res.status(400).json({
+                message:
+                    opening.stage === LEAVE_STAGE_HR
+                        ? opening.hrError?.message || 'HR is not configured in the Flowchart.'
+                        : 'Primary reportee is required before requesting clarification.',
+            });
+        }
+
+        const record = await Attendance.findOne({
+            employeeMongoId: String(employee._id),
+            date,
+        });
+
+        if (!record) {
+            return res.status(400).json({
+                message: 'No attendance mark found for this date.',
+            });
+        }
+
+        if (!isYellowClarificationEligible(record)) {
+            return res.status(400).json({
+                message: 'Clarification can only be requested on yellow (late / early / mispunch) days.',
+            });
+        }
+
+        if (record.leaveRequestStatus === 'pending') {
+            return res.status(400).json({
+                message: 'A request is already pending for this date.',
+                record,
+            });
+        }
+
+        const requestPool =
+            approvalEventPool(record, { countOpenPunch: true }) ||
+            (record.timeIn && !record.timeOut ? 'mispunch' : '');
+        if (requestPool) {
+            const limitMessage = await attendanceApprovalLimitMessageFor(employee, {
+                pool: requestPool,
+                requestDates: [date],
+            });
+            if (limitMessage) return res.status(400).json({ message: limitMessage });
+        }
+
+        const empName =
+            [employee.firstName, employee.lastName].filter(Boolean).join(' ').trim() ||
+            record.employeeName ||
+            'Employee';
+        const previousStatusKey = record.statusKey;
+        const previousStatusLabel =
+            record.statusLabel || leaveStatusLabel(record.statusKey);
+
+        record.previousStatusKey = previousStatusKey;
+        record.previousStatusLabel = previousStatusLabel;
+        record.requestedStatusKey = 'on_office';
+        record.requestedStatusLabel = 'Present';
+        record.leaveRequestReason = reason;
+        record.leaveRequestKind = 'yellow';
+        record.attachmentName = storedFile?.attachmentName || attachmentName || record.attachmentName || '';
+        if (storedFile?.attachmentKey) {
+            record.attachmentKey = storedFile.attachmentKey;
+            record.attachmentMime = storedFile.attachmentMime || '';
+        }
+        record.leaveRequestStatus = 'pending';
+        record.leaveApprovalStage = opening.stage;
+        record.leaveRequestedAt = new Date();
+        record.leaveDecidedAt = null;
+        record.leaveDecidedBy = null;
+        record.employeeId = employee.employeeId || record.employeeId || '';
+        record.employeeName = empName;
+        await record.save();
+
+        await notifyLeaveRequestApprover({
+            employee,
+            approver: opening.approver,
+            stage: opening.stage,
+            from: date,
+            to: date,
+            attendanceId: record._id,
+            requestedLabel: 'Miss Punch',
+            requestedStatusKey: 'on_office',
+            leaveRequestKind: 'yellow',
+            reason,
+            attachmentName,
+        });
+
+        return res.status(200).json({
+            message: leaveRequestSentMessage(opening.stage),
+            record,
+        });
+    } catch (error) {
+        console.error('[requestAttendanceYellow]', error);
+        return res.status(500).json({
+            message: error.message || 'Failed to submit yellow day clarification.',
+        });
+    }
+}
+
+const FUTURE_REQUEST_KINDS = {
+    leave: {
+        leaveRequestKind: 'future_leave',
+        requestedStatusKey: 'authorized_leave',
+        requestedStatusLabel: 'Authorized Leave',
+        extra2Prefix: 'Future leave',
+    },
+    annual_leave: {
+        leaveRequestKind: 'future_annual',
+        requestedStatusKey: 'on_leave',
+        requestedStatusLabel: 'Annual Leave',
+        extra2Prefix: 'Future annual leave',
+    },
+    late_arrived: {
+        leaveRequestKind: 'future_late',
+        requestedStatusKey: 'late_arrived',
+        requestedStatusLabel: 'Late arrival',
+        extra2Prefix: 'Future late arrival',
+    },
+    early_go: {
+        leaveRequestKind: 'future_early',
+        requestedStatusKey: 'early_go',
+        requestedStatusLabel: 'Early go',
+        extra2Prefix: 'Future early go',
+    },
+};
+
+const MAX_FUTURE_REQUEST_DAYS = 62;
+
+/** Accepts HH:mm or HH:mm:ss and returns HH:mm, or '' when unusable. */
+function normalizeClockHHmm(value) {
+    const match = /^(\d{1,2}):(\d{2})/.exec(String(value || '').trim());
+    if (!match) return '';
+    const hour = Number(match[1]);
+    const minute = Number(match[2]);
+    if (hour > 23 || minute > 59) return '';
+    return `${String(hour).padStart(2, '0')}:${String(minute).padStart(2, '0')}`;
+}
+
+function isApprovedPartialLeave(record) {
+    const part = String(record?.leaveRequestDayPart || '');
+    return (
+        String(record?.leaveRequestStatus || '') === 'approved' &&
+        String(record?.statusKey || '') === 'authorized_leave' &&
+        (part === 'half' || part === 'quarter')
+    );
+}
+
+function partialDayLabel(dayPart, session, described) {
+    const name = dayPart === 'quarter' ? 'Quarter day' : dayPart === 'half' ? 'Half day' : 'Full day';
+    if (dayPart !== 'half' && dayPart !== 'quarter') return name;
+    const side = session === 'pm' ? 'PM' : 'AM';
+    if (described && !described.flexible && described.workStart && described.workEnd) {
+        return `${name} ${side} (work ${described.workStart}–${described.workEnd})`;
+    }
+    return `${name} ${side}`;
+}
+
+function futureRequestRangeLabel(fromDate, toDate) {
+    return fromDate === toDate ? fromDate : `${fromDate} → ${toDate}`;
+}
+
+/**
+ * POST /api/Attendance/me/future-request
+ * Planned leave / late / early across future working days (not tomorrow; skip holidays).
+ * Body: { fromDate, toDate, kind, dayPart: full|half|quarter, session: am|pm, reason, attachmentName }
+ */
+export async function requestAttendanceFuture(req, res) {
+    try {
+        if (mongoose.connection.readyState !== 1) {
+            return res.status(503).json({ message: 'Database not connected.' });
+        }
+
+        const self = await resolveLinkedEmployee(req);
+        if (!self) {
+            return res.status(404).json({ message: 'No linked employee profile found for this user.' });
+        }
+        if (
+            await rejectIfNotSalaryEnrolled(res, self, {
+                dateKey: String(req.body?.fromDate || req.body?.date || '').trim(),
+            })
+        ) {
+            return;
+        }
+
+        const fromDate = String(req.body?.fromDate || req.body?.date || '').trim();
+        const toDate = String(req.body?.toDate || fromDate).trim();
+        const kind = String(req.body?.kind || 'leave').trim() || 'leave';
+        const reason = String(req.body?.reason || '').trim();
+        const attachmentName = String(req.body?.attachmentName || '').trim();
+        const storedFile = await storeLeaveAttachment(req.body?.attachmentData, attachmentName);
+        const isMultiDay = fromDate !== toDate;
+        const isAnnualLeave = kind === 'annual_leave';
+        const requestedPart = String(req.body?.dayPart || 'full').trim();
+        const dayPart =
+            !isMultiDay && !isAnnualLeave && (requestedPart === 'half' || requestedPart === 'quarter')
+                ? requestedPart
+                : 'full';
+        const session =
+            dayPart === 'full'
+                ? ''
+                : String(req.body?.session || '').trim().toLowerCase() === 'pm'
+                  ? 'pm'
+                  : String(req.body?.session || '').trim().toLowerCase() === 'am'
+                    ? 'am'
+                    : '';
+        const spec =
+            FUTURE_REQUEST_KINDS[
+                kind === 'annual_leave' ? 'annual_leave' : kind === 'leave' ? 'leave' : kind
+            ];
+
+        if (!isValidDateKey(fromDate) || !isValidDateKey(toDate)) {
+            return res.status(400).json({ message: 'Valid from and to dates (yyyy-MM-dd) are required.' });
+        }
+        if (toDate < fromDate) {
+            return res.status(400).json({ message: 'To date cannot be before the from date.' });
+        }
+        if (kind === 'leave' && inclusiveDateCount(fromDate, toDate) > 3) {
+            return res.status(400).json({
+                message:
+                    'Maximum 3 days of authorized leave are allowed. For more information, please contact your HOD.',
+            });
+        }
+        if (!spec) {
+            return res.status(400).json({ message: 'Choose Leave, Late arrival, or Early go.' });
+        }
+        if (dayPart !== 'full' && !session) {
+            return res.status(400).json({ message: 'Choose AM or PM for a half day or quarter day.' });
+        }
+        if ((kind === 'leave' || kind === 'late_arrived' || kind === 'early_go') && !reason) {
+            return res.status(400).json({ message: 'Reason is required.' });
+        }
+
+        const todayKey = getDubaiDateKey();
+        const tomorrowKey = nextDateKey(todayKey);
+        if (kind === 'leave' && (fromDate <= tomorrowKey || toDate <= tomorrowKey)) {
+            return res.status(400).json({
+                message: 'Authorized leave cannot be requested for today or tomorrow.',
+            });
+        }
+        if (fromDate <= todayKey) {
+            return res.status(400).json({ message: 'This request is only for future working days.' });
+        }
+
+        const employee = await EmployeeBasic.findById(self._id)
+            .select(
+                '_id employeeId firstName lastName companyEmail workEmail email primaryReportee staffType',
+            )
+            .populate(
+                'primaryReportee',
+                'firstName lastName employeeId companyEmail workEmail email',
+            )
+            .lean();
+
+        const opening = await resolveOpeningLeaveApprover(employee);
+        if (!opening.approver?._id) {
+            return res.status(400).json({
+                message:
+                    opening.stage === LEAVE_STAGE_HR
+                        ? opening.hrError?.message || 'HR is not configured in the Flowchart.'
+                        : 'Primary reportee is required before sending this request.',
+            });
+        }
+
+        if (isAnnualLeave) {
+            const { loadAnnualLeaveEligibilityForEmployee } = await import('./leave/leaveDashboardData.js');
+            const eligibilityEmployee = await EmployeeBasic.findById(employee._id)
+                .select('_id employeeId firstName lastName staffType contractJoiningDate dateOfJoining')
+                .lean();
+            const eligibility = await loadAnnualLeaveEligibilityForEmployee(eligibilityEmployee, {
+                from: fromDate,
+                to: toDate,
+            });
+            if (eligibility?.notEligible) {
+                const lines = [];
+                if (eligibility.cycleNotEligible) {
+                    const required = eligibility.requiredDays || 300;
+                    const done = eligibility.eligibleDays || 0;
+                    lines.push(
+                        `You cannot apply for annual leave. You are not eligible. ${done} of ${required} days are completed from the previous annual leave or joining date to this leave start.`,
+                    );
+                }
+                if (eligibility.groupCap?.over && eligibility.groupCap.message) {
+                    lines.push(eligibility.groupCap.message);
+                }
+                const blockMessage = lines.join(' ') || 'You cannot apply for annual leave for these dates.';
+                return res.status(400).json({
+                    message: blockMessage.includes('contact your HOD')
+                        ? blockMessage
+                        : `${blockMessage} For more information, please contact your HOD.`,
+                    notEligible: true,
+                    ...eligibility,
+                });
+            }
+        }
+
+        const staffType = normalizeStaffType(employee.staffType);
+        const workingTime = await loadWorkingTimeDoc();
+        const scheduleWeek = getWeekForStaffType(workingTime, staffType);
+        const offWeekdays = new Set(getOffWeekdayKeys(scheduleWeek));
+        const holidaySet = await loadHolidaySet(todayKey, toDate, staffType);
+        const firstEligible = firstEligibleAdvanceRequestDate(todayKey, holidaySet, offWeekdays);
+
+        if (!firstEligible || fromDate < firstEligible) {
+            return res.status(400).json({
+                message: `Cannot request for tomorrow. The earliest date is ${firstEligible || 'the second working day'} (one working day ahead, holidays skipped).`,
+            });
+        }
+
+        const attendanceGate = await loadSalaryAttendanceGate(employee, { dateKey: fromDate });
+        if (attendanceGate.processingStartDate && fromDate < attendanceGate.processingStartDate) {
+            return res.status(400).json({
+                message: `Leave requests open from ${attendanceGate.processingStartDate}.`,
+            });
+        }
+
+        const requestDates = [];
+        for (let cursor = fromDate; cursor <= toDate; cursor = nextDateKey(cursor)) {
+            if (requestDates.length >= MAX_FUTURE_REQUEST_DAYS) {
+                return res.status(400).json({
+                    message: `A single request can cover at most ${MAX_FUTURE_REQUEST_DAYS} days.`,
+                });
+            }
+            if (!isNonWorkingDate(cursor, holidaySet, offWeekdays)) requestDates.push(cursor);
+        }
+
+        if (!requestDates.length) {
+            return res.status(400).json({
+                message: 'This range has no working days — holidays and weekly offs are skipped.',
+            });
+        }
+
+        if (kind === 'late_arrived' || kind === 'early_go') {
+            const limitMessage = await attendanceApprovalLimitMessageFor(employee, {
+                pool: 'late',
+                requestDates,
+            });
+            if (limitMessage) return res.status(400).json({ message: limitMessage });
+        }
+
+        const partialLeave =
+            dayPart === 'full'
+                ? null
+                : describePartialLeave({
+                    week: scheduleWeek,
+                    dateKey: requestDates[0],
+                    dayPart,
+                    session,
+                });
+        if (dayPart !== 'full' && !partialLeave) {
+            return res.status(400).json({
+                message: 'This working day has no hours for a half day or quarter day.',
+            });
+        }
+
+        const existing = await Attendance.find({
+            employeeMongoId: String(employee._id),
+            date: { $in: requestDates },
+        });
+        const existingByDate = new Map(existing.map((row) => [row.date, row]));
+
+        for (const dateKey of requestDates) {
+            const row = existingByDate.get(dateKey);
+            if (!row) continue;
+            if (row.leaveRequestStatus === 'pending') {
+                return res.status(400).json({
+                    message: `A request is already pending for ${dateKey}.`,
+                });
+            }
+            if (
+                (row.leaveRequestStatus === 'approved' || row.approvalStatus === 'approved') &&
+                ['authorized_leave', 'late_arrived', 'early_go', 'on_leave'].includes(String(row.statusKey || ''))
+            ) {
+                return res.status(400).json({
+                    message: `${dateKey} already has an approved request.`,
+                });
+            }
+        }
+
+        const empName =
+            [employee.firstName, employee.lastName].filter(Boolean).join(' ').trim() || 'Employee';
+        const groupId = new mongoose.Types.ObjectId().toString();
+        const requestedAt = new Date();
+        const rangeLabel = futureRequestRangeLabel(fromDate, toDate);
+        const dayPartLabel = partialDayLabel(dayPart, session, partialLeave);
+        const requestedStatusLabel =
+            dayPart !== 'full' && kind === 'leave'
+                ? dayPartLabel
+                : spec.requestedStatusLabel;
+        const savedRecords = [];
+
+        for (const dateKey of requestDates) {
+            const record =
+                existingByDate.get(dateKey) ||
+                new Attendance({
+                    date: dateKey,
+                    employeeMongoId: String(employee._id),
+                    employeeId: employee.employeeId || '',
+                    employeeName: empName,
+                    statusKey: 'not_marked',
+                    statusLabel: 'Upcoming',
+                });
+
+            record.previousStatusKey = record.statusKey || 'not_marked';
+            record.previousStatusLabel = record.statusLabel || 'Upcoming';
+            record.requestedStatusKey = spec.requestedStatusKey;
+            record.requestedStatusLabel = requestedStatusLabel;
+            record.leaveRequestReason = reason;
+            record.leaveRequestKind = spec.leaveRequestKind;
+            record.attachmentName = storedFile?.attachmentName || attachmentName;
+            if (storedFile?.attachmentKey) {
+                record.attachmentKey = storedFile.attachmentKey;
+                record.attachmentMime = storedFile.attachmentMime || '';
+            }
+            record.leaveRequestStatus = 'pending';
+            record.leaveApprovalStage = opening.stage;
+            record.leaveRequestDayPart = dayPart;
+            record.leaveRequestSession = session;
+            record.leaveDayFraction = partialLeavePortion(dayPart);
+            record.leaveDeductionTimes = 1;
+            record.leaveRequestTimeIn = partialLeave
+                ? partialLeave.workStart || ''
+                : normalizeClockHHmm(req.body?.timeIn);
+            record.leaveRequestTimeOut = partialLeave
+                ? partialLeave.workEnd || ''
+                : normalizeClockHHmm(req.body?.timeOut);
+            record.leaveRequestFromDate = fromDate;
+            record.leaveRequestToDate = toDate;
+            record.leaveRequestGroupId = groupId;
+            record.leaveRequestedAt = requestedAt;
+            record.leaveDecidedAt = null;
+            record.leaveDecidedBy = null;
+            record.employeeId = employee.employeeId || record.employeeId || '';
+            record.employeeName = empName;
+            await record.save();
+            savedRecords.push(record);
+
+        }
+
+        const approvalAttendanceId = savedRecords.reduce((min, row) => {
+            const id = String(row?._id || '');
+            return !min || (id && id < min) ? id : min;
+        }, '');
+        await notifyLeaveRequestApprover({
+            employee,
+            approver: opening.approver,
+            stage: opening.stage,
+            from: fromDate,
+            to: toDate,
+            attendanceId: approvalAttendanceId || savedRecords[0]?._id,
+            groupId,
+            requestedLabel: requestedStatusLabel,
+            requestedStatusKey: spec.requestedStatusKey,
+            leaveRequestKind: spec.leaveRequestKind,
+            reason,
+            attachmentName,
+        });
+
+        return res.status(200).json({
+            message: leaveRequestSentMessage(opening.stage),
+            dates: requestDates,
+            record: savedRecords[0],
+            records: savedRecords,
+        });
+    } catch (error) {
+        console.error('[requestAttendanceFuture]', error);
+        return res.status(500).json({ message: error.message || 'Failed to submit future request.' });
+    }
+}
+
+/**
+ * POST /api/Attendance/me/leave-request/decide
+ * Primary reportee approves or rejects.
+ * Body: { attendanceId | date + employeeMongoId, decision, approvedStatusKey? }
+ */
+export async function decideAttendanceLeaveRequest(req, res) {
+    try {
+        if (mongoose.connection.readyState !== 1) {
+            return res.status(503).json({ message: 'Database not connected.' });
+        }
+
+        const self = await resolveLinkedEmployee(req);
+        if (!self) {
+            return res.status(404).json({ message: 'No linked employee profile found for this user.' });
+        }
+
+        const decision = String(req.body?.decision || '').trim().toLowerCase();
+        if (decision !== 'approved' && decision !== 'rejected') {
+            return res.status(400).json({ message: 'decision must be approved or rejected.' });
+        }
+
+        const attendanceId = String(req.body?.attendanceId || '').trim();
+        const date = String(req.body?.date || '').trim();
+        const employeeMongoId = String(req.body?.employeeMongoId || '').trim();
+        const approvedStatusKey = String(req.body?.approvedStatusKey || '').trim();
+        const leavePayType = normalizeLeavePayType(req.body?.leavePayType);
+
+        const result = await decideLeaveRequestInternal({
+            attendanceId,
+            date,
+            employeeMongoId,
+            decision,
+            approvedStatusKey,
+            leavePayType,
+            timeIn: req.body?.timeIn,
+            timeOut: req.body?.timeOut,
+            rejectReason: req.body?.rejectReason || req.body?.reason,
+            actor: self,
+        });
+
+        if (!result.ok) {
+            return res.status(result.status || 400).json({ message: result.message });
+        }
+
+        return res.status(200).json({
+            message: result.advanced
+                ? `Accepted. This request is now pending with ${result.pendingWithName || 'HR'}.`
+                : decision === 'approved'
+                  ? 'Leave request approved.'
+                  : 'Leave request rejected. Previous status kept.',
+            advanced: Boolean(result.advanced),
+            pendingWithName: result.pendingWithName || '',
+            record: result.record,
+        });
+    } catch (error) {
+        console.error('[decideAttendanceLeaveRequest]', error);
+        return res.status(500).json({ message: error.message || 'Failed to decide leave request.' });
+    }
+}
+
+export async function decideLeaveRequestInternal({
+    attendanceId,
+    date,
+    employeeMongoId,
+    decision,
+    approvedStatusKey = '',
+    leavePayType = '',
+    timeIn = '',
+    timeOut = '',
+    rejectReason = '',
+    actor,
+    hrBypass = false,
+}) {
+    let record = null;
+    if (attendanceId && mongoose.Types.ObjectId.isValid(attendanceId)) {
+        record = await Attendance.findById(attendanceId);
+    } else if (isValidDateKey(date) && employeeMongoId) {
+        record = await Attendance.findOne({ date, employeeMongoId: String(employeeMongoId) });
+    }
+
+    if (!record) {
+        return { ok: false, status: 404, message: 'Attendance record not found.' };
+    }
+    if (record.leaveRequestStatus !== 'pending') {
+        return { ok: false, status: 400, message: 'No pending leave request for this day.' };
+    }
+
+    const subject = await EmployeeBasic.findById(record.employeeMongoId)
+        .select('_id employeeId firstName lastName companyEmail workEmail email primaryReportee staffType')
+        .lean();
+    const hrResolved = await resolveFlowchartHrEmployee();
+    const hrEmployee = hrResolved?.employee || null;
+    const hrId = hrEmployee?._id ? String(hrEmployee._id) : '';
+    const reporteeId = String(subject?.primaryReportee || '').trim();
+    const stage = inferLeaveApprovalStage(record, { reporteeId, hrId });
+    const actorId = String(actor?._id || '').trim();
+    const canDecide = leaveApproverCanDecide({
+        stage,
+        actorId,
+        reporteeId,
+        hrId,
+    });
+    if (decision === 'updated') {
+        if (!canDecide && hrBypass !== true) {
+            return {
+                ok: false,
+                status: 403,
+                message: 'Only HR or the assigned approver can edit this request.',
+            };
+        }
+    } else if (!canDecide) {
+        return {
+            ok: false,
+            status: 403,
+            message:
+                stage === LEAVE_STAGE_HR
+                    ? 'Only HR can accept or reject this request.'
+                    : 'Only the primary reportee can accept or reject this request.',
+        };
+    }
+
+    const trimmedRejectReason = String(rejectReason || '').trim();
+    if (decision === 'rejected' && !trimmedRejectReason) {
+        return { ok: false, status: 400, message: 'Reject reason is required.' };
+    }
+
+    // Multi-day requests share a group id, so one decision covers every day of the range.
+    const groupId = String(record.leaveRequestGroupId || '').trim();
+    let groupRecords = [record];
+    if (groupId) {
+        const siblings = await Attendance.find({
+            leaveRequestGroupId: groupId,
+            employeeMongoId: record.employeeMongoId,
+            leaveRequestStatus: 'pending',
+        }).sort({ date: 1 });
+        const others = siblings.filter((row) => String(row._id) !== String(record._id));
+        groupRecords = [record, ...others].sort((a, b) => (a.date < b.date ? -1 : 1));
+    }
+
+    const editedIn = normalizeClockHHmm(timeIn);
+    const editedOut = normalizeClockHHmm(timeOut);
+    if ((decision === 'approved' || decision === 'updated') && (editedIn || editedOut)) {
+        const punchKinds = new Set(['yellow', 'past_late', 'future_late', 'future_early']);
+        for (const groupRecord of groupRecords) {
+            if (editedIn) groupRecord.leaveRequestTimeIn = editedIn;
+            if (editedOut) groupRecord.leaveRequestTimeOut = editedOut;
+            if (punchKinds.has(String(groupRecord.leaveRequestKind || ''))) {
+                if (editedIn) groupRecord.timeIn = `${editedIn}:00`;
+                if (editedOut) groupRecord.timeOut = `${editedOut}:00`;
+            }
+        }
+    }
+    if (decision === 'updated') {
+        if (!editedIn && !editedOut) {
+            return { ok: false, status: 400, message: 'Enter a check-in or check-out time.' };
+        }
+        for (const groupRecord of groupRecords) {
+            await groupRecord.save();
+        }
+        return { ok: true, updated: true, record };
+    }
+
+    const requestedKey = String(approvedStatusKey || record.requestedStatusKey || '').trim();
+    const extraDates = groupRecords.map((row) => String(row.date || '').trim());
+    let overflowMap = new Map();
+    if (decision === 'approved' && subject) {
+        if (
+            requestedKey === 'sick_leave' ||
+            groupRecords.some((row) => String(row.requestedStatusKey || '') === 'sick_leave')
+        ) {
+            overflowMap = await resolveSickOverflowStatuses(subject, extraDates, {
+                excludeGroupId: groupId,
+            });
+        } else if (requestedKey !== 'compoff_leave') {
+            const allowanceError = await checkEmployeeLeaveAllowance(subject, {
+                statusKey: requestedKey,
+                extraDates,
+                excludeGroupId: groupId,
+            });
+            if (allowanceError) {
+                return { ok: false, status: 400, message: allowanceError };
+            }
+        }
+    }
+
+    const requestedLabel =
+        record.requestedStatusLabel || leaveStatusLabel(String(record.requestedStatusKey || '').trim());
+
+    if (decision === 'approved' && stage === LEAVE_STAGE_REPORTEE && hrId && hrId !== reporteeId) {
+        if (!hrEmployee?._id) {
+            return { ok: false, status: 400, message: 'HR is not configured in the Flowchart.' };
+        }
+        for (const groupRecord of groupRecords) {
+            const chosen = String(approvedStatusKey || '').trim();
+            if (chosen && chosen !== String(groupRecord.requestedStatusKey || '').trim()) {
+                groupRecord.requestedStatusKey = chosen;
+                const nextLabel = leaveStatusLabel(chosen);
+                if (nextLabel && nextLabel !== chosen) groupRecord.requestedStatusLabel = nextLabel;
+            }
+            groupRecord.leaveApprovalStage = LEAVE_STAGE_HR;
+            await groupRecord.save();
+        }
+        const from = groupRecords[0].leaveRequestFromDate || groupRecords[0].date;
+        const to =
+            groupRecords[groupRecords.length - 1].leaveRequestToDate ||
+            groupRecords[groupRecords.length - 1].date;
+        const approvalAttendanceId = groupRecords.reduce((min, row) => {
+            const id = String(row?._id || '');
+            return !min || (id && id < min) ? id : min;
+        }, '');
+        await syncDashboardAction({
+            requestId: leaveDashboardRequestObjectId(groupId, approvalAttendanceId),
+            requestType: LEAVE_DASHBOARD_REQUEST_TYPE,
+            assignedTo: actor._id,
+            status: 'Approved',
+            subjectEmployee: subject,
+            actionedBy: actor._id,
+            extra1: from,
+            extra2: `${requestedLabel} accepted by primary reportee`,
+        });
+        await syncDashboardAction({
+            requestId: record._id,
+            requestType: 'Attendance Leave Request',
+            assignedTo: actor._id,
+            status: 'Approved',
+            subjectEmployee: subject,
+            actionedBy: actor._id,
+            extra1: from,
+            extra2: requestedLabel,
+        });
+        const pendingWithName = leaveApprovalPersonName(hrEmployee) || 'HR';
+        await notifyLeaveRequestApprover({
+            employee: subject,
+            approver: hrEmployee,
+            stage: LEAVE_STAGE_HR,
+            from,
+            to,
+            attendanceId: approvalAttendanceId,
+            groupId,
+            requestedLabel: groupRecords[0].requestedStatusLabel || requestedLabel,
+            requestedStatusKey: groupRecords[0].requestedStatusKey,
+            leaveRequestKind: groupRecords[0].leaveRequestKind,
+            reason: groupRecords[0].leaveRequestReason || '',
+            attachmentName: groupRecords[0].attachmentName || '',
+        });
+        return {
+            ok: true,
+            advanced: true,
+            pendingWithName,
+            record: groupRecords[0],
+        };
+    }
+
+    const dateLabel =
+        groupRecords.length > 1
+            ? `${groupRecords[0].date} → ${groupRecords[groupRecords.length - 1].date}`
+            : record.date;
+
+    let finalLabel = '';
+    for (const groupRecord of groupRecords) {
+        const dayKey =
+            overflowMap.get(String(groupRecord.date || '').trim()) ||
+            approvedStatusKey ||
+            String(groupRecord.requestedStatusKey || requestedKey || '').trim();
+        if (decision === 'rejected') groupRecord.leaveRejectReason = trimmedRejectReason;
+        const applied = await applyLeaveDecisionToRecord({
+            record: groupRecord,
+            decision,
+            approvedStatusKey: dayKey,
+            leavePayType: '',
+            actor,
+            subject,
+        });
+        if (!applied.ok) return applied;
+        if (!finalLabel) {
+            finalLabel = applied.record
+                ? applied.record.statusLabel ||
+                  leaveStatusLabel(applied.record.statusKey, '', applied.record.leavePayType)
+                : 'Upcoming';
+        }
+    }
+
+    if (subject) {
+        await sendAttendanceLeaveDecisionEmail({
+            employee: subject,
+            date: groupRecords[0].date,
+            dateLabel,
+            decision,
+            requestedLabel,
+            finalLabel,
+            rejectReason: trimmedRejectReason,
+            recordIds: [leaveDashboardRequestObjectId(groupId, record._id)],
+        });
+    }
+
+    const primary = await Attendance.findById(record._id);
+    return { ok: true, record: primary };
+}
+
+/** Applies one approve/reject to a single day and keeps its dashboard action in sync. */
+async function syncLeaveDecisionDashboardActions({
+    record,
+    actor,
+    subject,
+    decision,
+    requestedLabel,
+}) {
+    const status = decision === 'approved' ? 'Approved' : 'Rejected';
+    const subjectEmployee = subject || {
+        _id: record.employeeMongoId,
+        employeeId: record.employeeId,
+        firstName: record.employeeName,
+    };
+    const payload = {
+        assignedTo: actor._id,
+        status,
+        subjectEmployee,
+        actionedBy: actor._id,
+        extra1: record.date,
+        extra2: requestedLabel,
+    };
+
+    await syncDashboardAction({
+        ...payload,
+        requestId: record._id,
+        requestType: 'Attendance Leave Request',
+    });
+
+    if (
+        isLeaveDashboardAttendanceRow(record) ||
+        isTwoStepLeaveKind(record.leaveRequestKind)
+    ) {
+        await syncDashboardAction({
+            ...payload,
+            requestId: leaveDashboardRequestObjectId(record.leaveRequestGroupId, record._id),
+            requestType: LEAVE_DASHBOARD_REQUEST_TYPE,
+        });
+    }
+
+    await dismissDecidedLeaveBells({
+        employeeMongoId: record.employeeMongoId,
+        from: record.leaveRequestFromDate || record.date,
+        to: record.leaveRequestToDate || record.date,
+        attendanceIds: [record._id],
+        groupId: record.leaveRequestGroupId,
+        outcome: status,
+    });
+}
+
+/** Applies one approve/reject to a single day and keeps its dashboard action in sync. */
+async function applyLeaveDecisionToRecord({
+    record,
+    decision,
+    approvedStatusKey = '',
+    leavePayType = '',
+    actor,
+    subject,
+}) {
+    const requestedKey = String(record.requestedStatusKey || '').trim();
+    const requestedLabel =
+        record.requestedStatusLabel || leaveStatusLabel(requestedKey);
+    const kind = String(record.leaveRequestKind || '');
+    const partialLabel = partialDayLabel(
+        record.leaveRequestDayPart,
+        record.leaveRequestSession,
+        {
+            flexible: !record.leaveRequestTimeIn,
+            workStart: record.leaveRequestTimeIn,
+            workEnd: record.leaveRequestTimeOut,
+        },
+    );
+    const partialSuffix =
+        record.leaveRequestDayPart === 'half' || record.leaveRequestDayPart === 'quarter'
+            ? ` · ${partialLabel}`
+            : '';
+
+        if (decision === 'approved') {
+        const applyAuthorized = () => {
+            const part = String(record.leaveRequestDayPart || 'full');
+            record.statusKey = 'authorized_leave';
+            record.statusLabel =
+                part === 'half'
+                    ? `Authorized Half Day${record.leaveRequestSession ? ` (${String(record.leaveRequestSession).toUpperCase()})` : ''}`
+                    : part === 'quarter'
+                      ? `Authorized Quarter Day${record.leaveRequestSession ? ` (${String(record.leaveRequestSession).toUpperCase()})` : ''}`
+                      : 'Authorized Leave';
+            record.leavePayType = 'unpaid';
+            record.leaveDayFraction = partialLeavePortion(part);
+            record.approvalStatus = 'approved';
+            if (record.leaveRequestReason) record.reason = record.leaveRequestReason;
+            return null;
+        };
+
+        if (kind === 'yellow' || requestedKey === 'on_office') {
+            record.statusKey = 'on_office';
+            record.statusLabel = 'Present';
+            record.leavePayType = '';
+            record.approvalStatus = 'approved';
+            if (!String(record.timeOut || '').trim()) {
+                record.timeOut = String(record.timeIn || '').trim() || '18:00:00';
+            }
+            if (record.leaveRequestReason) {
+                record.reason = record.leaveRequestReason;
+            }
+        } else if (kind === 'future_leave') {
+            const payError = applyAuthorized();
+            if (payError) return payError;
+        } else if (kind === 'future_annual') {
+            record.statusKey = 'on_leave';
+            record.statusLabel = 'Annual Leave';
+            record.leavePayType = '';
+            record.approvalStatus = 'approved';
+            if (record.leaveRequestReason) record.reason = record.leaveRequestReason;
+        } else if (kind === 'future_late' || kind === 'past_late') {
+            record.statusKey = 'late_arrived';
+            record.statusLabel = kind === 'past_late' ? 'Late Arrival' : `Late arrival approved${partialSuffix}`;
+            record.leavePayType = '';
+            record.approvalStatus = 'approved';
+            if (kind === 'past_late') {
+                const clock = (value) => {
+                    const hhmm = normalizeClockHHmm(value);
+                    return hhmm ? `${hhmm}:00` : '';
+                };
+                const arrived = clock(record.leaveRequestTimeIn);
+                const left = clock(record.leaveRequestTimeOut);
+                if (arrived) record.timeIn = arrived;
+                if (left) record.timeOut = left;
+            }
+            if (record.leaveRequestReason) record.reason = record.leaveRequestReason;
+        } else if (kind === 'future_early') {
+            record.statusKey = 'early_go';
+            record.statusLabel = 'Early go approved';
+            record.leavePayType = '';
+            record.approvalStatus = 'approved';
+            if (record.leaveRequestReason) record.reason = record.leaveRequestReason;
+        } else {
+            const chosenKey = String(approvedStatusKey || '').trim() || requestedKey;
+            if (!REPORTEE_APPROVE_LEAVE_KEYS.has(chosenKey)) {
+                return {
+                    ok: false,
+                    status: 400,
+                    message: 'Choose Authorized, Sick, or Unauthorized leave before approving.',
+                };
+            }
+            if (chosenKey === 'authorized_leave') {
+                const payError = applyAuthorized();
+                if (payError) return payError;
+            } else {
+                record.statusKey = chosenKey;
+                record.statusLabel = leaveStatusLabel(chosenKey);
+                record.leavePayType = '';
+                record.approvalStatus = 'approved';
+                if (record.leaveRequestReason && !record.reason) {
+                    record.reason = record.leaveRequestReason;
+                }
+            }
+        }
+    }
+
+    if (
+        decision === 'rejected' &&
+        kind.startsWith('future_') &&
+        (!record.timeIn || record.previousStatusKey === 'not_marked')
+    ) {
+        const recordId = record._id;
+        const dateKey = record.date;
+        const snapshot =
+            typeof record.toObject === 'function' ? record.toObject() : { ...record };
+        await Attendance.deleteOne({ _id: recordId });
+        await syncLeaveDecisionDashboardActions({
+            record: { ...snapshot, _id: recordId, date: dateKey },
+            actor,
+            subject,
+            decision: 'rejected',
+            requestedLabel,
+        });
+        return { ok: true, record: null };
+    }
+
+    record.leaveRequestStatus = decision;
+    record.leaveApprovalStage = '';
+    record.leaveDecidedAt = new Date();
+    record.leaveDecidedBy = actor._id;
+    await record.save();
+
+    await syncLeaveDecisionDashboardActions({
+        record,
+        actor,
+        subject,
+        decision,
+        requestedLabel,
+    });
+
+    return { ok: true, record };
+}
