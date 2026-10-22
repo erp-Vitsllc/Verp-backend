@@ -11775,8 +11775,18 @@ export const returnAssetItem = async (req, res) => {
             });
         }
 
+        const directUnassign =
+            req.body?.directUnassign === true ||
+            String(req.body?.directUnassign || '').trim().toLowerCase() === 'true';
+        const acDirectUnassign = directUnassign && (isAcFlow || matchesDeptAc);
+        if (directUnassign && !acDirectUnassign) {
+            return res.status(403).json({
+                message: 'Only the Asset Controller can unassign this asset directly.',
+            });
+        }
+
         // AC / Admin return of a tools asset: holder approves if they can log in, otherwise their reportee.
-        if (isElevatedReturn && !fleetVehicle && item.assignedTo && !req.body?.reassignTo) {
+        if (isElevatedReturn && !fleetVehicle && item.assignedTo && !req.body?.reassignTo && !acDirectUnassign) {
             const ownerResolved = await resolveOwnerTransferApprover(item.assignedTo);
             if (!ownerResolved.ok) {
                 return res.status(400).json({ message: ownerResolved.message });
@@ -12094,7 +12104,8 @@ export const returnAssetItem = async (req, res) => {
             },
         });
 
-        // If Asset Controller/Admin returned it, notify the previously assigned employee by email.
+        // If Asset Controller/Admin returned it, notify the previously assigned employee.
+        // Direct unassign: company email when present, otherwise WhatsApp.
         if (isElevatedReturn && prevAssignedTo) {
             try {
                 const employee = await EmployeeBasic.findById(prevAssignedTo)
@@ -12102,13 +12113,30 @@ export const returnAssetItem = async (req, res) => {
                     .populate('primaryReportee', 'firstName lastName companyEmail workEmail personalEmail email')
                     .lean()
                     .catch(() => null);
-                if (employee) {
+                const companyMail = String(employee?.companyEmail || employee?.workEmail || '').trim();
+                const directNote = 'The Asset Controller unassigned this asset. It is no longer assigned to you.';
+                if (employee && acDirectUnassign && !companyMail) {
+                    const EmployeeContact = (await import('../models/EmployeeContact.js')).default;
+                    const { sendTextMessage } = await import('../services/whatsappService.js');
+                    const contact = await EmployeeContact.findOne({ employeeId: employee.employeeId })
+                        .select('whatsappNumber')
+                        .lean();
+                    const phone = String(contact?.whatsappNumber || '').trim();
+                    if (phone) {
+                        await sendTextMessage(
+                            phone,
+                            `${employee.firstName || 'Hello'}, ${directNote} Asset ${item.assetId || ''} ${item.name || ''}.`.trim(),
+                        );
+                    }
+                } else if (employee) {
                     await sendAssignedEmployeeActionEmail({
                         asset: item,
                         employee,
                         action: 'Return Asset',
                         performedBy: req.user.employeeId || 'Asset Controller',
-                        details: 'Your asset was returned to store by Asset Controller/Admin.'
+                        details: acDirectUnassign
+                            ? directNote
+                            : 'Your asset was returned to store by Asset Controller/Admin.'
                     });
                 }
             } catch (e) {
