@@ -4,6 +4,7 @@ import TaskManagerTask from "../../models/TaskManagerTask.js";
 import { uploadDocumentToS3 } from "../../utils/s3Upload.js";
 import { canonicalTaskType, sendTaskActivityEmail, syncManualTaskNotification, taskOpenPath } from "../../utils/taskManagerModule.js";
 import { emailFrontendUrl } from "../../utils/resolveFrontendBaseUrl.js";
+import { resolveEmployeeEmailWithReporteeLoaded } from "../../utils/resolveEmployeeEmail.js";
 import { viewerMaySeeAllNotifications } from "./getTaskManagerNotifications.js";
 
 const PRIORITIES = new Set(["High", "Medium", "Low"]);
@@ -187,7 +188,7 @@ export const createTaskManagerTask = async (req, res) => {
         } catch (syncError) {
             console.error("Task notification sync failed:", syncError);
         }
-        const assigneeEmail = assignee.companyEmail || assignee.workEmail || "";
+        const assigneeEmail = String((await resolveEmployeeEmailWithReporteeLoaded(assignee))?.email || "").trim();
         if (assigneeEmail && created.updates?.[0]) {
             try {
                 const sent = await sendTaskActivityEmail({

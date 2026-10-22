@@ -102,11 +102,10 @@ export async function sendAttendanceLeaveRequestEmail({
         const empName = personName(employee);
         const mgrName = personName(manager);
         const base = emailFrontendUrl();
+        const fallbackGroup = String(employee?.staffType || 'office').trim().toLowerCase() || 'office';
         const path =
             String(reviewPath || '').trim() ||
-            `/dashboard?focusAttendance=1&attendanceEmployeeId=${encodeURIComponent(
-                String(employee._id || ''),
-            )}&attendanceDate=${encodeURIComponent(String(date || ''))}`;
+            `/HRM/Attendance/mark?date=${encodeURIComponent(String(date || ''))}&staffType=${encodeURIComponent(fallbackGroup)}&group=${encodeURIComponent(fallbackGroup)}&blinkEmployee=${encodeURIComponent(String(employee?._id || ''))}`;
         const buttonUrl = path.startsWith('http')
             ? path
             : `${base}${path.startsWith('/') ? path : `/${path}`}`;
@@ -201,6 +200,51 @@ export async function sendAttendanceLeaveRequestEmail({
         });
     } catch (err) {
         console.error('[AttendanceLeaveEmail] request email failed:', err?.message || err);
+    }
+}
+
+function hourTypeLabel(value) {
+    return value === 'waived' ? 'Waived off' : 'Authorized';
+}
+
+/** Tell the previous person that the hour request type was changed. */
+export async function sendHourTypeChangedEmail({
+    toEmp,
+    changedByName = '',
+    employeeName = '',
+    date = '',
+    fromType = '',
+    toType = '',
+    hours = 0,
+    recordIds = [],
+}) {
+    try {
+        const mail = createTransport();
+        const { email: to } = resolveEmployeeEmail(toEmp || {});
+        if (!mail || !to) return;
+        const who = changedByName || 'Someone';
+        const subject = `Hour request changed to ${hourTypeLabel(toType)}`;
+        const html = `
+            <p>Hello,</p>
+            <p><strong>${who}</strong> changed the hour request for <strong>${employeeName || 'the employee'}</strong> on <strong>${date || 'this day'}</strong>.</p>
+            <p><strong>From:</strong> ${hourTypeLabel(fromType)}<br><strong>To:</strong> ${hourTypeLabel(toType)}<br><strong>Approved hours:</strong> ${hours}</p>
+        `;
+        await mail.transporter.sendMail({
+            from: `"VeRP System" <${mail.from}>`,
+            to,
+            subject,
+            html,
+        });
+        await keepSentMail({
+            from: mail.from,
+            to: [to],
+            subject,
+            html,
+            recordIds,
+            emailType: 'Hour request type changed',
+        });
+    } catch (err) {
+        console.error('[AttendanceChangeEmail] hour type change email failed:', err?.message || err);
     }
 }
 
@@ -395,6 +439,10 @@ export async function sendAttendanceLeaveDecisionEmail({
         const title = approved ? 'Leave Request Approved' : 'Leave Request Rejected';
         const shownDate = dateLabel || date;
         const why = String(rejectReason || '').trim();
+        const base = emailFrontendUrl();
+        const group = String(employee?.staffType || 'office').trim().toLowerCase() || 'office';
+        const day = String(date || '').trim();
+        const buttonUrl = `${base}/HRM/Attendance/mark?date=${encodeURIComponent(day)}&staffType=${encodeURIComponent(group)}&group=${encodeURIComponent(group)}&blinkEmployee=${encodeURIComponent(String(employee?._id || ''))}`;
         const body = approved
             ? `Your leave request for <strong>${shownDate}</strong> was <strong>approved</strong>. Status set to <strong>${finalLabel || requestedLabel}</strong>.`
             : `Your leave request for <strong>${shownDate}</strong> was <strong>rejected</strong>. Status remains <strong>${finalLabel || 'unchanged'}</strong>.${
@@ -410,6 +458,11 @@ export async function sendAttendanceLeaveDecisionEmail({
                     <div style="padding:24px;">
                         <p>Dear <strong>${empName}</strong>,</p>
                         <p>${body}</p>
+                        <div style="text-align:center;margin-top:24px;">
+                            <a href="${buttonUrl}" style="background:#EA3D2F;color:#fff;text-decoration:none;padding:12px 24px;border-radius:8px;font-weight:600;display:inline-block;">
+                                Open this day
+                            </a>
+                        </div>
                     </div>
                 </div>
             `;
@@ -474,7 +527,8 @@ export async function sendAttendanceDirectChangeEmail({
                 ? `<p style="margin:0 0 8px;"><strong>Time:</strong> ${timeIn || '—'} – ${timeOut || '—'}</p>`
                 : '';
         const base = emailFrontendUrl();
-        const buttonUrl = `${base}/HRM/Attendance/mark?date=${encodeURIComponent(String(date || ''))}`;
+        const group = String(employee?.staffType || 'office').trim().toLowerCase() || 'office';
+        const buttonUrl = `${base}/HRM/Attendance/mark?date=${encodeURIComponent(String(date || ''))}&staffType=${encodeURIComponent(group)}&group=${encodeURIComponent(group)}&blinkEmployee=${encodeURIComponent(String(employee?._id || ''))}`;
 
         const subjectLine = `Attendance updated: ${empName} — ${date || ''}`;
         await Promise.all(

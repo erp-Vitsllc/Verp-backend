@@ -19,26 +19,22 @@ export function isTwoStepLeaveKind(kind) {
 }
 
 /**
- * A request starts with the primary reportee.
- * It starts with HR when there is no reportee, or the reportee is HR.
+ * A request starts with the primary reportee, including when that person is also HR.
+ * It starts with HR only when the employee has no primary reportee.
  */
 export function openingLeaveApprovalStage(reporteeId, hrId) {
     const reportee = String(reporteeId || '').trim();
-    const hr = String(hrId || '').trim();
-    if (reportee && reportee !== hr) return LEAVE_STAGE_REPORTEE;
+    if (reportee) return LEAVE_STAGE_REPORTEE;
     return LEAVE_STAGE_HR;
 }
 
 /**
- * Rows saved before the two-step field existed:
- * future authorized and annual leave were sent straight to HR.
- * Everything else was waiting on the primary reportee.
+ * Rows saved before the stage field existed wait on the primary reportee.
+ * A stored stage is kept, including a request HR is already reviewing.
  */
 export function inferLeaveApprovalStage(record, { reporteeId = '', hrId = '' } = {}) {
     const explicit = String(record?.leaveApprovalStage || '').trim();
     if (explicit === LEAVE_STAGE_REPORTEE || explicit === LEAVE_STAGE_HR) return explicit;
-    const kind = String(record?.leaveRequestKind || '').trim();
-    if (kind === 'future_leave' || kind === 'future_annual') return LEAVE_STAGE_HR;
     return openingLeaveApprovalStage(reporteeId, hrId);
 }
 

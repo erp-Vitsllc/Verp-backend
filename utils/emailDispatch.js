@@ -330,7 +330,7 @@ export async function findEmailsForTask({ ids = [], prefixes = [], focus = '', r
 
     let rows = await EmailNotificationLog.find(query)
         .sort({ sentAt: -1 })
-        .limit(40)
+        .limit(200)
         .select('from to cc subject html sentAt emailType module recordId')
         .lean();
 

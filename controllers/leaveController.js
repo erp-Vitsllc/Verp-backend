@@ -30,6 +30,22 @@ import {
     normalizeStaffType,
 } from '../utils/workingTimeHelpers.js';
 
+function shiftDateKey(dateKey, days) {
+    const [year, month, day] = String(dateKey || '').split('-').map(Number);
+    if (![year, month, day].every(Number.isFinite)) return '';
+    const next = new Date(Date.UTC(year, month - 1, day + Number(days || 0)));
+    return `${next.getUTCFullYear()}-${String(next.getUTCMonth() + 1).padStart(2, '0')}-${String(next.getUTCDate()).padStart(2, '0')}`;
+}
+
+function requestLeaveWeight(row) {
+    const part = String(row?.leaveRequestDayPart || '').trim();
+    if (part === 'half') return 0.5;
+    if (part === 'quarter') return 0.25;
+    const fraction = Number(row?.leaveDayFraction);
+    if (fraction > 0 && fraction < 1) return fraction;
+    return 1;
+}
+
 const LEAVE_COUNT_KEYS = [
     'authorized_leave',
     'unauthorized_leave',
@@ -274,6 +290,60 @@ export async function getEmployeeLeaveDirectory(req, res) {
             countedDays.add(dayKey);
             if (!countsByEmp[id]) countsByEmp[id] = {};
             countsByEmp[id][key] = (countsByEmp[id][key] || 0) + 1;
+        }
+
+        const requestRows =
+            mongoIds.length === 0
+                ? []
+                : await Attendance.find({
+                      $and: [
+                          partyMatch,
+                          { leaveRequestStatus: { $in: ['pending', 'approved'] } },
+                          { requestedStatusKey: { $in: LEAVE_COUNT_KEYS } },
+                          {
+                              $or: [
+                                  { date: { $gte: from, $lte: to } },
+                                  {
+                                      leaveRequestFromDate: { $lte: to },
+                                      leaveRequestToDate: { $gte: from },
+                                  },
+                              ],
+                          },
+                      ],
+                  })
+                      .select(
+                          'employeeMongoId employeeId date statusKey requestedStatusKey leaveRequestStatus leaveRequestFromDate leaveRequestToDate leaveRequestDayPart leaveDayFraction',
+                      )
+                      .lean()
+                      .maxTimeMS(12000);
+
+        for (const row of requestRows || []) {
+            const key = String(row.requestedStatusKey || '').trim();
+            if (!LEAVE_COUNT_KEYS.includes(key)) continue;
+            if (!isLeaveEntryVisible(row, visibility, visibilityByCode)) continue;
+            const id =
+                (visibility.has(String(row.employeeMongoId || ''))
+                    ? String(row.employeeMongoId)
+                    : '') ||
+                mongoByCode.get(String(row.employeeId || '').trim()) ||
+                '';
+            if (!id) continue;
+            const rangeStart = String(row.leaveRequestFromDate || row.date || '').trim();
+            const rangeEnd = String(row.leaveRequestToDate || row.date || rangeStart).trim();
+            if (!/^\d{4}-\d{2}-\d{2}$/.test(rangeStart)) continue;
+            const weight = requestLeaveWeight(row);
+            let cursor = rangeStart > from ? rangeStart : from;
+            const endKey = rangeEnd < to ? rangeEnd : to;
+            while (cursor && cursor <= endKey) {
+                const dayKey = `${id}|${cursor}`;
+                if (!countedDays.has(dayKey)) {
+                    countedDays.add(dayKey);
+                    if (!countsByEmp[id]) countsByEmp[id] = {};
+                    countsByEmp[id][key] = (countsByEmp[id][key] || 0) + weight;
+                }
+                if (cursor === endKey) break;
+                cursor = shiftDateKey(cursor, 1);
+            }
         }
 
         const historicalProfiles = await loadHistoricalLeaveProfilesByEmployeeId(enrolledCodes);

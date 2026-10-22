@@ -172,6 +172,54 @@ async function mailEmployee(emp, { subject, html, recordId, emailType }) {
     return sendTaskActivityEmail({ to: [to], subject, html, recordId, emailType });
 }
 
+async function businessEmail(emp) {
+    if (!emp) return "";
+    const resolved = await resolveEmployeeEmailWithReporteeLoaded(emp);
+    return String(resolved?.email || "").trim();
+}
+
+/** Assignee and requester both get every task email. Mentioned people are added. */
+async function taskRecipientEmails(task, extraPeople = []) {
+    const assignee = isObjectId(task?.assignee) ? await findAssignee(String(task.assignee)) : null;
+    const requester = await findEmployeeByName(task?.requestedByName);
+    const emails = [];
+    for (const person of [assignee, requester, ...extraPeople]) {
+        const email = await businessEmail(person);
+        if (email) emails.push(email);
+    }
+    return {
+        to: [...new Set(emails)],
+        assignee,
+        requester,
+        assigneeName: task?.assigneeName || personName(assignee),
+        requesterName: task?.requestedByName || personName(requester),
+    };
+}
+
+async function emailTaskHistory(task, { event, detail, actorName }) {
+    const audience = await taskRecipientEmails(task);
+    if (!audience.to.length) return { sent: false };
+    const taskKey = task?.sourceDashboardActionId ? String(task.sourceDashboardActionId) : `manual-${task?._id || ""}`;
+    const link = `${emailFrontendUrl()}/task-manager/${encodeURIComponent(taskKey)}`;
+    try {
+        return await sendTaskActivityEmail({
+            to: audience.to,
+            subject: `Task ${event}: ${task?.taskName || "Task"}`,
+            html: taskActionHtml({
+                hello: "there",
+                lines: [`${actorName || "Someone"} — ${detail || event}`],
+                taskName: task?.taskName,
+                link,
+            }),
+            recordId: String(task?.sourceDashboardActionId || task?._id || ""),
+            emailType: `Task ${event}`,
+        });
+    } catch (error) {
+        console.error("Task history email failed:", error);
+        return { sent: false };
+    }
+}
+
 function sanitizeComment(value) {
     return String(value || "")
         .replace(/<(?!\/?(b|strong|i|em|br)\b)[^>]*>/gi, "")
@@ -203,13 +251,10 @@ async function notifyParties(task, { notifyKind, subject, html }) {
         requesterName: task?.requestedByName || "",
     };
     if (!enabled) return result;
-    const assignee = isObjectId(task?.assignee) ? await findAssignee(String(task.assignee)) : null;
-    const requester = await findEmployeeByName(task?.requestedByName);
-    if (!result.assigneeName) result.assigneeName = personName(assignee);
-    if (!result.requesterName) result.requesterName = personName(requester);
-    const assigneeEmail = assignee?.companyEmail || assignee?.workEmail || "";
-    const requesterEmail = requester?.companyEmail || requester?.workEmail || "";
-    const to = [...new Set([assigneeEmail, requesterEmail].map((item) => String(item || "").trim()).filter(Boolean))];
+    const audience = await taskRecipientEmails(task);
+    if (!result.assigneeName) result.assigneeName = audience.assigneeName;
+    if (!result.requesterName) result.requesterName = audience.requesterName;
+    const to = audience.to;
     if (!to.length) return result;
     try {
         const sent = await sendTaskActivityEmail({
@@ -221,8 +266,8 @@ async function notifyParties(task, { notifyKind, subject, html }) {
         });
         result.emailSent = Boolean(sent.sent);
         if (result.emailSent) {
-            result.assigneeNotified = Boolean(assigneeEmail);
-            result.requesterNotified = Boolean(requesterEmail);
+            result.assigneeNotified = Boolean(audience.assignee);
+            result.requesterNotified = Boolean(audience.requester);
         }
     } catch (error) {
         console.error("Task activity email failed:", error);
@@ -257,16 +302,15 @@ async function notifyWorkUpdateAudience(task, { text, authorName, mentionIds, ac
     };
     if (settings.workUpdate === false) return result;
     const ids = [...new Set((Array.isArray(mentionIds) ? mentionIds : []).map((id) => String(id || "")).filter(isObjectId))];
-    let people = [];
-    if (ids.length) {
-        people = await EmployeeBasic.find({ _id: { $in: ids }, status: { $ne: "Left User" } })
-            .select("firstName lastName companyEmail workEmail")
-            .lean();
-    } else if (isObjectId(task?.assignee)) {
-        const assignee = await findAssignee(String(task.assignee));
-        if (assignee) people = [assignee];
-    }
-    const to = [...new Set(people.map((person) => person.companyEmail || person.workEmail).map((item) => String(item || "").trim()).filter(Boolean))];
+    const mentioned = ids.length
+        ? await EmployeeBasic.find({ _id: { $in: ids }, status: { $ne: "Left User" } })
+            .select("firstName lastName companyEmail workEmail primaryReportee status")
+            .lean()
+        : [];
+    const audience = await taskRecipientEmails(task, mentioned);
+    if (!result.assigneeName) result.assigneeName = audience.assigneeName;
+    if (!result.requesterName) result.requesterName = audience.requesterName;
+    const to = audience.to;
     if (!to.length) return result;
     const taskKey = task?.sourceDashboardActionId ? String(task.sourceDashboardActionId) : `manual-${task?._id || ""}`;
     const taskLink = `${emailFrontendUrl()}/task-manager/${encodeURIComponent(taskKey)}`;
@@ -286,7 +330,8 @@ async function notifyWorkUpdateAudience(task, { text, authorName, mentionIds, ac
             `,
         });
         result.emailSent = Boolean(sent.sent);
-        result.assigneeNotified = Boolean(result.emailSent && !ids.length);
+        result.assigneeNotified = Boolean(result.emailSent && audience.assignee);
+        result.requesterNotified = Boolean(result.emailSent && audience.requester);
     } catch (error) {
         console.error("Task work update email failed:", error);
     }
@@ -576,7 +621,7 @@ async function notifyRequesterTaskClosed(task, target) {
     if (saved.requesterNotifiedAt) return { sent: false, already: true };
     if (isSystemRequester(task.requestedByName)) return { sent: false, system: true };
     const requester = await findEmployeeByName(personBaseName(task.requestedByName));
-    const companyEmail = String(requester?.companyEmail || "").trim();
+    const companyEmail = await businessEmail(requester);
     const requesterName = personName(requester) || personBaseName(task.requestedByName) || "there";
     const link = taskDetailLink(target);
     const recordId = String(target?.action?._id || task._id || "");
@@ -893,7 +938,28 @@ async function loadTaskSourceFacts(action) {
     return {};
 }
 
+async function alignTaskWithAttendanceRequest(target) {
+    const task = target?.task;
+    const requestId = String(target?.action?.requestId || "").trim();
+    if (!task?.save || !isObjectId(requestId)) return;
+    const change = await AttendanceChangeRequest.findById(requestId).select("stage").lean()
+        || await AttendanceChangeRequest.findOne({
+            "proposed.attendanceId": requestId,
+            stage: { $ne: "superseded" },
+        }).sort({ updatedAt: -1 }).select("stage").lean();
+    const stage = String(change?.stage || "");
+    const open = stage === "pending_reportee" || stage === "pending_hr" || stage === "pending_requester";
+    if (stage === "rejected" && task.status !== "Cancelled") {
+        task.status = "Cancelled";
+        await task.save();
+    } else if (open && ["Completed", "Cancelled", "Rejected"].includes(String(task.status || ""))) {
+        task.status = "In Progress";
+        await task.save();
+    }
+}
+
 async function buildDetail(target, viewer) {
+    await alignTaskWithAttendanceRequest(target);
     const manual = target.kind === "manual";
     const task = target.task;
     const action = target.action;
@@ -916,6 +982,13 @@ async function buildDetail(target, viewer) {
         if (!cardAssignee.name) cardAssignee.name = task?.assigneeName || "Unassigned";
     const cardRequester = contactCard(requester);
     if (!cardRequester.name) cardRequester.name = personBaseName(requesterName) || requesterName;
+    const heldAssignee = String(task?.closeRequest?.returnAssigneeName || "").trim();
+    if (heldAssignee) {
+        const requesterPlain = personBaseName(cardRequester.name) || cardRequester.name;
+        cardAssignee.name = !requesterPlain || requesterPlain.toLowerCase() === heldAssignee.toLowerCase()
+            ? heldAssignee
+            : `${heldAssignee} (${requesterPlain})`;
+    }
     const originalAssigneeName = String(task?.closeRequest?.originalAssigneeName || "").trim();
     const requesterLabel = reassignedRequesterLabel(cardRequester.name, originalAssigneeName);
 
@@ -1251,6 +1324,13 @@ export const updateTaskManagerTask = async (req, res) => {
             if (assigneeChanged) {
                 task.history.push(historyEntry("Reassigned", `Assignee changed to ${assigneeName}.`, viewer.name));
             }
+            await emailTaskHistory(task, {
+                event: assigneeChanged ? "Reassigned" : "Edited",
+                detail: assigneeChanged
+                    ? `Assignee changed to ${assigneeName}.`
+                    : "Task details were updated.",
+                actorName: viewer.name,
+            });
             saved = await task.save();
             await syncManualTaskNotification(saved);
         } else {
@@ -1280,6 +1360,11 @@ export const updateTaskManagerTask = async (req, res) => {
             if (storedFiles.length) overlay.attachments = [...(overlay.attachments || []), ...storedFiles];
             overlay.history = overlay.history || [];
             overlay.history.push(historyEntry("Edited", "Task details were updated.", viewer.name));
+            await emailTaskHistory(overlay, {
+                event: "Edited",
+                detail: "Task details were updated.",
+                actorName: viewer.name,
+            });
             saved = await overlay.save();
             action.extra1 = taskName;
             action.assignedTo = assignee._id;
@@ -1769,9 +1854,6 @@ export const submitTaskCompletion = async (req, res) => {
                 completesAt: null,
             };
             task.markModified("closeRequest");
-            task.assignee = requester._id;
-            task.assigneeEmpId = requester.employeeId || "";
-            task.assigneeName = requesterName;
             task.status = "Pending";
             task.history = task.history || [];
             task.history.push(historyEntry("Pending Review", `${viewer.name} completed this task. ${note.text}`, viewer.name));
@@ -1924,6 +2006,11 @@ export const reviewGeneralTask = async (req, res) => {
             return res.status(403).json({ message: "Only the original requester can review this task." });
         }
         if (decision === "approve") {
+            if (saved.returnAssigneeId) {
+                task.assignee = saved.returnAssigneeId;
+                task.assigneeEmpId = saved.returnAssigneeEmpId || "";
+                task.assigneeName = saved.returnAssigneeName || task.assigneeName;
+            }
             task.status = "Pending";
             task.closeRequest = {
                 ...saved,
@@ -2989,9 +3076,23 @@ async function buildTaskWorkflow(target, viewer) {
         });
     }
 
-    const raw = String(task?.status || action?.status || "Pending");
-    const finished = raw === "Completed" || raw === "Approved";
-    const rejected = raw === "Cancelled" || raw === "Rejected" || raw === "Dismissed";
+    const stage = String(changeRequest?.stage || "");
+    const requestOpen = stage === "pending_reportee" || stage === "pending_hr" || stage === "pending_requester";
+    const requestRejected = stage === "rejected";
+    if (task?.save && requestRejected && task.status !== "Cancelled") {
+        task.status = "Cancelled";
+        await task.save();
+    } else if (task?.save && requestOpen && ["Completed", "Cancelled", "Rejected"].includes(String(task.status || ""))) {
+        task.status = "In Progress";
+        await task.save();
+    }
+    const raw = requestRejected
+        ? "Cancelled"
+        : requestOpen
+          ? "In Progress"
+          : String(task?.status || action?.status || "Pending");
+    const finished = !requestRejected && !requestOpen && (raw === "Completed" || raw === "Approved");
+    const rejected = requestRejected || raw === "Cancelled" || raw === "Rejected" || raw === "Dismissed";
     const workflowLocked = !manual && action?.requestType !== "Task Manager";
     let current = -1;
     for (let index = steps.length - 1; index >= 0; index -= 1) {
@@ -3011,6 +3112,11 @@ async function buildTaskWorkflow(target, viewer) {
         });
     }
     if (current < 0) current = Math.max(0, steps.findIndex((step) => step.key === "assigned" || step.key === "reassigned"));
+    if (requestRejected) {
+        const rejectedKey = changeRequest?.decidedAtHr ? "hr" : "reportee";
+        const rejectedIndex = steps.findIndex((step) => step.key === rejectedKey);
+        if (rejectedIndex >= 0) current = rejectedIndex;
+    }
 
     steps.forEach((step, index) => {
         if (finished) step.status = "Completed";
@@ -3100,6 +3206,11 @@ export const decideTaskManagerWorkflow = async (req, res) => {
         if (decision === "reject") {
             task.status = "Cancelled";
             task.history.push(historyEntry("Rejected", `${current.title} was rejected.`, viewer.name));
+            await emailTaskHistory(task, {
+                event: "Rejected",
+                detail: `${current.title} was rejected.`,
+                actorName: viewer.name,
+            });
             await task.save();
             await closeReassignmentNotices(task);
             await syncManualTaskNotification(task);
@@ -3116,6 +3227,11 @@ export const decideTaskManagerWorkflow = async (req, res) => {
                 task.assigneeName = assigneeName;
                 task.status = "In Progress";
                 task.history.push(historyEntry("Approved", `${current.title} approved. Sent to ${assigneeName}.`, viewer.name));
+                await emailTaskHistory(task, {
+                    event: "Approved",
+                    detail: `${current.title} approved. Sent to ${assigneeName}.`,
+                    actorName: viewer.name,
+                });
                 await task.save();
                 await syncManualTaskNotification(task);
                 const destination = moduleForText(task.taskName, task.description, task.taskType);
@@ -3146,6 +3262,11 @@ export const decideTaskManagerWorkflow = async (req, res) => {
             } else {
                 task.status = "Completed";
                 task.history.push(historyEntry("Approved", `${current.title} approved. The task is completed.`, viewer.name));
+                await emailTaskHistory(task, {
+                    event: "Approved",
+                    detail: `${current.title} approved. The task is completed.`,
+                    actorName: viewer.name,
+                });
                 await task.save();
                 await closeReassignmentNotices(task);
                 await syncManualTaskNotification(task);

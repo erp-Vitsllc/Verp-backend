@@ -576,6 +576,15 @@ export async function getEmployeeAnnualLeaveEligibility(req, res) {
         if (!employee || isCompanyShellEmployee(employee)) {
             return res.status(404).json({ message: 'Employee not found.' });
         }
+        const actor = await resolveActorEmployee(req);
+        const isSelf = actor?._id && String(actor._id) === String(employee._id);
+        if (!isSelf) {
+            const userId = req.user?._id || req.user?.id;
+            const canView = Boolean(userId && (await hasPermission(userId, 'hrm_leave', 'view')));
+            if (!canView) {
+                return res.status(403).json({ message: 'You can only check your own annual leave eligibility.' });
+            }
+        }
         const from = String(req.query?.from || req.query?.startDate || '').trim();
         const to = String(req.query?.to || req.query?.endDate || '').trim();
         const eligibility = await loadAnnualLeaveEligibilityForEmployee(employee, { from, to });
@@ -932,19 +941,12 @@ export async function getLeavePendingInbox(req, res) {
                 employeeMongoId: { $in: reporteeIds },
                 $or: [
                     { leaveApprovalStage: 'pending_reportee' },
-                    {
-                        leaveApprovalStage: { $in: ['', null] },
-                        leaveRequestKind: { $nin: ['future_leave', 'future_annual'] },
-                    },
+                    { leaveApprovalStage: { $in: ['', null] } },
                 ],
             });
         }
         if (actorIsHr) {
             waitingOnActor.push({ leaveApprovalStage: 'pending_hr' });
-            waitingOnActor.push({
-                leaveApprovalStage: { $in: ['', null] },
-                leaveRequestKind: { $in: ['future_leave', 'future_annual'] },
-            });
         }
 
         let grouped = [];
@@ -1274,6 +1276,7 @@ async function writePendingLeaveDay({
     reason,
     annualLeaveNotEligible = false,
     leaveApprovalStage = '',
+    approvedNow = false,
 }) {
     const employeeName = employeeDisplayName(employee) || 'Employee';
     let record = await Attendance.findOne({
@@ -1303,8 +1306,8 @@ async function writePendingLeaveDay({
     record.requestedStatusKey = spec.requestedStatusKey;
     record.requestedStatusLabel = spec.requestedStatusLabel;
     record.leaveRequestKind = spec.kind;
-    record.leaveRequestStatus = 'pending';
-    record.leaveApprovalStage = leaveApprovalStage || record.leaveApprovalStage || '';
+    record.leaveRequestStatus = approvedNow ? 'approved' : 'pending';
+    record.leaveApprovalStage = approvedNow ? '' : leaveApprovalStage || record.leaveApprovalStage || '';
     record.leaveRequestDayPart = 'full';
     record.leaveRequestTimeIn = '';
     record.leaveRequestTimeOut = '';
@@ -1312,13 +1315,17 @@ async function writePendingLeaveDay({
     record.leaveRequestToDate = to;
     record.leaveRequestGroupId = groupId;
     record.leaveRequestedAt = requestedAt;
-    record.leaveDecidedAt = null;
+    record.leaveDecidedAt = approvedNow ? requestedAt : null;
     record.leaveDecidedBy = null;
     record.leaveRequestReason = reason;
     record.annualLeaveNotEligible = Boolean(annualLeaveNotEligible);
     record.approvalStatus = '';
     record.leavePayType = '';
     record.markedBy = markedBy;
+    if (approvedNow) {
+        record.statusKey = spec.requestedStatusKey;
+        record.statusLabel = spec.requestedStatusLabel;
+    }
     await record.save();
     return record;
 }
@@ -1567,7 +1574,8 @@ export async function applyLeaveRange(req, res) {
                 annualEligibility?.notEligible &&
                 !hrOverride,
         );
-        const approveNow = shouldApprove && !escalateIneligibleAnnual;
+        const hrApprovesAnnual = Boolean(hrOverride && spec.requestedStatusKey === 'on_leave');
+        const approveNow = (shouldApprove && !escalateIneligibleAnnual) || hrApprovesAnnual;
         const existingGroup = attendanceId ? await loadEditableLeaveGroup(attendanceId) : null;
         if (attendanceId && !existingGroup) {
             return res.status(400).json({ message: 'No leave request found to update.' });
@@ -1728,8 +1736,27 @@ export async function applyLeaveRange(req, res) {
                         : reason,
                 annualLeaveNotEligible: escalateIneligibleAnnual,
                 leaveApprovalStage: approvalStage,
+                approvedNow: hrApprovesAnnual,
             });
             saved.push(record);
+        }
+
+        if (hrApprovesAnnual) {
+            return res.status(200).json({
+                message: ineligibleNotes.length
+                    ? `Annual leave approved. ${ineligibleNotes.join(' ')}`
+                    : `Annual leave approved for ${dayCount} day${dayCount === 1 ? '' : 's'}.`,
+                from,
+                to,
+                dayCount,
+                statusKey: spec.requestedStatusKey,
+                statusLabel: spec.requestedStatusLabel,
+                leaveType: spec.leaveType,
+                leaveRequestStatus: 'approved',
+                annualLeaveNotEligible: Boolean(ineligibleNotes.length),
+                attendanceId: saved[0] ? String(saved[0]._id) : '',
+                count: saved.length,
+            });
         }
 
         if (!approveNow) {

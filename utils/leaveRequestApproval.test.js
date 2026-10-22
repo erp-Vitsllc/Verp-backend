@@ -12,8 +12,8 @@ describe('openingLeaveApprovalStage', () => {
         assert.equal(openingLeaveApprovalStage('mgr', 'hr'), 'pending_reportee');
     });
 
-    it('starts with HR when the reportee is HR', () => {
-        assert.equal(openingLeaveApprovalStage('hr', 'hr'), 'pending_hr');
+    it('starts with the primary reportee even when that person is also HR', () => {
+        assert.equal(openingLeaveApprovalStage('hr', 'hr'), 'pending_reportee');
     });
 
     it('starts with HR when there is no reportee', () => {
@@ -32,13 +32,13 @@ describe('inferLeaveApprovalStage', () => {
         );
     });
 
-    it('treats older future leave as already with HR', () => {
+    it('treats older future leave as waiting on the primary reportee', () => {
         assert.equal(
             inferLeaveApprovalStage(
                 { leaveRequestKind: 'future_annual' },
                 { reporteeId: 'mgr', hrId: 'hr' },
             ),
-            'pending_hr',
+            'pending_reportee',
         );
     });
 

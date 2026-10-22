@@ -90,11 +90,7 @@ router.get(
 );
 router.get('/employees/:id/attendance-profile/access', getEmployeeAttendanceProfileAccess);
 router.get('/employees/:id/attendance-profile', getEmployeeAttendanceProfile);
-router.get(
-    '/employees/:id/annual-eligibility',
-    checkPermission('hrm_leave', 'view'),
-    getEmployeeAnnualLeaveEligibility,
-);
+router.get('/employees/:id/annual-eligibility', getEmployeeAnnualLeaveEligibility);
 router.get('/', checkPermission('hrm_leave', 'view'), getEmployeeLeaveDirectory);
 
 export default router;

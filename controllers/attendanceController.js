@@ -47,6 +47,7 @@ import { syncDashboardAction } from '../utils/syncDashboard.js';
 import {
     sendAttendanceLeaveDecisionEmail,
     sendAttendanceDirectChangeEmail,
+    sendHourTypeChangedEmail,
 } from '../utils/sendAttendanceLeaveEmails.js';
 import {
     isCompanyShellEmployee,
@@ -221,7 +222,7 @@ function isYellowClarificationEligible(record) {
     if (!record) return false;
     const key = String(record.statusKey || '').trim();
     if (YELLOW_REQUEST_STATUS_KEYS.has(key)) return true;
-    if (key === 'unauthorized_leave' && isMispunchReasonText(record.reason)) return true;
+    if (key === 'unauthorized_leave') return true;
     if (record.timeIn && !record.timeOut && (key === 'on_office' || key === 'late_arrived' || key === 'work_from_home')) {
         return true;
     }
@@ -2469,7 +2470,7 @@ export async function getMyAttendanceYearSummary(req, res) {
             { year },
         );
         const leaveCycle = await loadCurrentLeaveCycleEligibility({
-            employee: { _id: self._id, employeeId: self.employeeId, staffType },
+            employee: { id: String(self._id), _id: self._id, employeeId: self.employeeId, staffType },
             profile: historicalProfile,
             policy,
             attendanceRecords: paintedDetails,
@@ -3553,7 +3554,15 @@ export async function getAttendancePendingInbox(req, res) {
             reporteeIds,
         });
 
-        const attendanceBellKinds = ['yellow', 'past_late', 'future_late', 'future_early'];
+        const attendanceBellKinds = [
+            'yellow',
+            'past_late',
+            'future_late',
+            'future_early',
+            'leave',
+            'future_leave',
+            'future_annual',
+        ];
         const waitingOnViewer = [];
         if (reporteeIds.length) {
             waitingOnViewer.push({
@@ -3865,6 +3874,9 @@ export async function decideAttendanceChangeRequest(req, res) {
         }
 
         if (request.action === 'hour_adjust') {
+            const previousType = request.proposed?.hourRequestType
+                || (Number(request.proposed?.hoursApproved) === 0 ? 'waived' : 'authorized');
+            const stageBeforeEdit = request.stage;
             const attendanceId = String(request.proposed?.attendanceId || '').trim();
             const source = mongoose.Types.ObjectId.isValid(attendanceId)
                 ? await Attendance.findById(attendanceId)
@@ -3884,6 +3896,31 @@ export async function decideAttendanceChangeRequest(req, res) {
             request.proposed.hoursApproved = edited.hoursApproved;
             request.proposed.reason = edited.reason;
             request.proposed.hourAdjustMode = edited.hourAdjustMode;
+            request.proposed.hourRequestType = edited.hourRequestType;
+            if (edited.hourRequestType && edited.hourRequestType !== previousType) {
+                const notifyId = stageBeforeEdit === 'pending_hr'
+                    ? request.reporteeId
+                    : stageBeforeEdit === 'pending_reportee'
+                      ? request.requestedBy
+                      : '';
+                if (notifyId) {
+                    const notifyEmp = await EmployeeBasic.findById(notifyId)
+                        .select('firstName lastName employeeId companyEmail workEmail email primaryReportee status')
+                        .populate('primaryReportee', 'companyEmail workEmail email status')
+                        .lean();
+                    const changedByName = [actor.firstName, actor.lastName].filter(Boolean).join(' ').trim();
+                    await sendHourTypeChangedEmail({
+                        toEmp: notifyEmp,
+                        changedByName,
+                        employeeName: request.employeeName || '',
+                        date: request.date || '',
+                        fromType: previousType,
+                        toType: edited.hourRequestType,
+                        hours: edited.hoursApproved,
+                        recordIds: [request._id, request.proposed?.attendanceId],
+                    });
+                }
+            }
             request.proposed.statusLabel =
                 request.proposed.hourAdjustKind === 'mispunch'
                     ? 'Misspunch request'
@@ -4476,6 +4513,12 @@ const FUTURE_REQUEST_KINDS = {
         requestedStatusLabel: 'Early go',
         extra2Prefix: 'Future early go',
     },
+    sick_leave: {
+        leaveRequestKind: 'leave',
+        requestedStatusKey: 'sick_leave',
+        requestedStatusLabel: 'Sick Leave',
+        extra2Prefix: 'Sick leave',
+    },
 };
 
 const MAX_FUTURE_REQUEST_DAYS = 62;
@@ -4544,9 +4587,10 @@ export async function requestAttendanceFuture(req, res) {
         const storedFile = await storeLeaveAttachment(req.body?.attachmentData, attachmentName);
         const isMultiDay = fromDate !== toDate;
         const isAnnualLeave = kind === 'annual_leave';
+        const isSickLeave = kind === 'sick_leave';
         const requestedPart = String(req.body?.dayPart || 'full').trim();
         const dayPart =
-            !isMultiDay && !isAnnualLeave && (requestedPart === 'half' || requestedPart === 'quarter')
+            !isMultiDay && !isAnnualLeave && !isSickLeave && (requestedPart === 'half' || requestedPart === 'quarter')
                 ? requestedPart
                 : 'full';
         const session =
@@ -4575,13 +4619,16 @@ export async function requestAttendanceFuture(req, res) {
             });
         }
         if (!spec) {
-            return res.status(400).json({ message: 'Choose Leave, Late arrival, or Early go.' });
+            return res.status(400).json({ message: 'Choose Leave, Sick leave, Late arrival, or Early go.' });
         }
         if (dayPart !== 'full' && !session) {
             return res.status(400).json({ message: 'Choose AM or PM for a half day or quarter day.' });
         }
-        if ((kind === 'leave' || kind === 'late_arrived' || kind === 'early_go') && !reason) {
+        if ((kind === 'leave' || kind === 'sick_leave' || kind === 'late_arrived' || kind === 'early_go') && !reason) {
             return res.status(400).json({ message: 'Reason is required.' });
+        }
+        if (isSickLeave && !storedFile?.attachmentKey) {
+            return res.status(400).json({ message: 'An attachment is required for sick leave.' });
         }
 
         const todayKey = getDubaiDateKey();
@@ -4591,7 +4638,7 @@ export async function requestAttendanceFuture(req, res) {
                 message: 'Authorized leave cannot be requested for today or tomorrow.',
             });
         }
-        if (fromDate <= todayKey) {
+        if (!isSickLeave && fromDate <= todayKey) {
             return res.status(400).json({ message: 'This request is only for future working days.' });
         }
 
@@ -4624,24 +4671,27 @@ export async function requestAttendanceFuture(req, res) {
                 from: fromDate,
                 to: toDate,
             });
-            if (eligibility?.notEligible) {
+            const eligibleOn = String(eligibility?.eligibleOn || '').trim();
+            const beforeEligibleDate = Boolean(
+                eligibility?.cycleNotEligible && (!eligibleOn || fromDate < eligibleOn),
+            );
+            const groupOver = Boolean(eligibility?.groupCap?.over);
+            if (beforeEligibleDate || groupOver) {
                 const lines = [];
-                if (eligibility.cycleNotEligible) {
-                    const required = eligibility.requiredDays || 300;
-                    const done = eligibility.eligibleDays || 0;
+                if (beforeEligibleDate) {
                     lines.push(
-                        `You cannot apply for annual leave. You are not eligible. ${done} of ${required} days are completed from the previous annual leave or joining date to this leave start.`,
+                        eligibleOn
+                            ? `You are not eligible for this annual leave. You can go on ${eligibleOn}. You can contact HR for more information.`
+                            : 'You are not eligible for this annual leave. You can contact HR for more information.',
                     );
                 }
-                if (eligibility.groupCap?.over && eligibility.groupCap.message) {
+                if (groupOver && eligibility.groupCap?.message) {
                     lines.push(eligibility.groupCap.message);
                 }
-                const blockMessage = lines.join(' ') || 'You cannot apply for annual leave for these dates.';
                 return res.status(400).json({
-                    message: blockMessage.includes('contact your HOD')
-                        ? blockMessage
-                        : `${blockMessage} For more information, please contact your HOD.`,
+                    message: lines.join(' ') || 'You are not eligible for this annual leave.',
                     notEligible: true,
+                    eligibleOn,
                     ...eligibility,
                 });
             }
@@ -4651,10 +4701,10 @@ export async function requestAttendanceFuture(req, res) {
         const workingTime = await loadWorkingTimeDoc();
         const scheduleWeek = getWeekForStaffType(workingTime, staffType);
         const offWeekdays = new Set(getOffWeekdayKeys(scheduleWeek));
-        const holidaySet = await loadHolidaySet(todayKey, toDate, staffType);
+        const holidaySet = await loadHolidaySet(isSickLeave && fromDate < todayKey ? fromDate : todayKey, toDate, staffType);
         const firstEligible = firstEligibleAdvanceRequestDate(todayKey, holidaySet, offWeekdays);
 
-        if (!firstEligible || fromDate < firstEligible) {
+        if (!isSickLeave && (!firstEligible || fromDate < firstEligible)) {
             return res.status(400).json({
                 message: `Cannot request for tomorrow. The earliest date is ${firstEligible || 'the second working day'} (one working day ahead, holidays skipped).`,
             });
@@ -4681,6 +4731,18 @@ export async function requestAttendanceFuture(req, res) {
             return res.status(400).json({
                 message: 'This range has no working days — holidays and weekly offs are skipped.',
             });
+        }
+
+        let sickOverflow = new Map();
+        if (isSickLeave) {
+            const allowanceError = await checkEmployeeLeaveAllowance(employee, {
+                statusKey: 'sick_leave',
+                extraDates: requestDates,
+            });
+            if (allowanceError) {
+                return res.status(400).json({ message: allowanceError });
+            }
+            sickOverflow = await resolveSickOverflowStatuses(employee, requestDates);
         }
 
         if (kind === 'late_arrived' || kind === 'early_go') {
@@ -4754,11 +4816,19 @@ export async function requestAttendanceFuture(req, res) {
                     statusLabel: 'Upcoming',
                 });
 
+            const overflowKey = isSickLeave ? sickOverflow.get(dateKey) || 'sick_leave' : '';
+            const dayRequestedKey = overflowKey || spec.requestedStatusKey;
+            const dayRequestedLabel = overflowKey ? leaveStatusLabel(overflowKey) : requestedStatusLabel;
             record.previousStatusKey = record.statusKey || 'not_marked';
             record.previousStatusLabel = record.statusLabel || 'Upcoming';
-            record.requestedStatusKey = spec.requestedStatusKey;
-            record.requestedStatusLabel = requestedStatusLabel;
-            record.leaveRequestReason = reason;
+            record.requestedStatusKey = dayRequestedKey;
+            record.requestedStatusLabel = dayRequestedLabel;
+            record.leaveRequestReason =
+                overflowKey === 'authorized_leave'
+                    ? reason
+                        ? `${reason} · Sick allowance used`
+                        : 'Converted from sick leave after the allowance from last annual leave was used'
+                    : reason;
             record.leaveRequestKind = spec.leaveRequestKind;
             record.attachmentName = storedFile?.attachmentName || attachmentName;
             if (storedFile?.attachmentKey) {

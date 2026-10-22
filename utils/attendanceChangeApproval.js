@@ -236,7 +236,9 @@ function changeReviewPath(request, employee) {
     const params = new URLSearchParams();
     const date = String(request?.date || '').trim();
     if (/^\d{4}-\d{2}-\d{2}$/.test(date)) params.set('date', date);
-    params.set('staffType', normalizeStaffType(request?.staffType || employee?.staffType) || 'office');
+    const group = normalizeStaffType(request?.staffType || employee?.staffType) || 'office';
+    params.set('staffType', group);
+    params.set('group', group);
     const person = String(request?.employeeMongoId || employee?._id || '').trim();
     if (person) params.set('blinkEmployee', person);
     const id = request?._id ? String(request._id) : '';
@@ -456,6 +458,8 @@ function pendingChangeRow(row, names = new Map()) {
         hoursTaken: Number(row.proposed?.hoursTaken) || 0,
         hoursMax: Number(row.proposed?.hoursMax) || 0,
         hourAdjustKind: row.proposed?.hourAdjustKind || '',
+        hourAdjustMode: row.proposed?.hourAdjustMode || '',
+        hourRequestType: row.proposed?.hourRequestType || '',
         hourAdjustFlexible: row.proposed?.hourAdjustFlexible === true,
         targetDate: row.proposed?.targetDate || '',
         confirmNextDay: row.proposed?.confirmNextDay === true,

@@ -403,6 +403,8 @@ export function formatTaskDisplayParts({
         || typeKey === "utility entry status change"
     ) {
         const { type: utilityType, account } = utilityParts(body, meta);
+        const grouped = Number(meta.groupedBillCount) || 0;
+        if (grouped > 1) return uniqueLines(utilityType, [`${grouped} accounts`]);
         return uniqueLines(utilityType, [account]);
     }
 

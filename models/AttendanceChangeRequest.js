@@ -83,6 +83,8 @@ const attendanceChangeRequestSchema = new mongoose.Schema(
             hoursTaken: { type: Number, default: 0 },
             hoursMax: { type: Number, default: 0 },
             hoursApproved: { type: Number, default: 0 },
+            hourAdjustMode: { type: String, enum: ['', 'authorized', 'custom'], default: '', trim: true },
+            hourRequestType: { type: String, enum: ['', 'waived', 'authorized'], default: '', trim: true },
             hourAdjustFlexible: { type: Boolean, default: false },
         },
         previous: {

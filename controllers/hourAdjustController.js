@@ -183,13 +183,20 @@ export function normalizeHourAdjustEdit(proposed = {}, body = {}) {
     if (approvedHours > max + 0.001) {
         return { error: `Approved hours cannot be more than ${max}.` };
     }
-    const mode = body?.hourAdjustMode === 'custom' ? 'custom' : body?.hourAdjustMode === 'authorized' ? 'authorized' : '';
+    const sentMode = body?.hourAdjustMode === 'custom' || body?.hourAdjustMode === 'authorized' ? body.hourAdjustMode : '';
+    const keptMode = proposed?.hourAdjustMode === 'custom' || proposed?.hourAdjustMode === 'authorized' ? proposed.hourAdjustMode : '';
+    const mode = sentMode || keptMode;
     const taken = roundHours(proposed?.hoursTaken);
     const storedHours = mode === 'authorized' ? taken : approvedHours;
     if (storedHours > max + 0.001) {
         return { error: `Approved hours cannot be more than ${max}.` };
     }
-    return { hoursApproved: storedHours, reason: nextReason, hourAdjustMode: mode };
+    return {
+        hoursApproved: storedHours,
+        reason: nextReason,
+        hourAdjustMode: mode,
+        hourRequestType: storedHours === 0 ? 'waived' : 'authorized',
+    };
 }
 
 async function emailDirectHourChange({ actor, hr, employee, record, previousLabel, nextLabel, reason }) {
@@ -389,6 +396,7 @@ export async function requestHourAdjust(req, res) {
                 hoursMax: max,
                 hoursApproved: storedHours,
                 hourAdjustMode: mode,
+                hourRequestType: storedHours === 0 ? 'waived' : 'authorized',
                 hourAdjustFlexible: flexible,
             },
             previous: {

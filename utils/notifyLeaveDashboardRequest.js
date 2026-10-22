@@ -39,21 +39,27 @@ export function leaveDashboardReviewPath({
     requestedStatusKey = '',
     staffType = '',
     employeeMongoId = '',
+    employeeName = '',
 } = {}) {
+    const group = normalizeStaffTypeKey(staffType) || 'office';
+    const person = String(employeeMongoId || '').trim();
     if (String(requestedStatusKey || '') === 'sick_leave') {
         const params = new URLSearchParams();
         if (from) params.set('date', from);
-        params.set('staffType', normalizeStaffTypeKey(staffType) || 'office');
-        if (employeeMongoId) params.set('blinkEmployee', String(employeeMongoId));
+        params.set('staffType', group);
+        params.set('group', group);
+        if (person) params.set('blinkEmployee', person);
         if (attendanceId) params.set('leaveAttendanceId', String(attendanceId));
         return `/HRM/Attendance/mark?${params.toString()}`;
     }
     const params = new URLSearchParams();
+    if (person) params.set('employeeId', person);
+    if (employeeName) params.set('employeeName', employeeName);
     if (from) params.set('from', from);
     if (to) params.set('to', to);
+    params.set('group', group);
     if (attendanceId) params.set('approvalId', String(attendanceId));
-    const query = params.toString();
-    return query ? `/HRM/Leave/annual-leave?${query}` : '/HRM/Leave/annual-leave';
+    return `/HRM/Leave/annual-leave?${params.toString()}`;
 }
 
 async function mailIdsForRequest({ requestId, requestType }) {
@@ -152,6 +158,7 @@ export async function notifyLeaveRequestApprover({
             requestedStatusKey,
             staffType,
             employeeMongoId: employee?._id,
+            employeeName: empName,
         }),
         buttonLabel: sickLeave ? 'Open attendance' : 'Open Leave Approval',
         emailTitle: hrStep ? `${label} — HR approval` : `${label} Request`,
@@ -218,6 +225,7 @@ export async function notifyFlowchartHrOfIneligibleAnnualLeave({
             from: start,
             to: end,
             requestedStatusKey,
+            staffType: normalizeStaffTypeKey(employee?.staffType) || 'office',
             leaveRequestKind,
             leaveRequestGroupId: String(groupId || ''),
             leaveDashboard: true,
@@ -242,6 +250,7 @@ export async function notifyFlowchartHrOfIneligibleAnnualLeave({
             requestedStatusKey,
             staffType: employee?.staffType,
             employeeMongoId: employee?._id,
+            employeeName: empName,
         }),
         buttonLabel: 'Open Leave Approval',
         emailTitle: `${label} — not eligible`,

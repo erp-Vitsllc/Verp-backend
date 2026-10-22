@@ -35,6 +35,67 @@ import {
     getExpectedRoleForFineStatus,
 } from "../../utils/fineStageAuth.js";
 
+function collapseUtilityBillReminderActions(actions = []) {
+    const groups = new Map();
+    const order = [];
+    for (const action of actions) {
+        if (String(action?.requestType || "") !== "Utility Bill Payment Reminder") {
+            order.push(action);
+            continue;
+        }
+        let meta = {};
+        try {
+            meta = JSON.parse(action.extra3 || "{}");
+        } catch {
+            meta = {};
+        }
+        const utilityType = String(meta.utilityType || "").trim();
+        const month = String(meta.billMonth || meta.yearMonth || "").trim();
+        if (!utilityType || !/^\d{4}-\d{2}$/.test(month)) {
+            order.push(action);
+            continue;
+        }
+        const key = `${utilityType.toLowerCase()}|${month}`;
+        if (!groups.has(key)) {
+            groups.set(key, []);
+            order.push({ __billGroup: key });
+        }
+        groups.get(key).push(action);
+    }
+    return order.map((item) => {
+        if (!item?.__billGroup) return item;
+        const members = groups.get(item.__billGroup) || [];
+        if (members.length <= 1) return members[0];
+        const first = members[0];
+        let meta = {};
+        try {
+            meta = JSON.parse(first.extra3 || "{}");
+        } catch {
+            meta = {};
+        }
+        const utilityType = String(meta.utilityType || "Utility").trim() || "Utility";
+        const month = String(meta.billMonth || meta.yearMonth || "");
+        const [year, monthNum] = month.split("-").map(Number);
+        const monthLabel = new Date(Date.UTC(year, monthNum - 1, 1)).toLocaleDateString("en-GB", {
+            month: "long",
+            year: "numeric",
+            timeZone: "UTC",
+        });
+        const count = members.length;
+        return {
+            ...first,
+            extra1: `${utilityType} · ${monthLabel}`,
+            extra2: `${monthLabel.replace(/\s+\d{4}$/, "")} — ${count} ${utilityType} pending for payment`,
+            extra3: JSON.stringify({
+                ...meta,
+                accountNo: "",
+                groupedBillCount: count,
+                detailsPath: "/HRM/Asset/UtilityBills",
+            }),
+        };
+    });
+}
+
 const DUBAI_DATE = new Intl.DateTimeFormat("en-CA", {
     timeZone: "Asia/Dubai",
     year: "numeric",
@@ -1024,7 +1085,7 @@ export const getTaskManagerNotifications = async (req, res) => {
             vehicleDisplayById(uniqueActions),
             attendanceFactsByActionId(uniqueActions),
         ]);
-        const tasks = uniqueActions.map((action) => {
+        const tasks = collapseUtilityBillReminderActions(uniqueActions).map((action) => {
             const requestedAt = action.requestedDate || action.createdAt || null;
             const requestedKey = dubaiDateKey(requestedAt);
             let status = displayStatus(action.status, action.requestType, requestedKey, todayKey);
@@ -1174,7 +1235,12 @@ export const getTaskManagerNotifications = async (req, res) => {
                                 ? "Pending Due"
                                 : "Pending";
             const assignee = byId.get(String(row.assignee || "")) || null;
-            const assigneeName = personName(assignee) || row.assigneeName || row.assigneeEmpId || "Unassigned";
+            const heldAssignee = String(row.closeRequest?.returnAssigneeName || "").trim();
+            const rawAssigneeName = heldAssignee || personName(assignee) || row.assigneeName || row.assigneeEmpId || "Unassigned";
+            const requesterPlain = String(row.requestedByName || "").trim().replace(/\s*\([^)]*\)\s*$/, "").trim();
+            const assigneeName = heldAssignee && requesterPlain && requesterPlain.toLowerCase() !== heldAssignee.toLowerCase()
+                ? `${heldAssignee} (${requesterPlain})`
+                : rawAssigneeName;
             const requesterBase = String(row.requestedByName || "").trim() || "System";
             const originalAssigneeName = String(row.closeRequest?.originalAssigneeName || "").trim();
             const requesterName = reassignedRequesterLabel(requesterBase, originalAssigneeName);
@@ -1431,6 +1497,9 @@ function leaveReviewHref(action) {
     if (String(action?.requestType || "") === "Attendance Leave Request" && !meta.leaveDashboard) {
         const params = new URLSearchParams();
         if (from) params.set("date", from);
+        const group = String(meta.staffType || "office").trim().toLowerCase() || "office";
+        params.set("staffType", group);
+        params.set("group", group);
         if (employeeId) params.set("blinkEmployee", employeeId);
         const requestId = String(attendanceId || action?.requestId || "").trim();
         if (requestId) params.set("leaveAttendanceId", requestId);
@@ -1442,6 +1511,7 @@ function leaveReviewHref(action) {
     if (employeeName) params.set("employeeName", employeeName);
     if (from) params.set("from", from);
     if (to) params.set("to", to);
+    params.set("group", String(meta.staffType || "office").trim().toLowerCase() || "office");
     const approvalId = attendanceId || String(action?.requestId || "").trim();
     if (approvalId) params.set("approvalId", approvalId);
     const query = params.toString();

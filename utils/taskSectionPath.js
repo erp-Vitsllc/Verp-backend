@@ -50,7 +50,9 @@ export function buildAttendanceSectionPath({ meta = {}, requestId = "", requestT
     const params = new URLSearchParams();
     const day = dateKey(meta.date) || dateKey(meta.from) || dateKey(meta.extra1);
     if (day) params.set("date", day);
-    params.set("staffType", clean(meta.staffType) || "office");
+    const group = clean(meta.staffType) || "office";
+    params.set("staffType", group);
+    params.set("group", group);
 
     const employee = mongoId(meta.employeeMongoId) || mongoId(subjectEmployeeId);
     if (employee) params.set("blinkEmployee", employee);
