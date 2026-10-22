@@ -79,10 +79,11 @@ function dubaiDateKey(value) {
 }
 
 function isGeneralTask(task) {
-    return String(task?.taskType || "") === "General Task" && !task?.sourceDashboardActionId;
+    return String(task?.taskType || "") === "General Task";
 }
 
 function detailDisplayStatus(task, action, manual) {
+    if (isGeneralTask(task) && task?.closeRequest?.closedAt && !task?.closeRequest?.reviewPending) return "Closed";
     if (task?.closeRequest?.reviewPending && task?.status !== "Completed") return "Pending Review";
     if (task?.closeRequest?.reviewReturned && (task?.status === "Pending" || task?.status === "In Progress")) return "Open";
     if (task?.status === "Completed" || task?.status === "Cancelled" || task?.status === "Rejected") return task.status;
@@ -1923,7 +1924,7 @@ export const reviewGeneralTask = async (req, res) => {
             return res.status(403).json({ message: "Only the original requester can review this task." });
         }
         if (decision === "approve") {
-            task.status = "Completed";
+            task.status = "Pending";
             task.closeRequest = {
                 ...saved,
                 reviewPending: false,

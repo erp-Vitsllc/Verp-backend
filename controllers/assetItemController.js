@@ -6,7 +6,7 @@ import EmployeeBasic from '../models/EmployeeBasic.js';
 import AssetHistory from '../models/AssetHistory.js';
 import Company from '../models/Company.js';
 import User from '../models/User.js';
-import { signOrKeepAttachmentUrl, uploadDocumentToS3, persistStoredAttachmentValue, deleteDocumentFromS3, normalizeS3Key } from '../utils/s3Upload.js';
+import { signOrKeepAttachmentUrl, uploadDocumentToS3, persistStoredAttachmentValue, deleteDocumentFromS3, normalizeS3Key, s3ObjectExists } from '../utils/s3Upload.js';
 import { generatePdf } from '../utils/generatePdf.js';
 import { sendAssetAssignmentEmail } from '../utils/sendAssetAssignmentEmail.js';
 import { isToolsAssetItem, sendToolsHandoverReportWhatsApp } from '../utils/sendToolsAssetWhatsAppReport.js';
@@ -13601,6 +13601,13 @@ export const updateHistoryBodyCondition = async (req, res) => {
                 if (typeof photo === 'string' && photo.startsWith('http')) {
                     photo = normalizeS3Key(photo) || photo;
                 }
+                const storedKey = typeof photo === 'string' ? (normalizeS3Key(photo) || photo) : '';
+                if (storedKey && !storedKey.startsWith('data:') && !(await s3ObjectExists(storedKey))) {
+                    return res.status(400).json({
+                        message: `${label}: that photo is not in storage. Upload a new image for this view.`,
+                    });
+                }
+                if (storedKey) photo = storedKey;
             }
 
             const existingRow =
