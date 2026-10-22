@@ -252,7 +252,10 @@ export async function listUtilityEntries(req, res) {
         if (assignedToType) filter.assignedToType = assignedToType;
         if (status === 'Active' || status === 'Inactive') filter.status = status;
 
-        const rows = await UtilityEntry.find(filter).sort({ createdAt: -1 }).lean();
+        const rows = await UtilityEntry.find(filter)
+            .select('-values.attachment.dataUrl')
+            .sort({ createdAt: -1 })
+            .lean();
         const revisions = await detailRevisionsByEntryId(rows.map((row) => row._id));
         return res.json({
             entries: rows.map((row) =>

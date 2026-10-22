@@ -738,37 +738,24 @@ export async function listUtilityBillPayments(req, res) {
             const overviewBills = await UtilityBillPayment.find(overviewFilter)
                 .select(OVERVIEW_BILL_FIELDS)
                 .lean();
+            res.status(200).json({ bills: overviewBills });
             const approvedLinkedIds = overviewBills
                 .filter((bill) => bill?.status === 'Approved' && utilityBillHasZohoLink(bill))
                 .map((bill) => bill._id);
             if (approvedLinkedIds.length) {
-                try {
-                    const synced = await syncApprovedUtilityBillsPaidFromZoho({
+                setImmediate(() => {
+                    syncApprovedUtilityBillsPaidFromZoho({
                         billIds: approvedLinkedIds,
                         fetchLive: false,
-                    });
-                    if (synced?.paidCount) {
-                        const fresh = await UtilityBillPayment.find({
-                            _id: { $in: approvedLinkedIds },
-                        })
-                            .select('status')
-                            .lean();
-                        const statusById = new Map(
-                            fresh.map((bill) => [String(bill._id), bill.status]),
+                    }).catch((syncErr) => {
+                        console.warn(
+                            '[listUtilityBillPayments] overview cache paid sync failed:',
+                            syncErr?.message || syncErr,
                         );
-                        overviewBills.forEach((bill) => {
-                            const next = statusById.get(String(bill._id));
-                            if (next) bill.status = next;
-                        });
-                    }
-                } catch (syncErr) {
-                    console.warn(
-                        '[listUtilityBillPayments] overview cache paid sync failed:',
-                        syncErr?.message || syncErr,
-                    );
-                }
+                    });
+                });
             }
-            return res.status(200).json({ bills: overviewBills });
+            return;
         }
 
         if (String(occupancy || '') === '1' && !batchId) {

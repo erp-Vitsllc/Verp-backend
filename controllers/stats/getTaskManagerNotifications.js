@@ -907,24 +907,27 @@ export const getTaskManagerNotifications = async (req, res) => {
             });
         }
         const viewer = await resolveTaskViewer(req);
-        await promoteDueTaskCompletions();
+        const promotion = promoteDueTaskCompletions().catch((error) => {
+            console.error("Promote due tasks failed:", error);
+        });
 
-        const actions = await DashboardAction.find({})
-            .select(
-                "assignedTo assignedToEmpId requestId requestType status subjectEmployeeId subjectName requestedDate requestedByName actionedDate extra1 extra2 extra3 createdAt",
-            )
-            .lean()
-            .maxTimeMS(20000);
+        const [actions, people] = await Promise.all([
+            DashboardAction.find({})
+                .select(
+                    "assignedTo assignedToEmpId requestId requestType status subjectEmployeeId subjectName requestedDate requestedByName actionedDate extra1 extra2 extra3 createdAt",
+                )
+                .lean()
+                .maxTimeMS(20000),
+            EmployeeBasic.find({
+                employeeId: { $ne: "VEGA-HR-0000" },
+            })
+                .select("firstName lastName employeeId profilePicture status")
+                .lean(),
+        ]);
 
         const assigneeIds = [
             ...new Set(actions.map((row) => String(row.assignedTo || "")).filter(isObjectId)),
         ];
-
-        const people = await EmployeeBasic.find({
-            employeeId: { $ne: "VEGA-HR-0000" },
-        })
-            .select("firstName lastName employeeId profilePicture status")
-            .lean();
 
         const byId = new Map();
         const byCode = new Map();
@@ -980,10 +983,11 @@ export const getTaskManagerNotifications = async (req, res) => {
 
         const manualRows = await TaskManagerTask.find({})
             .select(
-                "taskType priority taskName description assignee assigneeEmpId assigneeName completionDate requestedByName requestedByUserId status createdAt updatedAt sourceDashboardActionId attachments comments history reminders closeRequest",
+                "taskType priority taskName description assignee assigneeEmpId assigneeName completionDate requestedByName requestedByUserId status createdAt updatedAt sourceDashboardActionId closeRequest",
             )
             .lean()
             .maxTimeMS(10000);
+        await promotion;
         const overlayByAction = new Map();
         const createdRows = [];
         for (const row of manualRows) {
@@ -1266,23 +1270,22 @@ export const getTaskManagerNotifications = async (req, res) => {
         };
         const priorityRank = { High: 0, Medium: 1, Low: 2 };
         const signedPhotos = new Map();
-        const signPhoto = async (raw) => {
+        const signPhoto = (raw) => {
             const text = String(raw || "").trim().replace(/^\/+/, "");
-            if (!text) return "";
-            if (signedPhotos.has(text)) return signedPhotos.get(text);
-            let url = "";
-            if (text.startsWith("http") && isPresignedUrlStillFresh(text)) {
-                url = text;
-            } else {
+            if (!text) return Promise.resolve("");
+            const cached = signedPhotos.get(text);
+            if (cached) return cached;
+            const pending = (async () => {
+                if (text.startsWith("http") && isPresignedUrlStillFresh(text)) return text;
                 try {
                     const signed = await getSignedFileUrl(text);
-                    url = signed && String(signed).startsWith("http") ? signed : "";
+                    return signed && String(signed).startsWith("http") ? signed : "";
                 } catch {
-                    url = "";
+                    return "";
                 }
-            }
-            signedPhotos.set(text, url);
-            return url;
+            })();
+            signedPhotos.set(text, pending);
+            return pending;
         };
         await Promise.all(tasks.map(async (task) => {
             task.requesterPhoto = await signPhoto(task.requesterPhoto);

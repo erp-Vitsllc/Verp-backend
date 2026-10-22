@@ -70,17 +70,17 @@ export const getLoanById = async (req, res) => {
 
         // Fetch current HODs for display fallbacks in tracker (Context Aware)
         // Passes the employee object ID to find THEIR company's specific responsibilities
-        const hrHOD = await getDepartmentHOD('hr', employee._id);
-        const accountsHOD = await getDepartmentHOD('finance', employee._id);
-
-        const ceoHOD = await getManagementHOD(employee._id);
-
-        if (Array.isArray(loan.approvalAttachments) && loan.approvalAttachments.length > 0) {
-            await refreshStoredAttachmentUrls(loan.approvalAttachments);
-        }
-        if (Array.isArray(loan.approvalAttachmentHistory) && loan.approvalAttachmentHistory.length > 0) {
-            await refreshStoredAttachmentUrls(loan.approvalAttachmentHistory);
-        }
+        const [hrHOD, accountsHOD, ceoHOD] = await Promise.all([
+            getDepartmentHOD('hr', employee._id),
+            getDepartmentHOD('finance', employee._id),
+            getManagementHOD(employee._id),
+            Array.isArray(loan.approvalAttachments) && loan.approvalAttachments.length > 0
+                ? refreshStoredAttachmentUrls(loan.approvalAttachments)
+                : null,
+            Array.isArray(loan.approvalAttachmentHistory) && loan.approvalAttachmentHistory.length > 0
+                ? refreshStoredAttachmentUrls(loan.approvalAttachmentHistory)
+                : null,
+        ]);
 
         const data = {
             _id: loan._id,
@@ -137,7 +137,7 @@ export const getLoanById = async (req, res) => {
         };
 
         res.status(200).json(
-            await attachZohoExpenseNumber(data, { persistModel: Loan, fetchLive: true }),
+            await attachZohoExpenseNumber(data, { persistModel: Loan, fetchLive: false }),
         );
 
     } catch (error) {
