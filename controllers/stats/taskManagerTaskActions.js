@@ -1616,7 +1616,15 @@ export const submitTaskCompletion = async (req, res) => {
         const note = readDescription(req.body);
         if (note.error) return res.status(400).json({ message: note.error });
         const target = await loadTarget(req.params.taskKey);
-        if (!target?.task) return res.status(404).json({ message: "Task not found." });
+        if (!target) return res.status(404).json({ message: "Task not found." });
+        if (!target.task && target.action) {
+            const category = categoryFromRequestType(target.action.requestType, target.action.extra1);
+            if (category === "General Task") {
+                target.task = blankOverlay(target.action);
+                target.task.taskType = "General Task";
+            }
+        }
+        if (!target.task) return res.status(404).json({ message: "Task not found." });
         const viewer = await resolveTaskViewer(req);
         const task = target.task;
         const systemTask = String(task.taskType || '') === 'System Task';

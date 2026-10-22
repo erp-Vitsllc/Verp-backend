@@ -3366,6 +3366,9 @@ export async function markTeamAttendance(req, res) {
                 ? String(req.body.timeOut).trim()
                 : '';
         const reason = String(req.body?.reason || '').trim();
+        if (statusKey === 'sick_leave' && !reason) {
+            return res.status(400).json({ message: 'Reason is required.' });
+        }
         const attachmentName = String(req.body?.attachmentName || '').trim();
         const storedFile = await storeLeaveAttachment(req.body?.attachmentData, attachmentName);
         const markedBy = req.user?.id || null;
@@ -3472,7 +3475,8 @@ export async function getAttendancePendingInbox(req, res) {
             .select('_id')
             .lean();
         const reporteeIds = (reportees || []).map((r) => String(r._id));
-        const hr = await getDepartmentHOD('hr').catch(() => null);
+        const hrResolved = await resolveFlowchartHrEmployee().catch(() => null);
+        const hr = hrResolved?.employee || null;
         const viewerIsHr = hr && String(hr._id) === String(self._id);
         const otRows = viewerIsHr
             ? await Attendance.find({ flexibleOtStatus: 'pending' })
@@ -3549,26 +3553,36 @@ export async function getAttendancePendingInbox(req, res) {
             reporteeIds,
         });
 
-        if (!reporteeIds.length) {
-            return res.status(200).json({
-                message: 'Attendance pending inbox fetched successfully',
-                count: otItems.length + hourItems.length + attendanceTaskItems.length + changeItems.length,
-                items: [...changeItems, ...otItems, ...hourItems, ...attendanceTaskItems],
+        const attendanceBellKinds = ['yellow', 'past_late', 'future_late', 'future_early'];
+        const waitingOnViewer = [];
+        if (reporteeIds.length) {
+            waitingOnViewer.push({
+                employeeMongoId: { $in: reporteeIds },
+                $or: [
+                    { leaveApprovalStage: LEAVE_STAGE_REPORTEE },
+                    { leaveApprovalStage: { $in: ['', null] } },
+                ],
             });
         }
+        if (viewerIsHr) {
+            waitingOnViewer.push({ leaveApprovalStage: LEAVE_STAGE_HR });
+        }
 
-        const rows = await Attendance.find({
-            leaveRequestStatus: 'pending',
-            employeeMongoId: { $in: reporteeIds },
-            employeeName: { $not: /\(company\)\s*$/i },
-        })
+        const rows = waitingOnViewer.length
+            ? await Attendance.find({
+                leaveRequestStatus: 'pending',
+                leaveRequestKind: { $in: attendanceBellKinds },
+                employeeName: { $not: /\(company\)\s*$/i },
+                $or: waitingOnViewer,
+            })
             .sort({ leaveRequestedAt: -1, date: -1 })
             .limit(500)
-            .lean();
+            .lean()
+            : [];
 
         const items = (rows || [])
             .filter((r) => !isCompanyShellEmployee(r.employeeName) && !isCompanyShellEmployee(r))
-            .filter((r) => !isLeaveDashboardAttendanceRow(r) && !isTwoStepLeaveKind(r.leaveRequestKind))
+            .filter((r) => attendanceBellKinds.includes(String(r.leaveRequestKind || '').trim()))
             .map((r) => {
                 const kind = String(r.leaveRequestKind || '');
                 const isYellow = kind === 'yellow';
@@ -4021,6 +4035,15 @@ export async function decideAttendanceChangeRequest(req, res) {
             attachmentKey: request.proposed?.attachmentKey || '',
             attachmentMime: request.proposed?.attachmentMime || '',
         };
+        const approvedStatusKey = String(req.body?.approvedStatusKey || '').trim();
+        if (
+            approvedStatusKey === 'authorized_leave' &&
+            String(payload.statusKey || '') === 'sick_leave'
+        ) {
+            payload.statusKey = 'authorized_leave';
+            payload.statusLabel = authorizedLeaveLabel();
+            payload.leavePayType = leavePayTypeForStatus('authorized_leave');
+        }
         if (!ATTENDANCE_STATUS_KEYS.includes(payload.statusKey) && payload.statusKey !== 'not_marked') {
             return res.status(400).json({ message: 'This attendance change is no longer valid.' });
         }

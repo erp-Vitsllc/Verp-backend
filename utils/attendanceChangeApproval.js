@@ -7,6 +7,7 @@ import {
     sendAttendanceChangeRequestEmail,
 } from './sendAttendanceLeaveEmails.js';
 import { normalizeStaffType } from './workingTimeHelpers.js';
+import { signOrKeepAttachmentUrl } from './s3Upload.js';
 
 export const ATTENDANCE_CHANGE_REQUEST_TYPE = 'Attendance Change Request';
 
@@ -439,6 +440,7 @@ function pendingChangeRow(row, names = new Map()) {
         timeOut: row.proposed?.timeOut || '',
         reason: row.proposed?.reason || '',
         attachmentName: row.proposed?.attachmentName || '',
+        attachmentKey: row.proposed?.attachmentKey || '',
         requestedById: row.requestedBy ? String(row.requestedBy) : '',
         requestedByName: row.requestedByName || '',
         reporteeId,
@@ -487,7 +489,12 @@ export async function loadPendingAttendanceChanges(date) {
             .lean();
         for (const person of people || []) names.set(String(person._id), personName(person));
     }
-    return (rows || []).map((row) => pendingChangeRow(row, names));
+    const pending = (rows || []).map((row) => pendingChangeRow(row, names));
+    await Promise.all(pending.map(async (row) => {
+        const key = String(row.attachmentKey || '').trim();
+        row.attachmentUrl = key ? (await signOrKeepAttachmentUrl(key)) || '' : '';
+    }));
+    return pending;
 }
 
 function approverDisplayName(person) {
@@ -682,14 +689,13 @@ export async function loadAttendanceChangeInboxItems({ viewerId, viewerIsHr, rep
     );
 
     const seen = new Set();
-    return (rows || [])
-        .filter((row) => {
-            const id = String(row._id);
-            if (seen.has(id)) return false;
-            seen.add(id);
-            return true;
-        })
-        .map((row) => {
+    const visible = (rows || []).filter((row) => {
+        const id = String(row._id);
+        if (seen.has(id)) return false;
+        seen.add(id);
+        return true;
+    });
+    return Promise.all(visible.map(async (row) => {
             const summary = attendanceChangeSummary(row);
             const requestedLabel =
                 row.action === 'map'
@@ -714,6 +720,9 @@ export async function loadAttendanceChangeInboxItems({ viewerId, viewerIsHr, rep
                 timeOut: row.proposed?.timeOut || '',
                 reason: row.proposed?.reason || '',
                 attachmentName: row.proposed?.attachmentName || '',
+                attachmentUrl: row.proposed?.attachmentKey
+                    ? (await signOrKeepAttachmentUrl(row.proposed.attachmentKey)) || ''
+                    : '',
                 action: row.action || 'mark',
                 hoursApproved: Number(row.proposed?.hoursApproved) || 0,
                 flexibleOtApprovedHours: Number(row.proposed?.flexibleOtApprovedHours) || 0,
@@ -731,7 +740,7 @@ export async function loadAttendanceChangeInboxItems({ viewerId, viewerIsHr, rep
                 extra2: summary,
                 message: summary,
             };
-        });
+        }));
 }
 
 export async function closeAttendanceChangeRequest(request, { status, actorId }) {
