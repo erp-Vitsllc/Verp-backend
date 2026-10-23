@@ -152,7 +152,7 @@ export async function getLeaveGroupCalendars(req, res) {
                       ],
                   })
                       .select(detail
-                          ? 'employeeMongoId employeeId employeeName date statusKey statusLabel timeIn timeOut timeOutDate checkInLocation checkOutLocation reason leaveRequestReason hourAdjustReason flexibleOtReason hourAdjustStatus leaveRequestStatus leaveApprovalStage leaveRequestKind requestedStatusKey requestedStatusLabel flexibleOtStatus approvalStatus hoursApproved hoursTaken flexibleWorkedHours flexibleRequiredHours flexibleFromOtDate flexibleOtNextDayDate compOff leavePayType updatedAt historical'
+                          ? 'employeeMongoId employeeId employeeName date statusKey statusLabel timeIn timeOut timeOutDate checkInLocation checkOutLocation reason leaveRequestReason hourAdjustReason flexibleOtReason hourAdjustStatus leaveRequestStatus leaveApprovalStage leaveRequestKind requestedStatusKey requestedStatusLabel flexibleOtStatus flexibleOtApprovedHours approvalStatus hoursApproved hoursTaken flexibleWorkedHours flexibleRequiredHours flexibleFromOtDate flexibleOtNextDayDate compOff leavePayType updatedAt historical'
                           : 'employeeMongoId employeeId date statusKey timeIn timeOut updatedAt historical')
                       .lean()
                       .maxTimeMS(12000)

@@ -126,7 +126,9 @@ export async function waiveAttendanceDeduction(req, res) {
             return res.status(400).json({ message: 'This day has no deduction to waive.' });
         }
         const [withDeduction] = await attachAttendanceDeductionDays([record.toObject()]);
-        if (!(Number(withDeduction?.deductionDays) > 0)) {
+        const approvedHoursStillDeduct = String(record.hourAdjustStatus || '') === 'approved'
+            && Number(record.hoursApproved) > 0;
+        if (!(Number(withDeduction?.deductionDays) > 0) && !approvedHoursStillDeduct) {
             return res.status(400).json({ message: 'This day has no deduction to waive.' });
         }
         const year = yearOf(record.date);
