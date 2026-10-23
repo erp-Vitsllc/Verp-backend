@@ -18,6 +18,7 @@ import {
 import {
     flexibleHoursPerDay,
     getWeekForStaffType,
+    isFlexibleTiming,
     loadWorkingTimeDoc,
     normalizeStaffType,
 } from '../utils/workingTimeHelpers.js';
@@ -251,11 +252,15 @@ export async function requestFlexibleOvertime(req, res) {
         }
 
         const employee = await EmployeeBasic.findById(record.employeeMongoId)
-            .select('_id employeeId firstName lastName primaryReportee companyEmail workEmail email attendanceAccountStatus attendanceSuspension')
+            .select('_id employeeId firstName lastName staffType primaryReportee companyEmail workEmail email attendanceAccountStatus attendanceSuspension')
             .populate('primaryReportee', 'firstName lastName employeeId companyEmail workEmail email')
             .lean();
         if (isAttendanceSuspendedOn(employee, record.date)) {
             return res.status(403).json({ message: 'This employee is suspended on this date. Attendance cannot be changed.' });
+        }
+        const week = getWeekForStaffType(await loadWorkingTimeDoc(), normalizeStaffType(employee?.staffType));
+        if (!isFlexibleTiming(week)) {
+            return res.status(400).json({ message: 'Overtime and next day present apply only to flexible timing.' });
         }
         const reporteeId = employee?.primaryReportee?._id || employee?.primaryReportee || '';
         const isReportee = Boolean(reporteeId && String(reporteeId) === String(actor._id));
