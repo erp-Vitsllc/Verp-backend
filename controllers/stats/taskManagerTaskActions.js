@@ -1,5 +1,6 @@
 import Company from "../../models/Company.js";
 import DashboardAction from "../../models/DashboardAction.js";
+import EmailNotificationLog from "../../models/EmailNotificationLog.js";
 import Payment from "../../models/Payment.js";
 import AssetHistory from "../../models/AssetHistory.js";
 import AssetItem from "../../models/AssetItem.js";
@@ -3540,10 +3541,78 @@ async function undoMoneyRequest(Model, requestId, statusField) {
     await row.save();
 }
 
+const ATTENDANCE_APPROVAL_TYPES = new Set([
+    "Attendance Change Request",
+    "Hour Approval Request",
+    "Flexible OT Request",
+]);
+
+function escapeIdPattern(value) {
+    return String(value || "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+/**
+ * Drop the approval document behind an attendance task and clear a still-pending
+ * hour or overtime mark. Applied attendance days stay as they are.
+ * Returns the approval ids so their bells and mail alerts can be removed too.
+ */
+async function undoAttendanceApproval(action) {
+    const requestType = String(action?.requestType || "");
+    if (!ATTENDANCE_APPROVAL_TYPES.has(requestType)) return [];
+    const requestId = String(action?.requestId || "");
+    if (!isObjectId(requestId)) return [];
+
+    const changes = await AttendanceChangeRequest.find({
+        $or: [{ _id: requestId }, { "proposed.attendanceId": requestId }],
+    }).select("_id proposed.attendanceId").lean();
+    const changeIds = changes.map((row) => row._id);
+    const attendanceIds = new Set();
+    if (!changes.some((row) => String(row._id) === requestId)) attendanceIds.add(requestId);
+    for (const row of changes) {
+        const attendanceId = String(row?.proposed?.attendanceId || "");
+        if (isObjectId(attendanceId)) attendanceIds.add(attendanceId);
+    }
+
+    for (const id of attendanceIds) {
+        const record = await Attendance.findById(id);
+        if (!record) continue;
+        let dirty = false;
+        if (record.hourAdjustStatus === "pending") {
+            record.hourAdjustStatus = "";
+            record.hourAdjustKind = "";
+            record.hourAdjustReason = "";
+            record.hourAdjustMode = "";
+            record.hoursApproved = 0;
+            dirty = true;
+        }
+        if (record.flexibleOtStatus === "pending") {
+            record.flexibleOtStatus = "";
+            record.flexibleOtReason = "";
+            record.flexibleOtApprovedHours = 0;
+            dirty = true;
+        }
+        if (dirty) await record.save();
+    }
+
+    if (changeIds.length) await AttendanceChangeRequest.deleteMany({ _id: { $in: changeIds } });
+    return changeIds;
+}
+
+async function deleteAlertsForRecords(recordIds = []) {
+    const ids = [...new Set((recordIds || []).map((id) => String(id || "")).filter(Boolean))];
+    if (!ids.length) return;
+    const or = [{ recordId: { $in: ids } }];
+    for (const id of ids) {
+        or.push({ recordId: new RegExp(`^${escapeIdPattern(id)}:`, "i") });
+    }
+    await EmailNotificationLog.deleteMany({ $or: or });
+}
+
 /** Reverse the request this task started, then drop every related bell. */
 async function undoTaskProcess(action) {
     const requestType = String(action?.requestType || "");
     const requestId = action?.requestId;
+    if (ATTENDANCE_APPROVAL_TYPES.has(requestType)) return;
     if (requestType === "Asset Assignment" || requestType === "Asset Reassign") {
         await undoAssetAssignment(requestId);
         return;
@@ -3615,27 +3684,33 @@ async function deleteTaskSource(action) {
     }
 
     await undoTaskProcess(action);
+    const approvalIds = await undoAttendanceApproval(action);
 
     const ids = [action._id];
     const title = String(action.extra1 || "").trim();
     const leaveRequest = requestType === "Employee Leave Request" || requestType === "Attendance Leave Request";
+    const attendanceApproval = ATTENDANCE_APPROVAL_TYPES.has(requestType);
     const siblingTypes = requestType === "Asset Assignment" || requestType === "Asset Reassign"
         ? ["Asset Assignment", "Asset", "Asset Reassign"]
         : leaveRequest
             ? ["Employee Leave Request", "Attendance Leave Request", "Employee Request Resend"]
             : HUB_REQUEST_TYPES.has(requestType)
                 ? [...HUB_REQUEST_TYPES, "Employee Request Resend"]
-                : [requestType];
-    if (requestId && requestType && requestType !== "Task Manager") {
+                : attendanceApproval
+                    ? [...ATTENDANCE_APPROVAL_TYPES]
+                    : [requestType];
+    const requestIds = [requestId, ...approvalIds].filter((id) => isObjectId(id));
+    if (requestIds.length && requestType && requestType !== "Task Manager") {
         const related = await DashboardAction.find({
-            requestId,
-            requestType: { $in: siblingTypes },
-            ...(title && !HUB_REQUEST_TYPES.has(requestType) && !leaveRequest ? { extra1: title } : {}),
+            requestId: { $in: requestIds },
+            ...(attendanceApproval ? {} : { requestType: { $in: siblingTypes } }),
+            ...(title && !HUB_REQUEST_TYPES.has(requestType) && !leaveRequest && !attendanceApproval ? { extra1: title } : {}),
         }).select("_id").lean();
         related.forEach((row) => ids.push(row._id));
     }
     await deleteTasksAndBellsForActions(ids);
     await DashboardAction.deleteMany({ _id: { $in: ids } });
+    await deleteAlertsForRecords([...ids, ...approvalIds, requestId]);
 }
 
 async function deleteTasksAndBellsForActions(actionIds = []) {

@@ -145,6 +145,11 @@ const attendanceSchema = new mongoose.Schema(
             trim: true,
             index: true,
         },
+        /** Clear attendance put this day back to unauthorized. Do not paint the old leave over it. */
+        leaveCoverBlocked: {
+            type: Boolean,
+            default: false,
+        },
         requestedStatusKey: {
             type: String,
             default: '',

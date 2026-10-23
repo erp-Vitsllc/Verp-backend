@@ -529,18 +529,18 @@ export async function requestMispunch(req, res) {
 
         const attendanceId = String(req.body?.attendanceId || '').trim();
         const timeIn = storedPunchClock(req.body?.timeIn);
-        const timeOut = storedPunchClock(req.body?.timeOut);
         const reason = String(req.body?.reason || '').trim();
         if (!mongoose.Types.ObjectId.isValid(attendanceId)) {
             return res.status(400).json({ message: 'Attendance record is required.' });
         }
-        if (!timeIn || !timeOut) {
-            return res.status(400).json({ message: 'Check-in time and check-out time are required.' });
+        if (!timeIn) {
+            return res.status(400).json({ message: 'Check-in time is required.' });
         }
         if (!reason) return res.status(400).json({ message: 'Reason is required.' });
 
         const record = await Attendance.findById(attendanceId);
         if (!record) return res.status(404).json({ message: 'Attendance record not found.' });
+        const timeOut = storedPunchClock(req.body?.timeOut) || storedPunchClock(record.timeOut);
         if (record.hourAdjustStatus === 'approved' && record.hourAdjustKind === 'mispunch') {
             return res.status(400).json({ message: 'This missed punch is already approved.' });
         }

@@ -53,6 +53,43 @@ describe('attendance leave day cover', () => {
         assert.equal(row._id, 'att-1');
     });
 
+    it('keeps unauthorized leave after attendance was cleared', () => {
+        const index = new Map([[coverKey('emp-1', '2026-10-02'), annualCover]]);
+        const [cleared] = applyLeaveCoverIndex(
+            [
+                {
+                    _id: 'att-cleared',
+                    date: '2026-10-02',
+                    employeeMongoId: 'emp-1',
+                    statusKey: 'unauthorized_leave',
+                    statusLabel: 'Unauthorized Leave',
+                    leaveRequestStatus: 'approved',
+                    requestedStatusKey: 'on_leave',
+                    timeIn: '',
+                    timeOut: '',
+                },
+            ],
+            index,
+        );
+        assert.equal(cleared.statusKey, 'unauthorized_leave');
+        assert.equal(cleared._id, 'att-cleared');
+
+        const [blocked] = applyLeaveCoverIndex(
+            [
+                {
+                    date: '2026-10-02',
+                    employeeMongoId: 'emp-1',
+                    statusKey: 'unauthorized_leave',
+                    leaveCoverBlocked: true,
+                    timeIn: '',
+                    timeOut: '',
+                },
+            ],
+            index,
+        );
+        assert.equal(blocked.statusKey, 'unauthorized_leave');
+    });
+
     it('shows annual leave for today when no attendance row exists', () => {
         const today = { ...annualCover, date: '2026-10-03' };
         const index = new Map([[coverKey('emp-1', '2026-10-03'), today]]);

@@ -13,7 +13,6 @@ import {
     getOffWeekdayKeys,
     getWeekForStaffType,
     holidayAppliesToStaff,
-    summarizePunchOvertime,
     isFlexibleTiming,
     WEEKDAY_KEYS,
 } from '../../utils/workingTimeHelpers.js';
@@ -402,9 +401,10 @@ async function loadLiveAttendanceEligibility({ employee, from, to, staffType }) 
         .lean();
     const live = summarizeAttendanceEligibility(rows, { throughDate: periodEnd });
     const week = getWeekForStaffType(workingTime, staffType);
-    const overtime = isFlexibleTiming(week)
+    const flexibleTiming = isFlexibleTiming(week);
+    const overtime = flexibleTiming
         ? summarizeApprovedFlexibleOvertime(rows)
-        : summarizePunchOvertime(rows, week);
+        : { hours: 0, days: 0, overtimeRecords: [] };
     const coveredDates = new Set(
         (rows || []).map((row) => String(row?.date || '').trim()).filter((date) => isDateKey(date)),
     );
@@ -430,6 +430,7 @@ async function loadLiveAttendanceEligibility({ employee, from, to, staffType }) 
         overtimeHours: overtime.hours,
         overtimeDays: overtime.days,
         overtimeRecords: overtime.overtimeRecords,
+        showOvertime: flexibleTiming,
         from: periodStart,
         to: periodEnd,
     };
@@ -1028,6 +1029,7 @@ export async function buildPayload(req, employeeId, overlay = {}) {
             overtimeHours: Number(liveAttendance.overtimeHours) || 0,
             overtimeDays: Number(liveAttendance.overtimeDays) || 0,
             overtimeRecords: liveAttendance.overtimeRecords || [],
+            showOvertime: liveAttendance.showOvertime === true,
             leaveRecords: liveAttendance.leaveRecords || [],
         },
         leaveRecords,

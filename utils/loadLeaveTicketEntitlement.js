@@ -52,7 +52,6 @@ import {
     getOffWeekdayKeys,
     getWeekForStaffType,
     holidayAppliesToStaff,
-    summarizePunchOvertime,
     isFlexibleTiming,
     WEEKDAY_KEYS,
 } from './workingTimeHelpers.js';
@@ -375,7 +374,7 @@ async function loadLiveAttendanceEligibility({ employee, from, to, staffType }) 
     const week = getWeekForStaffType(workingTime, staffType);
     const overtime = isFlexibleTiming(week)
         ? summarizeApprovedFlexibleOvertime(rows)
-        : summarizePunchOvertime(rows, week);
+        : { hours: 0, days: 0, overtimeRecords: [] };
     const coveredDates = new Set(
         (rows || []).map((row) => String(row?.date || '').trim()).filter((date) => isDateKey(date)),
     );

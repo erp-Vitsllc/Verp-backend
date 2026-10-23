@@ -1394,15 +1394,33 @@ export async function fetchBillByIdAcrossOrgs(billId, preferredOrgId = '') {
     ];
     const orgTries = attempts.length ? attempts : [''];
 
+    let lastMissing = null;
     for (const orgId of orgTries) {
         try {
             const live = await withZohoOrganization(orgId || null, () => fetchBillById(id));
             if (live) return live;
-        } catch {
-            /* try next org */
+        } catch (err) {
+            // Per-org daily cap. Another organization will not have this bill, and
+            // each extra GET still counts against that org's limit.
+            if (isZohoBooksRateLimitError(err)) throw err;
+            if (isZohoBillMissingError(err)) {
+                lastMissing = err;
+                continue;
+            }
+            lastMissing = lastMissing || err;
         }
     }
+    if (lastMissing && orgTries.length === 1) throw lastMissing;
     return null;
+}
+
+export function isZohoBooksRateLimitError(err) {
+    const message = String(err?.message || err || '');
+    return /exceeded the maximum|rate limit|too many requests/i.test(message);
+}
+
+export function isZohoBillMissingError(err) {
+    return /does not exist/i.test(String(err?.message || err || ''));
 }
 
 export async function fetchExpenseById(expenseId) {

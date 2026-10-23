@@ -3952,7 +3952,7 @@ export async function decideAttendanceChangeRequest(req, res) {
             });
         }
 
-        if (request.action === 'hour_adjust') {
+        if (request.action === 'hour_adjust' && request.proposed?.hourAdjustKind !== 'mispunch') {
             const previousType = request.proposed?.hourRequestType
                 || (Number(request.proposed?.hoursApproved) === 0 ? 'waived' : 'authorized');
             const stageBeforeEdit = request.stage;
@@ -5491,6 +5491,7 @@ async function applyLeaveDecisionToRecord({
     }
 
     record.leaveRequestStatus = decision;
+    if (decision === 'approved') record.leaveCoverBlocked = false;
     record.leaveApprovalStage = '';
     record.leaveDecidedAt = new Date();
     record.leaveDecidedBy = actor._id;

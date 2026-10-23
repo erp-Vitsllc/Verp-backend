@@ -5,7 +5,8 @@ import DashboardAction from '../models/DashboardAction.js';
 import ZohoBill from '../models/ZohoBill.js';
 import {
     fetchBillById,
-    fetchBillByIdAcrossOrgs,
+    isZohoBillMissingError,
+    isZohoBooksRateLimitError,
     searchZohoBillsByNumber,
     searchZohoBillsByText,
 } from '../services/zohoService.js';
@@ -16,6 +17,9 @@ import { resolveZohoOrganizationIdForCompany } from './resolveZohoOrganization.j
 import Company from '../models/Company.js';
 
 const UTILITY_REQUEST_TYPE = 'Utility Bill Payment';
+
+/** Zoho's 5,000-call cap is per organization per day. Stop calling that org until restart. */
+const zohoOrgRateLimited = new Set();
 
 const clean = (value, fallback = '') => {
     const text = String(value ?? '').trim();
@@ -520,19 +524,16 @@ export async function syncApprovedUtilityBillsPaidFromZoho({
     }
 
     async function fetchZohoBillLive(zohoId, preferredOrgId) {
-        try {
-            const across = await fetchBillByIdAcrossOrgs(zohoId, preferredOrgId);
-            if (across) return across;
-        } catch {
-            /* try remaining org ids below */
-        }
-
-        const orgTries = [
-            ...new Set([clean(preferredOrgId), ...orgFallbacks].filter(Boolean)),
-        ];
+        const preferred = clean(preferredOrgId);
+        const orgTries = [...new Set([preferred, ...orgFallbacks].filter(Boolean))];
         const attempts = orgTries.length ? orgTries : [''];
-        let lastErr = null;
+        let lastMissing = null;
+
         for (const orgId of attempts) {
+            if (orgId && zohoOrgRateLimited.has(orgId)) {
+                if (orgId === preferred) break;
+                continue;
+            }
             try {
                 const live = await withZohoOrganization(orgId || null, () =>
                     fetchBillById(zohoId),
@@ -544,10 +545,39 @@ export async function syncApprovedUtilityBillsPaidFromZoho({
                     return live;
                 }
             } catch (err) {
-                lastErr = err;
+                if (isZohoBooksRateLimitError(err)) {
+                    if (orgId && !zohoOrgRateLimited.has(orgId)) {
+                        zohoOrgRateLimited.add(orgId);
+                        console.warn(
+                            `[syncApprovedUtilityBillsPaidFromZoho] org ${orgId} hit Zoho's 5,000-call limit; skipping further live bill fetches for this process`,
+                        );
+                    }
+                    // The bill lives in this org. A 404 from another org is not "bill deleted".
+                    if (!preferred || orgId === preferred) {
+                        const rateErr = new Error(
+                            'Zoho organization call limit reached; using cached bill status',
+                        );
+                        rateErr.rateLimited = true;
+                        throw rateErr;
+                    }
+                    continue;
+                }
+                if (isZohoBillMissingError(err)) {
+                    lastMissing = err;
+                    continue;
+                }
+                lastMissing = lastMissing || err;
             }
         }
-        if (lastErr) throw lastErr;
+
+        if (preferred && zohoOrgRateLimited.has(preferred)) {
+            const rateErr = new Error(
+                'Zoho organization call limit reached; using cached bill status',
+            );
+            rateErr.rateLimited = true;
+            throw rateErr;
+        }
+        if (lastMissing) throw lastMissing;
         return null;
     }
 
@@ -591,10 +621,12 @@ export async function syncApprovedUtilityBillsPaidFromZoho({
                     return { paid: isZohoBillFullyPaid(live), live: true };
                 }
             } catch (err) {
-                console.warn(
-                    `[syncApprovedUtilityBillsPaidFromZoho] fetch ${id} failed:`,
-                    err?.message || err,
-                );
+                if (!err?.rateLimited) {
+                    console.warn(
+                        `[syncApprovedUtilityBillsPaidFromZoho] fetch ${id} failed:`,
+                        err?.message || err,
+                    );
+                }
             }
         }
 
@@ -610,6 +642,7 @@ export async function syncApprovedUtilityBillsPaidFromZoho({
         const attempts = orgs.length ? orgs : [''];
 
         for (const orgId of attempts) {
+            if (orgId && zohoOrgRateLimited.has(orgId)) continue;
             let rows = [];
             try {
                 rows = await withZohoOrganization(orgId || null, async () => {
@@ -619,7 +652,8 @@ export async function syncApprovedUtilityBillsPaidFromZoho({
                     ]);
                     return [...byNumber, ...byText];
                 });
-            } catch {
+            } catch (err) {
+                if (isZohoBooksRateLimitError(err) && orgId) zohoOrgRateLimited.add(orgId);
                 continue;
             }
 

@@ -86,6 +86,8 @@ export function chooseLeaveCover(current, incoming) {
 
 export function leaveCoverFromAttendanceRow(row) {
     if (!row) return null;
+    // Cleared attendance is unauthorized. Its leftover approval must not cover this day or its range.
+    if (String(row.statusKey || '').trim() === 'unauthorized_leave' || row.leaveCoverBlocked) return null;
     const requestStatus = String(row.leaveRequestStatus || '').trim();
     // Pending requests stay as a request. The day status changes only after approval.
     if (requestStatus !== 'approved') return null;
@@ -195,6 +197,16 @@ function paintLeaveOntoRow(row, cover, dateKey) {
 }
 
 function applyCoverToRow(row, externalCover, dateKey) {
+    const storedKey = String(row?.statusKey || '').trim();
+    const requestStatus = String(row?.leaveRequestStatus || '').trim();
+    // A cleared day is stored as unauthorized while the old approval is still on the row.
+    if (
+        row &&
+        (row.leaveCoverBlocked ||
+            (storedKey === 'unauthorized_leave' && requestStatus === 'approved'))
+    ) {
+        return row;
+    }
     const own = leaveCoverFromAttendanceRow(row);
     const cover = chooseLeaveCover(own, externalCover);
     if (!cover) return row;
@@ -322,7 +334,7 @@ export async function loadLeaveCoverIndex({ from, to, employees } = {}) {
         leaveRequestToDate: { $gte: start },
     })
         .select(
-            'employeeMongoId employeeId employeeName date requestedStatusKey requestedStatusLabel leaveRequestStatus leaveRequestKind leaveRequestGroupId leaveRequestFromDate leaveRequestToDate leaveRequestReason',
+            'employeeMongoId employeeId employeeName date statusKey leaveCoverBlocked requestedStatusKey requestedStatusLabel leaveRequestStatus leaveRequestKind leaveRequestGroupId leaveRequestFromDate leaveRequestToDate leaveRequestReason',
         )
         .lean();
 
