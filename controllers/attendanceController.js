@@ -223,7 +223,7 @@ function isYellowClarificationEligible(record) {
     if (!record) return false;
     const key = String(record.statusKey || '').trim();
     if (YELLOW_REQUEST_STATUS_KEYS.has(key)) return true;
-    if (key === 'unauthorized_leave') return true;
+    if (key === 'unauthorized_leave' || key === 'not_marked' || key === 'absent' || key === '') return true;
     if (record.timeIn && !record.timeOut && (key === 'on_office' || key === 'late_arrived' || key === 'work_from_home')) {
         return true;
     }
@@ -4496,10 +4496,32 @@ export async function requestAttendanceYellow(req, res) {
             });
         }
 
-        const record = await Attendance.findOne({
+        let record = await Attendance.findOne({
             employeeMongoId: String(employee._id),
             date,
         });
+
+        if (!record && date < todayKey) {
+            const nonWorking = await nonWorkingAttendanceMark(employee, date);
+            if (!nonWorking) {
+                record = await Attendance.findOneAndUpdate(
+                    { employeeMongoId: String(employee._id), date },
+                    {
+                        $setOnInsert: {
+                            date,
+                            employeeMongoId: String(employee._id),
+                            employeeId: employee.employeeId || '',
+                            employeeName: [employee.firstName, employee.lastName].filter(Boolean).join(' ').trim(),
+                            statusKey: 'unauthorized_leave',
+                            statusLabel: 'Unauthorized Leave',
+                            timeIn: '',
+                            timeOut: '',
+                        },
+                    },
+                    { upsert: true, new: true, setDefaultsOnInsert: true },
+                );
+            }
+        }
 
         if (!record) {
             return res.status(400).json({

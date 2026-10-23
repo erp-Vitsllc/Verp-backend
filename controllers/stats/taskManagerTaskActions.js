@@ -611,9 +611,19 @@ async function viewerIsTaskRequester(task, viewer, action = null) {
     return Boolean(viewerName && viewerName === requesterName.toLowerCase());
 }
 
+function generalTaskClosed(task) {
+    if (!task) return false;
+    const reviewable = isGeneralTask(task) || String(task.taskType || "") === "System Task";
+    if (!reviewable || task.status !== "Completed") return false;
+    const saved = closeSnapshot(task);
+    return Boolean(saved.closedAt) && !saved.reviewPending;
+}
+
 async function viewerCanReopen(task, viewer) {
-    if (!completionWindowOpen(task)) return false;
-    return viewerIsTaskRequester(task, viewer);
+    const owner = await viewerIsTaskRequester(task, viewer);
+    if (!owner) return false;
+    if (completionWindowOpen(task)) return true;
+    return generalTaskClosed(task);
 }
 
 async function notifyRequesterTaskClosed(task, target) {
@@ -745,8 +755,8 @@ async function closeFlags(task, viewer, currentAssigneeId, assigneeEmpId, action
         canCloseNow: open && viewerIsOriginalAssignee && !isGeneralTask(task) && String(task?.taskType || '') !== 'System Task' && !reviewPending && !closeScheduled,
         canRequestClose: completed && reassigned && holder && !notified && !closed,
         canFinishClose: completed && requested && !closed && viewerIsOriginal,
-        canReopen: closeScheduled && requesterViewer,
-        showReopen: requesterViewer && (closeScheduled || completed || Boolean(saved.completesAt)),
+        canReopen: (closeScheduled && requesterViewer) || (completed && requesterViewer && Boolean(saved.closedAt) && general),
+        showReopen: requesterViewer && (closeScheduled || (completed && Boolean(saved.closedAt) && general) || Boolean(saved.completesAt)),
         closeScheduled,
         closeState: closed ? "closed" : completionPending ? "confirm" : notified ? "requested" : "none",
         closeMessage,
@@ -2025,19 +2035,41 @@ export const reviewGeneralTask = async (req, res) => {
             };
             task.markModified("closeRequest");
             task.history = task.history || [];
-            task.history.push(historyEntry("Approved", `${viewer.name} approved this task. It is closed.`, viewer.name));
+            task.history.push(historyEntry("Approved", `${viewer.name} approved this task. It is closed and completed.`, viewer.name));
             await pushWorkUpdate(task, {
                 authorName: viewer.name,
                 authorRole: await authorRoleFor(viewer),
                 kind: "Work Update",
                 badge: "Completed",
-                text: `${viewer.name} approved this task. It is closed.`,
+                text: `${viewer.name} approved this task. It is closed and completed.`,
             }, SILENT_MAIL);
             await task.save();
             await syncManualTaskNotification(task);
+            let emailSent = false;
+            try {
+                const audience = await taskRecipientEmails(task);
+                const sent = await sendTaskActivityEmail({
+                    to: audience.to,
+                    subject: `Task closed: ${task.taskName || "Task"}`,
+                    html: taskActionHtml({
+                        hello: audience.assigneeName || "there",
+                        lines: [`${viewer.name} approved this task. It is closed and completed.`],
+                        taskName: task.taskName,
+                        link: taskDetailLink(target),
+                    }),
+                    recordId: String(task._id || target.action?._id || ""),
+                    emailType: "Task approved",
+                });
+                emailSent = Boolean(sent?.sent);
+            } catch (mailError) {
+                console.error("General task approve email failed:", mailError);
+            }
             const fresh = await loadTarget(req.params.taskKey);
             return res.status(200).json({
-                message: "Task approved and closed.",
+                message: emailSent
+                    ? "Task approved and closed. The assignee was emailed."
+                    : "Task approved and closed.",
+                emailSent,
                 task: await buildDetail(fresh, viewer),
             });
         }
@@ -2215,14 +2247,31 @@ export const reopenTaskManagerTask = async (req, res) => {
         if (!target?.task) return res.status(404).json({ message: "Task not found." });
         const viewer = await resolveTaskViewer(req);
         const task = target.task;
-        if (task.status === "Completed") {
+        const closedGeneral = generalTaskClosed(task);
+        if (task.status === "Completed" && !closedGeneral) {
             return res.status(400).json({ message: "Reopen Request is disabled after the task is Completed." });
         }
         if (!(await viewerCanReopen(task, viewer))) {
-            return res.status(403).json({ message: "Only the requester can reopen this task." });
+            return res.status(403).json({ message: "Only the task owner can reopen this task." });
         }
         const saved = closeSnapshot(task);
-        const text = `${viewer.name} reopened this task. It is pending again.`;
+        let noteText = "";
+        if (closedGeneral) {
+            const note = readDescription(req.body);
+            if (note.error) return res.status(400).json({ message: "A comment is required to reopen this task." });
+            noteText = note.text;
+            const assignee = isObjectId(saved.returnAssigneeId) ? await findAssignee(String(saved.returnAssigneeId)) : null;
+            if (assignee?._id) {
+                task.assignee = assignee._id;
+                task.assigneeEmpId = assignee.employeeId || saved.returnAssigneeEmpId || "";
+                task.assigneeName = personName(assignee) || saved.returnAssigneeName || task.assigneeName;
+            } else if (saved.returnAssigneeId) {
+                task.assignee = saved.returnAssigneeId;
+                task.assigneeEmpId = saved.returnAssigneeEmpId || task.assigneeEmpId;
+                task.assigneeName = saved.returnAssigneeName || task.assigneeName;
+            }
+        }
+        const text = noteText || `${viewer.name} reopened this task. It is pending again.`;
         task.status = "Pending";
         task.closeRequest = {
             ...saved,
@@ -2232,15 +2281,18 @@ export const reopenTaskManagerTask = async (req, res) => {
             closedAt: null,
             completesAt: null,
             completionConfirmedAt: null,
+            reviewPending: false,
+            reviewReturned: closedGeneral ? true : Boolean(saved.reviewReturned),
+            reviewNote: noteText || saved.reviewNote || "",
         };
         task.markModified("closeRequest");
         task.history = task.history || [];
-        task.history.push(historyEntry("Reopened", text, viewer.name));
+        task.history.push(historyEntry("Reopened", noteText ? `${viewer.name} reopened this task. ${noteText}` : text, viewer.name));
         await pushWorkUpdate(task, {
             authorName: viewer.name,
             authorRole: await authorRoleFor(viewer),
             kind: "Reopened",
-            badge: "Pending",
+            badge: "Open",
             text,
         }, SILENT_MAIL);
         await task.save();
@@ -2248,15 +2300,18 @@ export const reopenTaskManagerTask = async (req, res) => {
         const assignee = isObjectId(task.assignee) ? await findAssignee(String(task.assignee)) : null;
         let emailSent = false;
         try {
-            const sent = await mailEmployee(assignee, {
+            const audience = await taskRecipientEmails(task);
+            const sent = await sendTaskActivityEmail({
+                to: audience.to.length ? audience.to : [await businessEmail(assignee)].filter(Boolean),
                 subject: `Task reopened: ${task.taskName || "Task"}`,
                 html: taskActionHtml({
                     hello: personName(assignee) || task.assigneeName || "there",
-                    lines: [`${viewer.name} reopened this task. It is pending again.`],
+                    lines: [`${viewer.name} reopened this task. It is pending again for ${task.assigneeName || "the assignee"}.`],
                     taskName: task.taskName,
+                    description: noteText,
                     link: taskDetailLink(target),
                 }),
-                recordId: String(target.action?._id || task._id || ""),
+                recordId: String(task._id || target.action?._id || ""),
                 emailType: "Task reopened",
             });
             emailSent = Boolean(sent?.sent);

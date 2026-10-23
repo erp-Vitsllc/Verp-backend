@@ -1127,7 +1127,9 @@ export const getTaskManagerNotifications = async (req, res) => {
             });
             const requestMonth = monthKeyFromDateKey(requestedKey);
             const completedMonth = monthKeyFromDateKey(dubaiDateKey(action.actionedDate || requestedAt));
-            if (overlay?.status === "Completed") status = "Completed";
+            const closedReview = Boolean(overlay?.closeRequest?.closedAt) && !overlay?.closeRequest?.reviewPending;
+            if (closedReview && overlay?.status !== "Completed") status = "Closed";
+            else if (overlay?.status === "Completed") status = "Completed";
             else if (overlay?.status === "Rejected") status = "Rejected";
             else if (overlay?.status === "Cancelled") status = "Cancelled";
             else if (overlay?.status === "In Progress") status = "In Progress";
@@ -1144,7 +1146,7 @@ export const getTaskManagerNotifications = async (req, res) => {
                     summary.pendingDue += 1;
                     bump("pendingDue", requestMonth);
                 }
-            } else if (status === "Completed") {
+            } else if (status === "Completed" || status === "Closed") {
                 summary.completed += 1;
                 bump("completed", completedMonth);
             }
@@ -1686,7 +1688,9 @@ export async function listProfileEmployeeTasks({ employeeId, employeeCode, emplo
             const requestedAt = action.requestedDate || action.createdAt || null;
             const requestedKey = dubaiDateKey(requestedAt);
             let status = displayStatus(action.status, action.requestType, requestedKey, todayKey);
-            if (overlay?.status === "Completed") status = "Completed";
+            const closedReview = Boolean(overlay?.closeRequest?.closedAt) && !overlay?.closeRequest?.reviewPending;
+            if (closedReview && overlay?.status !== "Completed") status = "Closed";
+            else if (overlay?.status === "Completed") status = "Completed";
             else if (overlay?.status === "Rejected") status = "Rejected";
             else if (overlay?.status === "Cancelled") status = "Cancelled";
             else if (overlay?.status === "In Progress") status = "In Progress";

@@ -131,19 +131,15 @@ export async function restoreClearedAttendance({ employeeMongoId, date, markedBy
         await revertSyntheticOtDay(id, existing.flexibleOtNextDayDate, date);
     }
 
-    const baseline = employee ? await nonWorkingAttendanceMark(employee, date) : null;
-    if (!baseline) {
+    if (!employee) {
         await Attendance.deleteOne({ date, employeeMongoId: id });
-        return {
-            date,
-            employeeMongoId: id,
-            cleared: true,
-            statusKey: '',
-            statusLabel: '',
-            timeIn: '',
-            timeOut: '',
-        };
+        return { date, employeeMongoId: id, cleared: true, statusKey: '', statusLabel: '' };
     }
+
+    const baseline = await nonWorkingAttendanceMark(employee, date);
+    const statusKey = baseline?.statusKey || 'unauthorized_leave';
+    const statusLabel = baseline?.statusLabel || 'Unauthorized Leave';
+    const reason = baseline?.reason || '';
 
     const employeeName = [employee.firstName, employee.lastName].filter(Boolean).join(' ').trim();
     return Attendance.findOneAndUpdate(
@@ -154,9 +150,9 @@ export async function restoreClearedAttendance({ employeeMongoId, date, markedBy
                 employeeMongoId: id,
                 employeeId: String(employee.employeeId || ''),
                 employeeName,
-                statusKey: baseline.statusKey,
-                statusLabel: baseline.statusLabel,
-                reason: baseline.reason,
+                statusKey,
+                statusLabel,
+                reason,
                 timeIn: '',
                 timeOut: '',
                 timeOutDate: '',

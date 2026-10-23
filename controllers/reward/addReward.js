@@ -7,6 +7,7 @@ import { ensureAttachmentPersistedToS3 } from "../../utils/s3Upload.js";
 import nodemailer from "nodemailer";
 import { getDepartmentHOD } from "../../utils/getDepartmentHOD.js";
 import { getManagementHOD } from "../../utils/getManagementHOD.js";
+import { rememberRewardEmail } from "../../utils/emailDispatch.js";
 
 /**
  * Generate auto-incrementing reward ID in format: re1322, re1323, etc.
@@ -455,7 +456,7 @@ ${rewardData.workflow.map((w, i) => `│ ${i + 1}. Role: ${w.role.padEnd(12)} As
                                 const baseUrl = resolveFrontendBaseUrl();
                                 const rewardUrl = `${baseUrl}/HRM/Reward/${savedReward._id}`;
 
-                                await transporter.sendMail({
+                                const approvalMail = {
                                     from: `"VeRP System" <${emailUser}>`,
                                     to: repEmail,
                                     subject: `Reward Approval Request: ${rewardType} - ${empName}`,
@@ -485,7 +486,9 @@ ${rewardData.workflow.map((w, i) => `│ ${i + 1}. Role: ${w.role.padEnd(12)} As
                                         filename: savedReward.attachment.name || 'Reward-Attachment.pdf',
                                         path: savedReward.attachment.url
                                     }] : []
-                                });
+                                };
+                                await transporter.sendMail(approvalMail);
+                                await rememberRewardEmail(savedReward._id, approvalMail);
                                 console.log(`[AddReward] SUCCESS: Email sent to reportee ${repEmail}`);
                             }
                         }

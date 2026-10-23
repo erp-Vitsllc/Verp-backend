@@ -14772,6 +14772,76 @@ export const deleteAssetService = async (req, res) => {
     }
 };
 
+const ROLE_AMOUNT_REMARK_KEYS = new Set([
+    'estimatedCost',
+    'companyPayAmount',
+    'employeePayAmount',
+    'employeePayPercent',
+    'companyPayPercent',
+    'quotation1Amount',
+    'quotation2Amount',
+    'quotation3Amount',
+    'garageBillAmount',
+    'billingTotalAmount',
+    'totalServiceCharge',
+    'value',
+    'paidAmount',
+    'amount',
+    'insuranceExcessAmount',
+    'policeFineAmount',
+    'otherFineAmount',
+    'employeeLiabilityRows',
+    'billingPayables',
+    'otherFineRows',
+    'zohoBills',
+]);
+
+const ROLE_FILE_BODY_KEYS = [
+    'invoice',
+    'completionReport',
+    'shopInvoice',
+    'attachment',
+    'quotation2',
+    'quotation3',
+    'tireCondition',
+    'bodyWorkImages',
+    'accidentImages',
+    'returnOtherDoc',
+    'returnOtherDocs',
+    'newConditionImages',
+    'garageBillAttachment',
+    'accidentGarageQuotes',
+    'paymentToGarageAttachments',
+    'garageBillAttachments',
+];
+
+/** HR: amounts and attachments. Accounts: amounts only. Everything else stays saved. */
+function narrowRoleServiceUpdate(body, previousRemark, mode) {
+    const next = {};
+    if (mode === 'hr') {
+        for (const key of ROLE_FILE_BODY_KEYS) {
+            if (body?.[key] != null) next[key] = body[key];
+        }
+    }
+    if (body?.value != null && body.value !== '') next.value = body.value;
+    let incoming = {};
+    if (typeof body?.remark === 'string') {
+        try {
+            incoming = JSON.parse(body.remark);
+        } catch {
+            incoming = {};
+        }
+    } else if (body?.remark && typeof body.remark === 'object') {
+        incoming = body.remark;
+    }
+    const remark = { ...(previousRemark || {}) };
+    for (const [key, value] of Object.entries(incoming)) {
+        if (ROLE_AMOUNT_REMARK_KEYS.has(key)) remark[key] = value;
+    }
+    next.remark = JSON.stringify(remark);
+    return next;
+}
+
 // @desc    Submit a previously saved draft service request (starts workflow)
 // @route   POST /api/AssetItem/:id/service/:serviceId/submit-request
 // @access  Private
@@ -14823,13 +14893,6 @@ export const updateAssetServiceDraft = async (req, res) => {
             (reqStatus === 'submitted' ||
                 reqStatus === 'pending' ||
                 Boolean(String(remarkObj?.oilServiceInitiatedAt || '').trim()));
-        if (!mayUpdateDraft && !mayUpdateAtHrAccounts) {
-            return res.status(400).json({
-                message: zohoBillAccepted
-                    ? 'Initiate Service cannot be updated after the Zoho bill is accepted.'
-                    : 'Only pending service requests can be updated.',
-            });
-        }
 
         const isVehicleAssetForServiceGate = () => {
             const plate = String(asset.plateNumber || '').trim();
@@ -14860,42 +14923,79 @@ export const updateAssetServiceDraft = async (req, res) => {
             (String(service.serviceType || '').trim() === 'Oil Service' ||
                 isVehicleServiceTabRequestType(service.serviceType) ||
                 isTireChangeServiceType(service.serviceType));
-        if (isHrAccountsInitiateEdit) {
-            const isHr = await isUserInFlowchart(req.user, 'hr').catch(() => false);
-            if (!isHr) {
+        const [isHr, isAccounts] = await Promise.all([
+            isUserInFlowchart(req.user, 'hr').catch(() => false),
+            isUserInFlowchart(req.user, 'accounts').catch(() => false),
+        ]);
+        // Closed or view-only services: HR may still change amounts and attachments.
+        // Accounts may still change amounts. Other fields stay as saved.
+        let roleFieldOverride = '';
+        if (!mayUpdateDraft && !mayUpdateAtHrAccounts) {
+            if (isHr) roleFieldOverride = 'hr';
+            else if (isAccounts) roleFieldOverride = 'accounts';
+            else {
+                return res.status(400).json({
+                    message: zohoBillAccepted
+                        ? 'Initiate Service cannot be updated after the Zoho bill is accepted.'
+                        : 'Only pending service requests can be updated.',
+                });
+            }
+        }
+        if (!roleFieldOverride && isHrAccountsInitiateEdit) {
+            if (!isHr && isAccounts) roleFieldOverride = 'accounts';
+            else if (!isHr) {
                 return res.status(403).json({
                     message:
                         'Access denied. Only HR can update Initiate Service after submit until the Zoho bill is accepted.',
                 });
             }
-        } else if (isTireChangePending) {
+        } else if (!roleFieldOverride && isTireChangePending) {
             const allowed = await actorMayCreateOrInitiateVehicleService(req.user);
             if (!allowed) {
-                return res.status(403).json({
-                    message: 'Access denied. Sign in to update this tire change request.',
-                });
+                if (isHr) roleFieldOverride = 'hr';
+                else if (isAccounts) roleFieldOverride = 'accounts';
+                else {
+                    return res.status(403).json({
+                        message: 'Access denied. Sign in to update this tire change request.',
+                    });
+                }
             }
-        } else if (isOilServicePending || isVehicleServiceTabPending) {
+        } else if (!roleFieldOverride && (isOilServicePending || isVehicleServiceTabPending)) {
             const allowed = await actorMayCreateOrInitiateVehicleService(req.user);
             if (!allowed) {
-                return res.status(403).json({
-                    message: 'Access denied. Sign in to update this service request.',
-                });
+                if (isHr) roleFieldOverride = 'hr';
+                else if (isAccounts) roleFieldOverride = 'accounts';
+                else {
+                    return res.status(403).json({
+                        message: 'Access denied. Sign in to update this service request.',
+                    });
+                }
             }
-        } else if (isCarWashOpen) {
+        } else if (!roleFieldOverride && isCarWashOpen) {
             const allowed = await actorMayCreateOrInitiateVehicleService(req.user);
             if (!allowed) {
+                if (isHr) roleFieldOverride = 'hr';
+                else if (isAccounts) roleFieldOverride = 'accounts';
+                else {
+                    return res.status(403).json({
+                        message: 'Access denied. Sign in to update this car wash request.',
+                    });
+                }
+            }
+        } else if (!roleFieldOverride && !actorFlags.canAct) {
+            if (isHr) roleFieldOverride = 'hr';
+            else if (isAccounts) roleFieldOverride = 'accounts';
+            else {
                 return res.status(403).json({
-                    message: 'Access denied. Sign in to update this car wash request.',
+                    message: 'Access denied. Only Asset Controller/Admin, assigner, assigned user, or primary reportee can update service records.',
                 });
             }
-        } else if (!actorFlags.canAct) {
-            return res.status(403).json({
-                message: 'Access denied. Only Asset Controller/Admin, assigner, assigned user, or primary reportee can update service records.',
-            });
         }
 
-        const body = { ...(req.body || {}) };
+        let body = { ...(req.body || {}) };
+        if (roleFieldOverride) {
+            body = narrowRoleServiceUpdate(body, remarkObj, roleFieldOverride);
+        }
         if (body.remark && typeof body.remark === 'string') {
             try {
                 const parsed = JSON.parse(body.remark);

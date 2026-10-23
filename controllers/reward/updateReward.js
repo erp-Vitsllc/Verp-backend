@@ -13,6 +13,7 @@ import { resolveEmployeeEmail, addEmployeeEmailToSet } from "../../utils/resolve
 import { buildRewardApprovedEmailHtml } from "../../utils/buildRewardApprovedEmailHtml.js";
 import { isUsernameSystemSuperUser, isReqUserSystemSuperUser } from "../../utils/systemSuperUser.js";
 import { runAfterResponse } from "../../utils/runAfterResponse.js";
+import { rememberRewardEmail } from "../../utils/emailDispatch.js";
 
 export const updateReward = async (req, res) => {
     try {
@@ -209,6 +210,7 @@ export const updateReward = async (req, res) => {
                                 }
 
                                 await transporter.sendMail(mailOptions);
+                                await rememberRewardEmail(reward._id, mailOptions);
                                 console.log(`[UpdateReward] Resubmit email sent to ${targetUser.email || targetUser.companyEmail}`);
                             }
                         }
@@ -384,7 +386,7 @@ export const updateReward = async (req, res) => {
                                     const empNameForEmail = reward.employeeName;
 
                                     for (const recipient of finalRecipients) {
-                                        await transporter.sendMail({
+                                        const approvalMail = {
                                             from: `"VeRP System" <${emailUser}>`,
                                             to: recipient.email,
                                             subject: `Reward Approval Request: ${reward.rewardType} - ${empNameForEmail}`,
@@ -410,7 +412,9 @@ export const updateReward = async (req, res) => {
                                                     </div>
                                                 </div>
                                             `
-                                        });
+                                        };
+                                        await transporter.sendMail(approvalMail);
+                                        await rememberRewardEmail(reward._id, approvalMail);
                                     }
                                     console.log("Approval Emails Sent");
                                 } catch (e) {
@@ -734,6 +738,7 @@ ${reward.workflow ? reward.workflow.map((w, i) => `│ ${i + 1}. Role: ${w.role.
                                             console.log(
                                                 `[UpdateReward] Management→Accounts info email sent to: ${recipients.join(', ')}`,
                                             );
+                                            return rememberRewardEmail(reward._id, stageMailPayload);
                                         }),
                                     );
                                 }
@@ -1147,6 +1152,7 @@ ${reward.workflow ? reward.workflow.map((w, i) => `│ ${i + 1}. Role: ${w.role.
                                     console.warn("[UpdateReward] WARNING: Sending email with ZERO attachments.");
                                     await transporter.sendMail(mailOptions);
                                 }
+                                await rememberRewardEmail(reward._id, mailOptions);
                             } else {
                                 console.error("[UpdateReward] ERROR: Missing EMAIL_USER or EMAIL_PASS environment variables");
                             }
@@ -1254,12 +1260,14 @@ ${reward.workflow ? reward.workflow.map((w, i) => `│ ${i + 1}. Role: ${w.role.
                                      </div>
                                  `;
 
-                                await transporter.sendMail({
+                                const rejectionMail = {
                                     from: `"VeRP Notification" <${emailUser}>`,
                                     to: Array.from(recipientEmails).join(', '),
                                     subject: subject,
                                     html: html
-                                });
+                                };
+                                await transporter.sendMail(rejectionMail);
+                                await rememberRewardEmail(reward._id, rejectionMail);
                                 console.log(`[UpdateReward] SUCCESS: Reward rejection email sent to ${Array.from(recipientEmails).length} recipients (target employee excluded)`);
                             } else {
                                 console.error("[UpdateReward] ERROR: Missing EMAIL_USER or EMAIL_PASS for rejection email");

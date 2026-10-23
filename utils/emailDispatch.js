@@ -266,6 +266,27 @@ async function linkSentEmailToTasks(email) {
     }
 }
 
+/** Keep a reward email on the reward id the task page already loads. */
+export async function rememberRewardEmail(rewardId, mail = {}) {
+    const id = String(rewardId || '').trim();
+    if (!id || !mail?.subject) return;
+    const split = (value) => (Array.isArray(value)
+        ? value
+        : String(value || '').split(','))
+        .map((item) => String(item || '').trim())
+        .filter(Boolean);
+    await rememberSentEmail({
+        from: mail.from || '',
+        to: split(mail.to),
+        cc: split(mail.cc),
+        subject: mail.subject,
+        html: mail.html || '',
+        recordId: id,
+        module: 'Reward',
+        emailType: 'Reward',
+    });
+}
+
 /** Keep a copy of an email that was already sent, so the task page can show it. */
 export async function rememberSentEmail({
     from = '',
