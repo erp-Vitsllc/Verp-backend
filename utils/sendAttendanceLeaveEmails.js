@@ -207,6 +207,44 @@ function hourTypeLabel(value) {
     return value === 'waived' ? 'Waived off' : 'Authorized';
 }
 
+/** Tell the reportee that HR finished the hour request. */
+export async function sendHourRequestCompletedEmail({
+    toEmp,
+    employeeName = '',
+    date = '',
+    hourType = '',
+    hours = 0,
+    recordIds = [],
+}) {
+    try {
+        const mail = createTransport();
+        const { email: to } = resolveEmployeeEmail(toEmp || {});
+        if (!mail || !to) return;
+        const subject = 'Hour request completed by HR';
+        const html = `
+            <p>Hello,</p>
+            <p>HR completed the hour request for <strong>${employeeName || 'the employee'}</strong> on <strong>${date || 'this day'}</strong>.</p>
+            <p><strong>Type:</strong> ${hourTypeLabel(hourType)}<br><strong>Approved hours:</strong> ${hours}</p>
+        `;
+        await mail.transporter.sendMail({
+            from: `"VeRP System" <${mail.from}>`,
+            to,
+            subject,
+            html,
+        });
+        await keepSentMail({
+            from: mail.from,
+            to: [to],
+            subject,
+            html,
+            recordIds,
+            emailType: 'Hour request completed',
+        });
+    } catch (err) {
+        console.error('[AttendanceChangeEmail] hour completed email failed:', err?.message || err);
+    }
+}
+
 /** Tell the previous person that the hour request type was changed. */
 export async function sendHourTypeChangedEmail({
     toEmp,
@@ -423,6 +461,7 @@ export async function sendAttendanceLeaveDecisionEmail({
     requestedLabel,
     finalLabel,
     rejectReason = '',
+    attendanceId = '',
     recordIds = [],
 }) {
     try {
@@ -442,7 +481,13 @@ export async function sendAttendanceLeaveDecisionEmail({
         const base = emailFrontendUrl();
         const group = String(employee?.staffType || 'office').trim().toLowerCase() || 'office';
         const day = String(date || '').trim();
-        const buttonUrl = `${base}/HRM/Attendance/mark?date=${encodeURIComponent(day)}&staffType=${encodeURIComponent(group)}&group=${encodeURIComponent(group)}&blinkEmployee=${encodeURIComponent(String(employee?._id || ''))}`;
+        const decisionParams = new URLSearchParams();
+        if (day) decisionParams.set('date', day);
+        decisionParams.set('staffType', group);
+        decisionParams.set('group', group);
+        if (employee?._id) decisionParams.set('blinkEmployee', String(employee._id));
+        if (attendanceId) decisionParams.set('leaveAttendanceId', String(attendanceId));
+        const buttonUrl = `${base}/HRM/Attendance/mark?${decisionParams.toString()}`;
         const body = approved
             ? `Your leave request for <strong>${shownDate}</strong> was <strong>approved</strong>. Status set to <strong>${finalLabel || requestedLabel}</strong>.`
             : `Your leave request for <strong>${shownDate}</strong> was <strong>rejected</strong>. Status remains <strong>${finalLabel || 'unchanged'}</strong>.${

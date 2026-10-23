@@ -123,6 +123,146 @@ export async function recordErpEmailSent({
     } catch (err) {
         if (err?.code === 11000) return;
         console.warn('[emailDispatch] record failed:', err?.message || err);
+        return;
+    }
+
+    if (!metadata?.taskLinkedCopy) {
+        await linkSentEmailToTasks({
+            dedupeKey: key,
+            module,
+            emailType,
+            recordId,
+            from,
+            to,
+            cc,
+            subject,
+            html,
+            metadata,
+        });
+    }
+}
+
+function readActionMeta(extra3) {
+    if (!extra3) return {};
+    if (typeof extra3 === 'object') return extra3;
+    try {
+        const parsed = JSON.parse(String(extra3));
+        return parsed && typeof parsed === 'object' ? parsed : {};
+    } catch {
+        return {};
+    }
+}
+
+/** True when this dashboard action is the task the email was sent for. */
+export function actionOwnsEmail(action, email, actions = []) {
+    const recordId = String(email?.recordId || '').trim();
+    if (!recordId) return false;
+    const actionId = String(action?._id || '');
+    if (actionId && actionId === recordId) return true;
+
+    const meta = readActionMeta(action?.extra3);
+    const serviceRecordId = String(meta.serviceRecordId || '').trim();
+    const serviceReqNo = String(meta.serviceReqNo || '').trim();
+    const hay = `${email?.subject || ''} ${email?.html || ''} ${email?.emailType || ''} ${recordId}`.toLowerCase();
+    if (serviceRecordId && (recordId === serviceRecordId || hay.includes(serviceRecordId.toLowerCase()))) return true;
+    if (serviceReqNo && (recordId.toLowerCase() === serviceReqNo.toLowerCase() || hay.includes(serviceReqNo.toLowerCase()))) return true;
+
+    const requestId = String(action?.requestId || '');
+    const requestType = String(action?.requestType || '');
+    if (requestId && requestId === recordId) {
+        if (requestType === 'Vehicle Service Request') {
+            const serviceType = String(meta.serviceType || '').trim().toLowerCase();
+            return Boolean(serviceType && hay.includes(serviceType));
+        }
+        const docType = String(meta.vehicleDocType || meta.docType || '').trim().toLowerCase();
+        if (docType) return hay.includes(docType) || recordId.toLowerCase().includes(docType);
+        const title = String(action?.extra1 || '').trim().toLowerCase();
+        if (title.length > 12 && hay.includes(title.slice(0, 80))) return true;
+        const sameRecord = actions.filter((row) => String(row?.requestId || '') === requestId);
+        if (actions.length > 1 && sameRecord.length === 1) return true;
+        return false;
+    }
+
+    const extra = JSON.stringify(action?.extra3 || '');
+    if (extra.includes(recordId)) {
+        if (requestType === 'Vehicle Service Request') {
+            return serviceRecordId === recordId || serviceReqNo.toLowerCase() === recordId.toLowerCase();
+        }
+        return true;
+    }
+    return false;
+}
+
+/** Older sends were stored on the business record. Copy them onto this task when it is opened. */
+export async function attachStoredEmailsToAction(action) {
+    const actionId = String(action?._id || '').trim();
+    if (!/^[a-f0-9]{24}$/i.test(actionId)) return;
+    const meta = readActionMeta(action?.extra3);
+    const ids = [action.requestId, meta.serviceRecordId, meta.serviceReqNo, meta.attendanceId, meta.leaveRequestGroupId, meta.groupId]
+        .map((value) => String(value || '').trim())
+        .filter((value) => value && value !== actionId);
+    if (!ids.length) return;
+
+    const rows = await EmailNotificationLog.find({
+        recordId: { $in: ids },
+        'metadata.taskLinkedCopy': { $ne: true },
+    })
+        .sort({ sentAt: -1 })
+        .limit(80)
+        .select('dedupeKey module emailType recordId from to cc subject html metadata')
+        .lean()
+        .catch(() => []);
+
+    for (const row of rows) {
+        if (!actionOwnsEmail(action, row, [action])) continue;
+        await recordErpEmailSent({
+            dedupeKey: buildEmailDedupeKey(['task-link', actionId, row.dedupeKey || row.subject, normalizeRecipientList(row.to).join(',')]),
+            module: row.module,
+            emailType: row.emailType,
+            recordId: actionId,
+            from: row.from,
+            to: row.to,
+            cc: row.cc,
+            subject: row.subject,
+            html: row.html,
+            metadata: { ...(row.metadata || {}), taskLinkedCopy: true, sourceRecordId: row.recordId },
+        });
+    }
+}
+
+/** Copy the sent message onto the task id the task page already loads. */
+async function linkSentEmailToTasks(email) {
+    const recordId = String(email?.recordId || '').trim();
+    if (recordId.length < 3) return;
+
+    const DashboardAction = (await import('../models/DashboardAction.js')).default;
+    const clauses = [];
+    if (/^[a-f0-9]{24}$/i.test(recordId)) {
+        clauses.push({ _id: recordId }, { requestId: recordId });
+    }
+    clauses.push({ extra3: new RegExp(escapeEmailId(recordId)) });
+
+    const actions = await DashboardAction.find({ $or: clauses })
+        .select('_id requestId requestType extra1 extra3')
+        .limit(40)
+        .lean()
+        .catch(() => []);
+
+    for (const action of actions) {
+        const actionId = String(action?._id || '');
+        if (!actionId || actionId === recordId || !actionOwnsEmail(action, email, actions)) continue;
+        await recordErpEmailSent({
+            dedupeKey: buildEmailDedupeKey(['task-link', actionId, email.dedupeKey || email.subject, normalizeRecipientList(email.to).join(',')]),
+            module: email.module,
+            emailType: email.emailType,
+            recordId: actionId,
+            from: email.from,
+            to: email.to,
+            cc: email.cc,
+            subject: email.subject,
+            html: email.html,
+            metadata: { ...(email.metadata || {}), taskLinkedCopy: true, sourceRecordId: recordId },
+        });
     }
 }
 
@@ -192,8 +332,12 @@ export function emailBelongsToVehicleService(row, { serviceRecordId = '', servic
     const identity = emailIdentityText(row);
     if (/document expiry|expiry reminder|expiry follow-up/.test(identity)) return false;
 
+    const blob = `${identity} ${String(row?.html || '').toLowerCase()}`;
+    const reqNo = String(serviceReqNo || '').trim().toLowerCase();
+    const serviceId = String(serviceRecordId || '').trim().toLowerCase();
     if (serviceRecordId && recordId === serviceRecordId) return true;
-    if (serviceReqNo && recordId.toLowerCase() === String(serviceReqNo).trim().toLowerCase()) return true;
+    if (serviceId && blob.includes(serviceId)) return true;
+    if (reqNo && (recordId.toLowerCase() === reqNo || blob.includes(reqNo))) return true;
 
     const type = String(serviceType || '').trim().toLowerCase();
     if (!type || !identity.includes(type)) return false;
@@ -668,20 +812,25 @@ export async function sendErpEmail({
         ...(attachments?.length ? { attachments } : {}),
     });
 
-    if (key) {
-        await recordErpEmailSent({
-            dedupeKey: key,
-            module,
-            emailType,
+    await recordErpEmailSent({
+        dedupeKey: key || buildEmailDedupeKey([
+            'sent',
+            module || emailType || 'mail',
             recordId,
-            from,
-            to: toList,
-            cc: ccList,
-            subject: finalSubject,
-            html,
-            metadata,
-        });
-    }
+            finalSubject,
+            toList.join(','),
+            Date.now(),
+        ]),
+        module,
+        emailType,
+        recordId,
+        from,
+        to: toList,
+        cc: ccList,
+        subject: finalSubject,
+        html,
+        metadata,
+    });
 
     return { sent: true, to: toList, cc: ccList };
 }

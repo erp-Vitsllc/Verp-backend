@@ -21,6 +21,7 @@ import {
     decideAttendanceLeaveRequest,
     decideAttendanceChangeRequest,
     getAttendanceOpenTarget,
+    getLeaveAttachment,
 } from '../controllers/attendanceController.js';
 import {
     getCompOffMonth,
@@ -82,6 +83,7 @@ router.get('/dashboard/pending-inbox', getAttendancePendingInbox);
 router.post('/dashboard/approve-pending', approveAttendancePending);
 router.post('/change-request/decide', decideAttendanceChangeRequest);
 router.get('/open-target', getAttendanceOpenTarget);
+router.get('/attachment/:id', getLeaveAttachment);
 
 router.get(
     '/mark-roster',

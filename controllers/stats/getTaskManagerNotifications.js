@@ -1221,9 +1221,12 @@ export const getTaskManagerNotifications = async (req, res) => {
             const requestedAt = row.createdAt || null;
             const requestedKey = dubaiDateKey(requestedAt);
             const dueKey = dubaiDateKey(row.completionDate);
-            const open = row.status !== "Completed" && row.status !== "Cancelled";
+            const closedReview = Boolean(row.closeRequest?.closedAt) && !row.closeRequest?.reviewPending;
+            const open = row.status !== "Completed" && row.status !== "Cancelled" && !closedReview;
             const generalReview = String(row.taskType || "") === "General Task" && !row.sourceDashboardActionId;
-            const status = row.status === "Completed"
+            const status = closedReview
+                ? "Closed"
+                : row.status === "Completed"
                 ? "Completed"
                 : row.status === "Cancelled"
                     ? "Cancelled"
@@ -1249,16 +1252,16 @@ export const getTaskManagerNotifications = async (req, res) => {
 
             summary.total += 1;
             bump("total", requestMonth);
-            if (status === "Pending" || status === "Pending Due" || status === "Pending Review" || status === "Open") {
+            if (status === "Closed" || status === "Completed") {
+                summary.completed += 1;
+                bump("completed", completedMonth);
+            } else if (status === "Pending" || status === "Pending Due" || status === "Pending Review" || status === "Open") {
                 summary.pending += 1;
                 bump("pending", requestMonth);
                 if (status === "Pending Due") {
                     summary.pendingDue += 1;
                     bump("pendingDue", requestMonth);
                 }
-            } else if (status === "Completed") {
-                summary.completed += 1;
-                bump("completed", completedMonth);
             }
 
             const destination = moduleForText(row.taskName, row.description, row.taskType);

@@ -47,6 +47,7 @@ import { syncDashboardAction } from '../utils/syncDashboard.js';
 import {
     sendAttendanceLeaveDecisionEmail,
     sendAttendanceDirectChangeEmail,
+    sendHourRequestCompletedEmail,
     sendHourTypeChangedEmail,
 } from '../utils/sendAttendanceLeaveEmails.js';
 import {
@@ -1378,6 +1379,84 @@ async function attachLeaveFileUrls(rows) {
         plain.attachmentUrl = (await signOrKeepAttachmentUrl(key)) || '';
         return plain;
     }));
+}
+
+async function resolveStoredAttachmentKey(record) {
+    const direct = String(record?.attachmentKey || '').trim();
+    if (direct) return direct;
+    const employeeMongoId = String(record?.employeeMongoId || '').trim();
+    const date = String(record?.date || '').trim();
+    const groupId = String(record?.leaveRequestGroupId || '').trim();
+    const or = [];
+    if (employeeMongoId && date) or.push({ employeeMongoId, date });
+    if (groupId) or.push({ leaveRequestGroupId: groupId });
+    if (or.length) {
+        const sibling = await Attendance.findOne({
+            $or: or,
+            attachmentKey: { $nin: ['', null] },
+        })
+            .select('attachmentKey')
+            .lean();
+        if (sibling?.attachmentKey) return String(sibling.attachmentKey).trim();
+    }
+    if (employeeMongoId && date) {
+        const change = await AttendanceChangeRequest.findOne({
+            employeeMongoId,
+            date,
+            'proposed.attachmentKey': { $nin: ['', null] },
+        })
+            .sort({ updatedAt: -1 })
+            .select('proposed.attachmentKey')
+            .lean();
+        const changeKey = String(change?.proposed?.attachmentKey || '').trim();
+        if (changeKey) return changeKey;
+    }
+    return '';
+}
+
+/** GET /api/Attendance/attachment/:id — signed URL for a sick-leave file. */
+export async function getLeaveAttachment(req, res) {
+    try {
+        const id = String(req.params.id || '').trim();
+        const employeeMongoId = String(req.query.employeeMongoId || '').trim();
+        const date = String(req.query.date || '').trim();
+        const attachmentName = String(req.query.name || '').trim();
+        let record = null;
+        if (mongoose.Types.ObjectId.isValid(id)) {
+            record = await Attendance.findById(id)
+                .select('attachmentKey attachmentName employeeMongoId date leaveRequestGroupId')
+                .lean();
+        }
+        if (!record && employeeMongoId && date) {
+            record = await Attendance.findOne({ employeeMongoId, date })
+                .select('attachmentKey attachmentName employeeMongoId date leaveRequestGroupId')
+                .lean();
+        }
+        if (!record && attachmentName) {
+            record = await Attendance.findOne({ attachmentName })
+                .sort({ updatedAt: -1 })
+                .select('attachmentKey attachmentName employeeMongoId date leaveRequestGroupId')
+                .lean();
+        }
+        if (!record) {
+            return res.status(404).json({ message: 'Attendance day not found.' });
+        }
+        const key = await resolveStoredAttachmentKey(record);
+        if (!key) {
+            return res.status(404).json({ message: 'No file is stored for this day. Only the file name was saved.' });
+        }
+        const url = String((await signOrKeepAttachmentUrl(key)) || '').trim();
+        if (!/^https?:\/\//i.test(url)) {
+            return res.status(404).json({ message: 'The file could not be opened.' });
+        }
+        return res.status(200).json({
+            url,
+            name: record.attachmentName || '',
+        });
+    } catch (error) {
+        console.error('[getLeaveAttachment]', error);
+        return res.status(500).json({ message: error.message || 'Failed to open the attachment.' });
+    }
 }
 
 async function commitManualAttendanceMark({
@@ -3898,27 +3977,27 @@ export async function decideAttendanceChangeRequest(req, res) {
             request.proposed.hourAdjustMode = edited.hourAdjustMode;
             request.proposed.hourRequestType = edited.hourRequestType;
             if (edited.hourRequestType && edited.hourRequestType !== previousType) {
-                const notifyId = stageBeforeEdit === 'pending_hr'
-                    ? request.reporteeId
-                    : stageBeforeEdit === 'pending_reportee'
-                      ? request.requestedBy
-                      : '';
-                if (notifyId) {
-                    const notifyEmp = await EmployeeBasic.findById(notifyId)
-                        .select('firstName lastName employeeId companyEmail workEmail email primaryReportee status')
-                        .populate('primaryReportee', 'companyEmail workEmail email status')
-                        .lean();
-                    const changedByName = [actor.firstName, actor.lastName].filter(Boolean).join(' ').trim();
-                    await sendHourTypeChangedEmail({
-                        toEmp: notifyEmp,
-                        changedByName,
-                        employeeName: request.employeeName || '',
-                        date: request.date || '',
-                        fromType: previousType,
-                        toType: edited.hourRequestType,
-                        hours: edited.hoursApproved,
-                        recordIds: [request._id, request.proposed?.attendanceId],
-                    });
+                const changedByName = [actor.firstName, actor.lastName].filter(Boolean).join(' ').trim();
+                const mailFields = {
+                    changedByName,
+                    employeeName: request.employeeName || '',
+                    date: request.date || '',
+                    fromType: previousType,
+                    toType: edited.hourRequestType,
+                    hours: edited.hoursApproved,
+                    recordIds: [request._id, request.proposed?.attendanceId],
+                };
+                if (stageBeforeEdit === 'pending_reportee') {
+                    const hr = await getDepartmentHOD('hr').catch(() => null);
+                    if (hr?._id) await sendHourTypeChangedEmail({ ...mailFields, toEmp: hr });
+                } else if (stageBeforeEdit === 'pending_hr') {
+                    const requester = request.requestedBy
+                        ? await EmployeeBasic.findById(request.requestedBy)
+                            .select('firstName lastName employeeId companyEmail workEmail email primaryReportee status')
+                            .populate('primaryReportee', 'companyEmail workEmail email status')
+                            .lean()
+                        : null;
+                    if (requester) await sendHourTypeChangedEmail({ ...mailFields, toEmp: requester });
                 }
             }
             request.proposed.statusLabel =
@@ -4057,6 +4136,24 @@ export async function decideAttendanceChangeRequest(req, res) {
                 const status = hourErr.statusCode || 500;
                 if (status >= 500) throw hourErr;
                 return res.status(status).json({ message: hourErr.message || 'Could not approve these hours.' });
+            }
+            const reportee = employee?.primaryReportee?._id
+                ? employee.primaryReportee
+                : request.reporteeId
+                    ? await EmployeeBasic.findById(request.reporteeId)
+                        .select('firstName lastName employeeId companyEmail workEmail email primaryReportee status')
+                        .populate('primaryReportee', 'companyEmail workEmail email status')
+                        .lean()
+                    : null;
+            if (reportee) {
+                await sendHourRequestCompletedEmail({
+                    toEmp: reportee,
+                    employeeName: request.employeeName || '',
+                    date: request.date || '',
+                    hourType: request.proposed?.hourRequestType || '',
+                    hours: request.proposed?.hoursApproved || 0,
+                    recordIds: [request._id, request.proposed?.attendanceId],
+                });
             }
             return finishApproved(record);
         }
@@ -5182,6 +5279,7 @@ export async function decideLeaveRequestInternal({
             requestedLabel,
             finalLabel,
             rejectReason: trimmedRejectReason,
+            attendanceId: String(record._id || ''),
             recordIds: [leaveDashboardRequestObjectId(groupId, record._id)],
         });
     }

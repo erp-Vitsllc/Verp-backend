@@ -24,6 +24,7 @@ import {
     documentLabelFromExpiryText,
     emailBelongsToDocumentExpiry,
     emailBelongsToVehicleService,
+    attachStoredEmailsToAction,
     findEmailsForTask,
     serviceTypeFromTaskText,
 } from "../../utils/emailDispatch.js";
@@ -688,8 +689,8 @@ function dashboardActionIsClosed(action) {
 
 async function closeFlags(task, viewer, currentAssigneeId, assigneeEmpId, action = null) {
     const reassigned = taskWasReassigned(task);
-    const completed = task?.status === "Completed";
     const saved = closeSnapshot(task);
+    const completed = task?.status === "Completed" || (Boolean(saved.closedAt) && !saved.reviewPending);
     const requested = Boolean(saved.requestedAt);
     const notified = Boolean(saved.assigneeNotifiedAt);
     const closed = Boolean(saved.closedAt);
@@ -1055,6 +1056,7 @@ async function buildDetail(target, viewer) {
             for (const row of changeActions) exactIds.push(row._id);
         }
     }
+    if (mailAction?._id) await attachStoredEmailsToAction(mailAction);
     const taskEmails = await findEmailsForTask({ ids: exactIds });
     let recordEmails = [];
     if (vehicleService) {
@@ -2011,7 +2013,7 @@ export const reviewGeneralTask = async (req, res) => {
                 task.assigneeEmpId = saved.returnAssigneeEmpId || "";
                 task.assigneeName = saved.returnAssigneeName || task.assigneeName;
             }
-            task.status = "Pending";
+            task.status = "Completed";
             task.closeRequest = {
                 ...saved,
                 reviewPending: false,

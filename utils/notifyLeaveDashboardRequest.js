@@ -43,23 +43,13 @@ export function leaveDashboardReviewPath({
 } = {}) {
     const group = normalizeStaffTypeKey(staffType) || 'office';
     const person = String(employeeMongoId || '').trim();
-    if (String(requestedStatusKey || '') === 'sick_leave') {
-        const params = new URLSearchParams();
-        if (from) params.set('date', from);
-        params.set('staffType', group);
-        params.set('group', group);
-        if (person) params.set('blinkEmployee', person);
-        if (attendanceId) params.set('leaveAttendanceId', String(attendanceId));
-        return `/HRM/Attendance/mark?${params.toString()}`;
-    }
     const params = new URLSearchParams();
-    if (person) params.set('employeeId', person);
-    if (employeeName) params.set('employeeName', employeeName);
-    if (from) params.set('from', from);
-    if (to) params.set('to', to);
+    if (from) params.set('date', from);
+    params.set('staffType', group);
     params.set('group', group);
-    if (attendanceId) params.set('approvalId', String(attendanceId));
-    return `/HRM/Leave/annual-leave?${params.toString()}`;
+    if (person) params.set('blinkEmployee', person);
+    if (attendanceId) params.set('leaveAttendanceId', String(attendanceId));
+    return `/HRM/Attendance/mark?${params.toString()}`;
 }
 
 async function mailIdsForRequest({ requestId, requestType }) {
@@ -116,7 +106,6 @@ export async function notifyLeaveRequestApprover({
     const hrStep = stage === LEAVE_STAGE_HR;
     const waitingLabel = hrStep ? 'Pending with HR' : 'Pending with primary reportee';
     const staffType = normalizeStaffTypeKey(employee?.staffType) || 'office';
-    const sickLeave = String(requestedStatusKey || '') === 'sick_leave';
 
     await syncDashboardAction({
         requestId,
@@ -160,7 +149,7 @@ export async function notifyLeaveRequestApprover({
             employeeMongoId: employee?._id,
             employeeName: empName,
         }),
-        buttonLabel: sickLeave ? 'Open attendance' : 'Open Leave Approval',
+        buttonLabel: 'Open this request',
         emailTitle: hrStep ? `${label} — HR approval` : `${label} Request`,
         recordIds: await mailIdsForRequest({
             requestId,
@@ -252,7 +241,7 @@ export async function notifyFlowchartHrOfIneligibleAnnualLeave({
             employeeMongoId: employee?._id,
             employeeName: empName,
         }),
-        buttonLabel: 'Open Leave Approval',
+        buttonLabel: 'Open this request',
         emailTitle: `${label} — not eligible`,
         recordIds: await mailIdsForRequest({
             requestId,

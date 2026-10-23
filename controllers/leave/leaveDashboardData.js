@@ -1,5 +1,6 @@
 import mongoose from 'mongoose';
 import Attendance from '../../models/Attendance.js';
+import AttendanceChangeRequest from '../../models/AttendanceChangeRequest.js';
 import DashboardAction from '../../models/DashboardAction.js';
 import EmployeeBasic from '../../models/EmployeeBasic.js';
 import EmployeeHubRequest from '../../models/EmployeeHubRequest.js';
@@ -48,6 +49,7 @@ import { resolveFlowchartHrEmployee } from '../../utils/resolveFlowchartHrEmploy
 import {
     inferLeaveApprovalStage,
     LEAVE_STAGE_HR,
+    LEAVE_STAGE_REPORTEE,
     leaveApprovalPersonName,
     leaveApproverCanDecide,
     openingLeaveApprovalStage,
@@ -731,6 +733,85 @@ export async function getLeavePendingRequests(req, res) {
         });
 
         const requestItems = groupPendingRows(visibleRows);
+        const coveredPending = new Set(
+            requestItems
+                .filter((item) => item.statusKey === 'pending')
+                .map((item) => `${item.employeeMongoId}|${item.startDateKey}|${item.requestedStatusKey}`),
+        );
+        const changeRows = await AttendanceChangeRequest.find({
+            stage: { $in: ['pending_reportee', 'pending_hr', 'pending_requester'] },
+            action: { $in: ['mark', 'hour_adjust', 'flexible_ot'] },
+            employeeMongoId: { $in: allEmployeeIds },
+            ...(year ? { date: { $gte: yearFrom, $lte: yearTo } } : {}),
+        })
+            .sort({ createdAt: -1 })
+            .limit(500)
+            .lean()
+            .maxTimeMS(8000);
+        const leaveChangeStatuses = new Set([
+            'sick_leave',
+            'authorized_leave',
+            'on_leave',
+            'compoff_leave',
+            'unauthorized_leave',
+            'mispunch',
+            'late_arrived',
+            'early_go',
+        ]);
+        for (const change of changeRows || []) {
+            const proposed = change.proposed || {};
+            const action = String(change.action || '');
+            const nextDay = action === 'flexible_ot' && proposed.confirmNextDay === true;
+            const statusKey = String(
+                nextDay
+                    ? 'on_office'
+                    : proposed.statusKey || proposed.hourAdjustKind || (action === 'flexible_ot' ? 'flexible_ot' : ''),
+            ).trim();
+            if (action !== 'flexible_ot' && action !== 'hour_adjust' && !leaveChangeStatuses.has(statusKey)) continue;
+            const date = String((nextDay && proposed.targetDate) || change.date || '').trim();
+            const cover = `${change.employeeMongoId}|${date}|${statusKey}`;
+            if (coveredPending.has(cover)) continue;
+            const stage = String(change.stage || '');
+            const leaveType = nextDay
+                ? 'Next day attendance'
+                : action === 'flexible_ot'
+                    ? 'OT'
+                    : action === 'hour_adjust' && /mispunch/i.test(statusKey)
+                        ? 'Miss Punch'
+                        : leaveTypeLabel({
+                            requestedStatusKey: statusKey,
+                            requestedStatusLabel: proposed.statusLabel || '',
+                            leaveRequestKind: proposed.hourAdjustKind ? 'yellow' : 'leave',
+                        });
+            requestItems.push({
+                id: String(change._id),
+                changeRequestId: String(change._id),
+                requestAction: action,
+                staffType: change.staffType || '',
+                attendanceIds: proposed.attendanceId ? [String(proposed.attendanceId)] : [],
+                employeeMongoId: String(change.employeeMongoId || ''),
+                employeeId: change.employeeId || '',
+                name: change.employeeName || 'Employee',
+                leaveType,
+                startDate: formatDisplayDate(date),
+                endDate: formatDisplayDate(date),
+                startDateKey: date,
+                endDateKey: date,
+                status: 'Pending',
+                statusKey: 'pending',
+                requestedStatusKey: statusKey,
+                leaveRequestKind: 'leave',
+                leaveApprovalStage: stage === 'pending_hr' ? LEAVE_STAGE_HR : LEAVE_STAGE_REPORTEE,
+                annualLeaveNotEligible: false,
+                reason: String(proposed.reason || '').trim(),
+                attachmentName: String(proposed.attachmentName || '').trim(),
+                timeIn: proposed.timeIn || '',
+                timeOut: proposed.timeOut || '',
+                requestedAt: change.createdAt || null,
+                requestedDate: formatRequestedDate(change.createdAt),
+                sortAt: change.createdAt || date,
+            });
+        }
 
         const actor = await resolveActorEmployee(req);
         const hrFlags = await resolveLeaveHrFlags(req);
