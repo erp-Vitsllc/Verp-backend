@@ -27,7 +27,20 @@ describe("leave bell visibility", () => {
         assert.equal(kept.id, "open");
     });
 
-    it("drops old requests and requests that were accepted, rejected, or deleted", () => {
+    it("keeps a pending request after its last leave day", () => {
+        const [kept] = selectOpenLeaveBellItems([
+            {
+                id: "past-pending",
+                status: "Pending",
+                employeeMongoId: "emp-1",
+                startDateKey: "2026-10-05",
+                endDateKey: "2026-10-05",
+            },
+        ], { today: TODAY });
+        assert.equal(kept.id, "past-pending");
+    });
+
+    it("drops requests that were accepted, rejected, or deleted", () => {
         const kept = selectOpenLeaveBellItems([
             {
                 id: "old-hub",
@@ -76,6 +89,6 @@ describe("leave bell visibility", () => {
             pendingRanges: [{ employeeMongoId: "netra", from: "2026-11-02", to: "2026-11-02" }],
             decidedRanges: [{ employeeMongoId: "netra", from: "2026-10-21", to: "2026-10-21" }],
         });
-        assert.deepEqual(kept.map((item) => item.id), ["still-open"]);
+        assert.deepEqual(kept.map((item) => item.id), ["old-hub", "still-open"]);
     });
 });

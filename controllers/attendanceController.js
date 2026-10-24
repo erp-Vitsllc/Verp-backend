@@ -4010,8 +4010,9 @@ export async function decideAttendanceChangeRequest(req, res) {
         }
 
         const proposed = request.proposed && typeof request.proposed === 'object' ? request.proposed : {};
-        const nextIn = String(req.body?.timeIn || '').trim();
-        const nextOut = String(req.body?.timeOut || '').trim();
+        const lockMispunchTimes = request.action === 'hour_adjust' && proposed.hourAdjustKind === 'mispunch';
+        const nextIn = lockMispunchTimes ? '' : String(req.body?.timeIn || '').trim();
+        const nextOut = lockMispunchTimes ? '' : String(req.body?.timeOut || '').trim();
         let proposedChanged = false;
         if (nextIn) {
             proposed.timeIn = nextIn;
@@ -4563,8 +4564,13 @@ export async function requestAttendanceYellow(req, res) {
 
         record.previousStatusKey = previousStatusKey;
         record.previousStatusLabel = previousStatusLabel;
-        record.requestedStatusKey = 'on_office';
-        record.requestedStatusLabel = 'Present';
+        const missedPunch =
+            record.statusKey === 'mispunch' ||
+            !String(record.timeIn || '').trim() ||
+            !String(record.timeOut || '').trim() ||
+            /mispunch/i.test(String(record.reason || ''));
+        record.requestedStatusKey = missedPunch ? 'mispunch' : 'on_office';
+        record.requestedStatusLabel = missedPunch ? 'Mispunch' : 'Present';
         record.leaveRequestReason = reason;
         record.leaveRequestKind = 'yellow';
         record.attachmentName = storedFile?.attachmentName || attachmentName || record.attachmentName || '';
@@ -4588,8 +4594,8 @@ export async function requestAttendanceYellow(req, res) {
             from: date,
             to: date,
             attendanceId: record._id,
-            requestedLabel: 'Miss Punch',
-            requestedStatusKey: 'on_office',
+            requestedLabel: missedPunch ? 'Mispunch' : 'Present',
+            requestedStatusKey: missedPunch ? 'mispunch' : 'on_office',
             leaveRequestKind: 'yellow',
             reason,
             attachmentName,
@@ -5404,7 +5410,25 @@ async function applyLeaveDecisionToRecord({
             return null;
         };
 
-        if (kind === 'yellow' || requestedKey === 'on_office') {
+        const missedPunch =
+            requestedKey === 'mispunch' ||
+            record.statusKey === 'mispunch' ||
+            record.previousStatusKey === 'mispunch' ||
+            !String(record.timeIn || '').trim() ||
+            !String(record.timeOut || '').trim() ||
+            /mispunch/i.test(`${record.reason || ''} ${record.previousStatusLabel || ''}`);
+        if ((kind === 'yellow' || requestedKey === 'on_office' || requestedKey === 'mispunch') && missedPunch) {
+            const wasLate =
+                record.statusKey === 'late_arrived' ||
+                record.previousStatusKey === 'late_arrived' ||
+                /late/i.test(String(record.previousStatusLabel || ''));
+            record.statusKey = wasLate ? 'late_arrived' : 'mispunch';
+            record.statusLabel = wasLate ? 'Late Arrival' : 'Mispunch (Approved)';
+            record.hourAdjustStatus = 'approved';
+            record.hourAdjustKind = 'mispunch';
+            record.approvalStatus = 'approved';
+            if (record.leaveRequestReason) record.reason = record.leaveRequestReason;
+        } else if (kind === 'yellow' || requestedKey === 'on_office') {
             record.statusKey = 'on_office';
             record.statusLabel = 'Present';
             record.leavePayType = '';

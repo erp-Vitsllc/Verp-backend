@@ -33,6 +33,7 @@ import { resolveEmployeeEmailWithReporteeLoaded } from "../../utils/resolveEmplo
 import {
     alignOpenFineDashboardRows,
     displayStatus,
+    taskNumbersByRecordId,
     taskCategory as categoryFromRequestType,
     displayRequesterName,
     preferRequesterName,
@@ -86,6 +87,7 @@ function isGeneralTask(task) {
 
 function detailDisplayStatus(task, action, manual) {
     if (isGeneralTask(task) && task?.closeRequest?.closedAt && !task?.closeRequest?.reviewPending) return "Closed";
+    if (isGeneralTask(task) && task?.closeRequest?.reopenedAt && !task?.closeRequest?.closedAt && task?.status === "Pending") return "Reopened";
     if (task?.closeRequest?.reviewPending && task?.status !== "Completed") return "Pending Review";
     if (task?.closeRequest?.reviewReturned && (task?.status === "Pending" || task?.status === "In Progress")) return "Open";
     if (task?.status === "Completed" || task?.status === "Cancelled" || task?.status === "Rejected") return task.status;
@@ -437,7 +439,10 @@ function viewerIsCurrentAssignee(viewer, current) {
     if (assigneeId && viewer?.employeeObjectId && assigneeId === String(viewer.employeeObjectId)) return true;
     if (assigneeId && viewer?.userId && assigneeId === String(viewer.userId)) return true;
     const code = String(current?.assigneeEmpId || "").trim().toLowerCase();
-    return Boolean(code && viewer?.employeeId && code === String(viewer.employeeId).trim().toLowerCase());
+    if (code && viewer?.employeeId && code === String(viewer.employeeId).trim().toLowerCase()) return true;
+    const viewerName = personBaseName(viewer?.name).toLowerCase();
+    const assigneeName = personBaseName(current?.assigneeName).toLowerCase();
+    return Boolean(viewerName && assigneeName && viewerName === assigneeName);
 }
 
 async function nameOfAssignee(current, fallback = "") {
@@ -708,6 +713,7 @@ async function closeFlags(task, viewer, currentAssigneeId, assigneeEmpId, action
     const viewerIsAssignee = viewerIsCurrentAssignee(viewer, {
         assigneeId: currentAssigneeId,
         assigneeEmpId,
+        assigneeName: task?.assigneeName,
     });
     const original = reassigned ? await resolveOriginalAssignee(task) : null;
     const viewerIsOriginal = viewerMatchesEmployee(viewer, original);
@@ -1142,7 +1148,7 @@ async function buildDetail(target, viewer) {
         manual,
         workflowLocked,
         canReassign: viewerCanReassign(viewer, currentAssigneeId, assigneeEmpId),
-        canDelete: Boolean(
+        canDelete: generalTaskClosed(task) ? false : Boolean(
             viewer?.superUser
             || (manual && (
                 task?.requestedByUserId
@@ -1278,6 +1284,9 @@ export const updateTaskManagerTask = async (req, res) => {
         if (!(await denyUnlessViewer(req, res))) return;
         const target = await loadTarget(req.params.taskKey);
         if (!target) return res.status(404).json({ message: "Task not found." });
+        if (generalTaskClosed(target.task)) {
+            return res.status(400).json({ message: "This task is closed. Edit is disabled." });
+        }
 
         const taskType = canonicalTaskType(req.body?.taskType);
         const priority = String(req.body?.priority || "").trim();
@@ -1434,6 +1443,9 @@ export const reassignTaskManagerTask = async (req, res) => {
         if (!(await denyUnlessViewer(req, res))) return;
         const target = await loadTarget(req.params.taskKey);
         if (!target) return res.status(404).json({ message: "Task not found." });
+        if (generalTaskClosed(target.task)) {
+            return res.status(400).json({ message: "This task is closed. Reassign is disabled." });
+        }
         const viewer = await resolveTaskViewer(req);
         const current = assigneeOf(target);
         const originalPerson = target.task ? await resolveOriginalAssignee(target.task) : null;
@@ -1634,7 +1646,7 @@ export const returnTaskManagerTask = async (req, res) => {
             return res.status(400).json({ message: "This task is already closed." });
         }
         const current = assigneeOf(target);
-        if (!viewerIsCurrentAssignee(viewer, current)) {
+        if (!viewerIsCurrentAssignee(viewer, { ...current, assigneeName: task.assigneeName })) {
             return res.status(403).json({ message: "Only the current assignee can return this task." });
         }
         const original = await resolveOriginalAssignee(task);
@@ -1673,11 +1685,25 @@ export const returnTaskManagerTask = async (req, res) => {
         const recordId = String(target.action?._id || task._id || "");
         let emailSent = false;
         try {
+            const numberMap = await taskNumbersByRecordId([
+                task.sourceDashboardActionId,
+                target.action?._id,
+                task._id,
+                `manual-${task._id}`,
+            ]);
+            const taskNumber = numberMap.get(String(task.sourceDashboardActionId || target.action?._id || ""))
+                || numberMap.get(`manual-${task._id}`)
+                || numberMap.get(String(task._id || ""))
+                || "";
             const sent = await mailEmployee(original, {
-                subject: `Task returned to you: ${task.taskName || "Task"}`,
+                subject: `Task returned to you: ${taskNumber || task.taskName || "Task"}`,
                 html: taskActionHtml({
                     hello: originalName,
-                    lines: [`${viewer.name} returned this task to you.`],
+                    lines: [
+                        `${viewer.name} returned this task to you.`,
+                        `Task number: ${taskNumber || "—"}`,
+                        `Task name: ${task.taskName || "Task"}`,
+                    ],
                     taskName: task.taskName,
                     description: note.text,
                     link: taskDetailLink(target),
@@ -2036,13 +2062,14 @@ export const reviewGeneralTask = async (req, res) => {
             };
             task.markModified("closeRequest");
             task.history = task.history || [];
-            task.history.push(historyEntry("Approved", `${viewer.name} approved this task. It is closed and completed.`, viewer.name));
+            task.history.push(historyEntry("Approved", `${viewer.name} approved this task.`, viewer.name));
+            task.history.push(historyEntry("Closed", `${viewer.name} approved this task. It is closed.`, viewer.name));
             await pushWorkUpdate(task, {
                 authorName: viewer.name,
                 authorRole: await authorRoleFor(viewer),
                 kind: "Work Update",
-                badge: "Completed",
-                text: `${viewer.name} approved this task. It is closed and completed.`,
+                badge: "Closed",
+                text: `${viewer.name} approved this task. It is closed.`,
             }, SILENT_MAIL);
             await task.save();
             await syncManualTaskNotification(task);
@@ -2272,7 +2299,10 @@ export const reopenTaskManagerTask = async (req, res) => {
                 task.assigneeName = saved.returnAssigneeName || task.assigneeName;
             }
         }
-        const text = noteText || `${viewer.name} reopened this task. It is pending again.`;
+        const returnedName = task.assigneeName || saved.returnAssigneeName || "the last assigned user";
+        const text = noteText
+            ? `${viewer.name} reopened this task. Reason: ${noteText}`
+            : `${viewer.name} reopened this task. It is pending again.`;
         task.status = "Pending";
         task.closeRequest = {
             ...saved,
@@ -2288,12 +2318,15 @@ export const reopenTaskManagerTask = async (req, res) => {
         };
         task.markModified("closeRequest");
         task.history = task.history || [];
-        task.history.push(historyEntry("Reopened", noteText ? `${viewer.name} reopened this task. ${noteText}` : text, viewer.name));
+        task.history.push(historyEntry("Reopened", text, viewer.name));
+        if (closedGeneral) {
+            task.history.push(historyEntry("Reassigned", `The task returned to ${returnedName}, the last assigned user.`, viewer.name));
+        }
         await pushWorkUpdate(task, {
             authorName: viewer.name,
             authorRole: await authorRoleFor(viewer),
             kind: "Reopened",
-            badge: "Open",
+            badge: "Reopened",
             text,
         }, SILENT_MAIL);
         await task.save();
@@ -2302,14 +2335,33 @@ export const reopenTaskManagerTask = async (req, res) => {
         let emailSent = false;
         try {
             const audience = await taskRecipientEmails(task);
+            const owner = await resolveTaskRequesterEmployee(task);
+            const ownerName = personName(owner) || personBaseName(task.requestedByName) || viewer.name;
+            const ownerRole = await authorRoleFor(viewer);
+            const ownerEmail = await businessEmail(owner);
+            const numberMap = await taskNumbersByRecordId([
+                task.sourceDashboardActionId,
+                task._id,
+                `manual-${task._id}`,
+            ]);
+            const taskNumber = numberMap.get(String(task.sourceDashboardActionId || ""))
+                || numberMap.get(`manual-${task._id}`)
+                || numberMap.get(String(task._id || ""))
+                || "";
+            const ownerLine = [ownerName, ownerRole, ownerEmail].filter(Boolean).join(", ");
             const sent = await sendTaskActivityEmail({
                 to: audience.to.length ? audience.to : [await businessEmail(assignee)].filter(Boolean),
-                subject: `Task reopened: ${task.taskName || "Task"}`,
+                subject: `Task reopened: ${taskNumber || task.taskName || "Task"}`,
                 html: taskActionHtml({
                     hello: personName(assignee) || task.assigneeName || "there",
-                    lines: [`${viewer.name} reopened this task. It is pending again for ${task.assigneeName || "the assignee"}.`],
+                    lines: [
+                        `${ownerName} reopened this task and returned it to you.`,
+                        `Task number: ${taskNumber || "—"}`,
+                        `Task name: ${task.taskName || "Task"}`,
+                        `Reopening reason: ${noteText || "—"}`,
+                        `Task owner: ${ownerLine || ownerName}`,
+                    ],
                     taskName: task.taskName,
-                    description: noteText,
                     link: taskDetailLink(target),
                 }),
                 recordId: String(task._id || target.action?._id || ""),
@@ -2338,6 +2390,9 @@ export const updateTaskManagerTaskStatus = async (req, res) => {
         if (!(await denyUnlessViewer(req, res))) return;
         const target = await loadTarget(req.params.taskKey);
         if (!target) return res.status(404).json({ message: "Task not found." });
+        if (generalTaskClosed(target.task)) {
+            return res.status(400).json({ message: "This task is closed. Complete, edit, reassign, and delete are disabled." });
+        }
         const status = String(req.body?.status || "").trim();
         if (!STATUSES.has(status)) return res.status(400).json({ message: "Choose a valid status." });
         const viewer = await resolveTaskViewer(req);
@@ -3784,6 +3839,9 @@ export const deleteTaskManagerTask = async (req, res) => {
         if (!(await denyUnlessViewer(req, res))) return;
         const target = await loadTarget(req.params.taskKey);
         if (!target) return res.status(404).json({ message: "Task not found." });
+        if (generalTaskClosed(target.task)) {
+            return res.status(400).json({ message: "This task is closed. Delete is disabled." });
+        }
         const viewer = await resolveTaskViewer(req);
         const manual = target.kind === "manual";
         const ownerName = String(target.task?.requestedByName || "").trim().toLowerCase();

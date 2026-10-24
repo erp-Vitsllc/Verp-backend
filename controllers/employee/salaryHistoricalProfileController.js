@@ -364,6 +364,10 @@ function dubaiDateKey(date = new Date()) {
 function emptyLiveAttendance(from = '', to = '', workingDays = 0) {
     return {
         workingDays,
+        scheduledWorkingDays: workingDays,
+        holidayDays: 0,
+        weeklyOffDays: 0,
+        compOffDays: 0,
         leaveRecords: [],
         overtimeHours: 0,
         overtimeDays: 0,
@@ -371,6 +375,18 @@ function emptyLiveAttendance(from = '', to = '', workingDays = 0) {
         from,
         to,
     };
+}
+
+/** Approved overtime that was turned into the next working day. Scheduled groups earn none. */
+function countApprovedCompOffDays(rows, flexibleTiming) {
+    if (!flexibleTiming) return 0;
+    const nextDays = new Set();
+    for (const row of rows || []) {
+        if (String(row?.flexibleOtStatus || '') !== 'approved') continue;
+        const next = String(row?.flexibleOtNextDayDate || '').trim();
+        if (/^\d{4}-\d{2}-\d{2}$/.test(next)) nextDays.add(next);
+    }
+    return nextDays.size;
 }
 
 async function loadLiveAttendanceEligibility({ employee, from, to, staffType }) {
@@ -422,6 +438,10 @@ async function loadLiveAttendanceEligibility({ employee, from, to, staffType }) 
     });
     return {
         workingDays: live.workingDays,
+        scheduledWorkingDays: stats.workingDays,
+        holidayDays: stats.holidays,
+        weeklyOffDays: stats.weeklyOffs,
+        compOffDays: countApprovedCompOffDays(rows, flexibleTiming),
         leaveRecords: liveLeaveRecordsInProcessingWindow(
             [...masked.leaveRecords, ...implicitLeave],
             periodStart,
@@ -1026,6 +1046,10 @@ export async function buildPayload(req, employeeId, overlay = {}) {
             from: liveAttendance.from || '',
             to: liveAttendance.to || '',
             workingDays: Number(liveAttendance.workingDays) || 0,
+            scheduledWorkingDays: Number(liveAttendance.scheduledWorkingDays) || 0,
+            holidayDays: Number(liveAttendance.holidayDays) || 0,
+            weeklyOffDays: Number(liveAttendance.weeklyOffDays) || 0,
+            compOffDays: Number(liveAttendance.compOffDays) || 0,
             overtimeHours: Number(liveAttendance.overtimeHours) || 0,
             overtimeDays: Number(liveAttendance.overtimeDays) || 0,
             overtimeRecords: liveAttendance.overtimeRecords || [],

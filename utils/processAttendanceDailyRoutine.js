@@ -98,14 +98,22 @@ export async function processAttendanceDailyRoutine() {
             $or: [{ timeOut: '' }, { timeOut: null }, { timeOut: { $exists: false } }],
             statusKey: { $nin: ['holiday', 'weekly_off'] },
         },
-        {
-            $set: {
-                statusKey: 'mispunch',
-                statusLabel: 'Mispunched',
-                reason: 'Mispunched — forgot to check out (auto at midnight)',
-                approvalStatus: 'pending',
+        [
+            {
+                $set: {
+                    previousStatusKey: '$statusKey',
+                    previousStatusLabel: '$statusLabel',
+                    statusKey: {
+                        $cond: [{ $eq: ['$statusKey', 'late_arrived'] }, 'late_arrived', 'mispunch'],
+                    },
+                    statusLabel: {
+                        $cond: [{ $eq: ['$statusKey', 'late_arrived'] }, 'Late Arrival', 'Mispunched'],
+                    },
+                    reason: 'Mispunched — forgot to check out (auto at midnight)',
+                    approvalStatus: 'pending',
+                },
             },
-        },
+        ],
     );
 
     // 2) Previous day: both punches → finalize provisional rows (do not overwrite Late / Early Go)

@@ -1,6 +1,7 @@
 /**
  * Leave bell rows stay only while someone still has to accept or reject them.
- * Accepted, rejected, deleted, and requests whose last leave day has passed stay off the bell.
+ * Accepted, rejected, and deleted requests stay off the bell.
+ * A request that is still pending stays on the bell after its last leave day.
  */
 
 const MONTHS = {
@@ -151,7 +152,6 @@ export function selectOpenLeaveBellItems(items, options = {}) {
     return (items || []).filter((item) => {
         if (isClosedLeaveStatus(item?.status)) return false;
         const range = leaveRangeOf(item, today);
-        if (range.end && range.end < today) return false;
 
         const employeeId = clean(item?.employeeMongoId);
         if (!employeeId || !range.start || !range.end) return true;

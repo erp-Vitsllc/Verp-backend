@@ -78,9 +78,11 @@ async function actorIsFlowchartHr(actor) {
 }
 
 export function hourAdjustKindOf(record) {
+    const key = String(record?.statusKey || '').trim();
+    const text = `${record?.statusLabel || ''} ${record?.reason || ''}`;
+    if (key === 'mispunch' || /mispunch/i.test(text) || closedMissingCheckout(record)) return 'mispunch';
     const kind = punchAttendanceKind(record);
     if (kind) return kind;
-    if (closedMissingCheckout(record)) return 'mispunch';
     if (String(record?.statusKey || '').trim() === 'unauthorized_leave') return 'authorized_leave';
     return '';
 }
@@ -144,20 +146,18 @@ function applyApproved(record, { kind, approvedHours, taken, max, reason, mode, 
     record.hoursApproved = approvedHours;
     record.hourAdjustMode = mode === 'custom' || mode === 'authorized' ? mode : '';
     if (reason != null) record.hourAdjustReason = reason;
+    if (kind === 'mispunch') {
+        const wasLate =
+            record.statusKey === 'late_arrived' ||
+            record.previousStatusKey === 'late_arrived' ||
+            /late/i.test(String(record.previousStatusLabel || ''));
+        record.statusKey = wasLate ? 'late_arrived' : 'mispunch';
+        record.statusLabel = wasLate ? 'Late Arrival' : 'Mispunch (Approved)';
+        if (reason) record.reason = reason;
+        return;
+    }
     record.statusKey = STATUS_KEY[kind];
     record.statusLabel = APPROVED_LABEL[kind];
-    if (kind !== 'mispunch') return;
-    const checkIn = storedPunchClock(timeIn);
-    const checkOut = storedPunchClock(timeOut);
-    if (checkIn) {
-        record.timeIn = checkIn;
-        record.punchSource = 'manual';
-    }
-    if (checkOut) {
-        record.timeOut = checkOut;
-        record.checkOutSource = 'manual';
-    }
-    if (reason) record.reason = reason;
 }
 
 function isFlexibleHourProposal(proposed = {}) {
@@ -218,13 +218,17 @@ async function emailDirectHourChange({ actor, hr, employee, record, previousLabe
     }
 }
 
-function applyDirectZeroHour(record, { kind, reason, timeIn, timeOut }) {
+function applyDirectZeroHour(record, { kind, reason }) {
+    const wasLate =
+        record.statusKey === 'late_arrived' ||
+        record.previousStatusKey === 'late_arrived' ||
+        /late/i.test(String(record.previousStatusLabel || ''));
     record.hourAdjustStatus = '';
     record.hourAdjustKind = '';
     record.hoursTaken = 0;
     record.hoursApproved = 0;
     record.hoursMax = 0;
-    record.statusKey = STATUS_KEY[kind];
+    record.statusKey = kind === 'mispunch' && wasLate ? 'late_arrived' : STATUS_KEY[kind];
     record.statusLabel = {
         early_go: 'Early Go',
         late_arrived: 'Late Arrival',
@@ -234,17 +238,7 @@ function applyDirectZeroHour(record, { kind, reason, timeIn, timeOut }) {
         record.reason = reason;
         record.hourAdjustReason = '';
     }
-    if (kind !== 'mispunch') return;
-    const checkIn = storedPunchClock(timeIn);
-    const checkOut = storedPunchClock(timeOut);
-    if (checkIn) {
-        record.timeIn = checkIn;
-        record.punchSource = 'manual';
-    }
-    if (checkOut) {
-        record.timeOut = checkOut;
-        record.checkOutSource = 'manual';
-    }
+    if (kind === 'mispunch' && wasLate) record.statusLabel = 'Late Arrival';
 }
 
 export async function exactHourProposal(record, proposed = {}) {
@@ -528,19 +522,16 @@ export async function requestMispunch(req, res) {
         if (!actor) return res.status(404).json({ message: 'No linked employee profile found.' });
 
         const attendanceId = String(req.body?.attendanceId || '').trim();
-        const timeIn = storedPunchClock(req.body?.timeIn);
         const reason = String(req.body?.reason || '').trim();
         if (!mongoose.Types.ObjectId.isValid(attendanceId)) {
             return res.status(400).json({ message: 'Attendance record is required.' });
-        }
-        if (!timeIn) {
-            return res.status(400).json({ message: 'Check-in time is required.' });
         }
         if (!reason) return res.status(400).json({ message: 'Reason is required.' });
 
         const record = await Attendance.findById(attendanceId);
         if (!record) return res.status(404).json({ message: 'Attendance record not found.' });
-        const timeOut = storedPunchClock(req.body?.timeOut) || storedPunchClock(record.timeOut);
+        const timeIn = storedPunchClock(record.timeIn);
+        const timeOut = storedPunchClock(record.timeOut);
         if (record.hourAdjustStatus === 'approved' && record.hourAdjustKind === 'mispunch') {
             return res.status(400).json({ message: 'This missed punch is already approved.' });
         }

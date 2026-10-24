@@ -1141,7 +1141,7 @@ function leaveBellRange(row) {
     };
 }
 
-/** Pending requests only. Old, accepted, rejected, and deleted requests stay off the bell. */
+/** Pending requests only. Accepted, rejected, and deleted requests stay off the bell. */
 async function keepOpenLeaveBellItems(items) {
     const list = Array.isArray(items) ? items : [];
     const employeeIds = [...new Set(

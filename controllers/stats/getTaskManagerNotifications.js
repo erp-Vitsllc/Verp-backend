@@ -806,6 +806,14 @@ export function taskCategory(requestType, extra = "") {
     return "Workflow Task";
 }
 
+function generalLifecycleStatus(taskType, closeRequest, storedStatus) {
+    if (String(taskType || "") !== "General Task") return "";
+    const saved = closeRequest || {};
+    if (saved.closedAt && !saved.reviewPending) return "Closed";
+    if (saved.reopenedAt && !saved.closedAt && storedStatus === "Pending") return "Reopened";
+    return "";
+}
+
 function canDeleteTask(viewer, { manual, requestedByName, requestedByUserId }) {
     if (viewer?.superUser) return true;
     if (!manual) return false;
@@ -815,6 +823,19 @@ function canDeleteTask(viewer, { manual, requestedByName, requestedByUserId }) {
     const owner = String(requestedByName || "").trim().toLowerCase();
     const name = String(viewer?.name || "").trim().toLowerCase();
     return Boolean(owner && name && owner === name);
+}
+
+function viewerCanReturnTask(viewer, row) {
+    if (!row) return false;
+    const saved = row.closeRequest || {};
+    const reassigned = Boolean(saved.originalAssigneeId || saved.originalAssigneeName);
+    if (!reassigned) return false;
+    const status = String(row.status || "");
+    if (status === "Completed" || status === "Cancelled" || status === "Rejected") return false;
+    if (String(row.taskType || "") === "General Task" && saved.closedAt && !saved.reviewPending) return false;
+    const current = assigneeIsViewer(viewer, String(row.assignee || ""), row.assigneeEmpId, row.assigneeName);
+    if (!current) return false;
+    return !viewerOwnsOriginal(viewer, row);
 }
 
 function viewerOwnsOriginal(viewer, row) {
@@ -832,8 +853,20 @@ function viewerOwnsOriginal(viewer, row) {
     return Boolean(originalName && viewerName && originalName === viewerName);
 }
 
-function taskMine(viewer, { assigneeId, assigneeEmpId, assigneeName }) {
-    return assigneeIsViewer(viewer, assigneeId, assigneeEmpId, assigneeName);
+function taskMine(viewer, { assigneeId, assigneeEmpId, assigneeName, row, requesterName, requestedByUserId }) {
+    const shown = String(assigneeName || "").trim();
+    const paren = shown.match(/\(([^)]+)\)\s*$/);
+    const leadName = paren ? shown.slice(0, shown.lastIndexOf("(")).trim() : shown;
+    if (assigneeIsViewer(viewer, assigneeId, assigneeEmpId, leadName)) return true;
+    if (!paren) return false;
+    if (requestedByUserId && viewer?.userId && String(requestedByUserId) === String(viewer.userId)) return true;
+    const viewerName = personKey(viewer?.name);
+    const requester = personKey(cleanRequester(requesterName || paren[1]));
+    if (requester && viewerName && requester === viewerName) return true;
+    const heldId = String(row?.closeRequest?.returnAssigneeId || "");
+    const heldEmp = String(row?.closeRequest?.returnAssigneeEmpId || "");
+    const heldName = String(row?.closeRequest?.returnAssigneeName || "");
+    return assigneeIsViewer(viewer, heldId, heldEmp, heldName);
 }
 
 function assigneeIsViewer(viewer, assigneeId, assigneeEmpId, assigneeName = "") {
@@ -1128,7 +1161,13 @@ export const getTaskManagerNotifications = async (req, res) => {
             const requestMonth = monthKeyFromDateKey(requestedKey);
             const completedMonth = monthKeyFromDateKey(dubaiDateKey(action.actionedDate || requestedAt));
             const closedReview = Boolean(overlay?.closeRequest?.closedAt) && !overlay?.closeRequest?.reviewPending;
-            if (closedReview && overlay?.status !== "Completed") status = "Closed";
+            const life = generalLifecycleStatus(
+                overlay?.taskType || (category === "General Task" ? "General Task" : ""),
+                overlay?.closeRequest,
+                overlay?.status,
+            );
+            if (life) status = life;
+            else if (closedReview && overlay?.status !== "Completed") status = "Closed";
             else if (overlay?.status === "Completed") status = "Completed";
             else if (overlay?.status === "Rejected") status = "Rejected";
             else if (overlay?.status === "Cancelled") status = "Cancelled";
@@ -1136,10 +1175,11 @@ export const getTaskManagerNotifications = async (req, res) => {
             else if (overlay?.status === "Pending" && overlay?.closeRequest?.reopenedAt) {
                 status = displayStatus("Pending", action.requestType, requestedKey, todayKey);
             }
+            const actionsLocked = status === "Closed";
 
             summary.total += 1;
             bump("total", requestMonth);
-            if (status === "Pending" || status === "On Hold" || status === "Pending Due" || status === "In Progress") {
+            if (status === "Pending" || status === "On Hold" || status === "Pending Due" || status === "In Progress" || status === "Reopened") {
                 summary.pending += 1;
                 bump("pending", requestMonth);
                 if (status === "Pending Due") {
@@ -1155,8 +1195,9 @@ export const getTaskManagerNotifications = async (req, res) => {
                 actionId: String(action._id),
                 manual: false,
                 workflowLocked: action.requestType !== "Task Manager",
-                canReassign: viewerCanReassign(viewer, assigneeId, assigneeEmpId) || viewerOwnsOriginal(viewer, overlay),
-                canDelete: canDeleteTask(viewer, { manual: false, requestedByName: requesterBase }),
+                canReassign: !actionsLocked && (viewerCanReassign(viewer, assigneeId, assigneeEmpId) || viewerOwnsOriginal(viewer, overlay)),
+                canReturn: viewerCanReturnTask(viewer, overlay),
+                canDelete: !actionsLocked && canDeleteTask(viewer, { manual: false, requestedByName: requesterBase }),
                 taskNumber: "",
                 requestDate: requestedAt,
                 completionDate: overlay?.completionDate || action.actionedDate || null,
@@ -1226,7 +1267,10 @@ export const getTaskManagerNotifications = async (req, res) => {
             const closedReview = Boolean(row.closeRequest?.closedAt) && !row.closeRequest?.reviewPending;
             const open = row.status !== "Completed" && row.status !== "Cancelled" && !closedReview;
             const generalReview = String(row.taskType || "") === "General Task" && !row.sourceDashboardActionId;
-            const status = closedReview
+            const life = generalLifecycleStatus(row.taskType, row.closeRequest, row.status);
+            const status = life
+                ? life
+                : closedReview
                 ? "Closed"
                 : row.status === "Completed"
                 ? "Completed"
@@ -1239,6 +1283,7 @@ export const getTaskManagerNotifications = async (req, res) => {
                             : open && daysBetween(requestedKey, todayKey) >= 2
                                 ? "Pending Due"
                                 : "Pending";
+            const actionsLocked = status === "Closed";
             const assignee = byId.get(String(row.assignee || "")) || null;
             const heldAssignee = String(row.closeRequest?.returnAssigneeName || "").trim();
             const rawAssigneeName = heldAssignee || personName(assignee) || row.assigneeName || row.assigneeEmpId || "Unassigned";
@@ -1257,7 +1302,7 @@ export const getTaskManagerNotifications = async (req, res) => {
             if (status === "Closed" || status === "Completed") {
                 summary.completed += 1;
                 bump("completed", completedMonth);
-            } else if (status === "Pending" || status === "Pending Due" || status === "Pending Review" || status === "Open") {
+            } else if (status === "Pending" || status === "Pending Due" || status === "Pending Review" || status === "Open" || status === "Reopened") {
                 summary.pending += 1;
                 bump("pending", requestMonth);
                 if (status === "Pending Due") {
@@ -1273,8 +1318,9 @@ export const getTaskManagerNotifications = async (req, res) => {
                 actionId: row.sourceDashboardActionId ? String(row.sourceDashboardActionId) : `manual-${row._id}`,
                 manual: true,
                 workflowLocked: false,
-                canReassign: viewerCanReassign(viewer, assigneeId, row.assigneeEmpId) || viewerOwnsOriginal(viewer, row),
-                canDelete: canDeleteTask(viewer, {
+                canReassign: !actionsLocked && (viewerCanReassign(viewer, assigneeId, row.assigneeEmpId) || viewerOwnsOriginal(viewer, row)),
+                canReturn: viewerCanReturnTask(viewer, row),
+                canDelete: !actionsLocked && canDeleteTask(viewer, {
                     manual: true,
                     requestedByName: requesterName,
                     requestedByUserId: row.requestedByUserId,
@@ -1410,6 +1456,8 @@ function holdsOriginal(row, { id = "", code = "", nameKey = "" } = {}) {
 function profileStatusLabel(status) {
     const value = String(status || "");
     if (value === "Completed") return "Completed";
+    if (value === "Closed") return "Closed";
+    if (value === "Reopened") return "Reopened";
     if (value === "Pending Due" || value === "Overdue") return "Overdue";
     if (value === "Cancelled" || value === "Rejected" || value === "Dismissed") return "Closed";
     return "Pending";
@@ -1689,7 +1737,14 @@ export async function listProfileEmployeeTasks({ employeeId, employeeCode, emplo
             const requestedKey = dubaiDateKey(requestedAt);
             let status = displayStatus(action.status, action.requestType, requestedKey, todayKey);
             const closedReview = Boolean(overlay?.closeRequest?.closedAt) && !overlay?.closeRequest?.reviewPending;
-            if (closedReview && overlay?.status !== "Completed") status = "Closed";
+            const profileCategory = taskCategory(action.requestType, action.extra2 || "");
+            const life = generalLifecycleStatus(
+                overlay?.taskType || (profileCategory === "General Task" ? "General Task" : ""),
+                overlay?.closeRequest,
+                overlay?.status,
+            );
+            if (life) status = life;
+            else if (closedReview && overlay?.status !== "Completed") status = "Closed";
             else if (overlay?.status === "Completed") status = "Completed";
             else if (overlay?.status === "Rejected") status = "Rejected";
             else if (overlay?.status === "Cancelled") status = "Cancelled";
@@ -1740,7 +1795,10 @@ export async function listProfileEmployeeTasks({ employeeId, employeeCode, emplo
             const requestedAt = row.createdAt || null;
             const requestedKey = dubaiDateKey(requestedAt);
             const open = row.status !== "Completed" && row.status !== "Cancelled";
-            const status = row.status === "Completed"
+            const life = generalLifecycleStatus(row.taskType, row.closeRequest, row.status);
+            const status = life
+                ? life
+                : row.status === "Completed"
                 ? "Completed"
                 : row.status === "Cancelled"
                     ? "Cancelled"

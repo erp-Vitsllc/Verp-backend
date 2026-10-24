@@ -9,6 +9,8 @@ import {
 import { preferPunchedRows } from '../../utils/attendanceDayLookup.js';
 import { applyLeaveCoverIndex, loadLeaveCoverIndex } from '../../utils/attendanceLeaveDayCover.js';
 import { calendarDaysForEmployee, calendarStatusKey } from '../../utils/leaveGroupCalendarDays.js';
+import { overlaySuspendedAttendance } from '../../utils/attendanceSuspension.js';
+import { storedPunchGapPatch } from '../../utils/partialLeaveWindow.js';
 import EmployeeSalary from '../../models/EmployeeSalary.js';
 import AttendanceChangeRequest from '../../models/AttendanceChangeRequest.js';
 import { ATTENDANCE_CHANGE_OPEN_STAGES } from '../../utils/attendanceChangeApproval.js';
@@ -69,6 +71,10 @@ function slimGroupAttendanceRecord(row, todayKey) {
         hourAdjustReason: row.hourAdjustReason || '',
         flexibleOtReason: row.flexibleOtReason || '',
         hourAdjustStatus: row.hourAdjustStatus || '',
+        hourAdjustKind: row.hourAdjustKind || '',
+        deductionWaived: row.deductionWaived === true,
+        leaveRequestSession: row.leaveRequestSession || '',
+        attendanceSuspended: row.attendanceSuspended === true || row.statusKey === 'suspended',
         leaveRequestStatus: row.leaveRequestStatus || '',
         flexibleOtStatus: row.flexibleOtStatus || '',
         flexibleOtApprovedHours: row.flexibleOtApprovedHours || 0,
@@ -82,6 +88,15 @@ function slimGroupAttendanceRecord(row, todayKey) {
         compOff: row.compOff || null,
         leavePayType: row.leavePayType || '',
     };
+}
+
+/** Same day status the employee calendar shows: punch gaps, then suspension grey. */
+function displayRowsForEmployee(rows, employee, from, to) {
+    const patched = (rows || []).map((row) => {
+        const patch = storedPunchGapPatch(row);
+        return patch ? { ...row, ...patch } : row;
+    });
+    return overlaySuspendedAttendance(patched, employee, from, to);
 }
 
 function monthWindow(month) {
@@ -123,7 +138,7 @@ export async function getLeaveGroupCalendars(req, res) {
             employeeId: { $ne: 'VEGA-HR-0000' },
             ...REAL_EMPLOYEE_MONGO_FILTER,
         })
-            .select('_id employeeId firstName lastName staffType dateOfJoining primaryReportee')
+            .select('_id employeeId firstName lastName staffType dateOfJoining primaryReportee attendanceAccountStatus attendanceSuspension')
             .lean()
             .maxTimeMS(12000);
 
@@ -152,7 +167,7 @@ export async function getLeaveGroupCalendars(req, res) {
                       ],
                   })
                       .select(detail
-                          ? 'employeeMongoId employeeId employeeName date statusKey statusLabel timeIn timeOut timeOutDate checkInLocation checkOutLocation reason leaveRequestReason hourAdjustReason flexibleOtReason hourAdjustStatus leaveRequestStatus leaveApprovalStage leaveRequestKind requestedStatusKey requestedStatusLabel flexibleOtStatus flexibleOtApprovedHours approvalStatus hoursApproved hoursTaken flexibleWorkedHours flexibleRequiredHours flexibleFromOtDate flexibleOtNextDayDate compOff leavePayType updatedAt historical'
+                          ? 'employeeMongoId employeeId employeeName date statusKey statusLabel timeIn timeOut timeOutDate checkInLocation checkOutLocation reason leaveRequestReason hourAdjustReason flexibleOtReason hourAdjustStatus hourAdjustKind deductionWaived leaveRequestSession leaveRequestStatus leaveApprovalStage leaveRequestKind requestedStatusKey requestedStatusLabel flexibleOtStatus flexibleOtApprovedHours approvalStatus hoursApproved hoursTaken flexibleWorkedHours flexibleRequiredHours flexibleFromOtDate flexibleOtNextDayDate compOff leavePayType updatedAt historical'
                           : 'employeeMongoId employeeId date statusKey timeIn timeOut updatedAt historical')
                       .lean()
                       .maxTimeMS(12000)
@@ -279,7 +294,12 @@ export async function getLeaveGroupCalendars(req, res) {
             .map((emp) => {
                 const id = String(emp._id);
                 const visibleFrom = laterDate(dateKeyOf(emp.dateOfJoining), visibility.get(id));
-                const rows = coveredByEmployee.get(id) || [];
+                const rows = displayRowsForEmployee(
+                    coveredByEmployee.get(id) || [],
+                    emp,
+                    window.from,
+                    window.to,
+                );
                 return {
                     id,
                     employeeId: emp.employeeId || '',
