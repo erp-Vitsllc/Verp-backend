@@ -458,6 +458,7 @@ function pendingChangeRow(row, names = new Map()) {
         hoursTaken: Number(row.proposed?.hoursTaken) || 0,
         hoursMax: Number(row.proposed?.hoursMax) || 0,
         hourAdjustKind: row.proposed?.hourAdjustKind || '',
+        previousStatusLabel: row.previous?.statusLabel || '',
         hourAdjustMode: row.proposed?.hourAdjustMode || '',
         hourRequestType: row.proposed?.hourRequestType || '',
         hourAdjustFlexible: row.proposed?.hourAdjustFlexible === true,

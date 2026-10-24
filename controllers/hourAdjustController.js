@@ -13,8 +13,6 @@ import {
 import { punchAttendanceKind } from '../utils/partialLeaveWindow.js';
 import { isAttendanceSuspendedOn } from '../utils/attendanceSuspension.js';
 import {
-    attendanceApprovalLimitMessageFor,
-    attendanceApprovalLimitText,
     closedMissingCheckout,
     loadMispunchMonthAllowance,
 } from '../utils/attendanceApprovalAllowance.js';
@@ -138,6 +136,13 @@ function storedPunchClock(value) {
     return `${String(hour).padStart(2, '0')}:${String(minute).padStart(2, '0')}:00`;
 }
 
+const LEAVE_STATUS_LABEL = {
+    authorized_leave: 'Authorized Leave',
+    sick_leave: 'Sick Leave',
+    compoff_leave: 'Comp Off Leave',
+    unauthorized_leave: 'Unauthorized Leave',
+};
+
 function applyApproved(record, { kind, approvedHours, taken, max, reason, mode, timeIn, timeOut }) {
     record.hourAdjustStatus = 'approved';
     record.hourAdjustKind = kind;
@@ -255,6 +260,18 @@ export async function exactHourProposal(record, proposed = {}) {
 }
 
 export async function applyStoredHourAdjust(record, proposed = {}) {
+    const chosenLeave = String(proposed.approvedLeaveKey || '').trim();
+    if (LEAVE_STATUS_LABEL[chosenLeave]) {
+        record.hourAdjustStatus = 'approved';
+        record.hourAdjustKind = 'authorized_leave';
+        record.statusKey = chosenLeave;
+        record.statusLabel = LEAVE_STATUS_LABEL[chosenLeave];
+        if (proposed.reason) record.reason = proposed.reason;
+        record.leaveRequestStatus = 'approved';
+        record.approvalStatus = 'approved';
+        await record.save();
+        return record;
+    }
     const kind = proposed.hourAdjustKind || hourAdjustKindOf(record);
     if (!kind || !STATUS_KEY[kind]) {
         const error = new Error('This status cannot be approved.');
@@ -364,16 +381,6 @@ export async function requestHourAdjust(req, res) {
                 record,
                 applied: true,
             });
-        }
-        if (kind === 'late_arrived' || kind === 'early_go' || kind === 'mispunch') {
-            const limitMessage = await attendanceApprovalLimitMessageFor(
-                { _id: record.employeeMongoId, employeeId: record.employeeId },
-                {
-                    pool: kind === 'mispunch' ? 'mispunch' : 'late',
-                    requestDates: [record.date],
-                },
-            );
-            if (limitMessage) return res.status(400).json({ message: limitMessage });
         }
         const queued = await openAttendanceChangeForEmployee({
             employee,
@@ -537,21 +544,6 @@ export async function requestMispunch(req, res) {
         }
         if (hourAdjustKindOf(record) !== 'mispunch') {
             return res.status(400).json({ message: 'This day is not a missed punch.' });
-        }
-
-        const allowance = await loadMispunchMonthAllowance(
-            { _id: record.employeeMongoId, employeeId: record.employeeId },
-            record.date,
-        );
-        if (allowance.error) return res.status(400).json({ message: allowance.error });
-        if (allowance.allowed != null && !allowance.includesDate && allowance.used >= allowance.allowed) {
-            return res.status(400).json({
-                message: attendanceApprovalLimitText({
-                    pool: 'mispunch',
-                    taken: allowance.used,
-                    allowed: allowance.allowed,
-                }),
-            });
         }
 
         const isHr = await actorIsFlowchartHr(actor);

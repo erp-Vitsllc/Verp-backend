@@ -3,7 +3,7 @@ import Holiday from '../models/Holiday.js';
 import WorkingTime from '../models/WorkingTime.js';
 import SalaryEnrollment from '../models/SalaryEnrollment.js';
 import SalaryHistoricalProfile from '../models/SalaryHistoricalProfile.js';
-import { applySickAllowanceToLeaveRecords, latestAnnualLeaveEndFromLeaveRecords, leavePolicyEntitlements, sickDaysAfterAnnualLeave } from './employeeLeavePolicy.js';
+import { applySickAllowanceToLeaveRecords, latestAnnualLeaveEndFromLeaveRecords, leavePolicyEntitlements, shiftDateKey, sickDaysAfterAnnualLeave } from './employeeLeavePolicy.js';
 import { getScheduledEmailTimeZone, getCalendarPartsInTz } from './scheduleDailyAtMidnight.js';
 import {
     processingStartFromEnrollment,
@@ -63,7 +63,7 @@ function pad2(n) {
     return String(n).padStart(2, '0');
 }
 
-function toDateKey(value) {
+export function toDateKey(value) {
     if (!value) return '';
     if (value instanceof Date && !Number.isNaN(value.getTime())) {
         return `${value.getFullYear()}-${pad2(value.getMonth() + 1)}-${pad2(value.getDate())}`;
@@ -85,7 +85,7 @@ function weekdayKey(date) {
     return WEEKDAY_KEYS[date.getDay()];
 }
 
-function dubaiDateKey(date = new Date()) {
+export function dubaiDateKey(date = new Date()) {
     const parts = getCalendarPartsInTz(date, getScheduledEmailTimeZone());
     return `${parts.year}-${pad2(parts.month)}-${pad2(parts.day)}`;
 }
@@ -192,7 +192,7 @@ function filterHiddenSystemLeave(rows, hidden) {
     return (Array.isArray(rows) ? rows : []).filter((row) => !isHiddenSystemLeaveRow(row, list));
 }
 
-async function calcWorkingDays({ from, to, staffType }) {
+export async function calcWorkingDays({ from, to, staffType }) {
     const startDate = fromKey(from);
     const endDate = fromKey(to);
     const calendarDays = isDateKey(from) && isDateKey(to) && to >= from ? inclusiveCalendarDays(from, to) : 0;
@@ -303,11 +303,12 @@ export async function loadEmployeeSalaryWorkingDays(employee, profileHint = null
             ? await calcWorkingDays({ from: joiningDate, to: period.end, staffType })
             : { workingDays: 0 };
     const todayKey = dubaiDateKey();
+    const yesterdayKey = shiftDateKey(todayKey, -1);
     const live = isSalaryProcessingMonthReached(todayKey, verpStartDate)
         ? await loadLiveAttendanceEligibility({
               employee,
               from: verpStartDate,
-              to: todayKey,
+              to: yesterdayKey,
               staffType,
           })
         : { workingDays: 0, overtimeDays: 0 };
@@ -368,7 +369,7 @@ async function loadLiveAttendanceEligibility({ employee, from, to, staffType }) 
         date: { $gte: periodStart, $lte: periodEnd },
         $or: clauses,
     })
-        .select('date statusKey leaveRequestStatus requestedStatusKey reason timeIn timeOut flexibleOtStatus flexibleOtApprovedHours flexibleOtNextDayDate')
+        .select('date statusKey leaveRequestStatus requestedStatusKey reason timeIn timeOut flexibleOtStatus flexibleOtApprovedHours flexibleOtNextDayDate flexibleFromOtDate')
         .lean();
     const live = summarizeAttendanceEligibility(rows, { throughDate: periodEnd });
     const week = getWeekForStaffType(workingTime, staffType);
@@ -448,11 +449,12 @@ export async function loadLeaveTicketEntitlement({ employee, profile, salaryDoc,
     const annualLeaveRecords = historicalLeaveOnly(profile?.annualLeaveRecords);
     const paymentCycles = Array.isArray(profile?.paymentCycles) ? profile.paymentCycles : [];
     const todayKey = dubaiDateKey();
+    const yesterdayKey = shiftDateKey(todayKey, -1);
     const liveAttendance = isSalaryProcessingMonthReached(todayKey, verpStartDate)
         ? await loadLiveAttendanceEligibility({
               employee,
               from: verpStartDate,
-              to: todayKey,
+              to: yesterdayKey,
               staffType: employee.staffType,
           })
         : { workingDays: 0, leaveRecords: [], overtimeHours: 0, overtimeDays: 0, overtimeRecords: [], from: '', to: '' };

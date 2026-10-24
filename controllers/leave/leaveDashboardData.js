@@ -56,8 +56,9 @@ import {
     TWO_STEP_LEAVE_KINDS,
 } from '../../utils/leaveRequestApproval.js';
 import { isRequestUserDesignatedFlowchartHr } from '../../utils/isDesignatedFlowchartHr.js';
-import { dateEmployeeReachesWorkingDays, loadCurrentLeaveCycleEligibility } from '../../utils/loadLeaveTicketEntitlement.js';
+import { calcWorkingDays, dateEmployeeReachesWorkingDays, loadCurrentLeaveCycleEligibility } from '../../utils/loadLeaveTicketEntitlement.js';
 import { loadGroupAnnualLeaveCap } from '../../utils/groupAnnualLeaveCap.js';
+import { annualLeaveRequestBlock, loadAnnualLeaveAllowance } from '../../utils/annualLeaveAllowance.js';
 import {
     reopenApprovedLeaveRecords,
     settleFulfilledLeaveRows,
@@ -520,8 +521,8 @@ export async function loadAnnualLeaveEligibilityForEmployee(employee, { from = '
         };
     }
     const policy = await resolveEmployeePayrollPolicy(employee);
-    const [historicalProfile, attendanceRecords, groupCap] = await Promise.all([
-        loadHistoricalLeaveProfile(employee.employeeId),
+    const historicalProfile = await loadHistoricalLeaveProfile(employee.employeeId);
+    const [attendanceRecords, groupCap, allowance] = await Promise.all([
         Attendance.find({
             employeeMongoId: String(employee._id),
             statusKey: 'on_leave',
@@ -530,6 +531,7 @@ export async function loadAnnualLeaveEligibilityForEmployee(employee, { from = '
             .lean()
             .maxTimeMS(8000),
         loadGroupAnnualLeaveCap({ employee, from, to }),
+        loadAnnualLeaveAllowance({ employee, profile: historicalProfile, policy }),
     ]);
     const cycle = await loadCurrentLeaveCycleEligibility({
         employee,
@@ -551,12 +553,16 @@ export async function loadAnnualLeaveEligibilityForEmployee(employee, { from = '
             eligibleOn = '';
         }
     }
+    const allowanceBlock = annualLeaveRequestBlock(allowance, { from, to });
     return {
         ...serialized,
         eligibleOn,
-        cycleNotEligible: serialized.notEligible,
+        cycleNotEligible: false,
+        allowance,
+        allowanceBlock,
         groupCap,
-        notEligible: serialized.notEligible || Boolean(groupCap?.over),
+        allowanceBlocked: !allowanceBlock.ok,
+        notEligible: !allowanceBlock.ok || Boolean(groupCap?.over),
     };
 }
 
@@ -1626,28 +1632,34 @@ export async function applyLeaveRange(req, res) {
             spec.requestedStatusKey === 'on_leave'
                 ? await loadAnnualLeaveEligibilityForEmployee(employee, { from, to })
                 : null;
-        if (!hrOverride && annualEligibility?.groupCap?.over) {
-            const lines = [];
-            if (annualEligibility.cycleNotEligible) {
-                const required = annualEligibility.requiredDays || 300;
-                const done = annualEligibility.eligibleDays || 0;
-                lines.push(
-                    `You cannot apply for annual leave. You are not eligible. ${done} of ${required} days are completed from the previous annual leave or joining date to this leave start.`,
-                );
-                const eligibleOn = slashDate(annualEligibility.eligibleOn);
-                if (eligibleOn) {
-                    lines.push(`${eligibleOn} you will be ${required}. Look for that date or contact your HOD.`);
-                }
-            }
-            if (annualEligibility.groupCap.message) lines.push(annualEligibility.groupCap.message);
-            const blockMessage = lines.join(' ') || annualEligibility.groupCap.message;
-            return res.status(400).json({
-                message: String(blockMessage).includes('contact your HOD')
-                    ? blockMessage
-                    : `${blockMessage} For more information, please contact your HOD.`,
-                notEligible: true,
-                ...annualEligibility,
+        if (!hrOverride && annualEligibility && spec.requestedStatusKey === 'on_leave') {
+            const requestSpan = await calcWorkingDays({
+                from,
+                to,
+                staffType: employee.staffType,
             });
+            const allowanceHit = annualLeaveRequestBlock(annualEligibility.allowance, {
+                from,
+                to,
+                requestedDates: requestSpan.workingDateKeys || [],
+            });
+            if (!allowanceHit.ok || annualEligibility.groupCap?.over) {
+                const lines = [];
+                if (!allowanceHit.ok && allowanceHit.message) lines.push(allowanceHit.message);
+                if (annualEligibility.groupCap?.over && annualEligibility.groupCap.message) {
+                    lines.push(annualEligibility.groupCap.message);
+                }
+                const blockMessage = lines.join(' ');
+                return res.status(400).json({
+                    message: blockMessage
+                        ? `${blockMessage} For more information, please contact your HOD.`
+                        : 'You cannot apply for this annual leave.',
+                    notEligible: true,
+                    allowanceBlocked: !allowanceHit.ok,
+                    ...annualEligibility,
+                    allowanceBlock: allowanceHit,
+                });
+            }
         }
         const escalateIneligibleAnnual = Boolean(
             spec.requestedStatusKey === 'on_leave' &&

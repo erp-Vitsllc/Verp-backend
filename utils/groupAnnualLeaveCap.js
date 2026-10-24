@@ -38,7 +38,7 @@ export async function loadGroupAnnualLeaveCap({ employee, from = '', to = '' } =
             ...staffTypeMongoClause(staffType),
             status: { $ne: 'Left User' },
         })
-            .select({ _id: 1, employeeId: 1 })
+            .select({ _id: 1, employeeId: 1, firstName: 1, lastName: 1 })
             .lean()
             .maxTimeMS(8000),
     ]);
@@ -60,8 +60,18 @@ export async function loadGroupAnnualLeaveCap({ employee, from = '', to = '' } =
 
     let taken = 0;
     let applicantAlreadyCounted = false;
+    let blockers = [];
     if (hasRange && groupMembers.length) {
         const ids = groupMembers.map((row) => String(row._id));
+        const names = new Map(
+            groupMembers.map((row) => [
+                String(row._id),
+                {
+                    employeeId: row.employeeId || '',
+                    name: [row.firstName, row.lastName].filter(Boolean).join(' ').trim() || row.employeeId || 'Employee',
+                },
+            ]),
+        );
         const rows = await Attendance.find({
             employeeMongoId: { $in: ids },
             date: { $gte: rangeFrom, $lte: rangeTo },
@@ -74,12 +84,30 @@ export async function loadGroupAnnualLeaveCap({ employee, from = '', to = '' } =
                 },
             ],
         })
-            .select({ employeeMongoId: 1 })
+            .select({ employeeMongoId: 1, date: 1, leaveRequestStatus: 1, statusKey: 1 })
             .lean()
             .maxTimeMS(8000);
 
-        const people = new Set(rows.map((row) => String(row.employeeMongoId || '')));
-        people.delete('');
+        const byPerson = new Map();
+        for (const row of rows || []) {
+            const id = String(row.employeeMongoId || '');
+            if (!id) continue;
+            const current = byPerson.get(id) || {
+                employeeMongoId: id,
+                employeeId: names.get(id)?.employeeId || '',
+                name: names.get(id)?.name || 'Employee',
+                status: String(row.leaveRequestStatus || '').trim() || (row.statusKey === 'on_leave' ? 'approved' : ''),
+                dates: [],
+            };
+            if (row.date) current.dates.push(String(row.date));
+            if (row.statusKey === 'on_leave' || row.leaveRequestStatus === 'approved') current.status = 'approved';
+            byPerson.set(id, current);
+        }
+        blockers = [...byPerson.values()].map((row) => ({
+            ...row,
+            dates: [...new Set(row.dates)].sort(),
+        }));
+        const people = new Set(blockers.map((row) => row.employeeMongoId));
         taken = people.size;
         applicantAlreadyCounted = people.has(String(employee._id));
     }
@@ -101,5 +129,6 @@ export async function loadGroupAnnualLeaveCap({ employee, from = '', to = '' } =
         taken,
         over,
         message,
+        blockers,
     };
 }

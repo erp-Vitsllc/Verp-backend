@@ -28,6 +28,8 @@ import {
     liveLeaveRecordsInProcessingWindow,
     salaryProcessingStartDay,
     summarizeAttendanceEligibility,
+    countPresentCompOffDays,
+    sumApprovedOvertimeHours,
     implicitUnauthorizedLeaveForSchedule,
     validateLeaveDates,
     validateVerpStart,
@@ -88,7 +90,7 @@ describe('salary historical calculations', () => {
         assert.equal(live.leaveRecords.length, 9);
         assert.deepEqual(
             live.leaveRecords.map((row) => row.leaveType).sort(),
-            ['annual', 'annual', 'authorized', 'authorized', 'holiday', 'sick', 'sick', 'unauthorized', 'unauthorized'],
+            ['annual', 'authorized', 'authorized', 'compoff', 'holiday', 'sick', 'sick', 'unauthorized', 'unauthorized'],
         );
         const unmarked = live.leaveRecords.find((row) => row.fromDate === '2026-08-08');
         assert.equal(unmarked.leaveType, 'unauthorized');
@@ -97,6 +99,36 @@ describe('salary historical calculations', () => {
         assert.equal(holiday.source, 'system');
         const pending = live.leaveRecords.find((row) => row.fromDate === '2026-08-12');
         assert.equal(pending.status, 'pending');
+        const compOff = countPresentCompOffDays(
+            [
+                {
+                    date: '2026-08-01',
+                    statusKey: 'on_office',
+                    flexibleOtStatus: 'approved',
+                    flexibleOtApprovedHours: 10,
+                    flexibleOtNextDayDate: '2026-08-02',
+                },
+                { date: '2026-08-02', statusKey: 'on_office', flexibleFromOtDate: '2026-08-01' },
+                {
+                    date: '2026-08-03',
+                    statusKey: 'on_office',
+                    flexibleOtStatus: 'approved',
+                    flexibleOtApprovedHours: 8,
+                    flexibleOtNextDayDate: '2026-08-04',
+                },
+                { date: '2026-08-04', statusKey: 'sick_leave' },
+            ],
+            { from: '2026-08-01', to: '2026-08-04', flexibleTiming: true },
+        );
+        assert.equal(compOff, 1);
+        assert.equal(
+            sumApprovedOvertimeHours([
+                { flexibleOtStatus: 'approved', flexibleOtApprovedHours: 10, flexibleOtNextDayDate: '2026-08-02' },
+                { flexibleOtStatus: 'approved', flexibleOtApprovedHours: 8 },
+                { flexibleOtStatus: 'pending', flexibleOtApprovedHours: 5 },
+            ]),
+            18,
+        );
         assert.equal(leaveDeductionDays(pending), 0);
         const result = calculateHistoricalEligibility({
             workingDays: 40 + live.workingDays,
@@ -114,7 +146,7 @@ describe('salary historical calculations', () => {
         assert.equal(result.authorizedDeduction, 6);
         assert.equal(result.unauthorizedDeduction, 4);
         assert.equal(result.sickDeduction, 2);
-        assert.equal(result.annualDeduction, 2);
+        assert.equal(result.annualDeduction, 1);
         assert.equal(result.holidayDays, 1);
         assert.equal(result.eligibleBalance, 27);
     });

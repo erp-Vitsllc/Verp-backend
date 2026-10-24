@@ -36,11 +36,7 @@ import {
 } from '../utils/attendanceSuspension.js';
 import { describePartialLeave, partialLeaveOutcome, partialLeavePortion, storedPunchGapPatch } from '../utils/partialLeaveWindow.js';
 import { attachAttendanceDeductionDays } from '../utils/attachAttendanceDeductionDays.js';
-import {
-    approvalEventPool,
-    attendanceApprovalLimitMessageFor,
-    closedMissingCheckout,
-} from '../utils/attendanceApprovalAllowance.js';
+import { closedMissingCheckout } from '../utils/attendanceApprovalAllowance.js';
 import { staffTypeMongoClause } from '../utils/workLocationHelpers.js';
 import { getDepartmentHOD } from '../utils/getDepartmentHOD.js';
 import { syncDashboardAction } from '../utils/syncDashboard.js';
@@ -3453,6 +3449,9 @@ export async function markTeamAttendance(req, res) {
         const storedFile = await storeLeaveAttachment(req.body?.attachmentData, attachmentName);
         const markedBy = req.user?.id || null;
         const approvalCtx = await loadChangeApprovalContext(req);
+        if (statusKey === 'sick_leave' && !storedFile?.attachmentKey && !approvalCtx.actorIsHr) {
+            return res.status(400).json({ message: 'An attachment is required for sick leave.' });
+        }
         const saved = [];
         const pending = [];
 
@@ -3668,9 +3667,38 @@ export async function getAttendancePendingInbox(req, res) {
             .lean()
             : [];
 
-        const items = (rows || [])
+        const pendingRows = (rows || [])
             .filter((r) => !isCompanyShellEmployee(r.employeeName) && !isCompanyShellEmployee(r))
-            .filter((r) => attendanceBellKinds.includes(String(r.leaveRequestKind || '').trim()))
+            .filter((r) => attendanceBellKinds.includes(String(r.leaveRequestKind || '').trim()));
+
+        // One annual/leave request covers many days. Show a single inbox row for the range.
+        const groupedRows = [];
+        const seenGroups = new Map();
+        for (const row of pendingRows) {
+            const groupId = String(row.leaveRequestGroupId || '').trim();
+            const from = String(row.leaveRequestFromDate || '').trim();
+            const to = String(row.leaveRequestToDate || '').trim();
+            const key = groupId
+                ? `g:${groupId}`
+                : from && to
+                  ? `r:${row.employeeMongoId}|${from}|${to}|${row.leaveRequestKind || ''}|${row.leaveRequestedAt || ''}`
+                  : `d:${row._id}`;
+            const existing = seenGroups.get(key);
+            if (!existing) {
+                seenGroups.set(key, row);
+                groupedRows.push(row);
+                continue;
+            }
+            const existingId = String(existing._id || '');
+            const rowId = String(row._id || '');
+            if (rowId && (!existingId || rowId < existingId)) {
+                const index = groupedRows.indexOf(existing);
+                if (index >= 0) groupedRows[index] = row;
+                seenGroups.set(key, row);
+            }
+        }
+
+        const items = groupedRows
             .map((r) => {
                 const kind = String(r.leaveRequestKind || '');
                 const isYellow = kind === 'yellow';
@@ -3728,7 +3756,8 @@ export async function getAttendancePendingInbox(req, res) {
                     leaveRequestStatus: r.leaveRequestStatus || 'pending',
                     approvalStatus: r.leaveRequestStatus || 'pending',
                     status: 'Pending',
-                    extra1: r.date,
+                    requestedDate: r.leaveRequestedAt || null,
+                    extra1: r.leaveRequestFromDate || r.date,
                     extra2: summary,
                     message: summary,
                 };
@@ -3952,7 +3981,26 @@ export async function decideAttendanceChangeRequest(req, res) {
             });
         }
 
-        if (request.action === 'hour_adjust' && request.proposed?.hourAdjustKind !== 'mispunch') {
+        const authLeaveChoice = {
+            authorized_leave: 'Authorized Leave',
+            sick_leave: 'Sick Leave',
+            compoff_leave: 'Comp Off Leave',
+            unauthorized_leave: 'Unauthorized Leave',
+        };
+        if (
+            request.action === 'hour_adjust' &&
+            request.proposed?.hourAdjustKind === 'authorized_leave' &&
+            decision === 'approved'
+        ) {
+            const chosen = String(req.body?.approvedStatusKey || '').trim();
+            if (!authLeaveChoice[chosen]) {
+                return res.status(400).json({ message: 'Choose Authorized, Sick, Comp Off, or Unauthorized leave.' });
+            }
+            request.proposed.statusKey = chosen;
+            request.proposed.statusLabel = authLeaveChoice[chosen];
+            request.proposed.approvedLeaveKey = chosen;
+            request.markModified('proposed');
+        } else if (request.action === 'hour_adjust' && request.proposed?.hourAdjustKind !== 'mispunch') {
             const previousType = request.proposed?.hourRequestType
                 || (Number(request.proposed?.hoursApproved) === 0 ? 'waived' : 'authorized');
             const stageBeforeEdit = request.stage;
@@ -4340,11 +4388,6 @@ export async function requestAttendanceLeave(req, res) {
             if (requestedTimeOut <= requestedTimeIn) {
                 return res.status(400).json({ message: 'Check-out time must be after check-in time.' });
             }
-            const limitMessage = await attendanceApprovalLimitMessageFor(employee, {
-                pool: 'late',
-                requestDates: [date],
-            });
-            if (limitMessage) return res.status(400).json({ message: limitMessage });
         }
 
         if (!isLateArrival) {
@@ -4541,17 +4584,6 @@ export async function requestAttendanceYellow(req, res) {
                 message: 'A request is already pending for this date.',
                 record,
             });
-        }
-
-        const requestPool =
-            approvalEventPool(record, { countOpenPunch: true }) ||
-            (record.timeIn && !record.timeOut ? 'mispunch' : '');
-        if (requestPool) {
-            const limitMessage = await attendanceApprovalLimitMessageFor(employee, {
-                pool: requestPool,
-                requestDates: [date],
-            });
-            if (limitMessage) return res.status(400).json({ message: limitMessage });
         }
 
         const empName =
@@ -4763,7 +4795,8 @@ export async function requestAttendanceFuture(req, res) {
                 message: 'Authorized leave cannot be requested for today or tomorrow.',
             });
         }
-        if (!isSickLeave && fromDate <= todayKey) {
+        const isPunchRequest = kind === 'late_arrived' || kind === 'early_go';
+        if (!isSickLeave && !isPunchRequest && fromDate <= todayKey) {
             return res.status(400).json({ message: 'This request is only for future working days.' });
         }
 
@@ -4787,6 +4820,7 @@ export async function requestAttendanceFuture(req, res) {
             });
         }
 
+        let annualEligibility = null;
         if (isAnnualLeave) {
             const { loadAnnualLeaveEligibilityForEmployee } = await import('./leave/leaveDashboardData.js');
             const eligibilityEmployee = await EmployeeBasic.findById(employee._id)
@@ -4796,28 +4830,23 @@ export async function requestAttendanceFuture(req, res) {
                 from: fromDate,
                 to: toDate,
             });
-            const eligibleOn = String(eligibility?.eligibleOn || '').trim();
-            const beforeEligibleDate = Boolean(
-                eligibility?.cycleNotEligible && (!eligibleOn || fromDate < eligibleOn),
-            );
+            annualEligibility = eligibility;
+            const { annualLeaveRequestBlock } = await import('../utils/annualLeaveAllowance.js');
+            const allowanceHit = annualLeaveRequestBlock(eligibility?.allowance, {
+                from: fromDate,
+                to: toDate,
+            });
             const groupOver = Boolean(eligibility?.groupCap?.over);
-            if (beforeEligibleDate || groupOver) {
+            if (!allowanceHit.ok || groupOver) {
                 const lines = [];
-                if (beforeEligibleDate) {
-                    lines.push(
-                        eligibleOn
-                            ? `You are not eligible for this annual leave. You can go on ${eligibleOn}. You can contact HR for more information.`
-                            : 'You are not eligible for this annual leave. You can contact HR for more information.',
-                    );
-                }
-                if (groupOver && eligibility.groupCap?.message) {
-                    lines.push(eligibility.groupCap.message);
-                }
+                if (!allowanceHit.ok && allowanceHit.message) lines.push(allowanceHit.message);
+                if (groupOver && eligibility.groupCap?.message) lines.push(eligibility.groupCap.message);
                 return res.status(400).json({
                     message: lines.join(' ') || 'You are not eligible for this annual leave.',
                     notEligible: true,
-                    eligibleOn,
+                    allowanceBlocked: !allowanceHit.ok,
                     ...eligibility,
+                    allowanceBlock: allowanceHit,
                 });
             }
         }
@@ -4829,7 +4858,7 @@ export async function requestAttendanceFuture(req, res) {
         const holidaySet = await loadHolidaySet(isSickLeave && fromDate < todayKey ? fromDate : todayKey, toDate, staffType);
         const firstEligible = firstEligibleAdvanceRequestDate(todayKey, holidaySet, offWeekdays);
 
-        if (!isSickLeave && (!firstEligible || fromDate < firstEligible)) {
+        if (!isSickLeave && !isPunchRequest && (!firstEligible || fromDate < firstEligible)) {
             return res.status(400).json({
                 message: `Cannot request for tomorrow. The earliest date is ${firstEligible || 'the second working day'} (one working day ahead, holidays skipped).`,
             });
@@ -4858,6 +4887,24 @@ export async function requestAttendanceFuture(req, res) {
             });
         }
 
+        if (isAnnualLeave && annualEligibility) {
+            const { annualLeaveRequestBlock } = await import('../utils/annualLeaveAllowance.js');
+            const counted = annualLeaveRequestBlock(annualEligibility.allowance, {
+                from: fromDate,
+                to: toDate,
+                requestedDates: requestDates,
+            });
+            if (!counted.ok) {
+                return res.status(400).json({
+                    message: counted.message,
+                    notEligible: true,
+                    allowanceBlocked: true,
+                    ...annualEligibility,
+                    allowanceBlock: counted,
+                });
+            }
+        }
+
         let sickOverflow = new Map();
         if (isSickLeave) {
             const allowanceError = await checkEmployeeLeaveAllowance(employee, {
@@ -4868,14 +4915,6 @@ export async function requestAttendanceFuture(req, res) {
                 return res.status(400).json({ message: allowanceError });
             }
             sickOverflow = await resolveSickOverflowStatuses(employee, requestDates);
-        }
-
-        if (kind === 'late_arrived' || kind === 'early_go') {
-            const limitMessage = await attendanceApprovalLimitMessageFor(employee, {
-                pool: 'late',
-                requestDates,
-            });
-            if (limitMessage) return res.status(400).json({ message: limitMessage });
         }
 
         const partialLeave =

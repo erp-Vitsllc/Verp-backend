@@ -578,9 +578,48 @@ export const LIVE_LEAVE_STATUS_MAP = {
     unauthorized_leave: 'unauthorized',
     sick_leave: 'sick',
     on_leave: 'annual',
-    compoff_leave: 'annual',
+    compoff_leave: 'compoff',
     holiday: 'holiday',
 };
+
+/** Next days added from approved overtime that are still present, inside the window. A leave on that day is not a present day. */
+export function countPresentCompOffDays(rows = [], { from, to, flexibleTiming } = {}) {
+    if (!flexibleTiming) return 0;
+    const start = String(from || '').trim();
+    const end = String(to || '').trim();
+    if (!isDateKey(start) || !isDateKey(end)) return 0;
+    const byDate = new Map();
+    for (const row of rows || []) {
+        const date = String(row?.date || '').trim();
+        if (isDateKey(date)) byDate.set(date, row);
+    }
+    const days = new Set();
+    for (const row of rows || []) {
+        if (String(row?.flexibleOtStatus || '') !== 'approved') continue;
+        const next = String(row?.flexibleOtNextDayDate || '').trim();
+        if (!isDateKey(next) || next < start || next > end) continue;
+        const target = byDate.get(next);
+        if (!target) continue;
+        if (resolveOwnedAttendanceLeave(target)) continue;
+        const key = String(target.statusKey || '').trim();
+        const synthetic =
+            String(target.timeIn || '').trim() === 'OT' ||
+            String(target.timeOut || '').trim() === 'OT' ||
+            Boolean(String(target.flexibleFromOtDate || '').trim());
+        if (LIVE_WORKING_STATUS_KEYS.has(key) || synthetic) days.add(next);
+    }
+    return days.size;
+}
+
+/** Approved overtime hours in the window, including hours that were moved onto a next day. */
+export function sumApprovedOvertimeHours(rows = []) {
+    let hours = 0;
+    for (const row of rows || []) {
+        if (String(row?.flexibleOtStatus || '') !== 'approved') continue;
+        hours += Math.max(0, Number(row?.flexibleOtApprovedHours) || 0);
+    }
+    return Math.round(hours * 100) / 100;
+}
 
 function systemDayLeaveRecord(date, leaveType, status = 'approved', remarks = '') {
     return {

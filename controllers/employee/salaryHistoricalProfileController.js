@@ -45,6 +45,8 @@ import {
     liveLeaveRecordsInProcessingWindow,
     salaryProcessingStartDay,
     summarizeAttendanceEligibility,
+    countPresentCompOffDays,
+    sumApprovedOvertimeHours,
     implicitUnauthorizedLeaveForSchedule,
     uniqueConsumingCycles,
     validateLeaveDates,
@@ -55,7 +57,7 @@ import {
     overtimeHoursToDays,
 } from '../../utils/salaryHistoricalCalculations.js';
 import { serializePayrollSettings, requireMainSalaryPolicy } from './payrollSettingsController.js';
-import { applySickAllowanceToLeaveRecords, latestAnnualLeaveEndFromLeaveRecords, leavePolicyEntitlements, resolveEmployeePayrollPolicy, sickDaysAfterAnnualLeave } from '../../utils/employeeLeavePolicy.js';
+import { applySickAllowanceToLeaveRecords, latestAnnualLeaveEndFromLeaveRecords, leavePolicyEntitlements, resolveEmployeePayrollPolicy, shiftDateKey, sickDaysAfterAnnualLeave } from '../../utils/employeeLeavePolicy.js';
 import { resolveFlowchartHrEmployee } from '../../utils/resolveFlowchartHrEmployee.js';
 import {
     viewerIsSalaryFlowchartHr as viewerIsSalaryHr,
@@ -377,18 +379,6 @@ function emptyLiveAttendance(from = '', to = '', workingDays = 0) {
     };
 }
 
-/** Approved overtime that was turned into the next working day. Scheduled groups earn none. */
-function countApprovedCompOffDays(rows, flexibleTiming) {
-    if (!flexibleTiming) return 0;
-    const nextDays = new Set();
-    for (const row of rows || []) {
-        if (String(row?.flexibleOtStatus || '') !== 'approved') continue;
-        const next = String(row?.flexibleOtNextDayDate || '').trim();
-        if (/^\d{4}-\d{2}-\d{2}$/.test(next)) nextDays.add(next);
-    }
-    return nextDays.size;
-}
-
 async function loadLiveAttendanceEligibility({ employee, from, to, staffType }) {
     if (!isDateKey(from) || !employee) {
         return emptyLiveAttendance();
@@ -413,7 +403,7 @@ async function loadLiveAttendanceEligibility({ employee, from, to, staffType }) 
         date: { $gte: periodStart, $lte: periodEnd },
         $or: clauses,
     })
-        .select('date statusKey leaveRequestStatus requestedStatusKey reason timeIn timeOut flexibleOtStatus flexibleOtApprovedHours flexibleOtNextDayDate')
+        .select('date statusKey leaveRequestStatus requestedStatusKey reason timeIn timeOut flexibleOtStatus flexibleOtApprovedHours flexibleOtNextDayDate flexibleFromOtDate')
         .lean();
     const live = summarizeAttendanceEligibility(rows, { throughDate: periodEnd });
     const week = getWeekForStaffType(workingTime, staffType);
@@ -441,7 +431,12 @@ async function loadLiveAttendanceEligibility({ employee, from, to, staffType }) 
         scheduledWorkingDays: stats.workingDays,
         holidayDays: stats.holidays,
         weeklyOffDays: stats.weeklyOffs,
-        compOffDays: countApprovedCompOffDays(rows, flexibleTiming),
+        compOffDays: countPresentCompOffDays(rows, {
+            from: periodStart,
+            to: periodEnd,
+            flexibleTiming,
+        }),
+        approvedOvertimeHours: flexibleTiming ? sumApprovedOvertimeHours(rows) : 0,
         leaveRecords: liveLeaveRecordsInProcessingWindow(
             [...masked.leaveRecords, ...implicitLeave],
             periodStart,
@@ -919,12 +914,13 @@ export async function buildPayload(req, employeeId, overlay = {}) {
     const workflowStatus = mapWorkflow(profile);
     const enrolled = Boolean(enrollment) || workflowStatus === 'locked';
     const todayKey = dubaiDateKey();
+    const yesterdayKey = shiftDateKey(todayKey, -1);
     const processingMonthReached = isSalaryProcessingMonthReached(todayKey, verpStartDate);
     const liveAttendance = processingMonthReached
         ? await loadLiveAttendanceEligibility({
               employee,
               from: verpStartDate,
-              to: todayKey,
+              to: yesterdayKey,
               staffType: employee.staffType,
           })
         : emptyLiveAttendance();
@@ -1051,6 +1047,7 @@ export async function buildPayload(req, employeeId, overlay = {}) {
             weeklyOffDays: Number(liveAttendance.weeklyOffDays) || 0,
             compOffDays: Number(liveAttendance.compOffDays) || 0,
             overtimeHours: Number(liveAttendance.overtimeHours) || 0,
+            approvedOvertimeHours: Number(liveAttendance.approvedOvertimeHours) || 0,
             overtimeDays: Number(liveAttendance.overtimeDays) || 0,
             overtimeRecords: liveAttendance.overtimeRecords || [],
             showOvertime: liveAttendance.showOvertime === true,
