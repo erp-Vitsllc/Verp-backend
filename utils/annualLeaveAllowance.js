@@ -90,9 +90,9 @@ function periodByIndex(joiningDate, index) {
 }
 
 /**
- * The first 12 months from the contract joining date are worked, not taken as leave.
- * Leave is allowed in the next 12-month row. That row stays "Not hit 300" until a
- * full working-day cycle is counted. When that row's end date passes, or the next
+ * Each row is 12 months from the contract joining date.
+ * The first row starts on the joining date and stays "Not hit 300" until a full
+ * working-day cycle is counted. When that row's end date passes, or the next
  * cycle is counted, a new row opens and the previous one becomes Lapsed.
  */
 export function buildAnnualLeaveWindows({
@@ -120,13 +120,13 @@ export function buildAnnualLeaveWindows({
 
     let showCount = joining ? Math.max(entitled, 1) : 0;
     if (showCount > 0) {
-        const latest = periodByIndex(joining, showCount + 1);
+        const latest = periodByIndex(joining, showCount);
         if (latest && todayKey && todayKey > latest.endDate) showCount += 1;
     }
 
     const windows = [];
     for (let index = 1; index <= showCount; index += 1) {
-        const period = periodByIndex(joining, index + 1);
+        const period = periodByIndex(joining, index);
         if (!period) break;
         const { startDate, endDate } = period;
         const earned = index <= entitled;
