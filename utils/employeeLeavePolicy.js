@@ -519,10 +519,10 @@ export function sandwichDatesForLeave({ leaveByDate, offSet, from, to }) {
         const next = nearestNonOffDate(date, 1, { offSet, minDate: from, maxDate: to });
         const prevType = leaveByDate.get(prev);
         const nextType = leaveByDate.get(next);
-        if (!prevType || !nextType) continue;
+        if (!prevType || !nextType || prevType !== nextType) continue;
         extras.push({
             date,
-            statusKey: prevType === nextType ? prevType : prevType,
+            statusKey: prevType,
         });
     }
     return extras;
