@@ -73,8 +73,8 @@ function collectHistorical(profile) {
     return { deductionDates, annual, undatedDeduction };
 }
 
-function overlapDates(dates, start, end, workingSet) {
-    return (dates || []).filter((date) => date >= start && date <= end && workingSet.has(date));
+function datesInWindow(dates, start, end) {
+    return (dates || []).filter((date) => isDateKey(date) && date >= start && date <= end);
 }
 
 function periodByIndex(joiningDate, index) {
@@ -90,10 +90,10 @@ function periodByIndex(joiningDate, index) {
 }
 
 /**
- * Each row is 12 months from the contract joining date.
- * The first row starts on the joining date and stays "Not hit 300" until a full
- * working-day cycle is counted. When that row's end date passes, or the next
- * cycle is counted, a new row opens and the previous one becomes Lapsed.
+ * The joining year is worked. Each completed 300-day cycle opens the next
+ * 12-month row (300 → the year after joining, 600 → the year after that).
+ * Leave taken inside that start and end reduces the 30-day balance.
+ * The latest row is Active. Every earlier row is Lapsed.
  */
 export function buildAnnualLeaveWindows({
     joiningDate = '',
@@ -113,27 +113,19 @@ export function buildAnnualLeaveWindows({
     if (drop) counted = counted.slice(drop);
     const completed = Math.floor(counted.length / step);
     const remainderDays = counted.length % step;
-    const workingSet = new Set(workingDateKeys || []);
     const todayKey = isDateKey(today) ? today : '';
     const joining = isDateKey(joiningDate) ? joiningDate : '';
     const entitled = joining && (!todayKey || joining <= todayKey) ? completed : 0;
 
-    let showCount = joining ? Math.max(entitled, 1) : 0;
-    if (showCount > 0) {
-        const latest = periodByIndex(joining, showCount);
-        if (latest && todayKey && todayKey > latest.endDate) showCount += 1;
-    }
-
     const windows = [];
-    for (let index = 1; index <= showCount; index += 1) {
-        const period = periodByIndex(joining, index);
+    for (let index = 1; index <= entitled; index += 1) {
+        const period = periodByIndex(joining, index + 1);
         if (!period) break;
         const { startDate, endDate } = period;
-        const earned = index <= entitled;
         const approved = new Set();
         const pending = new Set();
         for (const leave of annualLeaves || []) {
-            const dates = overlapDates(leave.dates, startDate, endDate, workingSet);
+            const dates = datesInWindow(leave.dates, startDate, endDate);
             const bucket = leave.status === 'pending' ? pending : approved;
             dates.forEach((date) => bucket.add(date));
         }
@@ -141,19 +133,16 @@ export function buildAnnualLeaveWindows({
         const approvedDays = approved.size;
         const pendingDays = pending.size;
         const usedDays = approvedDays + pendingDays;
-        const ended = Boolean(todayKey && todayKey > endDate);
+        const status = index < entitled ? 'Lapsed' : 'Active';
         const notStarted = Boolean(todayKey && todayKey < startDate);
-        const superseded = earned && index < entitled;
-        let status = 'Not hit 300';
-        if (earned && (ended || superseded)) status = 'Lapsed';
-        else if (earned) status = 'Active';
-        const balance = earned ? Math.max(0, allowed - usedDays) : 0;
-        const open = status === 'Active' && !notStarted;
+        const ended = Boolean(todayKey && todayKey > endDate);
+        const balance = Math.max(0, allowed - usedDays);
+        const open = status === 'Active' && !notStarted && !ended;
         windows.push({
             index,
             startDate,
             endDate,
-            allowedDays: earned ? allowed : 0,
+            allowedDays: allowed,
             approvedDays,
             pendingDays,
             takenDays: usedDays,
@@ -166,7 +155,7 @@ export function buildAnnualLeaveWindows({
     }
 
     const active = windows.find((row) => row.canTake)
-        || windows.find((row) => row.status === 'Active' && (!todayKey || (todayKey >= row.startDate && todayKey <= row.endDate)))
+        || windows.find((row) => row.status === 'Active')
         || null;
     return {
         cycleDays: step,
