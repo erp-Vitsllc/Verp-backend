@@ -744,6 +744,8 @@ async function closeFlags(task, viewer, currentAssigneeId, assigneeEmpId, action
     }
     const holder = viewer?.superUser || viewerIsAssignee;
     const general = isGeneralTask(task);
+    const taskType = String(task?.taskType || '');
+    const systemOrWorkflow = taskType === 'System Task' || taskType === 'Workflow Task' || taskType === 'Work Flow Task';
     const reviewPending = Boolean(saved.reviewPending) && !completed;
     const flags = {
         reassigned,
@@ -757,9 +759,9 @@ async function closeFlags(task, viewer, currentAssigneeId, assigneeEmpId, action
         canComplete: false,
         canMarkRejected: false,
         canMarkCompleted: false,
-        canRejectWithNote: !alreadyRejected && open && (requesterViewer || viewerIsOriginalAssignee) && !viewerIsReassignee,
-        canHandBackToOriginal: open && viewerIsReassignee && !reviewPending && !closeScheduled,
-        canCloseNow: open && viewerIsOriginalAssignee && !isGeneralTask(task) && String(task?.taskType || '') !== 'System Task' && !reviewPending && !closeScheduled,
+        canRejectWithNote: !alreadyRejected && open && (requesterViewer || viewerIsOriginalAssignee) && !viewerIsReassignee && !(systemOrWorkflow && reassigned),
+        canHandBackToOriginal: open && viewerIsReassignee && !systemOrWorkflow && !reviewPending && !closeScheduled,
+        canCloseNow: open && !reassigned && (viewerIsAssignee || viewer?.superUser) && !general && !reviewPending && !closeScheduled,
         canRequestClose: completed && reassigned && holder && !notified && !closed,
         canFinishClose: completed && requested && !closed && viewerIsOriginal,
         canReopen: (closeScheduled && requesterViewer) || (completed && requesterViewer && Boolean(saved.closedAt) && general),
@@ -771,7 +773,7 @@ async function closeFlags(task, viewer, currentAssigneeId, assigneeEmpId, action
         canApproveGeneral: false,
         canRejectGeneral: false,
     };
-    const needsRequesterReview = general || String(task?.taskType || '') === 'System Task';
+    const needsRequesterReview = general;
     if (!needsRequesterReview) return flags;
     if (reviewPending) {
         flags.closeMessage = `${saved.completionRequestedByName || saved.returnAssigneeName || "The assignee"} completed this task. Approve to close it, or reject it with a reason.`;
@@ -1753,6 +1755,7 @@ export const submitTaskCompletion = async (req, res) => {
         const viewer = await resolveTaskViewer(req);
         const task = target.task;
         const systemTask = String(task.taskType || '') === 'System Task';
+        const workflowTask = String(task.taskType || '') === 'Workflow Task' || String(task.taskType || '') === 'Work Flow Task';
         const currentAssignee = assigneeOf(target);
         const originalAssignee = taskWasReassigned(task) ? await resolveOriginalAssignee(task) : null;
         const viewerIsReassignedHolder = Boolean(
@@ -1760,7 +1763,7 @@ export const submitTaskCompletion = async (req, res) => {
             && viewerIsCurrentAssignee(viewer, currentAssignee)
             && !viewerMatchesEmployee(viewer, originalAssignee),
         );
-        if (viewerIsReassignedHolder) {
+        if (viewerIsReassignedHolder && !systemTask && !workflowTask) {
             if (task.status === 'Completed' || task.status === 'Cancelled' || task.status === 'Rejected') {
                 return res.status(400).json({ message: 'This task is already closed.' });
             }
@@ -1807,7 +1810,7 @@ export const submitTaskCompletion = async (req, res) => {
                 task: await buildDetail(freshHandback, viewer),
             });
         }
-        if (!isGeneralTask(task) && !systemTask && viewerIsCurrentAssignee(viewer, currentAssignee)) {
+        if (!isGeneralTask(task) && !viewerIsReassignedHolder && viewerIsCurrentAssignee(viewer, currentAssignee)) {
             if (task.status === 'Completed' || task.status === 'Cancelled' || task.status === 'Rejected') {
                 return res.status(400).json({ message: 'This task is already closed.' });
             }
@@ -1861,7 +1864,7 @@ export const submitTaskCompletion = async (req, res) => {
                 task: await buildDetail(freshClosed, viewer),
             });
         }
-        if (isGeneralTask(task) || systemTask) {
+        if (isGeneralTask(task)) {
             if (task.status === "Completed" || task.status === "Cancelled" || task.status === "Rejected") {
                 return res.status(400).json({ message: "This task is already closed." });
             }
@@ -2823,6 +2826,9 @@ export const addTaskManagerUpdate = async (req, res) => {
         const viewer = await resolveTaskViewer(req);
         const task = target.task || (target.action ? blankOverlay(target.action) : null);
         if (!task) return res.status(404).json({ message: "Task not found." });
+        if (generalTaskClosed(task)) {
+            return res.status(400).json({ message: "This task is closed. Only the requester can reopen it." });
+        }
         const destination = target.kind === "manual"
             ? moduleForText(task.taskName, task.description, task.taskType)
             : moduleForRequestType(target.action?.requestType, `${target.action?.extra1 || ""} ${target.action?.extra2 || ""}`);
