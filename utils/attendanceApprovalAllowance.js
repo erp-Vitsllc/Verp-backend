@@ -148,17 +148,6 @@ async function attendanceRowsForEmployee(person, from, to) {
         .lean();
 }
 
-async function poolDatesForEmployee(person, from, to, today, pool) {
-    const rows = await attendanceRowsForEmployee(person, from, to);
-    const dates = [];
-    for (const row of rows || []) {
-        const rowPool = approvalEventPool(row, { countOpenPunch: String(row?.date || '') < today });
-        if (rowPool === pool) dates.push(String(row.date || ''));
-    }
-    return dates.filter(validDay);
-}
-
-/** Stored mispunches, closed days with no check-out, and a misspunch request that is still open. */
 async function mispunchDatesForEmployee(person, from, to, today) {
     const [rows, requests] = await Promise.all([
         attendanceRowsForEmployee(person, from, to),
@@ -181,32 +170,9 @@ async function mispunchDatesForEmployee(person, from, to, today) {
     return [...new Set(dates.filter(validDay))];
 }
 
-export async function attendanceApprovalLimitMessageFor(employee, { pool, requestDates }) {
-    const dates = [...new Set((requestDates || []).map((date) => String(date || '').trim()).filter(Boolean))];
-    if (!dates.length || (pool !== 'late' && pool !== 'mispunch')) return '';
-
-    const employeeId = String(employee?._id || '');
-    let person = employee;
-    if (!person?.staffType || !person?.employeeId) {
-        person = await EmployeeBasic.findById(employeeId).select('_id employeeId staffType').lean();
-    }
-    if (!person) return '';
-
-    const policy = await resolveEmployeePayrollPolicy(person);
-    const allowed = allowedApprovalEvents(policy, pool);
-    if (allowed == null) return '';
-
-    const months = [...new Set(dates.map((date) => date.slice(0, 7)))].sort();
-    const from = `${months[0]}-01`;
-    const to = monthEnd(months[months.length - 1]);
-    const today = todayKey();
-    const existingDates = pool === 'mispunch'
-        ? await mispunchDatesForEmployee(person, from, to, today)
-        : await poolDatesForEmployee(person, from, to, today, pool);
-
-    const block = approvalAllowanceBlock({ allowed, existingDates, requestDates: dates });
-    if (!block) return '';
-    return attendanceApprovalLimitText({ pool, taken: block.taken, allowed: block.allowed });
+export async function attendanceApprovalLimitMessageFor() {
+    // Salary-policy maximum request counts do not block sending a request.
+    return '';
 }
 
 /** Monthly missed-punch events already on record, and the salary-policy count. */
