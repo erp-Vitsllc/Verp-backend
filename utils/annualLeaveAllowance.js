@@ -64,8 +64,11 @@ function collectHistorical(profile) {
         const dates = eachDate(range.from, range.to);
         deductionDates.push(...dates);
         if (isAnnualRow(row)) {
+            const storedDays = Math.max(0, Number(row?.eligibleWorkingDays ?? row?.actualDays ?? row?.deductionDays) || 0);
             annual.push({
                 dates,
+                days: storedDays || dates.length,
+                startDate: range.from,
                 status: status === 'pending' ? 'pending' : 'approved',
             });
         }
@@ -92,8 +95,9 @@ function periodByIndex(joiningDate, index) {
 /**
  * Row 1 starts on the contract joining date. Each later row starts the day
  * after the previous leave eligible date. A row counts annual leave from its
- * joining date through the next row's leave eligible date, up to 30 days.
- * Days past 30 move to the next row. The row stays Inactive until that
+ * joining date through the next row's leave eligible date. Used is every day
+ * taken in that range, including days past 30. Balance stays 0 once used
+ * passes 30. The row stays Inactive until that
  * 300-day cycle is complete, then Active. It becomes Lapsed once the next
  * row's leave eligible date is today or earlier.
  */
@@ -134,57 +138,38 @@ export function buildAnnualLeaveWindows({
         }
     }
 
-    const leaveDates = [];
-    for (const leave of annualLeaves || []) {
-        for (const date of leave?.dates || []) {
-            if (!isDateKey(date)) continue;
-            leaveDates.push({ date, pending: leave.status === 'pending' });
-        }
-    }
-    leaveDates.sort((a, b) => a.date.localeCompare(b.date) || Number(a.pending) - Number(b.pending));
-    const seen = new Set();
-    const uniqueLeaves = [];
-    for (const leave of leaveDates) {
-        if (seen.has(leave.date)) continue;
-        seen.add(leave.date);
-        uniqueLeaves.push(leave);
-    }
-
-    const countedOnRow = periods.map(() => []);
-    const placeOnRow = (rowIndex, leave) => {
-        countedOnRow[rowIndex].push(leave);
+    const usedDaysByRow = periods.map(() => 0);
+    const pendingDaysByRow = periods.map(() => 0);
+    const leaveDatesByRow = periods.map(() => []);
+    const rowIndexForDate = (date) => {
+        const inside = periods.findIndex((period) => date >= period.startDate && date <= period.takeUntil);
+        if (inside >= 0) return inside;
+        const later = periods.findIndex((period) => date <= period.takeUntil);
+        return later >= 0 ? later : 0;
     };
-    for (const leave of uniqueLeaves) {
-        let placed = false;
-        for (let index = 0; index < periods.length; index += 1) {
-            const period = periods[index];
-            if (leave.date < period.startDate || leave.date > period.takeUntil) continue;
-            if (countedOnRow[index].length >= allowed) continue;
-            placeOnRow(index, leave);
-            placed = true;
-            break;
-        }
-        if (placed) continue;
-        for (let index = 0; index < periods.length; index += 1) {
-            const period = periods[index];
-            if (leave.date > period.takeUntil) continue;
-            if (countedOnRow[index].length >= allowed) continue;
-            placeOnRow(index, leave);
-            break;
-        }
+
+    for (const leave of annualLeaves || []) {
+        const dates = [...new Set((leave?.dates || []).filter((date) => isDateKey(date)))].sort();
+        const storedDays = Math.max(0, Number(leave?.days) || 0);
+        const dayCount = storedDays || dates.length;
+        if (!dayCount || !periods.length) continue;
+        const anchor = isDateKey(leave?.startDate) ? leave.startDate : dates[0] || '';
+        const index = anchor ? rowIndexForDate(anchor) : 0;
+        usedDaysByRow[index] += dayCount;
+        if (leave?.status === 'pending') pendingDaysByRow[index] += dayCount;
+        leaveDatesByRow[index].push(...dates);
     }
 
     const windows = periods.map((period, index) => {
-        const countedHere = countedOnRow[index];
-        const pendingDays = countedHere.filter((leave) => leave.pending).length;
-        const approvedDays = countedHere.length - pendingDays;
-        const usedDays = countedHere.length;
+        const pendingDays = pendingDaysByRow[index];
+        const usedDays = usedDaysByRow[index];
+        const approvedDays = Math.max(0, usedDays - pendingDays);
         const cycleReady = counted.length >= (index + 1) * step;
         const lapsed = Boolean(todayKey && period.takeUntil <= todayKey);
         const status = lapsed ? 'Lapsed' : cycleReady ? 'Active' : 'Inactive';
         const eligible = status !== 'Inactive';
         const balance = eligible ? Math.max(0, allowed - usedDays) : 0;
-        const dates = countedHere.map((leave) => leave.date).sort();
+        const dates = leaveDatesByRow[index].sort();
         return {
             index: period.index,
             startDate: period.startDate,

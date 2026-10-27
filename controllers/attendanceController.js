@@ -4894,7 +4894,9 @@ export async function requestAttendanceFuture(req, res) {
                 to: toDate,
             });
             const groupOver = Boolean(eligibility?.groupCap?.over);
-            if (!allowanceHit.ok || groupOver) {
+            const { isRequestUserDesignatedFlowchartHr } = await import('../utils/isDesignatedFlowchartHr.js');
+            const designatedHr = await isRequestUserDesignatedFlowchartHr(req);
+            if (!designatedHr && (!allowanceHit.ok || groupOver)) {
                 const lines = [];
                 if (!allowanceHit.ok && allowanceHit.message) lines.push(allowanceHit.message);
                 if (groupOver && eligibility.groupCap?.message) lines.push(eligibility.groupCap.message);
@@ -4951,7 +4953,9 @@ export async function requestAttendanceFuture(req, res) {
                 to: toDate,
                 requestedDates: requestDates,
             });
-            if (!counted.ok) {
+            const { isRequestUserDesignatedFlowchartHr } = await import('../utils/isDesignatedFlowchartHr.js');
+            const designatedHr = await isRequestUserDesignatedFlowchartHr(req);
+            if (!designatedHr && !counted.ok) {
                 return res.status(400).json({
                     message: counted.message,
                     notEligible: true,

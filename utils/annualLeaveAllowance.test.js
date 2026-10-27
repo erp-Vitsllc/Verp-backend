@@ -46,10 +46,32 @@ describe('annual leave windows', () => {
             cycleDays: 300,
             today: '2025-06-01',
         });
-        assert.equal(result.windows[0].takenDays, 2);
-        assert.equal(result.windows[0].balance, 28);
+        assert.equal(result.windows[0].takenDays, 3);
+        assert.equal(result.windows[0].balance, 27);
         assert.equal(result.windows[0].status, 'Active');
         assert.equal(result.windows[0].takeUntil, '2025-12-31');
+    });
+
+    it('counts the entered day total when it is higher than the calendar dates', () => {
+        const dates = [];
+        for (let day = 0; day < 37; day += 1) {
+            const date = new Date('2023-09-01T00:00:00');
+            date.setDate(date.getDate() + day);
+            const y = date.getFullYear();
+            const m = String(date.getMonth() + 1).padStart(2, '0');
+            const d = String(date.getDate()).padStart(2, '0');
+            dates.push(`${y}-${m}-${d}`);
+        }
+        const result = buildAnnualLeaveWindows({
+            joiningDate: '2023-08-24',
+            workingDateKeys: keys(600, '2023-08-24'),
+            annualLeaves: [{ dates, days: 52, startDate: dates[0], status: 'approved' }],
+            cycleDays: 300,
+            today: '2026-10-26',
+        });
+        assert.equal(result.windows[0].takenDays, 52);
+        assert.equal(result.windows[0].balance, 0);
+        assert.equal(result.windows[1].takenDays, 0);
     });
 
     it('moves days over 30 onto the next row', () => {
@@ -69,10 +91,10 @@ describe('annual leave windows', () => {
             cycleDays: 300,
             today: '2025-06-01',
         });
-        assert.equal(result.windows[0].takenDays, 30);
+        assert.equal(result.windows[0].takenDays, 45);
         assert.equal(result.windows[0].balance, 0);
-        assert.equal(result.windows[1].takenDays, 15);
-        assert.equal(result.windows[1].balance, 15);
+        assert.equal(result.windows[1].takenDays, 0);
+        assert.equal(result.windows[1].balance, 30);
     });
 
     it('keeps the joining row inactive before 300 counted days', () => {

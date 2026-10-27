@@ -1632,7 +1632,8 @@ export async function applyLeaveRange(req, res) {
             spec.requestedStatusKey === 'on_leave'
                 ? await loadAnnualLeaveEligibilityForEmployee(employee, { from, to })
                 : null;
-        if (!hrOverride && annualEligibility && spec.requestedStatusKey === 'on_leave') {
+        const designatedHr = hrOverride || (await isRequestUserDesignatedFlowchartHr(req));
+        if (!designatedHr && annualEligibility && spec.requestedStatusKey === 'on_leave') {
             const requestSpan = await calcWorkingDays({
                 from,
                 to,
