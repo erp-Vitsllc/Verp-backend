@@ -16,7 +16,7 @@ function keys(count, start = '2024-01-02') {
 }
 
 describe('annual leave windows', () => {
-    it('opens one row per completed 300 days, starting the year after joining', () => {
+    it('starts at the contract joining date and lapses after the next eligible date', () => {
         const result = buildAnnualLeaveWindows({
             joiningDate: '2024-01-01',
             workingDateKeys: keys(925),
@@ -26,19 +26,19 @@ describe('annual leave windows', () => {
         assert.equal(result.completedCycles, 3);
         assert.equal(result.remainderDays, 25);
         assert.equal(result.windows.length, 3);
-        assert.equal(result.windows[0].startDate, '2025-01-01');
-        assert.equal(result.windows[0].endDate, '2025-12-31');
+        assert.equal(result.windows[0].startDate, '2024-01-01');
+        assert.equal(result.windows[0].endDate, '2024-12-31');
+        assert.equal(result.windows[0].takeUntil, '2025-12-31');
         assert.equal(result.windows[0].status, 'Lapsed');
-        assert.equal(result.windows[1].startDate, '2026-01-01');
-        assert.equal(result.windows[1].endDate, '2026-12-31');
-        assert.equal(result.windows[1].status, 'Lapsed');
-        assert.equal(result.windows[2].startDate, '2027-01-01');
-        assert.equal(result.windows[2].endDate, '2027-12-31');
+        assert.equal(result.windows[1].startDate, '2025-01-01');
+        assert.equal(result.windows[1].endDate, '2025-12-31');
+        assert.equal(result.windows[1].status, 'Active');
+        assert.equal(result.windows[1].balance, 30);
+        assert.equal(result.windows[2].startDate, '2026-01-01');
         assert.equal(result.windows[2].status, 'Active');
-        assert.equal(result.windows[2].balance, 30);
     });
 
-    it('counts annual leave taken inside that year against the 30-day balance', () => {
+    it('counts leave through the next row leave eligible date and spills past 30', () => {
         const result = buildAnnualLeaveWindows({
             joiningDate: '2024-01-01',
             workingDateKeys: keys(300),
@@ -46,20 +46,46 @@ describe('annual leave windows', () => {
             cycleDays: 300,
             today: '2025-06-01',
         });
-        assert.equal(result.windows.length, 1);
         assert.equal(result.windows[0].takenDays, 2);
         assert.equal(result.windows[0].balance, 28);
         assert.equal(result.windows[0].status, 'Active');
+        assert.equal(result.windows[0].takeUntil, '2025-12-31');
     });
 
-    it('does not open a row before 300 counted days', () => {
+    it('moves days over 30 onto the next row', () => {
+        const taken = [];
+        for (let day = 1; day <= 45; day += 1) {
+            const date = new Date('2024-02-01T00:00:00');
+            date.setDate(date.getDate() + day);
+            const y = date.getFullYear();
+            const m = String(date.getMonth() + 1).padStart(2, '0');
+            const d = String(date.getDate()).padStart(2, '0');
+            taken.push(`${y}-${m}-${d}`);
+        }
+        const result = buildAnnualLeaveWindows({
+            joiningDate: '2024-01-01',
+            workingDateKeys: keys(600),
+            annualLeaves: [{ dates: taken, status: 'approved' }],
+            cycleDays: 300,
+            today: '2025-06-01',
+        });
+        assert.equal(result.windows[0].takenDays, 30);
+        assert.equal(result.windows[0].balance, 0);
+        assert.equal(result.windows[1].takenDays, 15);
+        assert.equal(result.windows[1].balance, 15);
+    });
+
+    it('keeps the joining row inactive before 300 counted days', () => {
         const result = buildAnnualLeaveWindows({
             joiningDate: '2025-11-01',
             workingDateKeys: keys(100, '2025-11-03'),
             cycleDays: 300,
             today: '2026-06-01',
         });
-        assert.equal(result.windows.length, 0);
+        assert.equal(result.windows.length, 1);
+        assert.equal(result.windows[0].status, 'Inactive');
+        assert.equal(result.windows[0].allowedDays, 0);
+        assert.equal(result.windows[0].balance, 0);
         const blocked = annualLeaveRequestBlock(result, {
             from: '2026-11-01',
             to: '2026-11-02',
