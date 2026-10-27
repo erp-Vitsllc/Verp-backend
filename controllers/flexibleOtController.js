@@ -1,5 +1,6 @@
 import mongoose from 'mongoose';
 import Attendance from '../models/Attendance.js';
+import Holiday from '../models/Holiday.js';
 import AttendanceChangeRequest from '../models/AttendanceChangeRequest.js';
 import EmployeeBasic from '../models/EmployeeBasic.js';
 import { getDepartmentHOD } from '../utils/getDepartmentHOD.js';
@@ -22,6 +23,7 @@ import {
     loadWorkingTimeDoc,
     normalizeStaffType,
 } from '../utils/workingTimeHelpers.js';
+import { nonWorkingFromContext } from '../utils/attendanceNonWorkingDay.js';
 import { refreshFlexibleOtRecords } from '../utils/syncFlexibleOt.js';
 import { notifyEmployeeFlexibleOtWhatsApp } from '../utils/sendFlexibleOtWhatsApp.js';
 import { sendAttendanceDirectChangeEmail } from '../utils/sendAttendanceLeaveEmails.js';
@@ -259,7 +261,14 @@ export async function requestFlexibleOvertime(req, res) {
             return res.status(403).json({ message: 'This employee is suspended on this date. Attendance cannot be changed.' });
         }
         const week = getWeekForStaffType(await loadWorkingTimeDoc(), normalizeStaffType(employee?.staffType));
-        if (!isFlexibleTiming(week)) {
+        const holiday = await Holiday.findOne({ date: record.date }).select('date appliesTo').lean();
+        const offDay = Boolean(nonWorkingFromContext({
+            holiday,
+            week,
+            staffType: normalizeStaffType(employee?.staffType),
+            date: record.date,
+        }));
+        if (!isFlexibleTiming(week) && !offDay) {
             return res.status(400).json({ message: 'Overtime and next day present apply only to flexible timing.' });
         }
         const reporteeId = employee?.primaryReportee?._id || employee?.primaryReportee || '';

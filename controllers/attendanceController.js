@@ -2,6 +2,7 @@ import mongoose from 'mongoose';
 import Attendance, { ATTENDANCE_STATUS_KEYS } from '../models/Attendance.js';
 import EmployeeBasic from '../models/EmployeeBasic.js';
 import Holiday from '../models/Holiday.js';
+import EmployeeSalary from '../models/EmployeeSalary.js';
 import SalaryEnrollment from '../models/SalaryEnrollment.js';
 import SalaryHistoricalProfile from '../models/SalaryHistoricalProfile.js';
 import { getScheduledEmailTimeZone, getZonedParts } from '../utils/scheduleDailyAtMidnight.js';
@@ -1943,7 +1944,7 @@ export async function getMyAttendanceMonth(req, res) {
                 }
             }
             const target = await EmployeeBasic.findById(forEmployeeId)
-                .select('_id employeeId firstName lastName staffType companyEmail attendanceAccountStatus attendanceSuspension')
+                .select('_id employeeId firstName lastName staffType companyEmail attendanceAccountStatus attendanceSuspension dateOfJoining joiningDate')
                 .lean();
             if (!target) {
                 return res.status(404).json({ message: 'Employee not found.' });
@@ -1951,7 +1952,7 @@ export async function getMyAttendanceMonth(req, res) {
             employee = target;
         } else if (self) {
             employee = await EmployeeBasic.findById(self._id)
-                .select('_id employeeId firstName lastName staffType companyEmail attendanceAccountStatus attendanceSuspension')
+                .select('_id employeeId firstName lastName staffType companyEmail attendanceAccountStatus attendanceSuspension dateOfJoining joiningDate')
                 .lean();
             if (!employee) employee = self;
         }
@@ -2003,6 +2004,8 @@ export async function getMyAttendanceMonth(req, res) {
             return presentFromOpenPunch(bestDayRecord(rows, todayKey), todayKey);
         };
 
+        const calendarPay = await calendarPayForEmployee(employee);
+
         if (gate.attendanceLocked || !gate.requestedOpen) {
             const loadedToday = await loadTodayPunch();
             const session = await openFlexibleSession(employee, todayKey, loadedToday);
@@ -2031,6 +2034,7 @@ export async function getMyAttendanceMonth(req, res) {
                     ? suspendedAttendanceView(employee, todayKey)
                     : session.todayRecord,
                 openFlexiblePunch: isAttendanceSuspendedOn(employee, todayKey) ? false : session.openFlexiblePunch,
+                calendarPay,
             });
         }
 
@@ -2117,6 +2121,7 @@ export async function getMyAttendanceMonth(req, res) {
             records: await attachLeaveFileUrls(displayRecords),
             todayRecord: displayToday,
             openFlexiblePunch: isAttendanceSuspendedOn(employee, todayKey) ? false : session.openFlexiblePunch,
+            calendarPay,
         });
     } catch (error) {
         console.error('[getMyAttendanceMonth]', error);
@@ -2291,6 +2296,58 @@ function applyEnrollUsedToLeaveBalances(leaveBalances, enrollUsed = {}, entitlem
         };
     }
     return next;
+}
+
+function calendarDateKey(value) {
+    if (!value) return '';
+    if (value instanceof Date && !Number.isNaN(value.getTime())) {
+        return value.toISOString().slice(0, 10);
+    }
+    const match = String(value).trim().match(/^(\d{4}-\d{2}-\d{2})/);
+    return match ? match[1] : '';
+}
+
+function calendarSalaryHistory(history) {
+    if (!Array.isArray(history)) return [];
+    return history.map((row) => ({
+        fromDate: calendarDateKey(row?.fromDate),
+        toDate: calendarDateKey(row?.toDate),
+        month: String(row?.month || '').trim(),
+        basic: Number(row?.basic) || 0,
+        total: Number(row?.totalSalary) || Number(row?.total) || 0,
+        monthlySalary: Number(row?.monthlySalary) || Number(row?.totalSalary) || 0,
+    }));
+}
+
+/** Salary and deduction rules the dashboard calendar uses for each day's paid and deducted amounts. */
+async function calendarPayForEmployee(employee) {
+    const employeeId = String(employee?.employeeId || '').trim();
+    const empty = { salary: null, salaryHistory: [], leavePolicy: null, joinKey: '' };
+    if (!employeeId) return empty;
+    try {
+        const [salaryDoc, leavePolicy] = await Promise.all([
+            EmployeeSalary.findOne({ employeeId })
+                .select('basic basicSalary monthlySalary totalSalary salaryHistory')
+                .lean(),
+            leavePolicyForEmployee(employee),
+        ]);
+        const monthly = Number(salaryDoc?.monthlySalary) || Number(salaryDoc?.totalSalary) || 0;
+        return {
+            salary: salaryDoc
+                ? {
+                    basic: Number(salaryDoc.basic ?? salaryDoc.basicSalary) || 0,
+                    monthlySalary: monthly,
+                    totalSalary: Number(salaryDoc.totalSalary) || monthly,
+                }
+                : null,
+            salaryHistory: calendarSalaryHistory(salaryDoc?.salaryHistory),
+            leavePolicy,
+            joinKey: calendarDateKey(employee?.dateOfJoining || employee?.joiningDate),
+        };
+    } catch (error) {
+        console.error('[calendarPayForEmployee]', error);
+        return empty;
+    }
 }
 
 async function leavePolicyForEmployee(employee) {
@@ -2689,7 +2746,7 @@ async function resolveMarkTargetEmployee(req) {
     }
 
     const target = await EmployeeBasic.findById(forEmployeeId)
-        .select('_id employeeId firstName lastName staffType companyEmail attendanceAccountStatus attendanceSuspension')
+        .select('_id employeeId firstName lastName staffType companyEmail attendanceAccountStatus attendanceSuspension dateOfJoining joiningDate')
         .lean();
     if (!target) {
         return { error: { status: 404, message: 'Employee not found.' } };

@@ -638,7 +638,7 @@ export async function publishReassignmentNotices(task, {
     }
     for (const person of watchers) {
         const id = String(person?.employeeId || "");
-        if (!isObjectId(id) || id === String(newAssigneeId || "")) continue;
+        if (!isObjectId(id)) continue;
         const existing = notices.get(id);
         if (!existing) {
             notices.set(id, {
@@ -654,26 +654,21 @@ export async function publishReassignmentNotices(task, {
     const path = taskOpenPath(taskKey);
     const messageName = String(reassigneeName || "").trim() || "another employee";
     const label = String(noticeText || "").trim();
-    const extra3 = JSON.stringify({
-        taskManager: true,
-        reassignedNotice: true,
-        module: String(moduleName || "general"),
-        path,
-        taskPath: path,
-        taskKey: String(taskKey || ""),
-        taskManagerId: String(task._id || ""),
-        reassignedToName: label ? "" : messageName,
-    });
+    const moduleKey = String(moduleName || "general");
     const nextNotices = [];
     for (const [id, row] of notices) {
         if (!isObjectId(row.requestId)) row.requestId = new mongoose.Types.ObjectId();
-        if (id === String(newAssigneeId || "")) {
-            await DashboardAction.updateMany(
-                { requestId: row.requestId, requestType: "Task Manager" },
-                { status: "Dismissed", actionedDate: new Date() },
-            );
-            continue;
-        }
+        const forNewAssignee = id === String(newAssigneeId || "");
+        const extra3 = JSON.stringify({
+            taskManager: true,
+            reassignedNotice: true,
+            module: moduleKey,
+            path,
+            taskPath: path,
+            taskKey: String(taskKey || ""),
+            taskManagerId: String(task._id || ""),
+            reassignedToName: label || forNewAssignee ? "" : messageName,
+        });
         await DashboardAction.findOneAndUpdate(
             { requestId: row.requestId, requestType: "Task Manager" },
             {
@@ -687,7 +682,7 @@ export async function publishReassignmentNotices(task, {
                 requestedByName: "Task Manager",
                 requestedDate: new Date(),
                 extra1: taskName || "Task",
-                extra2: label || `Reassigned to: ${messageName}`,
+                extra2: label || (forNewAssignee ? "This task was reassigned to you" : `Reassigned to: ${messageName}`),
                 extra3,
                 actionedDate: null,
             },
@@ -1020,8 +1015,6 @@ export async function loadTaskManagerInboxItems(assigneeClauses, moduleName, opt
     } catch (error) {
         console.error("Task inbox notice cleanup failed:", error);
     }
-    // A reassignment notice is a copy of the module request. It stays off every module bell.
-    mapped = mapped.filter((row) => !readTaskInboxMeta(row.extra3).reassignedNotice);
     if (options.omitExpiryFollowUps) {
         mapped = mapped.filter((row) => !isExpiryFollowUpTaskRow(row));
     }

@@ -577,6 +577,13 @@ async function keepReassignmentVisible(task, target, { previous, newAssignee, re
             empId: task.closeRequest?.originalAssigneeEmpId || "",
         });
     }
+    const newAssigneeId = newAssignee?._id || newAssignee;
+    if (isObjectId(newAssigneeId)) {
+        watchers.push({
+            employeeId: newAssigneeId,
+            empId: newAssignee?.employeeId || "",
+        });
+    }
     await publishReassignmentNotices(task, {
         watchers,
         reassigneeName,
@@ -3254,9 +3261,17 @@ async function buildTaskWorkflow(target, viewer) {
         } else {
             step.at = null;
         }
+        const taskType = String(task?.taskType || category || '');
+        const systemOrWorkflow = /system task|workflow task|work flow task/i.test(taskType);
+        const originalId = String(task?.closeRequest?.originalAssigneeId || '');
+        const backWithOriginal = systemOrWorkflow
+            && taskWasReassigned(task)
+            && originalId
+            && String(assigneeId || '') === originalId;
         step.canAct = step.status === "In Progress"
             && Boolean(step.personId)
             && !workflowLocked
+            && !backWithOriginal
             && viewerCanReassign(viewer, assigneeId, assigneeEmpId);
     });
 
