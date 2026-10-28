@@ -42,6 +42,7 @@ import {
     vehicleDisplayById,
     vehicleDisplayFor,
     viewerMaySeeAllNotifications,
+    collapseOpenDuplicatesOf,
 } from "./getTaskManagerNotifications.js";
 import {
     accessPathFor,
@@ -61,7 +62,7 @@ import {
     publishReassignmentNotices,
     sendTaskActivityEmail,
     sendTaskReassignedEmail,
-    reassignedRequesterLabel,
+    reassignmentAssignees,
     syncManualTaskNotification,
     taskOpenPath,
     upsertTaskNotice,
@@ -1017,9 +1018,16 @@ async function buildDetail(target, viewer) {
             : `${heldAssignee} (${requesterPlain})`;
     }
     const originalAssigneeName = String(task?.closeRequest?.originalAssigneeName || "").trim();
-    const requesterLabel = reassignedRequesterLabel(cardRequester.name, originalAssigneeName);
+    const originalAssigneeId = String(task?.closeRequest?.originalAssigneeId || "");
 
     const { assigneeId: currentAssigneeId, assigneeEmpId } = assigneeOf(target);
+    const assigneePair = reassignmentAssignees({
+        assigneeName: cardAssignee.name,
+        originalAssigneeName,
+    });
+    const originalEmp = assigneePair.reassignedAssigneeName && isObjectId(originalAssigneeId)
+        ? await employeeById(originalAssigneeId)
+        : null;
     const vehicles = manual || !action ? new Map() : await vehicleDisplayById([action]);
     const source = manual || !action ? {} : await loadTaskSourceFacts(action);
     const workflowLocked = !manual && action?.requestType !== "Task Manager";
@@ -1219,7 +1227,18 @@ async function buildDetail(target, viewer) {
         assigneeEmail: cardAssignee.email,
         assigneePhone: cardAssignee.phone,
         assigneePhoto: await signedProfilePhoto(cardAssignee.photo),
-        requesterName: requesterLabel || cardRequester.name,
+        mainAssigneeName: assigneePair.mainAssigneeName || cardAssignee.name,
+        reassignedAssigneeName: assigneePair.reassignedAssigneeName,
+        mainAssigneeRole: assigneePair.reassignedAssigneeName ? (originalEmp?.designation || "") : cardAssignee.role,
+        mainAssigneePhoto: await signedProfilePhoto(
+            assigneePair.reassignedAssigneeName ? (originalEmp?.profilePicture || "") : cardAssignee.photo,
+        ),
+        reassignedAssigneePhoto: assigneePair.reassignedAssigneeName
+            ? await signedProfilePhoto(cardAssignee.photo)
+            : "",
+        originalAssigneeName,
+        originalAssigneeId,
+        requesterName: cardRequester.name,
         requesterBaseName: cardRequester.name,
         requesterRole: cardRequester.role,
         requesterEmail: cardRequester.email,
@@ -1367,18 +1386,7 @@ export const updateTaskManagerTask = async (req, res) => {
         } else {
             const action = target.action;
             let overlay = target.task;
-            if (!overlay) {
-                overlay = new TaskManagerTask({
-                    sourceDashboardActionId: action._id,
-                    requestedByName: action.requestedByName || "",
-                    status: "Pending",
-                    completionDate,
-                    assignee: assignee._id,
-                    taskType,
-                    priority,
-                    taskName,
-                });
-            }
+            if (!overlay) overlay = await ensureOverlay(action);
             if (assigneeChanged) rememberOriginalAssignee(overlay, previous, previousAssigneeName);
             overlay.taskType = taskType;
             overlay.priority = priority;
@@ -1405,6 +1413,11 @@ export const updateTaskManagerTask = async (req, res) => {
 
         if (assigneeChanged && saved) {
             const destination = moduleForText(taskName, description, taskType, target.action?.requestType);
+            try {
+                await collapseOpenDuplicatesOf(target.action);
+            } catch (collapseError) {
+                console.error("Duplicate task cleanup failed:", collapseError);
+            }
             try {
                 await keepReassignmentVisible(saved, target, {
                     previous,
@@ -1516,21 +1529,7 @@ export const reassignTaskManagerTask = async (req, res) => {
             action.assignedToEmpId = assignee.employeeId || "";
             await action.save();
             let overlay = target.task;
-            if (!overlay) {
-                overlay = new TaskManagerTask({
-                    sourceDashboardActionId: action._id,
-                    taskType: "Workflow Task",
-                    priority: "Medium",
-                    taskName: action.extra1 || action.requestType || "Task",
-                    description: action.extra2 || "",
-                    completionDate: action.actionedDate || action.requestedDate || new Date(),
-                    requestedByName: action.requestedByName || "",
-                    assignee: current.assigneeId || action.assignedTo,
-                    assigneeEmpId: current.assigneeEmpId || action.assignedToEmpId || "",
-                    assigneeName: previousName || action.subjectName || "",
-                    status: "Pending",
-                });
-            }
+            if (!overlay) overlay = await ensureOverlay(action);
             rememberOriginalAssignee(overlay, current, previousName);
             clearPendingCompletion(overlay);
             overlay.assignee = assignee._id;
@@ -1554,6 +1553,11 @@ export const reassignTaskManagerTask = async (req, res) => {
             noticeTask = overlay;
         }
 
+        try {
+            await collapseOpenDuplicatesOf(target.action || noticeTask);
+        } catch (collapseError) {
+            console.error("Duplicate task cleanup failed:", collapseError);
+        }
         try {
             await keepReassignmentVisible(noticeTask, target, {
                 previous: current,
@@ -1754,7 +1758,7 @@ export const submitTaskCompletion = async (req, res) => {
         if (!target.task && target.action) {
             const category = categoryFromRequestType(target.action.requestType, target.action.extra1);
             if (category === "General Task") {
-                target.task = blankOverlay(target.action);
+                target.task = await ensureOverlay(target.action);
                 target.task.taskType = "General Task";
             }
         }
@@ -2414,7 +2418,7 @@ export const updateTaskManagerTaskStatus = async (req, res) => {
             }
             const note = readDescription(req.body);
             if (note.error) return res.status(400).json({ message: "A rejection comment is required." });
-            const task = target.task || (target.action ? blankOverlay(target.action) : null);
+            const task = target.task || (target.action ? await ensureOverlay(target.action) : null);
             if (!task) return res.status(404).json({ message: "Task not found." });
             const text = note.text;
             task.status = "Rejected";
@@ -2453,7 +2457,7 @@ export const updateTaskManagerTaskStatus = async (req, res) => {
                 message: "This request is updated on its own page. You can still reassign it here.",
             });
         }
-        const task = target.task || (target.action ? blankOverlay(target.action) : null);
+        const task = target.task || (target.action ? await ensureOverlay(target.action) : null);
         if (!task) return res.status(404).json({ message: "Task not found." });
         if (status === "Completed" && taskWasReassigned(task)) {
             return res.status(400).json({
@@ -2718,21 +2722,7 @@ export const addTaskManagerComment = async (req, res) => {
         if (text.length > 1000) return res.status(400).json({ message: "Comment must be 1000 characters or less." });
         const viewer = await resolveTaskViewer(req);
         let task = target.task;
-        if (!task && target.action) {
-            task = new TaskManagerTask({
-                sourceDashboardActionId: target.action._id,
-                taskType: "Workflow Task",
-                priority: "Medium",
-                taskName: target.action.extra1 || target.action.requestType || "Task",
-                description: "",
-                assignee: target.action.assignedTo,
-                assigneeEmpId: target.action.assignedToEmpId || "",
-                assigneeName: target.action.subjectName || "",
-                completionDate: target.action.requestedDate || new Date(),
-                requestedByName: target.action.requestedByName || "",
-                status: "Pending",
-            });
-        }
+        if (!task && target.action) task = await ensureOverlay(target.action);
         const safeText = sanitizeComment(text);
         if (!plainText(safeText)) return res.status(400).json({ message: "Comment is required." });
         const mail = await notifyParties(task, {
@@ -2775,21 +2765,7 @@ export const updateTaskManagerReminders = async (req, res) => {
         if (!(await denyUnlessViewer(req, res))) return;
         const target = await loadTarget(req.params.taskKey);
         if (!target) return res.status(404).json({ message: "Task not found." });
-        if (!target.task && target.action) {
-            target.task = new TaskManagerTask({
-                sourceDashboardActionId: target.action._id,
-                taskType: "Workflow Task",
-                priority: "Medium",
-                taskName: target.action.extra1 || target.action.requestType || "Task",
-                description: "",
-                assignee: target.action.assignedTo,
-                assigneeEmpId: target.action.assignedToEmpId || "",
-                assigneeName: target.action.subjectName || "",
-                completionDate: target.action.requestedDate || new Date(),
-                requestedByName: target.action.requestedByName || "",
-                status: "Pending",
-            });
-        }
+        if (!target.task && target.action) target.task = await ensureOverlay(target.action);
         if (!target.task) return res.status(404).json({ message: "Task not found." });
         target.task.reminders = {
             dueDate: Boolean(req.body?.dueDate),
@@ -2821,6 +2797,23 @@ function blankOverlay(action) {
     });
 }
 
+/** Reuse the task already linked to this request. A second copy is closed. */
+async function ensureOverlay(action) {
+    if (!action?._id) return null;
+    const rows = await TaskManagerTask.find({ sourceDashboardActionId: action._id }).sort({ updatedAt: -1 });
+    const open = rows.filter((row) => !["Completed", "Cancelled", "Rejected"].includes(String(row.status || "")));
+    const pool = open.length ? open : [];
+    if (!pool.length) return blankOverlay(action);
+    const [keep, ...extra] = pool;
+    if (extra.length) {
+        await TaskManagerTask.updateMany(
+            { _id: { $in: extra.map((row) => row._id) }, status: { $nin: ["Completed", "Cancelled"] } },
+            { $set: { status: "Cancelled" } },
+        );
+    }
+    return keep;
+}
+
 export const addTaskManagerUpdate = async (req, res) => {
     try {
         if (!(await denyUnlessViewer(req, res))) return;
@@ -2831,7 +2824,7 @@ export const addTaskManagerUpdate = async (req, res) => {
         if (text.length > 2000) return res.status(400).json({ message: "Work update must be 2000 characters or less." });
         const mentionIds = Array.isArray(req.body?.mentions) ? req.body.mentions : [];
         const viewer = await resolveTaskViewer(req);
-        const task = target.task || (target.action ? blankOverlay(target.action) : null);
+        const task = target.task || (target.action ? await ensureOverlay(target.action) : null);
         if (!task) return res.status(404).json({ message: "Task not found." });
         if (generalTaskClosed(task)) {
             return res.status(400).json({ message: "This task is closed. Only the requester can reopen it." });
@@ -2879,7 +2872,7 @@ export const updateTaskManagerNotifications = async (req, res) => {
         if (!(await denyUnlessViewer(req, res))) return;
         const target = await loadTarget(req.params.taskKey);
         if (!target) return res.status(404).json({ message: "Task not found." });
-        const task = target.task || (target.action ? blankOverlay(target.action) : null);
+        const task = target.task || (target.action ? await ensureOverlay(target.action) : null);
         if (!task) return res.status(404).json({ message: "Task not found." });
         const current = task.notifications || {};
         task.notifications = {

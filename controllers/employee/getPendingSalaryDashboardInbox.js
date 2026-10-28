@@ -22,6 +22,7 @@ import {
     salaryEnrollmentWaitingMessage,
 } from '../../utils/salaryEnrollmentApprovalNotify.js';
 import { SALARY_DMF_REQUEST_TYPE } from '../../utils/salaryDmfApproval.js';
+import { isPendingEnrollmentReminder, syncPendingSalaryEnrollmentTasks } from '../../utils/syncPendingSalaryEnrollmentTasks.js';
 import { viewerIsSalaryFlowchartHr } from '../../utils/viewerIsSalaryFlowchartHr.js';
 
 function parseExtra3(value) {
@@ -142,6 +143,27 @@ async function resolveEnrollmentApproverLabel() {
 }
 
 function mapDashboardInboxItem(da, profileById, monthDmfById, approverLabel = 'HR') {
+    if (isPendingEnrollmentReminder(da)) {
+        const meta = parseExtra3(da.extra3);
+        const employeeId = da.subjectEmployeeId || meta.employeeId || '';
+        const href =
+            meta.href ||
+            (employeeId ? `/HRM/Salary/enroll/${encodeURIComponent(employeeId)}` : '/HRM/Salary');
+        const name = da.subjectName || employeeId;
+        return {
+            dashboardActionId: da._id,
+            requestType: SALARY_ENROLLMENT_REQUEST_TYPE,
+            requestedDate: da.requestedDate,
+            requestedByName: da.requestedByName || '',
+            subjectName: name,
+            subjectEmployeeId: employeeId,
+            extra1: da.extra1 || `${name} is pending for enrollment`,
+            extra2: 'Pending for enrollment',
+            extra3: da.extra3 || JSON.stringify({ href, employeeId, pendingEnrollment: true }),
+            href,
+            status: 'Pending',
+        };
+    }
     const type = String(da.requestType || SALARY_ENROLLMENT_REQUEST_TYPE);
     const profile = profileById[String(da.requestId)];
     const monthRow = monthDmfById[String(da.requestId)];
@@ -195,6 +217,7 @@ export const getPendingSalaryDashboardInbox = async (req, res) => {
         }
 
         const assigneeClauses = buildAssigneeClauses(ctx.relevantIds, ctx.employeeIdCode);
+        await syncPendingSalaryEnrollmentTasks();
         const items = [];
 
         if (assigneeClauses.length > 0) {
@@ -223,12 +246,25 @@ export const getPendingSalaryDashboardInbox = async (req, res) => {
             const profileById = Object.fromEntries(profiles.map((row) => [String(row._id), row]));
             const monthDmfById = Object.fromEntries(monthDmfs.map((row) => [String(row._id), row]));
             const liveById = { ...profileById, ...monthDmfById };
-            const liveRows = await purgeOrphanDashboardActionRows(rows, liveById);
+            const reminderRows = [];
+            const linkedRows = [];
+            for (const da of rows) {
+                if (isPendingEnrollmentReminder(da)) reminderRows.push(da);
+                else linkedRows.push(da);
+            }
+            const liveRows = [
+                ...reminderRows,
+                ...(await purgeOrphanDashboardActionRows(linkedRows, liveById)),
+            ];
 
             const idsToDismiss = [];
             const actionableRows = [];
             for (const da of liveRows) {
                 const type = String(da.requestType || '');
+                if (isPendingEnrollmentReminder(da)) {
+                    actionableRows.push(da);
+                    continue;
+                }
                 if (type === SALARY_DMF_REQUEST_TYPE) {
                     const monthRow = monthDmfById[String(da.requestId)];
                     const dmfStatus = String(monthRow?.dmfApproval?.status || '');

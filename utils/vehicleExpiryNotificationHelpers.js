@@ -14,6 +14,7 @@ import {
 } from './vehicleExpiryScanUtils.js';
 import { cleanupVehicleExpiryNotificationsByLabels, VEHICLE_EXPIRY_REQUEST_TYPE } from './cleanupVehicleExpiryNotifications.js';
 import { formatExpiryDateLabel } from './processDocumentExpiryReminders.js';
+import { documentTaskLabel } from './taskDuplicateKey.js';
 import { getDaysUntil, isExpiryHrTaskDueForDoc } from './documentExpiryReminderStages.js';
 import { getDepartmentHOD } from './getDepartmentHOD.js';
 import { isNotificationEnabledForType } from './notificationEmailPermission.js';
@@ -144,8 +145,14 @@ export async function deleteStaleVehicleExpiryNotifications(asset) {
         .select('_id extra1')
         .lean();
 
+    const liveLabels = new Set([...liveDue].map((value) => documentTaskLabel(value)).filter(Boolean));
     const staleIds = pending
-        .filter((row) => !liveDue.has(String(row?.extra1 || '').trim()))
+        .filter((row) => {
+            const extra1 = String(row?.extra1 || '').trim();
+            if (liveDue.has(extra1)) return false;
+            const label = documentTaskLabel(extra1);
+            return !(label && liveLabels.has(label));
+        })
         .map((row) => row._id);
 
     await deleteExpiryActionsAndFinishTasks(staleIds);
@@ -169,15 +176,22 @@ export async function ensureLiveDueVehicleExpiryNotifications(asset, hrUser = nu
         const days = getDaysUntil(doc.expiryDate);
         if (!isExpiryHrTaskDueForDoc(days)) continue;
         const extra1 = buildVehicleExpiryFollowUpExtra1(doc);
-        const already = await DashboardAction.findOne({
+        const label = documentTaskLabel(extra1);
+        const pendingSameVehicle = await DashboardAction.find({
             requestId: asset._id,
             requestType: VEHICLE_EXPIRY_REQUEST_TYPE,
             status: 'Pending',
-            extra1,
+            extra1: { $regex: /^Expiry follow-up required:/i },
         })
-            .select('_id')
+            .select('_id extra1')
             .lean();
-        if (already) continue;
+        const already = pendingSameVehicle.find((row) => documentTaskLabel(row.extra1) === label);
+        if (already) {
+            if (already.extra1 !== extra1) {
+                await DashboardAction.updateOne({ _id: already._id }, { $set: { extra1, extra2: vehicleLabel } });
+            }
+            continue;
+        }
 
         const extra3 = JSON.stringify({
             activationSubject: 'vehicle',

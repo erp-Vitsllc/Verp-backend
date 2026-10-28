@@ -446,6 +446,10 @@ export function formatTaskDisplayParts({
         return assetParts(typeKey, { body, vehicleNo, assetLabel, hasPlate });
     }
 
+    if (typeKey === "salary enrollment" && secondary.toLowerCase() === "pending for enrollment") {
+        return uniqueLines("Pending Enrollment", personLines(owners));
+    }
+
     if (Object.prototype.hasOwnProperty.call(PERSON_LABELS, typeKey)) {
         return uniqueLines(PERSON_LABELS[typeKey], personLines(owners));
     }

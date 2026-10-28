@@ -65,19 +65,138 @@ function collectHistorical(profile) {
         deductionDates.push(...dates);
         if (isAnnualRow(row)) {
             const storedDays = Math.max(0, Number(row?.eligibleWorkingDays ?? row?.actualDays ?? row?.deductionDays) || 0);
+            const source = String(row?.source || 'manual').trim().toLowerCase();
             annual.push({
+                id: String(row?._id || row?.id || ''),
                 dates,
                 days: storedDays || dates.length,
                 startDate: range.from,
+                endDate: range.to,
                 status: status === 'pending' ? 'pending' : 'approved',
+                source: source === 'system' || source === 'erp' ? 'system' : 'manual',
+                multiplier: Math.max(0, Number(row?.multiplier ?? row?.rule) || 1) || 1,
+                remarks: String(row?.remarks || ''),
             });
         }
     }
     return { deductionDates, annual, undatedDeduction };
 }
 
-function datesInWindow(dates, start, end) {
-    return (dates || []).filter((date) => isDateKey(date) && date >= start && date <= end);
+function spreadAcrossDates(dates, dayCount) {
+    const list = (dates || []).filter((date) => isDateKey(date));
+    const total = Math.max(0, Number(dayCount) || 0);
+    if (!total || !list.length) return [];
+    const base = Math.floor(total / list.length);
+    let extra = total - base * list.length;
+    const out = [];
+    for (const date of list) {
+        const days = base + (extra > 0 ? 1 : 0);
+        if (extra > 0) extra -= 1;
+        if (days > 0) out.push({ date, days });
+    }
+    return out;
+}
+
+/**
+ * Fill the earliest row whose window contains the date, up to `allowed`.
+ * A later row receives the rest only when that same date is inside its window
+ * (row start through the following leave eligible date). Days that no later
+ * row can take stay on the earliest row, even past `allowed`.
+ */
+function allocateAnnualLeave(periods, leaves, allowed) {
+    const usedDaysByRow = periods.map(() => 0);
+    const pendingDaysByRow = periods.map(() => 0);
+    const leaveDatesByRow = periods.map(() => []);
+    const entriesByRow = periods.map(() => []);
+    const rowIndexForDate = (date) => {
+        const inside = periods.findIndex((period) => date >= period.startDate && date <= period.takeUntil);
+        if (inside >= 0) return inside;
+        const later = periods.findIndex((period) => date <= period.takeUntil);
+        return later >= 0 ? later : 0;
+    };
+    const ordered = [...(leaves || [])].sort((a, b) => {
+        const left = String(a?.startDate || a?.dates?.[0] || '');
+        const right = String(b?.startDate || b?.dates?.[0] || '');
+        if (left === right) return 0;
+        return left < right ? -1 : 1;
+    });
+
+    for (const leave of ordered) {
+        const dates = [...new Set((leave?.dates || []).filter((date) => isDateKey(date)))].sort();
+        const storedDays = Math.max(0, Number(leave?.days) || 0);
+        const dayCount = storedDays || dates.length;
+        if (!dayCount || !periods.length) continue;
+        const anchor = isDateKey(leave?.startDate) ? leave.startDate : dates[0] || '';
+        const endAnchor = isDateKey(leave?.endDate) ? leave.endDate : dates[dates.length - 1] || anchor;
+        const units = spreadAcrossDates(dates.length ? dates : anchor ? [anchor] : [], dayCount);
+        if (!units.length) continue;
+        const pending = leave?.status === 'pending';
+        const placed = periods.map(() => ({ days: 0, dates: [] }));
+
+        for (const unit of units) {
+            const covering = [];
+            periods.forEach((period, index) => {
+                if (unit.date >= period.startDate && unit.date <= period.takeUntil) covering.push(index);
+            });
+            const targets = covering.length ? covering : [rowIndexForDate(unit.date)];
+            let left = unit.days;
+            for (const index of targets) {
+                if (left <= 0) break;
+                const room = allowed - usedDaysByRow[index];
+                if (room <= 0) continue;
+                const take = Math.min(room, left);
+                usedDaysByRow[index] += take;
+                if (pending) pendingDaysByRow[index] += take;
+                placed[index].days += take;
+                placed[index].dates.push(unit.date);
+                left -= take;
+            }
+            if (left > 0) {
+                const index = targets[0];
+                usedDaysByRow[index] += left;
+                if (pending) pendingDaysByRow[index] += left;
+                placed[index].days += left;
+                placed[index].dates.push(unit.date);
+            }
+        }
+
+        const touched = placed
+            .map((bucket, index) => ({ bucket, index }))
+            .filter((item) => item.bucket.days > 0);
+        touched.forEach((item, position) => {
+            const earlier = new Set();
+            for (let prev = 0; prev < position; prev += 1) {
+                touched[prev].bucket.dates.forEach((date) => earlier.add(date));
+            }
+            const sorted = [...new Set(item.bucket.dates)].sort();
+            let from = sorted[0] || anchor;
+            let to = sorted[sorted.length - 1] || endAnchor || from;
+            if (from && earlier.has(from)) {
+                const next = addDays(from, 1);
+                if (next && next <= to) from = next;
+            }
+            leaveDatesByRow[item.index].push(...sorted);
+            const multiplier = Math.max(0, Number(leave?.multiplier) || 1) || 1;
+            const days = item.bucket.days;
+            entriesByRow[item.index].push({
+                id: String(leave?.id || ''),
+                fromDate: from,
+                toDate: to,
+                recordFrom: anchor,
+                recordTo: endAnchor,
+                actualDays: days,
+                multiplier,
+                source: leave?.source === 'system' ? 'system' : 'manual',
+                status: pending ? 'pending' : 'approved',
+                remarks: String(leave?.remarks || ''),
+            });
+        });
+    }
+
+    entriesByRow.forEach((entries) => {
+        entries.sort((a, b) => String(a.fromDate || '').localeCompare(String(b.fromDate || '')));
+    });
+    return { usedDaysByRow, pendingDaysByRow, leaveDatesByRow, entriesByRow };
 }
 
 function periodByIndex(joiningDate, index) {
@@ -95,9 +214,12 @@ function periodByIndex(joiningDate, index) {
 /**
  * Row 1 starts on the contract joining date. Each later row starts the day
  * after the previous leave eligible date. A row counts annual leave from its
- * joining date through the next row's leave eligible date. Used is every day
- * taken in that range, including days past 30. Balance stays 0 once used
- * passes 30. The row stays Inactive until that
+ * joining date through the next row's leave eligible date. Each row holds
+ * 30 days. Once that is full, later days count on the next row only when
+ * the leave date is inside that next row (its joining date through the
+ * following leave eligible date). Days the next row cannot take stay on
+ * the earlier row, and balance stays 0 once used passes 30. The row stays
+ * Inactive until that
  * 300-day cycle is complete, then Active. It becomes Lapsed once the next
  * row's leave eligible date is today or earlier.
  */
@@ -138,27 +260,11 @@ export function buildAnnualLeaveWindows({
         }
     }
 
-    const usedDaysByRow = periods.map(() => 0);
-    const pendingDaysByRow = periods.map(() => 0);
-    const leaveDatesByRow = periods.map(() => []);
-    const rowIndexForDate = (date) => {
-        const inside = periods.findIndex((period) => date >= period.startDate && date <= period.takeUntil);
-        if (inside >= 0) return inside;
-        const later = periods.findIndex((period) => date <= period.takeUntil);
-        return later >= 0 ? later : 0;
-    };
-
-    for (const leave of annualLeaves || []) {
-        const dates = [...new Set((leave?.dates || []).filter((date) => isDateKey(date)))].sort();
-        const storedDays = Math.max(0, Number(leave?.days) || 0);
-        const dayCount = storedDays || dates.length;
-        if (!dayCount || !periods.length) continue;
-        const anchor = isDateKey(leave?.startDate) ? leave.startDate : dates[0] || '';
-        const index = anchor ? rowIndexForDate(anchor) : 0;
-        usedDaysByRow[index] += dayCount;
-        if (leave?.status === 'pending') pendingDaysByRow[index] += dayCount;
-        leaveDatesByRow[index].push(...dates);
-    }
+    const { usedDaysByRow, pendingDaysByRow, leaveDatesByRow, entriesByRow } = allocateAnnualLeave(
+        periods,
+        annualLeaves,
+        allowed,
+    );
 
     const windows = periods.map((period, index) => {
         const pendingDays = pendingDaysByRow[index];
@@ -182,6 +288,7 @@ export function buildAnnualLeaveWindows({
             balance,
             remainingDays: status === 'Active' ? balance : 0,
             leaveDates: dates,
+            entries: entriesByRow[index] || [],
             status,
             canTake: status === 'Active' && balance > 0,
         };
@@ -293,8 +400,25 @@ export async function loadAnnualLeaveAllowance({ employee, profile, policy } = {
         const annualTaken = statusKey === 'on_leave';
         const annualPending = requested === 'on_leave' && requestStatus === 'pending';
         const annualApproved = requested === 'on_leave' && requestStatus === 'approved' && !annualTaken;
-        if (annualTaken || annualApproved) annualLeaves.push({ dates: [date], status: 'approved' });
-        else if (annualPending) annualLeaves.push({ dates: [date], status: 'pending' });
+        if (annualTaken || annualApproved) {
+            annualLeaves.push({
+                dates: [date],
+                days: 1,
+                startDate: date,
+                endDate: date,
+                status: 'approved',
+                source: 'system',
+            });
+        } else if (annualPending) {
+            annualLeaves.push({
+                dates: [date],
+                days: 1,
+                startDate: date,
+                endDate: date,
+                status: 'pending',
+                source: 'system',
+            });
+        }
     }
 
     return buildAnnualLeaveWindows({

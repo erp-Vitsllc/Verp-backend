@@ -19,6 +19,8 @@ import EmployeeLabourCard from "../models/EmployeeLabourCard.js";
 import EmployeeMedicalInsurance from "../models/EmployeeMedicalInsurance.js";
 import EmployeeDrivingLicense from "../models/EmployeeDrivingLicense.js";
 import DashboardAction from "../models/DashboardAction.js";
+import { documentTaskLabel } from "./taskDuplicateKey.js";
+import { finishTasksForRemovedExpiryActions } from "./finishVehicleExpiryTasks.js";
 import TaskManagerTask from "../models/TaskManagerTask.js";
 import ExpiryReminderLog from "../models/ExpiryReminderLog.js";
 import User from "../models/User.js";
@@ -180,21 +182,24 @@ const ensureDashboardAction = async ({
     if (!assignedTo || !requestId) return;
     const notifyOk = await isNotificationEnabledForType(requestType);
     if (!notifyOk) return;
-    const reassigned = await protectedExpiryActionIds(requestId, requestType, extra1);
-    if (reassigned.size) return;
-    const exists = await DashboardAction.findOne({
-        assignedTo,
+    const label = documentTaskLabel(extra1);
+    const pending = await DashboardAction.find({
         requestId,
         requestType,
         status: "Pending",
-        extra1,
+        extra1: { $regex: /^Expiry follow-up required:/i },
     })
-        .select("_id extra3")
+        .select("_id extra1 extra3")
         .lean();
-    if (exists) {
-        if (extra3 && (!exists.extra3 || String(exists.extra3) !== String(extra3))) {
-            await DashboardAction.updateOne({ _id: exists._id }, { $set: { extra3 } });
-        }
+    const existing = pending.find((row) => documentTaskLabel(row.extra1) === label);
+    if (existing) {
+        const patch = {};
+        if (extra1 && existing.extra1 !== extra1) patch.extra1 = extra1;
+        if (extra2) patch.extra2 = extra2;
+        if (subjectName) patch.subjectName = subjectName;
+        if (subjectEmployeeId) patch.subjectEmployeeId = subjectEmployeeId;
+        if (extra3 && String(existing.extra3 || "") !== String(extra3)) patch.extra3 = extra3;
+        if (Object.keys(patch).length) await DashboardAction.updateOne({ _id: existing._id }, { $set: patch });
         return;
     }
 
@@ -224,8 +229,14 @@ const removeVehicleExpiryActionsOutsideLiveSet = async ({ requestId, allowedExtr
         .select("_id extra1")
         .lean();
 
+    const allowedLabels = new Set([...allowedExtra1Set].map((value) => documentTaskLabel(value)).filter(Boolean));
     const actionIdsToDelete = pending
-        .filter((row) => !allowedExtra1Set.has(String(row?.extra1 || "").trim()))
+        .filter((row) => {
+            const extra1 = String(row?.extra1 || "").trim();
+            if (allowedExtra1Set.has(extra1)) return false;
+            const label = documentTaskLabel(extra1);
+            return !(label && allowedLabels.has(label));
+        })
         .map((row) => row._id);
 
     if (actionIdsToDelete.length > 0) {
@@ -249,16 +260,24 @@ const removeObsoleteExpiryActions = async ({ requestId, requestType, allowedExtr
         .select("_id extra1")
         .lean();
 
+    const allowedLabels = new Set([...allowedExtra1Set].map((value) => documentTaskLabel(value)).filter(Boolean));
     const actionIdsToDelete = pending
         .filter((row) => {
             const extra1 = (row?.extra1 || "").trim();
             if (!extra1.toLowerCase().startsWith("expiry follow-up required:")) return false;
-            return !allowedExtra1Set.has(extra1);
+            if (allowedExtra1Set.has(extra1)) return false;
+            const label = documentTaskLabel(extra1);
+            return !(label && allowedLabels.has(label));
         })
         .map((row) => row._id);
 
     if (actionIdsToDelete.length > 0) {
         await DashboardAction.deleteMany({ _id: { $in: actionIdsToDelete } });
+        try {
+            await finishTasksForRemovedExpiryActions(actionIdsToDelete);
+        } catch (err) {
+            console.warn("[expiry] finish linked tasks:", err?.message || err);
+        }
     }
 };
 

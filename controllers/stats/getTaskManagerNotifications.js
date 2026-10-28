@@ -18,14 +18,17 @@ import {
     moduleForRequestType,
     moduleForText,
     promoteDueTaskCompletions,
-    reassignedRequesterLabel,
+    reassignmentAssignees,
+    latestReassignedAt,
     resolveTaskViewer,
     viewerCanReassign,
 } from "../../utils/taskManagerModule.js";
 import { assignTaskNumbers } from "../../utils/taskNumber.js";
+import { chooseKeptDuplicate, documentTaskLabel, duplicateOverlayShouldClose, taskMatchHints } from "../../utils/taskDuplicateKey.js";
 import { formatTaskDisplayParts, vehicleRecordId } from "../../utils/taskDisplayName.js";
 import { composeTaskDescription } from "../../utils/taskDetailDescription.js";
 import { attendanceFactsByActionId } from "../../utils/loadAttendanceTaskFacts.js";
+import { syncPendingSalaryEnrollmentTasks } from "../../utils/syncPendingSalaryEnrollmentTasks.js";
 import { getDepartmentHOD } from "../../utils/getDepartmentHOD.js";
 import { getManagementHOD } from "../../utils/getManagementHOD.js";
 import {
@@ -802,6 +805,12 @@ function isSingleStepSystemTask(requestType) {
  */
 export function taskCategory(requestType, extra = "") {
     if (isGeneralHubRequest(requestType, extra)) return "General Task";
+    if (
+        String(requestType || "").trim() === "Salary Enrollment"
+        && String(extra || "").trim().toLowerCase() === "pending for enrollment"
+    ) {
+        return "System Task";
+    }
     if (isSingleStepSystemTask(requestType)) return "System Task";
     return "Workflow Task";
 }
@@ -853,11 +862,36 @@ function viewerOwnsOriginal(viewer, row) {
     return Boolean(originalName && viewerName && originalName === viewerName);
 }
 
+function assigneeColumns({ assigneeName, assigneeId, assigneePhoto, originalAssigneeName, originalAssigneeId, byId, photoForName }) {
+    const pair = reassignmentAssignees({ assigneeName, originalAssigneeName });
+    const originalRecord = byId.get(String(originalAssigneeId || ""));
+    const currentPhoto = assigneePhoto || "";
+    const originalPhoto = originalRecord?.profilePicture || photoForName(pair.mainAssigneeName) || "";
+    const reassigned = Boolean(pair.reassignedAssigneeName);
+    return {
+        mainAssigneeName: pair.mainAssigneeName,
+        reassignedAssigneeName: pair.reassignedAssigneeName,
+        mainAssigneePhoto: reassigned ? originalPhoto : currentPhoto,
+        reassignedAssigneePhoto: reassigned ? currentPhoto : "",
+        reassignedAssigneeId: reassigned ? String(assigneeId || "") : "",
+        originalAssigneeEmpId: String(originalRecord?.employeeId || "").trim(),
+    };
+}
+
 function taskMine(viewer, { assigneeId, assigneeEmpId, assigneeName, row, requesterName, requestedByUserId }) {
     const shown = String(assigneeName || "").trim();
+    const pair = reassignmentAssignees({
+        assigneeName: shown,
+        originalAssigneeName: row?.closeRequest?.originalAssigneeName,
+    });
+    if (pair.reassignedAssigneeName) {
+        if (assigneeIsViewer(viewer, assigneeId, assigneeEmpId, pair.reassignedAssigneeName)) return true;
+        return viewerOwnsOriginal(viewer, row);
+    }
     const paren = shown.match(/\(([^)]+)\)\s*$/);
     const leadName = paren ? shown.slice(0, shown.lastIndexOf("(")).trim() : shown;
     if (assigneeIsViewer(viewer, assigneeId, assigneeEmpId, leadName)) return true;
+    if (viewerOwnsOriginal(viewer, row)) return true;
     if (!paren) return false;
     if (requestedByUserId && viewer?.userId && String(requestedByUserId) === String(viewer.userId)) return true;
     const viewerName = personKey(viewer?.name);
@@ -884,10 +918,12 @@ function assigneeIsViewer(viewer, assigneeId, assigneeEmpId, assigneeName = "") 
     return Boolean(name && assignee && name === assignee);
 }
 
+const DUPLICATE_TASK_COMMENT = "Closed: duplicate task";
+
 function actionDuplicateKey(action) {
     const type = String(action.requestType || "");
     const requestId = String(action.requestId || "").trim();
-    const extra = String(action.extra1 || "").trim().toLowerCase().replace(/\s+/g, " ");
+    const extra = documentTaskLabel(action.extra1);
     const subject = String(action.subjectName || action.requestedByName || "").trim().toLowerCase();
     const assignee = String(action.assignedTo || action.assignedToEmpId || "");
     if (taskCategory(type) === "System Task") {
@@ -928,6 +964,155 @@ function dedupeOpenActions(actions) {
     }
     uniqueActions.push(...seenRequest.values());
     return uniqueActions;
+}
+
+function overlayWasCopied(overlay) {
+    return Boolean(
+        String(overlay?.closeRequest?.originalAssigneeId || "").trim()
+        || String(overlay?.closeRequest?.originalAssigneeName || "").trim(),
+    );
+}
+
+/**
+ * One open task per request. Extra copies are closed, and a reassigned copy is the one kept.
+ * An overlay that belonged to a closed copy moves onto the kept task when that task has none.
+ */
+export async function collapseDuplicateDashboardTasks(actions = [], overlays = null, { preferId = "" } = {}) {
+    const pending = (actions || []).filter((action) => (
+        action
+        && action.requestType !== "Task Manager"
+        && ["Pending", "On Hold"].includes(String(action.status || ""))
+        && String(action.comment || "") !== DUPLICATE_TASK_COMMENT
+    ));
+    let overlayRows = Array.isArray(overlays) ? overlays : null;
+    if (!overlayRows) {
+        const ids = pending.map((action) => action._id).filter(Boolean);
+        overlayRows = ids.length
+            ? await TaskManagerTask.find({
+                sourceDashboardActionId: { $in: ids },
+                status: { $nin: ["Completed", "Cancelled", "Rejected"] },
+            })
+                .select("sourceDashboardActionId status closeRequest createdAt updatedAt")
+                .lean()
+            : [];
+    }
+
+    const openOverlays = overlayRows.filter((row) => (
+        row?.sourceDashboardActionId
+        && !["Completed", "Cancelled", "Rejected"].includes(String(row.status || ""))
+    ));
+    const bySource = new Map();
+    for (const row of openOverlays) {
+        const sourceId = String(row.sourceDashboardActionId);
+        const list = bySource.get(sourceId) || [];
+        list.push(row);
+        bySource.set(sourceId, list);
+    }
+
+    const overlayByAction = new Map();
+    const reassignedActionIds = new Set();
+    const hiddenOverlayIds = new Set();
+    for (const [sourceId, list] of bySource) {
+        const ranked = [...list].sort((left, right) => {
+            const leftRank = overlayWasCopied(left) ? 1 : 0;
+            const rightRank = overlayWasCopied(right) ? 1 : 0;
+            if (leftRank !== rightRank) return rightRank - leftRank;
+            return new Date(right.updatedAt || right.createdAt || 0) - new Date(left.updatedAt || left.createdAt || 0);
+        });
+        overlayByAction.set(sourceId, ranked[0]);
+        if (overlayWasCopied(ranked[0])) reassignedActionIds.add(sourceId);
+        for (const extra of ranked.slice(1)) hiddenOverlayIds.add(String(extra._id));
+    }
+
+    const drop = new Set();
+    const groups = new Map();
+    for (const action of pending) {
+        const key = actionDuplicateKey(action);
+        if (!key) continue;
+        const list = groups.get(key) || [];
+        list.push(action);
+        groups.set(key, list);
+    }
+    const moves = [];
+    for (const list of groups.values()) {
+        if (list.length < 2) continue;
+        const kept = chooseKeptDuplicate(list, { reassignedIds: reassignedActionIds, preferId });
+        const keptId = String(kept?._id || "");
+        if (!keptId) continue;
+        for (const action of list) {
+            const id = String(action._id);
+            if (id === keptId) continue;
+            drop.add(id);
+            const loserOverlay = overlayByAction.get(id);
+            if (!loserOverlay) continue;
+            if (!overlayByAction.has(keptId)) {
+                moves.push({ overlayId: loserOverlay._id, winnerId: kept._id });
+                overlayByAction.set(keptId, loserOverlay);
+                if (overlayWasCopied(loserOverlay)) reassignedActionIds.add(keptId);
+            } else {
+                hiddenOverlayIds.add(String(loserOverlay._id));
+            }
+            overlayByAction.delete(id);
+        }
+    }
+
+    const now = new Date();
+    const writes = [];
+    if (drop.size) {
+        writes.push(DashboardAction.updateMany(
+            { _id: { $in: [...drop] }, status: { $in: ["Pending", "On Hold"] } },
+            { $set: { status: "Dismissed", actionedDate: now, comment: DUPLICATE_TASK_COMMENT } },
+        ));
+    }
+    const cancelIds = [...hiddenOverlayIds];
+    if (cancelIds.length) {
+        writes.push(TaskManagerTask.updateMany(
+            { _id: { $in: cancelIds }, status: { $nin: ["Completed", "Cancelled"] } },
+            { $set: { status: "Cancelled" } },
+        ));
+    }
+    for (const move of moves) {
+        writes.push(TaskManagerTask.updateOne(
+            { _id: move.overlayId },
+            { $set: { sourceDashboardActionId: move.winnerId } },
+        ));
+        hiddenOverlayIds.add(String(move.overlayId));
+    }
+    if (writes.length) await Promise.all(writes);
+    if (cancelIds.length) {
+        const needles = cancelIds.map((id) => String(id).replace(/[.*+?^${}()|[\]\\]/g, "\\$&"));
+        await DashboardAction.updateMany(
+            {
+                requestType: "Task Manager",
+                status: "Pending",
+                $or: needles.map((id) => ({ extra3: new RegExp(id) })),
+            },
+            { $set: { status: "Dismissed", actionedDate: now } },
+        );
+    }
+
+    return {
+        rows: (actions || []).filter((action) => (
+            !drop.has(String(action?._id || ""))
+            && String(action?.comment || "") !== DUPLICATE_TASK_COMMENT
+        )),
+        overlayByAction,
+        hiddenOverlayIds,
+    };
+}
+
+/** Close other open copies of this task after it is assigned or reassigned. */
+export async function collapseOpenDuplicatesOf(action) {
+    if (!action?._id || !action.requestId || !action.requestType) return;
+    const siblings = await DashboardAction.find({
+        requestId: action.requestId,
+        requestType: action.requestType,
+        status: { $in: ["Pending", "On Hold"] },
+    })
+        .select("requestId requestType status subjectName requestedByName assignedTo assignedToEmpId extra1 extra2 requestedDate createdAt comment")
+        .lean();
+    if (siblings.length < 2) return;
+    await collapseDuplicateDashboardTasks(siblings, null, { preferId: String(action._id) });
 }
 
 export function displayStatus(rawStatus, requestType, requestedKey, todayKey) {
@@ -1001,6 +1186,7 @@ export const getTaskManagerNotifications = async (req, res) => {
             });
         }
         const viewer = await resolveTaskViewer(req);
+        await syncPendingSalaryEnrollmentTasks();
         const promotion = promoteDueTaskCompletions().catch((error) => {
             console.error("Promote due tasks failed:", error);
         });
@@ -1077,16 +1263,14 @@ export const getTaskManagerNotifications = async (req, res) => {
 
         const manualRows = await TaskManagerTask.find({})
             .select(
-                "taskType priority taskName description assignee assigneeEmpId assigneeName completionDate requestedByName requestedByUserId status createdAt updatedAt sourceDashboardActionId closeRequest",
+                "taskType priority taskName description assignee assigneeEmpId assigneeName completionDate requestedByName requestedByUserId status createdAt updatedAt sourceDashboardActionId closeRequest history",
             )
             .lean()
             .maxTimeMS(10000);
         await promotion;
-        const overlayByAction = new Map();
         const createdRows = [];
         for (const row of manualRows) {
-            if (row.sourceDashboardActionId) overlayByAction.set(String(row.sourceDashboardActionId), row);
-            else createdRows.push(row);
+            if (!row.sourceDashboardActionId) createdRows.push(row);
         }
 
         const monthCounts = {
@@ -1102,8 +1286,17 @@ export const getTaskManagerNotifications = async (req, res) => {
 
         const summary = { total: 0, pending: 0, pendingDue: 0, completed: 0 };
         const preparedFines = await collapsePendingFineDashboardRows(actions);
-        await alignOpenFineDashboardRows(preparedFines.rows, overlayByAction);
-        const uniqueActions = dedupeOpenActions(preparedFines.rows).filter((action) => {
+        const fineOverlays = new Map();
+        for (const row of manualRows) {
+            if (row.sourceDashboardActionId) fineOverlays.set(String(row.sourceDashboardActionId), row);
+        }
+        await alignOpenFineDashboardRows(preparedFines.rows, fineOverlays);
+        const collapsedTasks = await collapseDuplicateDashboardTasks(preparedFines.rows, manualRows);
+        const overlayByAction = collapsedTasks.overlayByAction;
+        const hiddenOverlayIds = collapsedTasks.hiddenOverlayIds;
+        const actionById = new Map((actions || []).map((action) => [String(action._id), action]));
+        const listedTaskKeys = new Set();
+        const uniqueActions = dedupeOpenActions(collapsedTasks.rows).filter((action) => {
             const overlay = overlayByAction.get(String(action._id));
             if (taskInvolvesLeftUser(overlay?.assignee || action.assignedTo, overlay?.assigneeEmpId || action.assignedToEmpId)) {
                 return false;
@@ -1118,7 +1311,56 @@ export const getTaskManagerNotifications = async (req, res) => {
             vehicleDisplayById(uniqueActions),
             attendanceFactsByActionId(uniqueActions),
         ]);
+        const pendingLive = uniqueActions
+            .filter((action) => ["Pending", "On Hold"].includes(String(action.status || "")))
+            .map((action) => {
+                const vehicle = vehicles.get(vehicleRecordId(action)) || null;
+                return {
+                    ...action,
+                    day: dubaiDateKey(action.requestedDate || action.createdAt),
+                    hints: taskMatchHints(vehicle?.vehicleNo, vehicle?.assetName, vehicle?.assetNo, vehicle?.assetLabel),
+                };
+            });
+        const liveIds = new Set(uniqueActions.map((action) => String(action._id)));
+        const liveKeys = new Set(pendingLive.map((action) => actionDuplicateKey(action)).filter(Boolean));
+        const keptOverlayIds = new Set(
+            [...overlayByAction.values()].map((row) => String(row?._id || "")).filter(Boolean),
+        );
+        const duplicateOverlayIds = [];
+        for (const row of manualRows) {
+            if (keptOverlayIds.has(String(row._id))) continue;
+            const sourceId = String(row.sourceDashboardActionId || "");
+            const source = sourceId ? actionById.get(sourceId) : null;
+            if (!duplicateOverlayShouldClose({
+                overlay: { ...row, day: dubaiDateKey(row.createdAt) },
+                source,
+                liveActions: pendingLive,
+                sourceIsLive: Boolean(sourceId && liveIds.has(sourceId)),
+                sourceKey: source ? actionDuplicateKey(source) : "",
+                liveKeys,
+            })) continue;
+            duplicateOverlayIds.push(row._id);
+            hiddenOverlayIds.add(String(row._id));
+        }
+        if (duplicateOverlayIds.length) {
+            const now = new Date();
+            await TaskManagerTask.updateMany(
+                { _id: { $in: duplicateOverlayIds }, status: { $nin: ["Completed", "Cancelled"] } },
+                { $set: { status: "Cancelled" } },
+            );
+            const needles = duplicateOverlayIds.map((id) => String(id).replace(/[.*+?^${}()|[\]\\]/g, "\\$&"));
+            await DashboardAction.updateMany(
+                {
+                    requestType: "Task Manager",
+                    status: "Pending",
+                    $or: needles.map((id) => ({ extra3: new RegExp(id) })),
+                },
+                { $set: { status: "Dismissed", actionedDate: now } },
+            );
+        }
         const tasks = collapseUtilityBillReminderActions(uniqueActions).map((action) => {
+            const duplicateKey = actionDuplicateKey(action);
+            if (duplicateKey) listedTaskKeys.add(duplicateKey);
             const requestedAt = action.requestedDate || action.createdAt || null;
             const requestedKey = dubaiDateKey(requestedAt);
             let status = displayStatus(action.status, action.requestType, requestedKey, todayKey);
@@ -1137,7 +1379,17 @@ export const getTaskManagerNotifications = async (req, res) => {
                 sourceRequesters,
             );
             const originalAssigneeName = String(overlay?.closeRequest?.originalAssigneeName || "").trim();
-            const requesterName = reassignedRequesterLabel(requesterBase, originalAssigneeName);
+            const originalAssigneeId = String(overlay?.closeRequest?.originalAssigneeId || "");
+            const requesterName = requesterBase;
+            const assigneeDisplay = assigneeColumns({
+                assigneeName,
+                assigneeId,
+                assigneePhoto: assigneeRecord?.profilePicture || "",
+                originalAssigneeName,
+                originalAssigneeId,
+                byId,
+                photoForName,
+            });
             const destination = moduleForRequestType(action.requestType, `${action.extra1 || ""} ${action.extra2 || ""}`);
             const category = taskCategory(action.requestType, action.extra2 || "");
             const priority = category === "System Task" ? "High" : (overlay?.priority || priorityFor(status, action.requestType));
@@ -1200,6 +1452,7 @@ export const getTaskManagerNotifications = async (req, res) => {
                 canDelete: !actionsLocked && canDeleteTask(viewer, { manual: false, requestedByName: requesterBase }),
                 taskNumber: "",
                 requestDate: requestedAt,
+                reassignedAt: latestReassignedAt(overlay),
                 completionDate: overlay?.completionDate || action.actionedDate || null,
                 taskCategory: category,
                 accessPath: accessPathFor(destination, action.requestId, action.subjectEmployeeId, {
@@ -1214,11 +1467,11 @@ export const getTaskManagerNotifications = async (req, res) => {
                 description: copy.description,
                 requesterName,
                 requesterBaseName: cleanRequester(requesterBase),
-                requesterPhoto: originalAssigneeName
-                    ? (byId.get(String(overlay?.closeRequest?.originalAssigneeId || ""))?.profilePicture || photoForName(originalAssigneeName) || photoForName(requesterBase))
-                    : photoForName(requesterBase),
+                requesterPhoto: photoForName(requesterBase),
                 originalAssigneeName,
-                originalAssigneeId: String(overlay?.closeRequest?.originalAssigneeId || ""),
+                originalAssigneeId,
+                originalAssigneeEmpId: assigneeDisplay.originalAssigneeEmpId || String(overlay?.closeRequest?.originalAssigneeEmpId || "").trim(),
+                ...assigneeDisplay,
                 assigneeId,
                 assigneeName,
                 assigneePhoto: assigneeRecord?.profilePicture || "",
@@ -1254,8 +1507,13 @@ export const getTaskManagerNotifications = async (req, res) => {
         const visibleTaskRows = [
             ...createdRows,
             ...manualRows.filter((row) => {
+                if (hiddenOverlayIds.has(String(row._id))) return false;
                 const sourceId = String(row.sourceDashboardActionId || "");
-                return Boolean(sourceId) && !listedActionIds.has(sourceId);
+                if (!sourceId || listedActionIds.has(sourceId)) return false;
+                const source = actionById.get(sourceId);
+                const sourceKey = source ? actionDuplicateKey(source) : "";
+                if (sourceKey && listedTaskKeys.has(sourceKey)) return false;
+                return true;
             }),
         ];
 
@@ -1293,7 +1551,18 @@ export const getTaskManagerNotifications = async (req, res) => {
                 : rawAssigneeName;
             const requesterBase = String(row.requestedByName || "").trim() || "System";
             const originalAssigneeName = String(row.closeRequest?.originalAssigneeName || "").trim();
-            const requesterName = reassignedRequesterLabel(requesterBase, originalAssigneeName);
+            const originalAssigneeId = String(row.closeRequest?.originalAssigneeId || "");
+            const requesterName = requesterBase;
+            const assigneeId = String(row.assignee || "");
+            const assigneeDisplay = assigneeColumns({
+                assigneeName,
+                assigneeId,
+                assigneePhoto: assignee?.profilePicture || "",
+                originalAssigneeName,
+                originalAssigneeId,
+                byId,
+                photoForName,
+            });
             const requestMonth = monthKeyFromDateKey(requestedKey);
             const completedMonth = monthKeyFromDateKey(dueKey);
 
@@ -1312,7 +1581,6 @@ export const getTaskManagerNotifications = async (req, res) => {
             }
 
             const destination = moduleForText(row.taskName, row.description, row.taskType);
-            const assigneeId = String(row.assignee || "");
             const category = displayTaskType(row.taskType);
             tasks.push({
                 actionId: row.sourceDashboardActionId ? String(row.sourceDashboardActionId) : `manual-${row._id}`,
@@ -1327,6 +1595,7 @@ export const getTaskManagerNotifications = async (req, res) => {
                 }),
                 taskNumber: "",
                 requestDate: requestedAt,
+                reassignedAt: latestReassignedAt(row),
                 completionDate: row.completionDate || null,
                 taskCategory: category,
                 accessPath: accessPathFor(destination, "", ""),
@@ -1336,11 +1605,11 @@ export const getTaskManagerNotifications = async (req, res) => {
                 description: row.description || "",
                 requesterName,
                 requesterBaseName: cleanRequester(requesterBase),
-                requesterPhoto: originalAssigneeName
-                    ? (byId.get(String(row.closeRequest?.originalAssigneeId || ""))?.profilePicture || photoForName(originalAssigneeName) || photoForName(requesterBase))
-                    : photoForName(requesterBase),
+                requesterPhoto: photoForName(requesterBase),
                 originalAssigneeName,
-                originalAssigneeId: String(row.closeRequest?.originalAssigneeId || ""),
+                originalAssigneeId,
+                originalAssigneeEmpId: assigneeDisplay.originalAssigneeEmpId || String(row.closeRequest?.originalAssigneeEmpId || "").trim(),
+                ...assigneeDisplay,
                 assigneeId,
                 assigneeName,
                 assigneePhoto: assignee?.profilePicture || "",
@@ -1407,6 +1676,8 @@ export const getTaskManagerNotifications = async (req, res) => {
         await Promise.all(tasks.map(async (task) => {
             task.requesterPhoto = await signPhoto(task.requesterPhoto);
             task.assigneePhoto = await signPhoto(task.assigneePhoto);
+            task.mainAssigneePhoto = await signPhoto(task.mainAssigneePhoto);
+            task.reassignedAssigneePhoto = await signPhoto(task.reassignedAssigneePhoto);
         }));
 
         tasks.sort((a, b) => {
@@ -1729,10 +2000,12 @@ export async function listProfileEmployeeTasks({ employeeId, employeeCode, emplo
 
         const preparedProfile = await collapsePendingFineDashboardRows([...actionById.values()]);
         await alignOpenFineDashboardRows(preparedProfile.rows, overlayByAction);
-        const sourceRequesters = await sourceRequesterNameMap(preparedProfile.rows);
+        const collapsedProfile = await collapseDuplicateDashboardTasks(preparedProfile.rows);
+        const profileOverlays = collapsedProfile.overlayByAction;
+        const sourceRequesters = await sourceRequesterNameMap(collapsedProfile.rows);
         const rows = [];
-        for (const action of dedupeOpenActions(preparedProfile.rows)) {
-            const overlay = overlayByAction.get(String(action._id));
+        for (const action of dedupeOpenActions(collapsedProfile.rows)) {
+            const overlay = profileOverlays.get(String(action._id));
             const requestedAt = action.requestedDate || action.createdAt || null;
             const requestedKey = dubaiDateKey(requestedAt);
             let status = displayStatus(action.status, action.requestType, requestedKey, todayKey);
@@ -1758,7 +2031,7 @@ export async function listProfileEmployeeTasks({ employeeId, employeeCode, emplo
                 sourceRequesters,
             );
             const originalAssigneeName = String(overlay?.closeRequest?.originalAssigneeName || "").trim();
-            const requesterName = reassignedRequesterLabel(requesterBase, originalAssigneeName);
+            const requesterName = requesterBase;
             const rawAssignee = action.assignedTo;
             const assigneeId = String(overlay?.assignee || assigneeIdOf(rawAssignee) || "");
             const assigneeEmpId = String(overlay?.assigneeEmpId || action.assignedToEmpId || rawAssignee?.employeeId || "").trim();
@@ -1807,7 +2080,7 @@ export async function listProfileEmployeeTasks({ employeeId, employeeCode, emplo
                         : "Pending";
             const requesterBase = String(row.requestedByName || "").trim() || "System";
             const originalAssigneeName = String(row.closeRequest?.originalAssigneeName || "").trim();
-            const requesterName = reassignedRequesterLabel(requesterBase, originalAssigneeName);
+            const requesterName = requesterBase;
             const assigneeId = String(row.assignee || "");
             const assigneeEmpId = String(row.assigneeEmpId || "").trim();
             const assigneeName = String(row.assigneeName || "").trim();
@@ -1906,7 +2179,9 @@ export async function taskNumbersByRecordId(recordIds) {
             .maxTimeMS(8000),
     ]);
 
-    const unique = dedupeOpenActions((await collapsePendingFineDashboardRows(actions || [])).rows);
+    const preparedNumbers = await collapsePendingFineDashboardRows(actions || []);
+    const collapsedNumbers = await collapseDuplicateDashboardTasks(preparedNumbers.rows);
+    const unique = dedupeOpenActions(collapsedNumbers.rows);
     const stubs = unique.map((action) => ({
         actionId: String(action._id),
         requestDate: action.requestedDate || action.createdAt || null,
@@ -1973,7 +2248,18 @@ export async function countOpenTasksForAssignee(viewer) {
 
     const collapsedFines = await collapsePendingFineDashboardRows(actions);
     await alignOpenFineDashboardRows(collapsedFines.rows);
-    const unique = dedupeOpenActions(collapsedFines.rows);
+    const requestIds = [...new Set(collapsedFines.rows.map((action) => action.requestId).filter(Boolean))];
+    const siblings = requestIds.length
+        ? await DashboardAction.find({
+            requestId: { $in: requestIds },
+            status: { $in: ["Pending", "On Hold"] },
+            requestType: { $ne: "Task Manager" },
+        })
+            .select("requestId requestType status subjectName requestedByName assignedTo assignedToEmpId extra1 extra2 requestedDate createdAt comment")
+            .lean()
+        : [];
+    const collapsedOpen = await collapseDuplicateDashboardTasks(siblings.length ? siblings : collapsedFines.rows);
+    const unique = dedupeOpenActions(collapsedOpen.rows);
     const actionIds = unique.map((row) => row._id).filter(Boolean);
     const overlayOr = [];
     if (actionIds.length) overlayOr.push({ sourceDashboardActionId: { $in: actionIds } });
@@ -1982,15 +2268,47 @@ export async function countOpenTasksForAssignee(viewer) {
 
     const overlays = overlayOr.length
         ? await TaskManagerTask.find({ $or: overlayOr })
-            .select("assignee assigneeEmpId assigneeName sourceDashboardActionId status")
+            .select("assignee assigneeEmpId assigneeName sourceDashboardActionId status taskName description createdAt")
             .lean()
             .maxTimeMS(8000)
         : [];
+
+    const pendingLive = unique
+        .filter((action) => ["Pending", "On Hold"].includes(String(action.status || "")))
+        .map((action) => ({
+            ...action,
+            day: dubaiDateKey(action.requestedDate || action.createdAt),
+        }));
+    const liveIds = new Set(unique.map((action) => String(action._id)));
+    const liveKeys = new Set(pendingLive.map((action) => actionDuplicateKey(action)).filter(Boolean));
+    const sourceById = new Map((collapsedOpen.rows || []).map((action) => [String(action._id), action]));
+    const duplicateOverlayIds = [];
+    for (const row of overlays) {
+        const sourceId = String(row.sourceDashboardActionId || "");
+        const source = sourceById.get(sourceId) || null;
+        if (!duplicateOverlayShouldClose({
+            overlay: { ...row, day: dubaiDateKey(row.createdAt) },
+            source,
+            liveActions: pendingLive,
+            sourceIsLive: Boolean(sourceId && liveIds.has(sourceId)),
+            sourceKey: source ? actionDuplicateKey(source) : "",
+            liveKeys,
+        })) continue;
+        duplicateOverlayIds.push(row._id);
+    }
+    if (duplicateOverlayIds.length) {
+        await TaskManagerTask.updateMany(
+            { _id: { $in: duplicateOverlayIds }, status: { $nin: ["Completed", "Cancelled"] } },
+            { $set: { status: "Cancelled" } },
+        );
+    }
+    const closedOverlayIds = new Set(duplicateOverlayIds.map((id) => String(id)));
 
     const overlayByAction = new Map();
     let manualOpen = 0;
     const countedManual = new Set();
     for (const row of overlays) {
+        if (closedOverlayIds.has(String(row._id))) continue;
         if (row.sourceDashboardActionId) {
             overlayByAction.set(String(row.sourceDashboardActionId), row);
             continue;
@@ -2017,10 +2335,15 @@ export async function countOpenTasksForAssignee(viewer) {
         actionOpen += 1;
     }
 
+    const keptKeys = new Set(unique.map((action) => actionDuplicateKey(action)).filter(Boolean));
     for (const row of overlays) {
+        if (closedOverlayIds.has(String(row._id))) continue;
         if (!row.sourceDashboardActionId) continue;
+        if (collapsedOpen.hiddenOverlayIds.has(String(row._id))) continue;
         const sourceId = String(row.sourceDashboardActionId);
         if (countedActions.has(sourceId)) continue;
+        const sourceKey = actionDuplicateKey(sourceById.get(sourceId) || {});
+        if (sourceKey && keptKeys.has(sourceKey)) continue;
         if (!OPEN_MANUAL_STATUSES.has(row.status || "Pending")) continue;
         if (!assigneeIsViewer(viewer, row.assignee, row.assigneeEmpId, row.assigneeName)) continue;
         actionOpen += 1;

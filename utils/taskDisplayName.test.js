@@ -292,3 +292,16 @@ test("a task typed by hand keeps the name that was entered", () => {
         { title: "Call the supplier", subject: "" },
     );
 });
+
+test("pending salary enrollment names the employee under Pending Enrollment", () => {
+    assert.deepEqual(
+        formatTaskDisplayParts({
+            requestType: "Salary Enrollment",
+            extra1: "NIVIL ALI is pending for enrollment",
+            extra2: "Pending for enrollment",
+            subjectName: "NIVIL ALI",
+            subjectEmployeeId: "VEGA-HR-0101",
+        }),
+        { title: "Pending Enrollment", subject: "NIVIL ALI\nVEGA-HR-0101" },
+    );
+});

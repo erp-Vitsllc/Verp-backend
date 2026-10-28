@@ -78,6 +78,12 @@ export async function notifySalaryEnrollmentSubmitted({
 }) {
     const employeeName = displayName(employee);
     const employeeId = employee?.employeeId || profile?.employeeId;
+    try {
+        const { dismissPendingEnrollmentReminder } = await import('./syncPendingSalaryEnrollmentTasks.js');
+        await dismissPendingEnrollmentReminder(employee?._id);
+    } catch (error) {
+        console.error('[salaryEnrollmentApproval] pending enrollment reminder:', error?.message || error);
+    }
     const baseUrl = resolveFrontendBaseUrl(req);
     const href = `${baseUrl}/HRM/Salary/enroll/${encodeURIComponent(employeeId)}`;
     const approverLabel = salaryEnrollmentApproverLabel(hrEmployee);

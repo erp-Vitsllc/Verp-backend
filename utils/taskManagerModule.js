@@ -595,13 +595,42 @@ function mailTransport() {
     };
 }
 
-export function reassignedRequesterLabel(requesterName, originalAssigneeName) {
-    const strip = (value) => String(value || "").trim().replace(/\s*\([^)]*\)\s*$/, "").trim();
-    const requester = strip(requesterName);
-    const original = strip(originalAssigneeName);
-    if (!original) return requester;
-    if (!requester || requester.toLowerCase() === original.toLowerCase()) return original;
-    return `${original} (${requester})`;
+function plainPersonName(value) {
+    return String(value || "").trim().replace(/\s*\([^)]*\)\s*$/, "").trim();
+}
+
+/**
+ * Reassignment does not change the requester.
+ * The original assignee stays the main assignee, and the new assignee is listed under them.
+ */
+/** Latest reassignment time. Empty when the task has never been reassigned. */
+export function latestReassignedAt(row) {
+    const history = Array.isArray(row?.history) ? row.history : [];
+    let latest = 0;
+    for (const item of history) {
+        if (String(item?.event || "").trim() !== "Reassigned") continue;
+        const time = new Date(item?.createdAt || 0).getTime();
+        if (Number.isNaN(time) || time <= latest) continue;
+        latest = time;
+    }
+    return latest ? new Date(latest).toISOString() : "";
+}
+
+export function reassignmentAssignees({
+    assigneeName = "",
+    originalAssigneeName = "",
+} = {}) {
+    const current = plainPersonName(assigneeName);
+    const original = plainPersonName(originalAssigneeName);
+    const namesDiffer = Boolean(
+        original
+        && current
+        && original.toLowerCase() !== current.toLowerCase(),
+    );
+    return {
+        mainAssigneeName: namesDiffer ? original : (String(assigneeName || "").trim() || original),
+        reassignedAssigneeName: namesDiffer ? current : "",
+    };
 }
 
 export function taskOpenPath(taskKey) {
