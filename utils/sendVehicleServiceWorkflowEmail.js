@@ -2,6 +2,7 @@ import nodemailer from 'nodemailer';
 import { resolveFrontendBaseUrl } from './resolveFrontendBaseUrl.js';
 import { resolveEmployeeEmailWithReporteeLoaded, getFallbackEmailNote, employeeDisplayName } from './resolveEmployeeEmail.js';
 import { buildEmailDedupeKey, sendErpEmail } from './emailDispatch.js';
+import { vehicleServiceDetailsPath } from './vehicleServiceAdminOfficerNotification.js';
 
 /**
  * Notify flowchart role when a vehicle service workflow step is waiting or completed.
@@ -50,7 +51,18 @@ export async function sendVehicleServiceWorkflowEmail({
         });
 
         const base = (resolveFrontendBaseUrl()).replace(/\/$/, '');
-        const link = linkPath ? `${base}${linkPath.startsWith('/') ? linkPath : `/${linkPath}`}` : `${base}/HRM/Asset/Vehicle/details/${asset._id}`;
+        const workflow = asset?.activeServiceWorkflow || {};
+        const servicePath = vehicleServiceDetailsPath(
+            asset?._id,
+            workflow.serviceRecordId,
+            workflow.serviceTypeLabel,
+        );
+        const fallback = servicePath
+            ? `${base}${servicePath}`
+            : `${base}/HRM/Asset/Vehicle/details/${asset._id}?tab=service`;
+        const link = linkPath
+            ? `${base}${linkPath.startsWith('/') ? linkPath : `/${linkPath}`}`
+            : fallback;
 
         const esc = (value) =>
             String(value ?? '')
@@ -100,7 +112,7 @@ export async function sendVehicleServiceWorkflowEmail({
                         ${rowsHtml}
                     </table>
                     <p style="text-align:center;margin:28px 0;">
-                        <a href="${link}" style="background:#0d9488;color:#fff;padding:12px 24px;text-decoration:none;border-radius:8px;font-weight:700;display:inline-block;">Open vehicle</a>
+                        <a href="${link}" style="background:#0d9488;color:#fff;padding:12px 24px;text-decoration:none;border-radius:8px;font-weight:700;display:inline-block;">Open service</a>
                     </p>
                 </div>
             </div>`;

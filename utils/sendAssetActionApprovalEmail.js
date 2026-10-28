@@ -48,14 +48,14 @@ export const sendAssetActionApprovalEmail = async (asset, actionType, manager, r
             actionType === 'Transfer' ? 'transfer' :
             actionType === 'Add Accessory' || actionType === 'Update Accessory' || actionType === 'Unattach Accessory' ? 'accessory' :
             'damage';
-        const tabParam = (actionType === 'Unattach Accessory' || actionType === 'Add Accessory' || actionType === 'Update Accessory')
-            ? '&tab=accessories'
-            : '';
+        const isAccessory = actionType === 'Unattach Accessory' || actionType === 'Add Accessory' || actionType === 'Update Accessory';
+        const tabParam = isAccessory ? '&tab=accessories' : '&tab=document';
+        const focusParam = isAccessory ? '' : '&focusCard=pendingAction';
         const isFleetVehicle = !!String(asset?.plateNumber || '').trim();
         const fleetHandoverAction = ['Return Asset', 'Reassign Asset'].includes(actionType);
         const link = isFleetVehicle && fleetHandoverAction
-            ? `${frontendUrl}/HRM/Asset/Vehicle/details/${asset._id}`
-            : `${frontendUrl}/HRM/Asset/details/${asset._id}?authAction=${authAction}${tabParam}`;
+            ? `${frontendUrl}/HRM/Asset/Vehicle/details/${asset._id}?tab=handover`
+            : `${frontendUrl}/HRM/Asset/details/${asset._id}?authAction=${authAction}${tabParam}${focusParam}`;
 
         const att = normalizePdfAttachments(attachments);
 

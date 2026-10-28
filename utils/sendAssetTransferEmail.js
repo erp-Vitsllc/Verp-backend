@@ -38,7 +38,7 @@ export const sendAssetTransferEmail = async (asset, fromEmployee, toEmployee, ap
         });
 
         const frontendUrl = resolveFrontendBaseUrl();
-        const link = `${frontendUrl}/HRM/Asset/details/${asset._id}?authAction=transfer`;
+        const link = `${frontendUrl}/HRM/Asset/details/${asset._id}?tab=document&focusCard=pendingAction&authAction=transfer`;
 
         const htmlContent = `
             <div style="font-family: Arial, sans-serif; color: #333; max-width: 600px; margin: 0 auto; border: 1px solid #eaeaea; border-radius: 8px; overflow: hidden;">

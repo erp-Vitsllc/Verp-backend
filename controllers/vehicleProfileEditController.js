@@ -77,7 +77,7 @@ async function notifyHrOfVehicleProfileEditSubmission(req, asset, designatedHr, 
                 auth: { user: emailUser, pass: emailPass },
             });
             const hrName = `${designatedHr.firstName || ''} ${designatedHr.lastName || ''}`.trim() || 'HR';
-            const detailUrl = `${resolveFrontendBaseUrl(req)}/HRM/Asset/Vehicle/details/${asset._id}`;
+            const detailUrl = `${resolveFrontendBaseUrl(req)}/HRM/Asset/Vehicle/details/${asset._id}?focusCard=pendingApproval`;
             const changesHtml = pendingEditsChangeHtml(pending, (sectionId) => SECTION_LABEL[sectionId]);
             await transporter.sendMail({
                 from: `"VeRP Portal" <${emailUser}>`,

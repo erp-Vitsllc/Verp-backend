@@ -369,8 +369,7 @@ export const updateLoanDetails = async (req, res) => {
 
                             const origin = req.headers.origin || (req.headers.referer ? new URL(req.headers.referer).origin : null);
                             const baseUrl = resolveFrontendBaseUrl(req);
-                            const typeSlug = type ? type.replace(/\s+/g, '-') : 'Loan';
-                            const actionUrl = `${baseUrl}/HRM/LoanAndAdvance/${typeSlug}-${savedLoan._id}`;
+                            const actionUrl = `${baseUrl}/HRM/LoanAndAdvance/${encodeURIComponent(String(savedLoan._id))}?focusCard=record`;
 
                             const html = `
                                  <div style="font-family: Arial, sans-serif; color: #333; line-height: 1.6; max-width: 600px; margin: 0 auto; border: 1px solid #eee; border-radius: 10px; overflow: hidden;">

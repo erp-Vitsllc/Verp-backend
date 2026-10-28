@@ -2217,6 +2217,7 @@ export async function submitOilServiceDetails(asset, serviceId, serviceUpdates, 
             asset: populated || asset,
             remark,
             service: asset.services?.id?.(serviceId) || serviceRow || null,
+            serviceTypeLabel: 'Oil Service',
         });
 
         // Complete Service → clear Admin inbox; Make Payment / Zoho stays Accounts-only.
@@ -2259,6 +2260,7 @@ export async function submitOilServiceDetails(asset, serviceId, serviceUpdates, 
         asset: populated || asset,
         remark,
         service: asset.services?.id?.(serviceId) || null,
+        serviceTypeLabel: 'Oil Service',
     });
 
     await notifyOilServiceDetailsCompleted({

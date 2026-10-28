@@ -13,7 +13,6 @@ import { resolveEmployeeEmail, addEmployeeEmailToSet } from "../../utils/resolve
 import { buildRewardApprovedEmailHtml } from "../../utils/buildRewardApprovedEmailHtml.js";
 import { isUsernameSystemSuperUser, isReqUserSystemSuperUser } from "../../utils/systemSuperUser.js";
 import { runAfterResponse } from "../../utils/runAfterResponse.js";
-import { rememberRewardEmail } from "../../utils/emailDispatch.js";
 
 export const updateReward = async (req, res) => {
     try {
@@ -177,7 +176,8 @@ export const updateReward = async (req, res) => {
                                 });
 
                                 const baseUrl = resolveFrontendBaseUrl();
-                                const rewardUrl = `${baseUrl}/HRM/Reward/${reward._id}`;
+                                const rewardCode = reward.rewardId || reward._id;
+                                const rewardUrl = `${baseUrl}/HRM/Reward/rewrd.${encodeURIComponent(String(rewardCode))}?focusCard=record`;
                                 const empName = reward.employeeName || "Employee";
 
                                 const mailOptions = {
@@ -210,7 +210,6 @@ export const updateReward = async (req, res) => {
                                 }
 
                                 await transporter.sendMail(mailOptions);
-                                await rememberRewardEmail(reward._id, mailOptions);
                                 console.log(`[UpdateReward] Resubmit email sent to ${targetUser.email || targetUser.companyEmail}`);
                             }
                         }
@@ -382,11 +381,12 @@ export const updateReward = async (req, res) => {
                                     });
 
                                     const baseUrl = resolveFrontendBaseUrl();
-                                    const rewardUrl = `${baseUrl}/HRM/Reward/${reward._id}`;
+                                    const rewardCode = reward.rewardId || reward._id;
+                                    const rewardUrl = `${baseUrl}/HRM/Reward/rewrd.${encodeURIComponent(String(rewardCode))}?focusCard=record`;
                                     const empNameForEmail = reward.employeeName;
 
                                     for (const recipient of finalRecipients) {
-                                        const approvalMail = {
+                                        await transporter.sendMail({
                                             from: `"VeRP System" <${emailUser}>`,
                                             to: recipient.email,
                                             subject: `Reward Approval Request: ${reward.rewardType} - ${empNameForEmail}`,
@@ -412,9 +412,7 @@ export const updateReward = async (req, res) => {
                                                     </div>
                                                 </div>
                                             `
-                                        };
-                                        await transporter.sendMail(approvalMail);
-                                        await rememberRewardEmail(reward._id, approvalMail);
+                                        });
                                     }
                                     console.log("Approval Emails Sent");
                                 } catch (e) {
@@ -738,7 +736,6 @@ ${reward.workflow ? reward.workflow.map((w, i) => `│ ${i + 1}. Role: ${w.role.
                                             console.log(
                                                 `[UpdateReward] Management→Accounts info email sent to: ${recipients.join(', ')}`,
                                             );
-                                            return rememberRewardEmail(reward._id, stageMailPayload);
                                         }),
                                     );
                                 }
@@ -930,11 +927,6 @@ ${reward.workflow ? reward.workflow.map((w, i) => `│ ${i + 1}. Role: ${w.role.
                 currentStatus !== 'Approved (Paid)'
             ) {
 
-                const isCashOrGiftFinal =
-                    reward.rewardType === 'Cash Reward' ||
-                    reward.rewardType === 'Gift Reward' ||
-                    (parseFloat(reward.amount || 0) > 0);
-
                 try {
                     // Emails: reward target (TO); reportee, creator, management, accounts, HR, all@vegadigital.ae (CC)
                     const employeeForEmail = await EmployeeBasic.findOne({ employeeId: reward.employeeId })
@@ -1011,18 +1003,16 @@ ${reward.workflow ? reward.workflow.map((w, i) => `│ ${i + 1}. Role: ${w.role.
                                     auth: { user: emailUser, pass: emailPass }
                                 });
 
-                                const employeeFullName = `${employeeForEmail.firstName || ''} ${employeeForEmail.lastName || ''}`.trim();
-                                const subject = `Congratulations! Reward Approved — ${employeeFullName}`;
+                                const subject = `Congratulations! Reward Approved — ${employeeForEmail.firstName || ''} ${employeeForEmail.lastName || ''}`.trim();
                                 const html = buildRewardApprovedEmailHtml({
                                     employeeFirstName: employeeForEmail.firstName,
                                     employeeLastName: employeeForEmail.lastName,
                                     rewardType: reward.rewardType,
                                     title: reward.title,
-                                    amount: isCashOrGiftFinal ? reward.amount : null,
+                                    amount: reward.amount,
                                     hasOriginalAttachment: Boolean(
                                         reward.attachment && (reward.attachment.url || reward.attachment.publicId),
                                     ),
-                                    showAccountsNote: false,
                                 });
 
                                 const mailOptions = {
@@ -1152,7 +1142,6 @@ ${reward.workflow ? reward.workflow.map((w, i) => `│ ${i + 1}. Role: ${w.role.
                                     console.warn("[UpdateReward] WARNING: Sending email with ZERO attachments.");
                                     await transporter.sendMail(mailOptions);
                                 }
-                                await rememberRewardEmail(reward._id, mailOptions);
                             } else {
                                 console.error("[UpdateReward] ERROR: Missing EMAIL_USER or EMAIL_PASS environment variables");
                             }
@@ -1260,14 +1249,12 @@ ${reward.workflow ? reward.workflow.map((w, i) => `│ ${i + 1}. Role: ${w.role.
                                      </div>
                                  `;
 
-                                const rejectionMail = {
+                                await transporter.sendMail({
                                     from: `"VeRP Notification" <${emailUser}>`,
                                     to: Array.from(recipientEmails).join(', '),
                                     subject: subject,
                                     html: html
-                                };
-                                await transporter.sendMail(rejectionMail);
-                                await rememberRewardEmail(reward._id, rejectionMail);
+                                });
                                 console.log(`[UpdateReward] SUCCESS: Reward rejection email sent to ${Array.from(recipientEmails).length} recipients (target employee excluded)`);
                             } else {
                                 console.error("[UpdateReward] ERROR: Missing EMAIL_USER or EMAIL_PASS for rejection email");

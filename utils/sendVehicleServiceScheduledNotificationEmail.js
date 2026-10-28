@@ -161,7 +161,8 @@ function assignedUserOf(asset, assignee) {
 function serviceDetailsUrl(asset, service, serviceType) {
     const assetId = asset?._id;
     const serviceId = service?._id || service?.id;
-    const path = vehicleServiceDetailsPath(assetId, serviceId, serviceType);
+    const type = String(serviceType || service?.serviceType || '').trim();
+    const path = vehicleServiceDetailsPath(assetId, serviceId, type);
     if (path) return withFrontendPath(path);
     if (assetId) return withFrontendPath(`/HRM/Asset/Vehicle/details/${assetId}?tab=service`);
     return resolveFrontendBaseUrl();

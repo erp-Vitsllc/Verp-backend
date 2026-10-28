@@ -454,7 +454,8 @@ ${rewardData.workflow.map((w, i) => `│ ${i + 1}. Role: ${w.role.padEnd(12)} As
                                 });
 
                                 const baseUrl = resolveFrontendBaseUrl();
-                                const rewardUrl = `${baseUrl}/HRM/Reward/${savedReward._id}`;
+                                const rewardCode = savedReward.rewardId || savedReward._id;
+                                const rewardUrl = `${baseUrl}/HRM/Reward/rewrd.${encodeURIComponent(String(rewardCode))}?focusCard=record`;
 
                                 const approvalMail = {
                                     from: `"VeRP System" <${emailUser}>`,

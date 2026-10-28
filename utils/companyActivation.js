@@ -400,7 +400,7 @@ const sendCompanyActivationEmailToHr = async ({
     });
 
     const baseUrl = resolveFrontendBaseUrl();
-    const companyUrl = `${baseUrl}/Company/${company._id}`;
+    const companyUrl = `${baseUrl}/Company/${company._id}?tab=basic&focusCard=basicDetails&activationReview=1`;
     const isResubmission = String(activationTypeLabel).toLowerCase() === "reactivation";
     const typeForDisplay = isResubmission ? "Reactivation (Resubmission)" : "New Activation";
     const subject = `${typeForDisplay} request: ${company.name}`;

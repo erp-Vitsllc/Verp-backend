@@ -750,6 +750,7 @@ async function completeAccidentRepairWithoutZohoBilling(
         asset: populated || asset,
         remark,
         service,
+        serviceTypeLabel: 'Accident Repair',
     }).catch((err) => {
         console.error('[AccidentRepair] completed email failed:', err?.message || err);
     });

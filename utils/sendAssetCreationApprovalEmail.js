@@ -45,10 +45,10 @@ export const sendAssetCreationApprovalEmail = async ({ asset, recipient, creator
         const plate = String(asset?.plateNumber || '').trim();
         const isFleetVehicle = !!plate;
         const buttonUrl = isBulk && bulkIds.length > 0
-            ? `${frontendUrl}/HRM/Asset/details/${assetId}?bulkCreation=1&bulkAssetIds=${encodeURIComponent(bulkIds.join(','))}`
+            ? `${frontendUrl}/HRM/Asset/details/${assetId}?tab=document&focusCard=pendingApproval&bulkCreation=1&bulkAssetIds=${encodeURIComponent(bulkIds.join(','))}`
             : isFleetVehicle
-                ? `${frontendUrl}/HRM/Asset/Vehicle/details/${assetId}`
-                : `${frontendUrl}/HRM/Asset/details/${assetId}`;
+                ? `${frontendUrl}/HRM/Asset/Vehicle/details/${assetId}?focusCard=pendingApproval`
+                : `${frontendUrl}/HRM/Asset/details/${assetId}?tab=document&focusCard=pendingApproval`;
 
         const recipientName = recipient.firstName || (isFleetVehicle ? 'HR' : 'Asset Controller');
         const approvalTitle = isFleetVehicle ? 'Vehicle Creation Approval' : 'Asset Creation Approval';

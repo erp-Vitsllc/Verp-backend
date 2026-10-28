@@ -3,6 +3,7 @@ import { getDepartmentHOD } from './getDepartmentHOD.js';
 import { sendVehicleServiceWorkflowEmail } from './sendVehicleServiceWorkflowEmail.js';
 import { applyVehicleServiceNotificationCopy } from './vehicleServiceNotificationCopy.js';
 import { applyServiceActiveState } from './assetOperationalFlags.js';
+import { vehicleServiceDetailsPath } from './vehicleServiceAdminOfficerNotification.js';
 
 const STAGE_SCHEDULED = 'scheduled_service';
 
@@ -64,7 +65,12 @@ export async function processVehicleServiceScheduledPhase() {
                         stageLabel: copy.stageLabel,
                         actionLabel: copy.actionLabel,
                         detailLine: copy.detailLine,
-                        linkPath: `/HRM/Asset/Vehicle/details/${asset._id}`,
+                        linkPath:
+                            vehicleServiceDetailsPath(
+                                asset._id,
+                                liveWf.serviceRecordId,
+                                liveWf.serviceTypeLabel,
+                            ) || `/HRM/Asset/Vehicle/details/${asset._id}?tab=service`,
                     });
                 }
             }

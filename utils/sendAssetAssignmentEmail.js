@@ -157,7 +157,7 @@ export const sendAssetAssignmentEmail = async ({
                   ? `${frontendUrl}/HRM/Asset?bulkAssignmentGroup=${encodeURIComponent(String(bulkAssignmentGroupId))}`
                   : isBulk
                     ? `${frontendUrl}/HRM/Asset`
-                    : `${frontendUrl}/HRM/Asset/details/${assetId}`;
+                    : `${frontendUrl}/HRM/Asset/details/${assetId}?tab=document&focusCard=pendingAssignment`;
 
         const recipientName = employeeDisplayName(recipientRecord);
         const fallbackNote = isPrimaryReporteeRecipient

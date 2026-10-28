@@ -21,7 +21,8 @@ function createTransporter() {
 }
 
 function fineLink(fine) {
-    return `${resolveFrontendBaseUrl()}/HRM/Fine/${fine._id}`;
+    const fineCode = fine?.fineId || fine?.baseFineId || fine?._id;
+    return `${resolveFrontendBaseUrl()}/HRM/Fine/${encodeURIComponent(String(fineCode))}?focusCard=pendingApproval`;
 }
 
 function fineAmountLabel(fine) {

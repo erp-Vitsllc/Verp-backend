@@ -685,7 +685,7 @@ function vehicleServiceEmailHtml({ parsed, recipientName, asset, link }) {
                 <p style="color:#475569;">${esc(detail)}</p>
                 <table style="width:100%;margin:16px 0;background:#f8fafc;border-radius:8px;border:1px solid #e2e8f0;border-collapse:collapse;">${table}</table>
                 <p style="text-align:center;margin:28px 0;">
-                    <a href="${esc(link)}" style="background:#0d9488;color:#fff;padding:12px 24px;text-decoration:none;border-radius:8px;font-weight:700;display:inline-block;">Open vehicle</a>
+                    <a href="${esc(link)}" style="background:#0d9488;color:#fff;padding:12px 24px;text-decoration:none;border-radius:8px;font-weight:700;display:inline-block;">Open service</a>
                 </p>
             </div>
         </div>`;
@@ -731,7 +731,9 @@ async function restoreUnsavedEmailCopies(rows) {
             || /^\[Action Required\]/i.test(String(row.subject || ''));
         const buttonUrl = parsed.bulk || !detailsId
             ? `${frontendUrl}/HRM/Asset`
-            : `${frontendUrl}/HRM/Asset/details/${detailsId}`;
+            : pending
+              ? `${frontendUrl}/HRM/Asset/details/${detailsId}?tab=document&focusCard=pendingAssignment`
+              : `${frontendUrl}/HRM/Asset/details/${detailsId}?tab=document`;
         row.html = assignmentEmailHtml({
             parsed,
             recipientName: employeeDisplayName(person),
@@ -750,7 +752,7 @@ async function restoreUnsavedEmailCopies(rows) {
             const parsed = parseVehicleServiceSubject(row.subject);
             if (!parsed?.assetCode) continue;
             const asset = await AssetItem.findOne({ assetId: parsed.assetCode })
-                .select('assetId name plateEmirate plateNumber')
+                .select('assetId name plateEmirate plateNumber services._id services.serviceType activeServiceWorkflow.serviceRecordId activeServiceWorkflow.serviceTypeLabel')
                 .lean()
                 .catch(() => null);
             const recipientEmail = normalizeEmailAddress(Array.isArray(row.to) ? row.to[0] : '');
@@ -760,13 +762,23 @@ async function restoreUnsavedEmailCopies(rows) {
                 }).select('firstName lastName').lean().catch(() => null)
                 : null;
             const first = String(person?.firstName || '').trim();
+            const { vehicleServiceDetailsPath } = await import('./vehicleServiceAdminOfficerNotification.js');
+            const wanted = String(parsed.serviceType || '').trim().toLowerCase();
+            const workflow = asset?.activeServiceWorkflow || {};
+            const listed = Array.isArray(asset?.services) ? asset.services : [];
+            const typed = [...listed].reverse().find((row) => String(row?.serviceType || '').trim().toLowerCase() === wanted);
+            const serviceId = typed?._id || workflow.serviceRecordId || '';
+            const serviceType = typed?.serviceType || workflow.serviceTypeLabel || parsed.serviceType;
+            const servicePath = vehicleServiceDetailsPath(asset?._id, serviceId, serviceType);
             row.html = vehicleServiceEmailHtml({
                 parsed,
                 recipientName: first || employeeDisplayName(person),
                 asset,
-                link: asset?._id
-                    ? `${frontendUrl}/HRM/Asset/Vehicle/details/${asset._id}`
-                    : `${frontendUrl}/HRM/Asset/Vehicle`,
+                link: servicePath
+                    ? `${frontendUrl}${servicePath}`
+                    : asset?._id
+                      ? `${frontendUrl}/HRM/Asset/Vehicle/details/${asset._id}?tab=service`
+                      : `${frontendUrl}/HRM/Asset/Vehicle`,
             });
         }
     }

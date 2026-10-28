@@ -49,7 +49,8 @@ export const sendHODAuthorizationEmail = async (type, item, hod, requester) => {
         let subjectId = '';
 
         if (type === 'Fine') {
-            link = `${frontendUrl}/HRM/Fine/${item._id}`;
+            const fineCode = item.fineId || item.baseFineId || item._id;
+            link = `${frontendUrl}/HRM/Fine/${encodeURIComponent(String(fineCode))}?focusCard=pendingApproval`;
             subjectId = item.fineId;
             detailsHtml = `
                 <p><strong>Fine ID:</strong> ${item.fineId}</p>
@@ -57,15 +58,15 @@ export const sendHODAuthorizationEmail = async (type, item, hod, requester) => {
                 <p><strong>Amount:</strong> AED ${item.fineAmount || 0}</p>
             `;
         } else if (type === 'Reward') {
-            link = `${frontendUrl}/HRM/Reward/${item._id}`;
+            const rewardCode = item.rewardId || item._id;
+            link = `${frontendUrl}/HRM/Reward/rewrd.${encodeURIComponent(String(rewardCode))}?focusCard=record`;
             subjectId = item.rewardId || `REWARD-${item._id.toString().slice(-6)}`;
             detailsHtml = `
                 <p><strong>Reward Type:</strong> ${item.rewardType}</p>
                 <p><strong>Amount:</strong> AED ${item.amount || 0}</p>
             `;
         } else if (type === 'Loan' || type === 'Advance') {
-            const typeSlug = item.type ? item.type.replace(/\s+/g, '-') : type;
-            link = `${frontendUrl}/HRM/LoanAndAdvance/${typeSlug}-${item._id}`;
+            link = `${frontendUrl}/HRM/LoanAndAdvance/${encodeURIComponent(String(item._id))}?focusCard=record`;
             subjectId = `LOAN-${item._id.toString().slice(-6)}`;
             detailsHtml = `
                 <p><strong>Request Type:</strong> ${type}</p>

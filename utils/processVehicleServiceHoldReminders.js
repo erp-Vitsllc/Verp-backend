@@ -4,6 +4,7 @@ import { sendVehicleServiceWorkflowEmail } from "./sendVehicleServiceWorkflowEma
 import { getDepartmentHOD } from "./getDepartmentHOD.js";
 import { isTireChangeWorkflow, tireChangeDetailsPath, notifyTireChangeStakeholder } from "./tireChangeWorkflow.js";
 import { applyVehicleServiceNotificationCopy } from "./vehicleServiceNotificationCopy.js";
+import { vehicleServiceDetailsPath } from "./vehicleServiceAdminOfficerNotification.js";
 
 const ONE_DAY_MS = 24 * 60 * 60 * 1000;
 
@@ -80,7 +81,9 @@ export async function processVehicleServiceHoldReminders() {
             const remindAt = hold.remindAt ? new Date(hold.remindAt) : new Date(holdUntil.getTime() - 24 * 60 * 60 * 1000);
             if (!isDue(remindAt)) continue;
 
-            const legacyPath = `/HRM/Asset/Vehicle/service-requests/details/${asset._id}/${wf.serviceRecordId}`;
+            const legacyPath =
+                vehicleServiceDetailsPath(asset._id, wf.serviceRecordId, wf.serviceTypeLabel) ||
+                `/HRM/Asset/Vehicle/service-requests/details/${asset._id}/${wf.serviceRecordId}`;
 
             const holdCopy = await applyVehicleServiceNotificationCopy({
                 recipient: asset.assignedTo,

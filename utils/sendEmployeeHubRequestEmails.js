@@ -178,10 +178,10 @@ export async function sendEmployeeHubDecisionEmails({
                     body: `
                         <p><strong>${empName}</strong> (${empId}) early salary request was approved.</p>
                         ${desc ? `<p style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;padding:12px;white-space:pre-wrap;">${desc}</p>` : ''}
-                        <p>The attendance page has this request on the employee profile.</p>
+                        <p>Open the request on the dashboard.</p>
                     `,
-                    buttonUrl: `${emailFrontendUrl()}/HRM/Attendance`,
-                    buttonLabel: 'Open attendance',
+                    buttonUrl: url,
+                    buttonLabel: 'Open request',
                 }),
                 dedupeKey: buildEmailDedupeKey([
                     'EmployeeHub',

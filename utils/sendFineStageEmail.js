@@ -32,7 +32,8 @@ export const sendFineStageEmail = async (fine, recipients, stageName, allAssigne
     const to = Array.isArray(recipients) ? recipients.join(',') : recipients;
 
     const frontendUrl = resolveFrontendBaseUrl();
-    const actionLink = `${frontendUrl}/HRM/Fine/${fine._id}`;
+    const fineCode = fine.fineId || fine.baseFineId || fine._id;
+    const actionLink = `${frontendUrl}/HRM/Fine/${encodeURIComponent(String(fineCode))}?focusCard=pendingApproval`;
     
     // Support group lists for the email body if provided, otherwise use fine.assignedEmployees
     const employeeList = (allAssignedEmployees && allAssignedEmployees.length > 0) 

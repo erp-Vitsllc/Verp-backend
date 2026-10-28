@@ -7,7 +7,10 @@ import { sendVehicleServiceScheduledNotificationEmail } from './sendVehicleServi
 import { sendVehicleServiceCompletedNotificationEmail } from './sendVehicleServiceCompletedNotificationEmail.js';
 import { syncDashboardAction } from './syncDashboard.js';
 import { applyVehicleServiceNotificationCopy, requesterNameFromService } from './vehicleServiceNotificationCopy.js';
-import { refreshAdminOfficerServiceTrack } from './vehicleServiceAdminOfficerNotification.js';
+import {
+    refreshAdminOfficerServiceTrack,
+    vehicleServiceDetailsPath,
+} from './vehicleServiceAdminOfficerNotification.js';
 import { applyServiceActiveState } from './assetOperationalFlags.js';
 import { getWorkflowContextForService } from './vehicleServiceWorkflowResolve.js';
 
@@ -648,7 +651,9 @@ export async function notifyShopScheduleStakeholders({
         ) || null;
     const liveRemark = Object.keys(remark || {}).length ? remark : parseRemark(service);
     const rows = buildShopScheduleEmailDetailRows(liveRemark, serviceTypeLabel);
-    const linkPath = `/HRM/Asset/Vehicle/details/${populated._id}`;
+    const linkPath =
+        vehicleServiceDetailsPath(populated._id, serviceRecordId, serviceTypeLabel) ||
+        `/HRM/Asset/Vehicle/details/${populated._id}?tab=service`;
 
     for (const recipient of recipients) {
         await sendVehicleServiceWorkflowEmail({
@@ -1273,6 +1278,9 @@ export async function advanceShopBillingAfterAccountsApprove(
                 detailLine,
                 detailRows: buildShopScheduleEmailDetailRows(remark, serviceTypeLabel || 'Vehicle Service'),
                 serviceReqNo: resolveServiceReqNo(service, remark),
+                linkPath:
+                    shopMakePaymentPath(serviceTypeLabel, populated?._id || asset._id, serviceId) ||
+                    vehicleServiceDetailsPath(populated?._id || asset._id, serviceId, serviceTypeLabel),
                 cc,
             });
         }

@@ -489,8 +489,7 @@ export const approveLoan = async (req, res) => {
 
             const origin = req.headers.origin || (req.headers.referer ? new URL(req.headers.referer).origin : null);
             const baseUrl = resolveFrontendBaseUrl(req);
-            const typeSlug = loan.type ? loan.type.replace(/\s+/g, '-') : 'Loan';
-            const actionUrl = `${baseUrl}/HRM/LoanAndAdvance/${typeSlug}-${loan._id}`;
+            const actionUrl = `${baseUrl}/HRM/LoanAndAdvance/${encodeURIComponent(String(loan._id))}?focusCard=record`;
 
             // 1. Notify Next Approver
             if (nextApprover && (nextApprover.companyEmail || nextApprover.email)) {
@@ -777,7 +776,7 @@ export const approveLoan = async (req, res) => {
                             const applicantName = applicant
                                 ? `${applicant.firstName || ''} ${applicant.lastName || ''}`.trim()
                                 : loan.applicantName || 'Employee';
-                            const payUrl = `${baseUrl}/HRM/LoanAndAdvance/${typeSlug}-${loan._id}`;
+                            const payUrl = `${baseUrl}/HRM/LoanAndAdvance/${encodeURIComponent(String(loan._id))}?focusCard=record`;
                             const accountsSubject = `${typeSlug} Approved — Pay to Employee`;
                             const accountsHtml = `
                                     <div style="font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; color: #333; line-height: 1.6; max-width: 600px; margin: 0 auto; border: 1px solid #e2e8f0; border-radius: 12px; overflow: hidden;">

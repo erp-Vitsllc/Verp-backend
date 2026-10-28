@@ -106,7 +106,8 @@ export const sendFineApprovalEmail = async (fine, assignedEmployees) => {
 
         // 4. Send Emails
         const frontendUrl = resolveFrontendBaseUrl();
-        const fineLink = `${frontendUrl}/HRM/Fine/${fine._id}`;
+        const fineCode = fine.fineId || fine.baseFineId || fine._id;
+        const fineLink = `${frontendUrl}/HRM/Fine/${encodeURIComponent(String(fineCode))}?focusCard=pendingApproval`;
 
         // Generate HTML Table for Employees
         const rows = employeementDetails.map(emp => `

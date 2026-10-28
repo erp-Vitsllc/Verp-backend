@@ -57,7 +57,7 @@ export const sendResponsibilityApprovalEmail = async ({
         const subject = `New Responsibility Assigned: ${category} for ${companyName}`;
         const frontendUrl = emailFrontendUrl();
         const dashId = dashboardDeepLinkId != null ? String(dashboardDeepLinkId) : String(requestId || "");
-        const buttonUrl = `${frontendUrl}/Dashboard?requestId=${encodeURIComponent(dashId)}`;
+        const buttonUrl = `${frontendUrl}/dashboard?scope=incoming&requestId=${encodeURIComponent(dashId)}`;
         const flowchartUrl = `${frontendUrl}/Settings/FlowChart`;
 
         const legacyUnassigned = listHtml(

@@ -388,7 +388,7 @@ export const submitVehicleProfileActivation = async (req, res) => {
         const actor = await classifyActivationActor(req);
         const requestedByName = displayNameFromReq(req);
         const baseUrl = resolveFrontendBaseUrl(req);
-        const detailUrl = `${baseUrl}/HRM/Asset/Vehicle/details/${id}`;
+        const detailUrl = `${baseUrl}/HRM/Asset/Vehicle/details/${id}?focusCard=pendingApproval`;
         const vehicleLabel = `${asset.name || 'Vehicle'} (${asset.assetId || id})`;
         const descText = String(description || '').trim();
         const sectionsHtml = sections.map((s) => `<li>${SECTION_LABEL[s] || s}</li>`).join('');
@@ -643,7 +643,7 @@ export const approveVehicleProfileActivation = async (req, res) => {
         }
 
         const baseUrl = resolveFrontendBaseUrl(req);
-        const detailUrl = `${baseUrl}/HRM/Asset/Vehicle/details/${id}`;
+        const detailUrl = `${baseUrl}/HRM/Asset/Vehicle/details/${id}?focusCard=pendingApproval`;
         const vehicleLabel = `${asset.name || 'Vehicle'} (${asset.assetId || id})`;
         const requestedByName = displayNameFromReq(req);
         const sections = requested;
