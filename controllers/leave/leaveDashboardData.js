@@ -56,9 +56,11 @@ import {
     TWO_STEP_LEAVE_KINDS,
 } from '../../utils/leaveRequestApproval.js';
 import { isRequestUserDesignatedFlowchartHr } from '../../utils/isDesignatedFlowchartHr.js';
-import { calcWorkingDays, dateEmployeeReachesWorkingDays, loadCurrentLeaveCycleEligibility } from '../../utils/loadLeaveTicketEntitlement.js';
+import { calcWorkingDays, dateEmployeeReachesWorkingDays, dubaiDateKey, loadCurrentLeaveCycleEligibility } from '../../utils/loadLeaveTicketEntitlement.js';
 import { loadGroupAnnualLeaveCap } from '../../utils/groupAnnualLeaveCap.js';
 import { annualLeaveRequestBlock, loadAnnualLeaveAllowance } from '../../utils/annualLeaveAllowance.js';
+import { buildAnnualLeaveCalendar, buildAnnualLeaveSelectionMessage } from '../../utils/annualLeaveCalendar.js';
+import { addDays } from '../../utils/salaryHistoricalCalculations.js';
 import {
     reopenApprovedLeaveRecords,
     settleFulfilledLeaveRows,
@@ -518,10 +520,14 @@ export async function loadAnnualLeaveEligibilityForEmployee(employee, { from = '
             ...serializeAnnualLeaveEligibility(),
             cycleNotEligible: false,
             groupCap: null,
+            calendar: null,
         };
     }
     const policy = await resolveEmployeePayrollPolicy(employee);
     const historicalProfile = await loadHistoricalLeaveProfile(employee.employeeId);
+    const today = dubaiDateKey();
+    const markFrom = addDays(today, -120) || today;
+    const markTo = addDays(today, 800) || today;
     const [attendanceRecords, groupCap, allowance] = await Promise.all([
         Attendance.find({
             employeeMongoId: String(employee._id),
@@ -530,7 +536,7 @@ export async function loadAnnualLeaveEligibilityForEmployee(employee, { from = '
             .select('date statusKey')
             .lean()
             .maxTimeMS(8000),
-        loadGroupAnnualLeaveCap({ employee, from, to }),
+        loadGroupAnnualLeaveCap({ employee, from, to, markFrom, markTo }),
         loadAnnualLeaveAllowance({ employee, profile: historicalProfile, policy }),
     ]);
     const cycle = await loadCurrentLeaveCycleEligibility({
@@ -554,6 +560,22 @@ export async function loadAnnualLeaveEligibilityForEmployee(employee, { from = '
         }
     }
     const allowanceBlock = annualLeaveRequestBlock(allowance, { from, to });
+    const calendarCore = buildAnnualLeaveCalendar({
+        windows: allowance?.windows || [],
+        allowedDays: allowance?.allowedDays,
+        cycleDays: allowance?.cycleDays,
+        today,
+        remainingDays: allowance?.remainingDays,
+    });
+    const calendar = {
+        ...calendarCore,
+        yellowSpans: groupCap?.yellowSpans || [],
+        cappedDates: groupCap?.cappedDates || [],
+        ownLeaveDates: groupCap?.ownLeaveDates || [],
+        groupLabel: groupCap?.groupLabel || '',
+        maxAllowed: groupCap?.maxAllowed ?? null,
+        maxPercent: groupCap?.maxPercent ?? null,
+    };
     return {
         ...serialized,
         eligibleOn,
@@ -561,6 +583,7 @@ export async function loadAnnualLeaveEligibilityForEmployee(employee, { from = '
         allowance,
         allowanceBlock,
         groupCap,
+        calendar,
         allowanceBlocked: !allowanceBlock.ok,
         notEligible: !allowanceBlock.ok || Boolean(groupCap?.over),
     };
@@ -596,9 +619,26 @@ export async function getEmployeeAnnualLeaveEligibility(req, res) {
         const from = String(req.query?.from || req.query?.startDate || '').trim();
         const to = String(req.query?.to || req.query?.endDate || '').trim();
         const eligibility = await loadAnnualLeaveEligibilityForEmployee(employee, { from, to });
+        let selectionMessage = '';
+        if (/^\d{4}-\d{2}-\d{2}$/.test(from) && /^\d{4}-\d{2}-\d{2}$/.test(to) && to >= from) {
+            const requestSpan = await calcWorkingDays({
+                from,
+                to,
+                staffType: employee.staffType,
+            });
+            selectionMessage = buildAnnualLeaveSelectionMessage({
+                calendar: eligibility.calendar,
+                allowance: eligibility.allowance,
+                groupCap: eligibility.groupCap,
+                from,
+                to,
+                requestedDates: requestSpan.workingDateKeys || [],
+            });
+        }
         return res.status(200).json({
             message: 'Annual leave eligibility fetched successfully',
             ...eligibility,
+            selectionMessage,
         });
     } catch (error) {
         console.error('[getEmployeeAnnualLeaveEligibility]', error);
@@ -1639,26 +1679,22 @@ export async function applyLeaveRange(req, res) {
                 to,
                 staffType: employee.staffType,
             });
-            const allowanceHit = annualLeaveRequestBlock(annualEligibility.allowance, {
+            const selectionMessage = buildAnnualLeaveSelectionMessage({
+                calendar: annualEligibility.calendar,
+                allowance: annualEligibility.allowance,
+                groupCap: annualEligibility.groupCap,
                 from,
                 to,
                 requestedDates: requestSpan.workingDateKeys || [],
+                processingStart,
             });
-            if (!allowanceHit.ok || annualEligibility.groupCap?.over) {
-                const lines = [];
-                if (!allowanceHit.ok && allowanceHit.message) lines.push(allowanceHit.message);
-                if (annualEligibility.groupCap?.over && annualEligibility.groupCap.message) {
-                    lines.push(annualEligibility.groupCap.message);
-                }
-                const blockMessage = lines.join(' ');
+            if (selectionMessage) {
                 return res.status(400).json({
-                    message: blockMessage
-                        ? `${blockMessage} For more information, please contact your HOD.`
-                        : 'You cannot apply for this annual leave.',
                     notEligible: true,
-                    allowanceBlocked: !allowanceHit.ok,
+                    allowanceBlocked: Boolean(annualEligibility.allowanceBlocked),
                     ...annualEligibility,
-                    allowanceBlock: allowanceHit,
+                    selectionMessage,
+                    message: `${selectionMessage} For more, contact HR.`,
                 });
             }
         }

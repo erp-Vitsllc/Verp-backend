@@ -16,7 +16,6 @@ import {
     isFlexibleTiming,
     WEEKDAY_KEYS,
 } from '../../utils/workingTimeHelpers.js';
-import { summarizeApprovedFlexibleOvertime } from '../../utils/flexibleAttendance.js';
 import { applyEnrollmentMaskToLiveLeave } from '../../utils/attendanceLeaveDayCover.js';
 import { listActiveWorkLocations, normalizeStaffTypeKey } from '../../utils/workLocationHelpers.js';
 import { getCalendarPartsInTz, getScheduledEmailTimeZone } from '../../utils/scheduleDailyAtMidnight.js';
@@ -46,7 +45,7 @@ import {
     salaryProcessingStartDay,
     summarizeAttendanceEligibility,
     countPresentCompOffDays,
-    sumApprovedOvertimeHours,
+    eligibleOvertimeHours,
     implicitUnauthorizedLeaveForSchedule,
     uniqueConsumingCycles,
     validateLeaveDates,
@@ -403,13 +402,13 @@ async function loadLiveAttendanceEligibility({ employee, from, to, staffType }) 
         date: { $gte: periodStart, $lte: periodEnd },
         $or: clauses,
     })
-        .select('date statusKey leaveRequestStatus requestedStatusKey reason timeIn timeOut flexibleOtStatus flexibleOtApprovedHours flexibleOtNextDayDate flexibleFromOtDate')
+        .select('date statusKey leaveRequestStatus requestedStatusKey reason timeIn timeOut flexibleOtStatus flexibleOtApprovedHours flexibleOtNextDayDate flexibleFromOtDate flexibleWorkedHours compOff')
         .lean();
     const live = summarizeAttendanceEligibility(rows, { throughDate: periodEnd });
     const week = getWeekForStaffType(workingTime, staffType);
     const flexibleTiming = isFlexibleTiming(week);
     const overtime = flexibleTiming
-        ? summarizeApprovedFlexibleOvertime(rows)
+        ? eligibleOvertimeHours(rows)
         : { hours: 0, days: 0, overtimeRecords: [] };
     const coveredDates = new Set(
         (rows || []).map((row) => String(row?.date || '').trim()).filter((date) => isDateKey(date)),
@@ -436,7 +435,7 @@ async function loadLiveAttendanceEligibility({ employee, from, to, staffType }) 
             to: periodEnd,
             flexibleTiming,
         }),
-        approvedOvertimeHours: flexibleTiming ? sumApprovedOvertimeHours(rows) : 0,
+        approvedOvertimeHours: overtime.hours,
         leaveRecords: liveLeaveRecordsInProcessingWindow(
             [...masked.leaveRecords, ...implicitLeave],
             periodStart,

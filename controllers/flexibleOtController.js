@@ -11,6 +11,7 @@ import {
 } from '../utils/attendanceChangeApproval.js';
 import { isAttendanceSuspendedOn } from '../utils/attendanceSuspension.js';
 import {
+    flexibleOtFieldsFromDuration,
     isCurrentMonthDate,
     isAuthorizedLeaveStatus,
     requiredHoursForDate,
@@ -23,7 +24,7 @@ import {
     loadWorkingTimeDoc,
     normalizeStaffType,
 } from '../utils/workingTimeHelpers.js';
-import { nonWorkingFromContext } from '../utils/attendanceNonWorkingDay.js';
+import { compensableNonWorkingContext } from '../utils/attendanceNonWorkingDay.js';
 import { refreshFlexibleOtRecords } from '../utils/syncFlexibleOt.js';
 import { notifyEmployeeFlexibleOtWhatsApp } from '../utils/sendFlexibleOtWhatsApp.js';
 import { sendAttendanceDirectChangeEmail } from '../utils/sendAttendanceLeaveEmails.js';
@@ -249,9 +250,6 @@ export async function requestFlexibleOvertime(req, res) {
             return res.status(400).json({ message: 'Check-out is required before requesting overtime.' });
         }
         await refreshFlexibleOtRecords([record]);
-        if (!(Number(record.flexibleOtHours) > 0)) {
-            return res.status(400).json({ message: 'This day has no overtime to request.' });
-        }
 
         const employee = await EmployeeBasic.findById(record.employeeMongoId)
             .select('_id employeeId firstName lastName staffType primaryReportee companyEmail workEmail email attendanceAccountStatus attendanceSuspension')
@@ -260,14 +258,41 @@ export async function requestFlexibleOvertime(req, res) {
         if (isAttendanceSuspendedOn(employee, record.date)) {
             return res.status(403).json({ message: 'This employee is suspended on this date. Attendance cannot be changed.' });
         }
-        const week = getWeekForStaffType(await loadWorkingTimeDoc(), normalizeStaffType(employee?.staffType));
+        const staffType = normalizeStaffType(employee?.staffType);
+        const week = getWeekForStaffType(await loadWorkingTimeDoc(), staffType);
         const holiday = await Holiday.findOne({ date: record.date }).select('date appliesTo').lean();
-        const offDay = Boolean(nonWorkingFromContext({
+        const compensable = compensableNonWorkingContext({
             holiday,
             week,
-            staffType: normalizeStaffType(employee?.staffType),
+            staffType,
             date: record.date,
-        }));
+        });
+        if (
+            compensable?.kind === 'sunday' &&
+            String(record.flexibleOtStatus || '') !== 'approved' &&
+            !(Number(record.flexibleOtHours) > 0)
+        ) {
+            const fields = flexibleOtFieldsFromDuration({
+                isFlexible: isFlexibleTiming(week),
+                nonWorking: true,
+                date: record.date,
+                timeIn: record.timeIn,
+                timeOut: record.timeOut,
+                timeOutDate: record.timeOutDate,
+                requiredHours: 0,
+                statusKey: record.statusKey,
+            });
+            if (fields.flexibleOtHours > 0) {
+                record.flexibleWorkedHours = fields.flexibleWorkedHours;
+                record.flexibleRequiredHours = 0;
+                record.flexibleOtHours = fields.flexibleOtHours;
+                await record.save();
+            }
+        }
+        if (!(Number(record.flexibleOtHours) > 0)) {
+            return res.status(400).json({ message: 'This day has no overtime to request.' });
+        }
+        const offDay = Boolean(compensable);
         if (!isFlexibleTiming(week) && !offDay) {
             return res.status(400).json({ message: 'Overtime and next day present apply only to flexible timing.' });
         }
@@ -305,22 +330,20 @@ export async function requestFlexibleOvertime(req, res) {
             if (applied.status !== 200) {
                 return res.status(applied.status).json(applied.body);
             }
-            if (!isHr) {
-                const hr = await getDepartmentHOD('hr').catch(() => null);
-                try {
-                    await sendAttendanceDirectChangeEmail({
-                        recipients: [hr, employee?.primaryReportee].filter(Boolean),
-                        actor,
-                        employee,
-                        date: targetDate || record.date,
-                        previousLabel: 'Authorized leave',
-                        nextLabel: `Present from overtime on ${record.date}`,
-                        reason,
-                        recordIds: [record._id],
-                    });
-                } catch (mailErr) {
-                    console.error('[requestFlexibleOvertime] notice email failed:', mailErr?.message || mailErr);
-                }
+            const hr = await getDepartmentHOD('hr').catch(() => null);
+            try {
+                await sendAttendanceDirectChangeEmail({
+                    recipients: [hr, employee?.primaryReportee].filter(Boolean),
+                    actor,
+                    employee,
+                    date: targetDate || record.date,
+                    previousLabel: 'Authorized leave',
+                    nextLabel: `Present from overtime on ${record.date}`,
+                    reason,
+                    recordIds: [record._id],
+                });
+            } catch (mailErr) {
+                console.error('[requestFlexibleOvertime] notice email failed:', mailErr?.message || mailErr);
             }
             return res.status(200).json({
                 message: 'Present set on the selected day.',

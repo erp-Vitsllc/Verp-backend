@@ -141,6 +141,32 @@ describe('flexibleOtFieldsFromDuration', () => {
         assert.equal(fields.flexibleRequiredHours, 0);
     });
 
+    it('keeps overtime when a mispunch day still has check-in and next-day check-out', () => {
+        const fields = flexibleOtFieldsFromDuration({
+            isFlexible: true,
+            date: '2026-10-22',
+            timeIn: '08:04:00',
+            timeOut: '07:00:00',
+            timeOutDate: '2026-10-23',
+            requiredHours: 10,
+            statusKey: 'mispunch',
+        });
+        assert.equal(fields.flexibleWorkedHours, 22.93);
+        assert.equal(fields.flexibleOtHours, 12.93);
+    });
+
+    it('still ignores a mispunch that has no check-out', () => {
+        const fields = flexibleOtFieldsFromDuration({
+            isFlexible: true,
+            date: '2026-10-22',
+            timeIn: '08:04:00',
+            timeOut: '',
+            requiredHours: 10,
+            statusKey: 'mispunch',
+        });
+        assert.equal(fields.flexibleOtHours, 0);
+    });
+
     it('clears overtime when check-in or check-out is missing', () => {
         const fields = flexibleOtFieldsFromDuration({
             isFlexible: true,

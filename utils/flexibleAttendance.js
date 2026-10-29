@@ -234,7 +234,10 @@ export function flexibleOtFieldsFromDuration({
     const inn = String(timeIn || '').trim();
     const out = String(timeOut || '').trim();
     const punches = Boolean(inn && out && inn !== 'OT' && out !== 'OT');
-    if (FLEXIBLE_OT_SKIP_KEYS.has(key) || !punches) return cleared;
+    if (!punches) return cleared;
+    // A mispunch label can remain after the missing punch is filled in.
+    // Both clocks are a finished shift, so the extra hours can still be OT or comp off.
+    if (key !== 'mispunch' && FLEXIBLE_OT_SKIP_KEYS.has(key)) return cleared;
     // A holiday or weekly off is not a working day, so the time they worked is overtime.
     const spanMinutes = Number.isFinite(workedMinutes)
         ? workedMinutes

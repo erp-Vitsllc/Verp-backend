@@ -28,6 +28,7 @@ import {
     repairBlankNonWorkingRows,
     restoreClearedAttendance,
 } from '../utils/attendanceNonWorkingDay.js';
+import { loadOffDayWorkInboxItems } from '../utils/offDayWorkNotice.js';
 import { isNextDayPresentMark, nonHrMarkableDateKeys } from '../utils/nonHrMarkWindow.js';
 import { attendanceMarkRoute, yellowMarkHours } from '../utils/attendanceMarkPolicy.js';
 import {
@@ -835,12 +836,13 @@ function resolveStaffTypeFilter(raw) {
     return normalizeStaffType(value);
 }
 
-/** Holiday / weekly off do not need HR approval queue. */
+/** Holiday / weekly off do not need HR approval queue. Comp-off leave is already final. */
 function approvalStatusForMark(statusKey) {
     const key = String(statusKey || '').trim();
     if (!key || key === 'holiday' || key === 'weekly_off' || key === 'clear_attendance' || key === 'clear') {
         return '';
     }
+    if (key === 'compoff_leave') return 'approved';
     return 'pending';
 }
 
@@ -1662,20 +1664,26 @@ async function queueOrApplyManualMark(ctx, {
         reporteeId,
         hrId: ctx.hr?._id,
     });
+    const compOffLeave = payload.statusKey === 'compoff_leave';
+    const nextDayPresent =
+        !ctx.actorIsHr &&
+        date === shiftDateKey(getDubaiDateKey(), 1) &&
+        payload.statusKey === 'on_office';
+    if (nextDayPresent) {
+        payload.statusLabel = 'Present (Comp off)';
+    }
     const hours = ctx.actorIsHr ? { clockHours: 0, deductionHours: 0 } : await yellowMarkHours(employee, date, payload);
-    const route = ctx.actorIsHr
+    const route = ctx.actorIsHr || compOffLeave || nextDayPresent
         ? 'direct'
         : attendanceMarkRoute({
             statusKey: payload.statusKey,
             clockHours: hours.clockHours,
             deductionHours: hours.deductionHours,
         });
-    if (!ctx.actorIsHr && date === shiftDateKey(getDubaiDateKey(), 1) && payload.statusKey === 'on_office') {
-        payload.statusLabel = 'Present (Comp off)';
-    }
 
-    // HR writes the day. Other users write present and zero-hour yellow marks immediately.
-    // Leave and any deduction hours wait for the primary reportee, then HR.
+    // HR writes the day. Comp-off leave and next-day present save immediately for anyone.
+    // Those two send a notice email and do not wait for the primary reportee or HR.
+    // Other leave and any deduction hours wait for the primary reportee, then HR.
     if (route === 'direct') {
         const doc = await commitManualAttendanceMark({
             employee,
@@ -1696,7 +1704,7 @@ async function queueOrApplyManualMark(ctx, {
             employeeMongoId: id,
             actorId: ctx.actor?._id,
         });
-        if (!ctx.actorIsHr) {
+        if (!ctx.actorIsHr || compOffLeave) {
             await emailDirectAttendanceChange({
                 actor: ctx.actor,
                 hr: ctx.hr,
@@ -3611,6 +3619,10 @@ export async function getAttendancePendingInbox(req, res) {
             .select('_id')
             .lean();
         const reporteeIds = (reportees || []).map((r) => String(r._id));
+        const offDayPromise = loadOffDayWorkInboxItems(reporteeIds).catch((error) => {
+            console.error('[getAttendancePendingInbox] off-day work', error);
+            return [];
+        });
         const hrResolved = await resolveFlowchartHrEmployee().catch(() => null);
         const hr = hrResolved?.employee || null;
         const viewerIsHr = hr && String(hr._id) === String(self._id);
@@ -3820,10 +3832,11 @@ export async function getAttendancePendingInbox(req, res) {
                 };
             });
 
+        const offDayItems = await offDayPromise;
         return res.status(200).json({
             message: 'Attendance pending inbox fetched successfully',
-            count: items.length + otItems.length + hourItems.length + attendanceTaskItems.length + changeItems.length,
-            items: [...changeItems, ...otItems, ...hourItems, ...items, ...attendanceTaskItems],
+            count: items.length + otItems.length + hourItems.length + attendanceTaskItems.length + changeItems.length + offDayItems.length,
+            items: [...offDayItems, ...changeItems, ...otItems, ...hourItems, ...items, ...attendanceTaskItems],
         });
     } catch (error) {
         console.error('[getAttendancePendingInbox]', error);

@@ -11,7 +11,6 @@ import {
 const LEAVE_MARK_KEYS = new Set([
     'sick_leave',
     'authorized_leave',
-    'compoff_leave',
     'on_leave',
     'unauthorized_leave',
 ]);
@@ -41,8 +40,8 @@ function monthBounds(dateKey) {
 }
 
 /**
- * Present, and early go / late arrival / mispunch with no hours and no deduction, save immediately.
- * Leave, overtime, and any non-zero or deduction hours wait for the primary reportee, then HR.
+ * Present, comp-off leave, and early go / late arrival / mispunch with no hours and no deduction, save immediately.
+ * Other leave, overtime, and any non-zero or deduction hours wait for the primary reportee, then HR.
  */
 export function attendanceMarkRoute({
     statusKey,
@@ -51,6 +50,7 @@ export function attendanceMarkRoute({
     approvedHours = 0,
 } = {}) {
     const key = String(statusKey || '').trim();
+    if (key === 'compoff_leave') return 'direct';
     if (LEAVE_MARK_KEYS.has(key)) return 'approve';
     if (!YELLOW_MARK_KEYS.has(key)) return 'direct';
     const requested = roundHours(approvedHours);

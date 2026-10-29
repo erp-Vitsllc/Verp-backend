@@ -5,6 +5,7 @@ import {
     buildProfileActivationRejectedMessage,
 } from "./employeeProfileNotificationMessages.js";
 import { foldIntoAdminOfficerServiceTrackIfOpen } from "./vehicleServiceAdminOfficerNotification.js";
+import { noticeAlreadyDeleted } from "./deletedTaskNotice.js";
 
 /**
  * Synchronize a request with the DashboardAction collection.
@@ -300,7 +301,17 @@ export const syncDashboardAction = async (data) => {
             return;
         }
 
-        // 2. If status IS Pending, we ensure there is a record for the assignedTo user
+        // 2. If status IS Pending, we ensure there is a record for the assignedTo user.
+        // A deleted system or workflow task stays deleted. Do not build the bell again.
+        if (await noticeAlreadyDeleted({
+            requestType,
+            requestId,
+            extra1,
+            extra3,
+            subjectEmployeeId: subjectEmployee?.employeeId,
+        })) {
+            return;
+        }
         if (!assignedTo) return;
 
         let actualAssignedTo = assignedTo;

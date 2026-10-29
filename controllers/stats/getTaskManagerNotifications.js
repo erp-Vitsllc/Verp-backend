@@ -23,6 +23,8 @@ import {
     resolveTaskViewer,
     viewerCanReassign,
 } from "../../utils/taskManagerModule.js";
+import { viewerMayDeleteTask } from "../../utils/taskDeleteAccess.js";
+import { listDeletedNoticeKeys, noticeKeysForRecord } from "../../utils/deletedTaskNotice.js";
 import { assignTaskNumbers } from "../../utils/taskNumber.js";
 import { chooseKeptDuplicate, documentTaskLabel, duplicateOverlayShouldClose, taskMatchHints } from "../../utils/taskDuplicateKey.js";
 import { formatTaskDisplayParts, vehicleRecordId } from "../../utils/taskDisplayName.js";
@@ -819,19 +821,12 @@ function generalLifecycleStatus(taskType, closeRequest, storedStatus) {
     if (String(taskType || "") !== "General Task") return "";
     const saved = closeRequest || {};
     if (saved.closedAt && !saved.reviewPending) return "Closed";
-    if (saved.reopenedAt && !saved.closedAt && storedStatus === "Pending") return "Reopened";
+    if (saved.reopenedAt && !saved.closedAt && storedStatus === "Pending") return "Open";
     return "";
 }
 
-function canDeleteTask(viewer, { manual, requestedByName, requestedByUserId }) {
-    if (viewer?.superUser) return true;
-    if (!manual) return false;
-    if (requestedByUserId) {
-        return Boolean(viewer?.userId && String(requestedByUserId) === String(viewer.userId));
-    }
-    const owner = String(requestedByName || "").trim().toLowerCase();
-    const name = String(viewer?.name || "").trim().toLowerCase();
-    return Boolean(owner && name && owner === name);
+function canDeleteTask(viewer, fields) {
+    return viewerMayDeleteTask(viewer, fields);
 }
 
 function viewerCanReturnTask(viewer, row) {
@@ -862,23 +857,31 @@ function viewerOwnsOriginal(viewer, row) {
     return Boolean(originalName && viewerName && originalName === viewerName);
 }
 
-function assigneeColumns({ assigneeName, assigneeId, assigneePhoto, originalAssigneeName, originalAssigneeId, byId, photoForName }) {
-    const pair = reassignmentAssignees({ assigneeName, originalAssigneeName });
+function assigneeColumns({ assigneeName, assigneeId, assigneePhoto, originalAssigneeName, originalAssigneeId, byId, photoForName, closed = false }) {
+    const pair = reassignmentAssignees({ assigneeName, originalAssigneeName, closed });
     const originalRecord = byId.get(String(originalAssigneeId || ""));
     const currentPhoto = assigneePhoto || "";
     const originalPhoto = originalRecord?.profilePicture || photoForName(pair.mainAssigneeName) || "";
     const reassigned = Boolean(pair.reassignedAssigneeName);
+    const originalOnly = Boolean(closed && String(originalAssigneeName || "").trim());
     return {
         mainAssigneeName: pair.mainAssigneeName,
         reassignedAssigneeName: pair.reassignedAssigneeName,
-        mainAssigneePhoto: reassigned ? originalPhoto : currentPhoto,
+        mainAssigneePhoto: reassigned || originalOnly ? originalPhoto : currentPhoto,
         reassignedAssigneePhoto: reassigned ? currentPhoto : "",
         reassignedAssigneeId: reassigned ? String(assigneeId || "") : "",
         originalAssigneeEmpId: String(originalRecord?.employeeId || "").trim(),
+        assigneeLockedToOriginal: originalOnly,
+        listedAssigneeId: originalOnly ? String(originalAssigneeId || assigneeId || "") : "",
+        listedAssigneeName: originalOnly ? pair.mainAssigneeName : "",
+        listedAssigneePhoto: originalOnly ? originalPhoto : "",
+        listedAssigneeEmpId: originalOnly ? String(originalRecord?.employeeId || "").trim() : "",
     };
 }
 
-function taskMine(viewer, { assigneeId, assigneeEmpId, assigneeName, row, requesterName, requestedByUserId }) {
+function taskMine(viewer, { assigneeId, assigneeEmpId, assigneeName, row, requesterName, requestedByUserId, closed = false }) {
+    const originalName = String(row?.closeRequest?.originalAssigneeName || "").trim();
+    if (closed && originalName) return viewerOwnsOriginal(viewer, row);
     const shown = String(assigneeName || "").trim();
     const pair = reassignmentAssignees({
         assigneeName: shown,
@@ -1295,8 +1298,15 @@ export const getTaskManagerNotifications = async (req, res) => {
         const overlayByAction = collapsedTasks.overlayByAction;
         const hiddenOverlayIds = collapsedTasks.hiddenOverlayIds;
         const actionById = new Map((actions || []).map((action) => [String(action._id), action]));
+        const deletedNoticeSet = new Set(await listDeletedNoticeKeys());
+        const suppressedActionIds = new Set(
+            (actions || [])
+                .filter((action) => noticeKeysForRecord(action).some((key) => deletedNoticeSet.has(key)))
+                .map((action) => String(action._id)),
+        );
         const listedTaskKeys = new Set();
         const uniqueActions = dedupeOpenActions(collapsedTasks.rows).filter((action) => {
+            if (suppressedActionIds.has(String(action._id))) return false;
             const overlay = overlayByAction.get(String(action._id));
             if (taskInvolvesLeftUser(overlay?.assignee || action.assignedTo, overlay?.assigneeEmpId || action.assignedToEmpId)) {
                 return false;
@@ -1381,6 +1391,8 @@ export const getTaskManagerNotifications = async (req, res) => {
             const originalAssigneeName = String(overlay?.closeRequest?.originalAssigneeName || "").trim();
             const originalAssigneeId = String(overlay?.closeRequest?.originalAssigneeId || "");
             const requesterName = requesterBase;
+            const assigneeClosed = String(overlay?.status || "") === "Completed"
+                || (Boolean(overlay?.closeRequest?.closedAt) && !overlay?.closeRequest?.reviewPending);
             const assigneeDisplay = assigneeColumns({
                 assigneeName,
                 assigneeId,
@@ -1389,6 +1401,7 @@ export const getTaskManagerNotifications = async (req, res) => {
                 originalAssigneeId,
                 byId,
                 photoForName,
+                closed: assigneeClosed,
             });
             const destination = moduleForRequestType(action.requestType, `${action.extra1 || ""} ${action.extra2 || ""}`);
             const category = taskCategory(action.requestType, action.extra2 || "");
@@ -1418,20 +1431,20 @@ export const getTaskManagerNotifications = async (req, res) => {
                 overlay?.closeRequest,
                 overlay?.status,
             );
-            if (life) status = life;
+            if (overlay?.status === "Rejected") status = "Rejected";
+            else if (overlay?.status === "Cancelled") status = "Cancelled";
+            else if (life) status = life;
             else if (closedReview && overlay?.status !== "Completed") status = "Closed";
             else if (overlay?.status === "Completed") status = "Completed";
-            else if (overlay?.status === "Rejected") status = "Rejected";
-            else if (overlay?.status === "Cancelled") status = "Cancelled";
             else if (overlay?.status === "In Progress") status = "In Progress";
             else if (overlay?.status === "Pending" && overlay?.closeRequest?.reopenedAt) {
-                status = displayStatus("Pending", action.requestType, requestedKey, todayKey);
+                status = "Open";
             }
-            const actionsLocked = status === "Closed";
+            const actionsLocked = status === "Closed" || status === "Rejected" || status === "Cancelled";
 
             summary.total += 1;
             bump("total", requestMonth);
-            if (status === "Pending" || status === "On Hold" || status === "Pending Due" || status === "In Progress" || status === "Reopened") {
+            if (status === "Pending" || status === "On Hold" || status === "Pending Due" || status === "In Progress" || status === "Reopened" || status === "Open" || status === "Pending Review") {
                 summary.pending += 1;
                 bump("pending", requestMonth);
                 if (status === "Pending Due") {
@@ -1449,7 +1462,12 @@ export const getTaskManagerNotifications = async (req, res) => {
                 workflowLocked: action.requestType !== "Task Manager",
                 canReassign: !actionsLocked && (viewerCanReassign(viewer, assigneeId, assigneeEmpId) || viewerOwnsOriginal(viewer, overlay)),
                 canReturn: viewerCanReturnTask(viewer, overlay),
-                canDelete: !actionsLocked && canDeleteTask(viewer, { manual: false, requestedByName: requesterBase }),
+                canDelete: !actionsLocked && canDeleteTask(viewer, {
+                    taskCategory: category,
+                    requestedByName: requesterBase,
+                    requestedByUserId: overlay?.requestedByUserId,
+                    closed: actionsLocked,
+                }),
                 taskNumber: "",
                 requestDate: requestedAt,
                 reassignedAt: latestReassignedAt(overlay),
@@ -1472,10 +1490,12 @@ export const getTaskManagerNotifications = async (req, res) => {
                 originalAssigneeId,
                 originalAssigneeEmpId: assigneeDisplay.originalAssigneeEmpId || String(overlay?.closeRequest?.originalAssigneeEmpId || "").trim(),
                 ...assigneeDisplay,
-                assigneeId,
-                assigneeName,
-                assigneePhoto: assigneeRecord?.profilePicture || "",
-                assigneeEmpId: String(assigneeRecord?.employeeId || assigneeEmpId).trim(),
+                assigneeId: assigneeDisplay.assigneeLockedToOriginal ? assigneeDisplay.listedAssigneeId : assigneeId,
+                assigneeName: assigneeDisplay.assigneeLockedToOriginal ? assigneeDisplay.listedAssigneeName : assigneeName,
+                assigneePhoto: assigneeDisplay.assigneeLockedToOriginal ? assigneeDisplay.listedAssigneePhoto : (assigneeRecord?.profilePicture || ""),
+                assigneeEmpId: assigneeDisplay.assigneeLockedToOriginal
+                    ? (assigneeDisplay.listedAssigneeEmpId || String(overlay?.closeRequest?.originalAssigneeEmpId || "").trim())
+                    : String(assigneeRecord?.employeeId || assigneeEmpId).trim(),
                 priority,
                 module: destination.module,
                 moduleLabel: destination.label,
@@ -1486,6 +1506,7 @@ export const getTaskManagerNotifications = async (req, res) => {
                     assigneeName,
                     row: overlay,
                     requesterName: requesterBase,
+                    closed: assigneeClosed,
                 }),
                 displayStatus: status,
                 rawStatus: action.status || "Pending",
@@ -1509,6 +1530,7 @@ export const getTaskManagerNotifications = async (req, res) => {
             ...manualRows.filter((row) => {
                 if (hiddenOverlayIds.has(String(row._id))) return false;
                 const sourceId = String(row.sourceDashboardActionId || "");
+                if (sourceId && suppressedActionIds.has(sourceId)) return false;
                 if (!sourceId || listedActionIds.has(sourceId)) return false;
                 const source = actionById.get(sourceId);
                 const sourceKey = source ? actionDuplicateKey(source) : "";
@@ -1523,25 +1545,29 @@ export const getTaskManagerNotifications = async (req, res) => {
             const requestedKey = dubaiDateKey(requestedAt);
             const dueKey = dubaiDateKey(row.completionDate);
             const closedReview = Boolean(row.closeRequest?.closedAt) && !row.closeRequest?.reviewPending;
-            const open = row.status !== "Completed" && row.status !== "Cancelled" && !closedReview;
+            const open = row.status !== "Completed" && row.status !== "Cancelled" && row.status !== "Rejected" && !closedReview;
             const generalReview = String(row.taskType || "") === "General Task" && !row.sourceDashboardActionId;
             const life = generalLifecycleStatus(row.taskType, row.closeRequest, row.status);
-            const status = life
+            const status = row.status === "Rejected"
+                ? "Rejected"
+                : row.status === "Cancelled"
+                ? "Cancelled"
+                : life
                 ? life
                 : closedReview
                 ? "Closed"
                 : row.status === "Completed"
                 ? "Completed"
-                : row.status === "Cancelled"
-                    ? "Cancelled"
-                    : generalReview && row.closeRequest?.reviewPending
+                : generalReview && row.closeRequest?.reviewPending
                         ? "Pending Review"
                         : generalReview && row.closeRequest?.reviewReturned
                             ? "Open"
-                            : open && daysBetween(requestedKey, todayKey) >= 2
-                                ? "Pending Due"
-                                : "Pending";
-            const actionsLocked = status === "Closed";
+                            : row.status === "Pending" && row.closeRequest?.reopenedAt && !row.closeRequest?.reviewPending
+                                ? "Open"
+                                : open && daysBetween(requestedKey, todayKey) >= 2
+                                    ? "Pending Due"
+                                    : "Pending";
+            const actionsLocked = status === "Closed" || status === "Rejected" || status === "Cancelled";
             const assignee = byId.get(String(row.assignee || "")) || null;
             const heldAssignee = String(row.closeRequest?.returnAssigneeName || "").trim();
             const rawAssigneeName = heldAssignee || personName(assignee) || row.assigneeName || row.assigneeEmpId || "Unassigned";
@@ -1554,6 +1580,7 @@ export const getTaskManagerNotifications = async (req, res) => {
             const originalAssigneeId = String(row.closeRequest?.originalAssigneeId || "");
             const requesterName = requesterBase;
             const assigneeId = String(row.assignee || "");
+            const assigneeClosed = status === "Completed" || status === "Closed";
             const assigneeDisplay = assigneeColumns({
                 assigneeName,
                 assigneeId,
@@ -1562,6 +1589,7 @@ export const getTaskManagerNotifications = async (req, res) => {
                 originalAssigneeId,
                 byId,
                 photoForName,
+                closed: assigneeClosed,
             });
             const requestMonth = monthKeyFromDateKey(requestedKey);
             const completedMonth = monthKeyFromDateKey(dueKey);
@@ -1589,9 +1617,10 @@ export const getTaskManagerNotifications = async (req, res) => {
                 canReassign: !actionsLocked && (viewerCanReassign(viewer, assigneeId, row.assigneeEmpId) || viewerOwnsOriginal(viewer, row)),
                 canReturn: viewerCanReturnTask(viewer, row),
                 canDelete: !actionsLocked && canDeleteTask(viewer, {
-                    manual: true,
+                    taskCategory: category,
                     requestedByName: requesterName,
                     requestedByUserId: row.requestedByUserId,
+                    closed: actionsLocked,
                 }),
                 taskNumber: "",
                 requestDate: requestedAt,
@@ -1610,10 +1639,12 @@ export const getTaskManagerNotifications = async (req, res) => {
                 originalAssigneeId,
                 originalAssigneeEmpId: assigneeDisplay.originalAssigneeEmpId || String(row.closeRequest?.originalAssigneeEmpId || "").trim(),
                 ...assigneeDisplay,
-                assigneeId,
-                assigneeName,
-                assigneePhoto: assignee?.profilePicture || "",
-                assigneeEmpId: String(assignee?.employeeId || row.assigneeEmpId || "").trim(),
+                assigneeId: assigneeDisplay.assigneeLockedToOriginal ? assigneeDisplay.listedAssigneeId : assigneeId,
+                assigneeName: assigneeDisplay.assigneeLockedToOriginal ? assigneeDisplay.listedAssigneeName : assigneeName,
+                assigneePhoto: assigneeDisplay.assigneeLockedToOriginal ? assigneeDisplay.listedAssigneePhoto : (assignee?.profilePicture || ""),
+                assigneeEmpId: assigneeDisplay.assigneeLockedToOriginal
+                    ? (assigneeDisplay.listedAssigneeEmpId || String(row.closeRequest?.originalAssigneeEmpId || "").trim())
+                    : String(assignee?.employeeId || row.assigneeEmpId || "").trim(),
                 priority: category === "System Task" ? "High" : (row.priority || "Medium"),
                 module: destination.module,
                 moduleLabel: destination.label,
@@ -1625,6 +1656,7 @@ export const getTaskManagerNotifications = async (req, res) => {
                     row,
                     requesterName: requesterBase,
                     requestedByUserId: row.requestedByUserId,
+                    closed: assigneeClosed,
                 }),
                 displayStatus: status,
                 rawStatus: row.status || "Pending",
@@ -1634,7 +1666,7 @@ export const getTaskManagerNotifications = async (req, res) => {
                 extra2: "",
                 extra3: "",
                 targetEmployeeId: row.assigneeEmpId || "",
-                subjectName: assigneeName,
+                subjectName: assigneeDisplay.assigneeLockedToOriginal ? assigneeDisplay.listedAssigneeName : assigneeName,
                 requestedBy: requesterName,
                 requestedByName: requesterName,
                 status: row.status || "Pending",
@@ -2016,14 +2048,14 @@ export async function listProfileEmployeeTasks({ employeeId, employeeCode, emplo
                 overlay?.closeRequest,
                 overlay?.status,
             );
-            if (life) status = life;
+            if (overlay?.status === "Rejected") status = "Rejected";
+            else if (overlay?.status === "Cancelled") status = "Cancelled";
+            else if (life) status = life;
             else if (closedReview && overlay?.status !== "Completed") status = "Closed";
             else if (overlay?.status === "Completed") status = "Completed";
-            else if (overlay?.status === "Rejected") status = "Rejected";
-            else if (overlay?.status === "Cancelled") status = "Cancelled";
             else if (overlay?.status === "In Progress") status = "In Progress";
             else if (overlay?.status === "Pending" && overlay?.closeRequest?.reopenedAt) {
-                status = displayStatus("Pending", action.requestType, requestedKey, todayKey);
+                status = "Open";
             }
             const requesterBase = displayRequesterName(
                 preferRequesterName(overlay?.requestedByName, action.requestedByName),
@@ -2067,7 +2099,7 @@ export async function listProfileEmployeeTasks({ employeeId, employeeCode, emplo
         for (const row of createdRows) {
             const requestedAt = row.createdAt || null;
             const requestedKey = dubaiDateKey(requestedAt);
-            const open = row.status !== "Completed" && row.status !== "Cancelled";
+            const open = row.status !== "Completed" && row.status !== "Cancelled" && row.status !== "Rejected";
             const life = generalLifecycleStatus(row.taskType, row.closeRequest, row.status);
             const status = life
                 ? life
@@ -2075,9 +2107,11 @@ export async function listProfileEmployeeTasks({ employeeId, employeeCode, emplo
                 ? "Completed"
                 : row.status === "Cancelled"
                     ? "Cancelled"
-                    : open && daysBetween(requestedKey, todayKey) >= 2
-                        ? "Pending Due"
-                        : "Pending";
+                    : row.status === "Rejected"
+                        ? "Rejected"
+                        : open && daysBetween(requestedKey, todayKey) >= 2
+                            ? "Pending Due"
+                            : "Pending";
             const requesterBase = String(row.requestedByName || "").trim() || "System";
             const originalAssigneeName = String(row.closeRequest?.originalAssigneeName || "").trim();
             const requesterName = requesterBase;

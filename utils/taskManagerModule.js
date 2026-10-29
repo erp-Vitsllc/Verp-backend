@@ -601,7 +601,8 @@ function plainPersonName(value) {
 
 /**
  * Reassignment does not change the requester.
- * The original assignee stays the main assignee, and the new assignee is listed under them.
+ * While the task is open, the original assignee stays the main assignee and the new assignee is listed under them.
+ * Once that task is closed, only the original assignee remains.
  */
 /** Latest reassignment time. Empty when the task has never been reassigned. */
 export function latestReassignedAt(row) {
@@ -619,9 +620,16 @@ export function latestReassignedAt(row) {
 export function reassignmentAssignees({
     assigneeName = "",
     originalAssigneeName = "",
+    closed = false,
 } = {}) {
     const current = plainPersonName(assigneeName);
     const original = plainPersonName(originalAssigneeName);
+    if (closed && original) {
+        return {
+            mainAssigneeName: original,
+            reassignedAssigneeName: "",
+        };
+    }
     const namesDiffer = Boolean(
         original
         && current
@@ -808,7 +816,7 @@ export async function promoteDueTaskCompletions() {
         task.history = task.history || [];
         task.history.push({
             event: "Completed",
-            detail: "Two days passed after the assignee closed this task. The status is Completed and Reopen Request is disabled.",
+            detail: "Two days passed after the assignee closed this task. The status is Completed. An admin super user can reopen it. The requester of a general task can reopen it with a reason.",
             actorName: "Task Manager",
             createdAt: new Date(),
         });
@@ -818,7 +826,7 @@ export async function promoteDueTaskCompletions() {
             authorRole: "",
             kind: "Completed",
             badge: "Completed",
-            text: "Two days passed after the close. The status is Completed and Reopen Request is disabled.",
+            text: "Two days passed after the close. The status is Completed. An admin super user can reopen it. The requester of a general task can reopen it with a reason.",
             emailSent: false,
             assigneeNotified: false,
             requesterNotified: false,
@@ -1067,7 +1075,9 @@ export async function syncManualTaskNotification(task) {
             assignedToEmpId: task.assigneeEmpId || "",
             requestId: task._id,
             requestType: "Task Manager",
-            status: closed ? (task.status === "Cancelled" || task.status === "Rejected" ? "Dismissed" : "Approved") : "Pending",
+            status: closed
+                ? (task.status === "Rejected" ? "Rejected" : task.status === "Cancelled" ? "Dismissed" : "Approved")
+                : "Pending",
             subjectEmployeeId: task.assigneeEmpId || "",
             subjectName: task.assigneeName || "",
             requestedByName: task.requestedByName || "",

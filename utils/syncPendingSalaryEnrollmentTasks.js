@@ -8,6 +8,8 @@ import {
 } from './attendanceEmployeeFilters.js';
 import { isPlaceholderEmployeeId } from './employeeIdPrefix.js';
 import { getDepartmentHOD } from './getDepartmentHOD.js';
+import DeletedTaskNotice from '../models/DeletedTaskNotice.js';
+import { salaryEnrollmentEmployeeKey } from './deletedTaskNotice.js';
 import {
     isPendingEnrollmentReminder,
     PENDING_ENROLLMENT_EXTRA,
@@ -129,7 +131,17 @@ async function flowchartHrAssignee() {
 async function runSync() {
     const hr = await flowchartHrAssignee();
     const pending = await listEmployeesPendingEnrollment();
-    const pendingKeys = new Set(pending.map((emp) => employeeCodeKey(emp.employeeId)));
+    const blockedKeys = new Set();
+    const noticeKeys = pending.map((emp) => salaryEnrollmentEmployeeKey(emp.employeeId)).filter(Boolean);
+    if (noticeKeys.length) {
+        const blocked = await DeletedTaskNotice.find({ noticeKey: { $in: noticeKeys } })
+            .select('noticeKey')
+            .lean()
+            .maxTimeMS(8000);
+        for (const row of blocked || []) blockedKeys.add(String(row.noticeKey || ''));
+    }
+    const openPending = pending.filter((emp) => !blockedKeys.has(salaryEnrollmentEmployeeKey(emp.employeeId)));
+    const pendingKeys = new Set(openPending.map((emp) => employeeCodeKey(emp.employeeId)));
 
     const openReminders = await DashboardAction.find({
         requestType: PENDING_ENROLLMENT_REQUEST_TYPE,
@@ -160,12 +172,12 @@ async function runSync() {
         );
     }
 
-    if (!hr || !pending.length) {
+    if (!hr || !openPending.length) {
         return { ok: true, upserted: 0, dismissed: staleIds.length };
     }
 
     const now = new Date();
-    const ops = pending.map((emp) => {
+    const ops = openPending.map((emp) => {
         const employeeId = String(emp.employeeId).trim();
         const name = employeeName(emp);
         const href = `/HRM/Salary/enroll/${encodeURIComponent(employeeId)}`;

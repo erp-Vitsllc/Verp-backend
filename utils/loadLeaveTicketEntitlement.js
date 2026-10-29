@@ -251,6 +251,26 @@ export async function projectEligibleWorkingDate({ from, workingDaysNeeded, staf
     return '';
 }
 
+/** The next `count` working dates from `from`. Holidays and weekly offs are skipped. */
+export async function projectWorkingDateKeys({ from, count, staffType }) {
+    const need = Math.max(0, Math.ceil(Number(count) || 0));
+    if (!isDateKey(from) || need <= 0) return [];
+    const keys = [];
+    let cursor = from;
+    for (let guard = 0; guard < 30 && keys.length < need; guard += 1) {
+        const span = Math.min(400, Math.max((need - keys.length) * 2 + 14, 45));
+        const end = addDays(cursor, span - 1);
+        if (!isDateKey(end)) break;
+        const result = await calcWorkingDays({ from: cursor, to: end, staffType });
+        keys.push(...(result.workingDateKeys || []));
+        if (keys.length >= need) return keys.slice(0, need);
+        const next = addDays(end, 1);
+        if (!isDateKey(next) || next <= cursor) break;
+        cursor = next;
+    }
+    return keys.slice(0, need);
+}
+
 export async function dateEmployeeReachesWorkingDays({ workingDaysNeeded, staffType }) {
     const tomorrow = addDays(dubaiDateKey(), 1);
     return projectEligibleWorkingDate({

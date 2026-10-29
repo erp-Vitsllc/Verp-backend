@@ -7,6 +7,7 @@ import {
     isWeekOffForStaff,
     loadWorkingTimeDoc,
     normalizeStaffType,
+    weekdayKeyFromDateKey,
 } from './workingTimeHelpers.js';
 
 function scheduleLabel(staffType) {
@@ -46,6 +47,25 @@ export async function nonWorkingAttendanceMark(employee, date) {
     ]);
     const week = getWeekForStaffType(workingTime, staffType);
     return nonWorkingFromContext({ holiday, week, staffType, date });
+}
+
+/**
+ * Holiday or weekly off, and every Sunday.
+ * Sunday stays compensable when the schedule lists it as a working day.
+ * This does not change the stored day status.
+ */
+export function compensableNonWorkingContext({ holiday, week, staffType, date }) {
+    const baseline = nonWorkingFromContext({ holiday, week, staffType, date });
+    if (baseline) return baseline;
+    if (weekdayKeyFromDateKey(date) === 'sunday') {
+        return {
+            kind: 'sunday',
+            statusKey: 'weekly_off',
+            statusLabel: 'Sunday',
+            reason: 'Sunday',
+        };
+    }
+    return null;
 }
 
 async function revertSyntheticOtDay(employeeMongoId, nextDayDate, sourceDate) {

@@ -621,6 +621,93 @@ export function sumApprovedOvertimeHours(rows = []) {
     return Math.round(hours * 100) / 100;
 }
 
+function roundOvertimeHours(value) {
+    return Math.round((Number(value) || 0) * 100) / 100;
+}
+
+/**
+ * Approved overtime that still counts as overtime.
+ * A next-day present, or a comp off adjusted from overtime, already used those hours.
+ * Those hours are not overtime again.
+ */
+function compOffDayHours(row) {
+    const placed = Number(row?.flexibleWorkedHours) || 0;
+    if (placed > 0) return placed;
+    return OVERTIME_HOURS_PER_DAY;
+}
+
+function isPresentCompOffDay(row) {
+    if (!row || resolveOwnedAttendanceLeave(row)) return false;
+    const linked = Boolean(String(row?.flexibleFromOtDate || '').trim());
+    const synthetic =
+        String(row?.timeIn || '').trim() === 'OT' || String(row?.timeOut || '').trim() === 'OT';
+    if (!linked && !synthetic) return false;
+    const key = String(row?.statusKey || '').trim();
+    return LIVE_WORKING_STATUS_KEYS.has(key) || linked || synthetic;
+}
+
+export function eligibleOvertimeHours(rows = []) {
+    const list = Array.isArray(rows) ? rows : [];
+    const byDate = new Map();
+    for (const row of list) {
+        const date = String(row?.date || '').trim();
+        if (date) byDate.set(date, row);
+    }
+    const overtimeRecords = [];
+    const consumedNextDays = new Set();
+    for (const row of list) {
+        if (String(row?.flexibleOtStatus || '') !== 'approved') continue;
+        const approved = Math.max(0, Number(row?.flexibleOtApprovedHours) || 0);
+        if (!(approved > 0)) continue;
+        const date = String(row.date || '').trim();
+        const next = String(row?.flexibleOtNextDayDate || '').trim();
+        let remain = approved;
+        if (next) {
+            const target = byDate.get(next);
+            const consumed = Math.min(approved, compOffDayHours(target));
+            remain = roundOvertimeHours(approved - consumed);
+            if (date) consumedNextDays.add(`${date}|${next}`);
+        }
+        if (!(remain > 0)) continue;
+        overtimeRecords.push({
+            date,
+            hours: remain,
+            days: 0,
+            isOffDay: false,
+        });
+    }
+    for (const row of list) {
+        if (!isPresentCompOffDay(row)) continue;
+        const from = String(row?.flexibleFromOtDate || '').trim();
+        const date = String(row?.date || '').trim();
+        if (!from || !date || consumedNextDays.has(`${from}|${date}`)) continue;
+        const source = overtimeRecords.find((record) => record.date === from && record.hours > 0);
+        if (!source) continue;
+        const consumed = Math.min(source.hours, compOffDayHours(row));
+        source.hours = roundOvertimeHours(source.hours - consumed);
+        consumedNextDays.add(`${from}|${date}`);
+    }
+    let deduct = 0;
+    for (const row of list) {
+        if (String(row?.compOff?.state || '') !== 'adjusted') continue;
+        deduct += Number(row?.compOff?.otHoursDeducted) || OVERTIME_HOURS_PER_DAY;
+    }
+    let left = roundOvertimeHours(deduct);
+    for (const record of overtimeRecords) {
+        if (!(left > 0)) break;
+        const take = Math.min(record.hours, left);
+        record.hours = roundOvertimeHours(record.hours - take);
+        left = roundOvertimeHours(left - take);
+    }
+    const kept = overtimeRecords.filter((record) => record.hours > 0);
+    const hours = roundOvertimeHours(kept.reduce((sum, record) => sum + record.hours, 0));
+    return {
+        hours,
+        days: overtimeHoursToDays(hours),
+        overtimeRecords: kept,
+    };
+}
+
 function systemDayLeaveRecord(date, leaveType, status = 'approved', remarks = '') {
     return {
         leaveType,

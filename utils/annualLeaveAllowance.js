@@ -5,7 +5,7 @@ import {
     policyLeaveWorkingDays,
     twelveMonthPeriodEnd,
 } from './salaryHistoricalCalculations.js';
-import { calcWorkingDays, dubaiDateKey, toDateKey } from './loadLeaveTicketEntitlement.js';
+import { calcWorkingDays, dubaiDateKey, projectWorkingDateKeys, toDateKey } from './loadLeaveTicketEntitlement.js';
 
 export const ANNUAL_LEAVE_ALLOWED_DAYS = 30;
 
@@ -270,7 +270,8 @@ export function buildAnnualLeaveWindows({
         const pendingDays = pendingDaysByRow[index];
         const usedDays = usedDaysByRow[index];
         const approvedDays = Math.max(0, usedDays - pendingDays);
-        const cycleReady = counted.length >= (index + 1) * step;
+        const needed = (index + 1) * step;
+        const cycleReady = counted.length >= needed;
         const lapsed = Boolean(todayKey && period.takeUntil <= todayKey);
         const status = lapsed ? 'Lapsed' : cycleReady ? 'Active' : 'Inactive';
         const eligible = status !== 'Inactive';
@@ -281,6 +282,7 @@ export function buildAnnualLeaveWindows({
             startDate: period.startDate,
             endDate: period.endDate,
             takeUntil: period.takeUntil,
+            eligibleOn: counted.length >= needed ? counted[needed - 1] : '',
             allowedDays: eligible ? allowed : 0,
             approvedDays,
             pendingDays,
@@ -309,7 +311,43 @@ export function buildAnnualLeaveWindows({
         remainingDays: active ? active.remainingDays : 0,
         startDate: active?.startDate || '',
         endDate: active?.endDate || '',
+        countedDateKeys: counted,
     };
+}
+
+const MAX_PROJECTED_WORKING_DAYS = 900;
+
+async function attachEligibleDates(allowance, staffType) {
+    try {
+        const keys = Array.isArray(allowance?.countedDateKeys) ? allowance.countedDateKeys : [];
+        const step = Math.max(1, Number(allowance?.cycleDays) || 300);
+        const pending = (allowance?.windows || []).filter(
+            (window) => !window.eligibleOn && window.status !== 'Lapsed',
+        );
+        if (!pending.length) return allowance;
+        const maxNeed = Math.max(...pending.map((window) => window.index * step));
+        const left = Math.min(MAX_PROJECTED_WORKING_DAYS, maxNeed - keys.length);
+        const from = keys.length ? addDays(keys[keys.length - 1], 1) : pending[0].startDate;
+        const future = left > 0 ? await projectWorkingDateKeys({ from, count: left, staffType }) : [];
+        for (const window of pending) {
+            const index = window.index * step - keys.length - 1;
+            window.eligibleOn = index >= 0 ? future[index] || '' : '';
+        }
+        return allowance;
+    } finally {
+        if (allowance) delete allowance.countedDateKeys;
+    }
+}
+
+function windowOpensOnEligibleDate(item, start, end) {
+    return (
+        item?.status === 'Inactive' &&
+        isDateKey(item.eligibleOn) &&
+        isDateKey(start) &&
+        isDateKey(end) &&
+        start >= item.eligibleOn &&
+        end <= item.takeUntil
+    );
 }
 
 export function annualLeaveRequestBlock(allowance, { from = '', to = '', requestedDates = [] } = {}) {
@@ -319,10 +357,18 @@ export function annualLeaveRequestBlock(allowance, { from = '', to = '', request
     const dated = isDateKey(start) && isDateKey(end);
     const datedRow = dated
         ? windows.find((item) => start >= item.startDate && end <= item.takeUntil && item.remainingDays > 0 && item.status === 'Active')
+            || windows.find((item) => windowOpensOnEligibleDate(item, start, end))
             || windows.find((item) => start >= item.startDate && end <= item.takeUntil)
         : null;
     const row = datedRow || allowance?.active || windows.find((item) => item.status === 'Active') || null;
     if (!row) {
+        if (!dated && windows.some((item) => item.status === 'Inactive')) {
+            const cycle = allowance?.cycleDays || 300;
+            return {
+                ok: false,
+                message: `Annual leave opens when counted working days complete the next ${cycle}-day cycle.`,
+            };
+        }
         return {
             ok: false,
             message: 'Annual leave follows 12-month periods from the contract joining date. These dates are outside every period.',
@@ -334,7 +380,8 @@ export function annualLeaveRequestBlock(allowance, { from = '', to = '', request
             message: `Annual leave for ${row.startDate} to ${row.endDate} has lapsed and those days cannot be taken.`,
         };
     }
-    if (row.status !== 'Active') {
+    const laterOpen = windowOpensOnEligibleDate(row, start, end);
+    if (row.status !== 'Active' && !laterOpen) {
         const cycle = allowance?.cycleDays || 300;
         return {
             ok: false,
@@ -342,14 +389,28 @@ export function annualLeaveRequestBlock(allowance, { from = '', to = '', request
         };
     }
     const days = Array.isArray(requestedDates) ? requestedDates.length : 0;
+    const allowed = Math.max(0, Number(allowance?.allowedDays) || ANNUAL_LEAVE_ALLOWED_DAYS);
     let capacity = 0;
     let started = false;
     for (const item of windows) {
         if (item.index === row.index) started = true;
         if (!started) continue;
         if (dated && end > item.takeUntil) break;
-        if (item.status !== 'Active') break;
-        capacity += item.remainingDays;
+        if (item.status === 'Active') {
+            capacity += item.remainingDays;
+            continue;
+        }
+        if (
+            item.status === 'Inactive' &&
+            isDateKey(item.eligibleOn) &&
+            dated &&
+            end >= item.eligibleOn &&
+            start <= item.takeUntil
+        ) {
+            capacity += Math.max(0, allowed - (Number(item.takenDays) || 0));
+            continue;
+        }
+        break;
     }
     if (days > capacity) {
         return {
@@ -367,7 +428,7 @@ export async function loadAnnualLeaveAllowance({ employee, profile, policy } = {
     const today = dubaiDateKey();
     const cycleDays = policyLeaveWorkingDays(policy);
     if (!employee?._id || !isDateKey(joiningDate) || joiningDate > today) {
-        return buildAnnualLeaveWindows({ cycleDays, today });
+        return attachEligibleDates(buildAnnualLeaveWindows({ cycleDays, today }), employee?.staffType);
     }
 
     const [working, attendanceRows] = await Promise.all([
@@ -421,13 +482,16 @@ export async function loadAnnualLeaveAllowance({ employee, profile, policy } = {
         }
     }
 
-    return buildAnnualLeaveWindows({
-        joiningDate,
-        workingDateKeys: working.workingDateKeys || [],
-        deductionDates,
-        undatedDeduction: historical.undatedDeduction,
-        annualLeaves,
-        cycleDays,
-        today,
-    });
+    return attachEligibleDates(
+        buildAnnualLeaveWindows({
+            joiningDate,
+            workingDateKeys: working.workingDateKeys || [],
+            deductionDates,
+            undatedDeduction: historical.undatedDeduction,
+            annualLeaves,
+            cycleDays,
+            today,
+        }),
+        employee.staffType,
+    );
 }

@@ -20,6 +20,7 @@ import {
 import { closeStaleProbationChangeTasksFromPendingRows } from "../../utils/sendProbationWorkflowEmail.js";
 import { isAcceptedAssignmentOutcomeNotification } from "../../utils/isAcceptedAssignmentOutcomeNotification.js";
 import { filterAndCloseCompletedAssetDutyDashboardRows } from "../../utils/closeCompletedAssignmentNotifications.js";
+import { listDeletedNoticeKeys, noticeKeysForRecord } from "../../utils/deletedTaskNotice.js";
 import {
     buildProfileActivationApprovedMessage,
     buildProfileActivationEntityLine,
@@ -2220,19 +2221,26 @@ export const getUserActivityStats = async (req, res) => {
         const finalActivityList = await filterStaleEmployeeActivationInboxItems(
             await filterCompletedCompanyActivationItems(activityList),
         );
+        const deletedNoticeKeys = await listDeletedNoticeKeys();
+        const deletedNoticeSet = new Set(deletedNoticeKeys);
+        const visibleActivityList = finalActivityList.filter((item) => {
+            const keys = noticeKeysForRecord(item);
+            return !keys.some((key) => deletedNoticeSet.has(key));
+        });
 
         // Final counts
-        const pendingCount = finalActivityList.filter(i => i.status === 'Pending').length;
-        const approvedCount = finalActivityList.filter(i => i.status === 'Approved').length;
-        const rejectedCount = finalActivityList.filter(i => (i.status === 'Rejected' || i.status === 'rejected')).length;
+        const pendingCount = visibleActivityList.filter(i => i.status === 'Pending').length;
+        const approvedCount = visibleActivityList.filter(i => i.status === 'Approved').length;
+        const rejectedCount = visibleActivityList.filter(i => (i.status === 'Rejected' || i.status === 'rejected')).length;
 
         res.status(200).json({
             pending: pendingCount,
             approved: approvedCount,
             rejected: rejectedCount,
-            total: finalActivityList.length,
+            total: visibleActivityList.length,
             flowchartHrEmployeeObjectId: flowchartHrEmp?._id ? String(flowchartHrEmp._id) : null,
-            items: finalActivityList.sort((a, b) => {
+            deletedNoticeKeys,
+            items: visibleActivityList.sort((a, b) => {
                 const dateA = new Date(a.actionedDate || a.requestedDate || 0);
                 const dateB = new Date(b.actionedDate || b.requestedDate || 0);
                 return dateB - dateA;

@@ -52,6 +52,7 @@ import {
     isNotificationEnabledForType,
     isEmailEnabledForEvent,
 } from "./notificationEmailPermission.js";
+import { expiryNoticeAlreadyDeleted } from "./deletedTaskNotice.js";
 
 const STAGE_1_MARKER = 30;
 const STAGE_2_MARKER = 20;
@@ -180,6 +181,13 @@ const ensureDashboardAction = async ({
     requestType = "Document Expiry Reminder",
 }) => {
     if (!assignedTo || !requestId) return;
+    if (await expiryNoticeAlreadyDeleted({
+        requestType,
+        requestId,
+        subjectEmployeeId,
+        extra1,
+        extra3,
+    })) return;
     const notifyOk = await isNotificationEnabledForType(requestType);
     if (!notifyOk) return;
     const label = documentTaskLabel(extra1);

@@ -1,6 +1,8 @@
 import Attendance from '../models/Attendance.js';
 import EmployeeBasic from '../models/EmployeeBasic.js';
-import { notifyPrimaryReporteeOfLeaveRequest } from '../utils/notifyLeaveDashboardRequest.js';
+import { getDepartmentHOD } from '../utils/getDepartmentHOD.js';
+import { settleFulfilledLeaveRequest } from '../utils/leaveRequestSettlement.js';
+import { sendAttendanceDirectChangeEmail } from '../utils/sendAttendanceLeaveEmails.js';
 import { loadCompOffMonth, settleCompOffDay } from '../utils/compOffSettlement.js';
 
 const DATE_KEY = /^\d{4}-\d{2}-\d{2}$/;
@@ -57,7 +59,7 @@ export async function settleCompOff(req, res) {
 /**
  * POST /api/Attendance/me/compoff-request
  * Body: { date, reason }
- * The day stays unchanged until the primary reportee approves it as comp-off leave.
+ * The day becomes comp-off leave immediately. HR and the primary reportee get a notice email.
  */
 export async function requestCompOffLeave(req, res) {
     try {
@@ -74,12 +76,10 @@ export async function requestCompOffLeave(req, res) {
         }
 
         const employee = await EmployeeBasic.findById(self._id)
-            .select('_id employeeId firstName lastName companyEmail workEmail email primaryReportee')
+            .select('_id employeeId firstName lastName companyEmail workEmail email primaryReportee staffType')
             .populate('primaryReportee', 'firstName lastName employeeId companyEmail workEmail email')
             .lean();
-        if (!employee?.primaryReportee?._id) {
-            return res.status(400).json({ message: 'Primary reportee is required before requesting comp-off leave.' });
-        }
+        if (!employee) return res.status(404).json({ message: 'No linked employee profile found for this user.' });
 
         let record = await Attendance.findOne({
             employeeMongoId: String(employee._id),
@@ -88,11 +88,10 @@ export async function requestCompOffLeave(req, res) {
         if (String(record?.statusKey || '') === 'compoff_leave') {
             return res.status(400).json({ message: 'This date is already comp-off leave.' });
         }
-        if (record?.leaveRequestStatus === 'pending') {
-            return res.status(400).json({ message: 'A leave request is already pending for this date.' });
-        }
 
         const empName = [employee.firstName, employee.lastName].filter(Boolean).join(' ').trim() || 'Employee';
+        const previousLabel = record?.statusLabel || 'Not marked';
+        const hadPendingLeave = record?.leaveRequestStatus === 'pending';
         if (!record) {
             record = new Attendance({
                 date,
@@ -105,36 +104,45 @@ export async function requestCompOffLeave(req, res) {
         }
 
         record.previousStatusKey = record.statusKey || 'not_marked';
-        record.previousStatusLabel = record.statusLabel || 'Upcoming';
-        record.requestedStatusKey = 'compoff_leave';
-        record.requestedStatusLabel = 'Comp Off Leave';
-        record.leaveRequestReason = reason;
-        record.leaveRequestKind = 'leave';
-        record.leaveRequestStatus = 'pending';
-        record.leaveApprovalStage = 'pending_reportee';
-        record.leaveRequestFromDate = date;
-        record.leaveRequestToDate = date;
-        record.leaveRequestedAt = new Date();
-        record.leaveDecidedAt = null;
-        record.leaveDecidedBy = null;
+        record.previousStatusLabel = previousLabel;
+        record.statusKey = 'compoff_leave';
+        record.statusLabel = 'Comp Off Leave';
+        record.approvalStatus = 'approved';
+        record.reason = reason;
         record.employeeId = employee.employeeId || record.employeeId || '';
         record.employeeName = empName;
-        await record.save();
+        if (hadPendingLeave) {
+            record.requestedStatusKey = 'compoff_leave';
+            record.leaveRequestStatus = 'pending';
+            await record.save();
+            await settleFulfilledLeaveRequest(record);
+        } else {
+            record.leaveRequestStatus = '';
+            record.leaveApprovalStage = '';
+            record.requestedStatusKey = '';
+            record.requestedStatusLabel = '';
+            record.leaveRequestKind = '';
+            await record.save();
+        }
 
-        await notifyPrimaryReporteeOfLeaveRequest({
-            employee,
-            manager: employee.primaryReportee,
-            from: date,
-            to: date,
-            attendanceId: record._id,
-            requestedLabel: 'Comp Off Leave',
-            requestedStatusKey: 'compoff_leave',
-            leaveRequestKind: 'leave',
-            reason,
-        });
+        const hr = await getDepartmentHOD('hr').catch(() => null);
+        try {
+            await sendAttendanceDirectChangeEmail({
+                recipients: [hr, employee.primaryReportee].filter(Boolean),
+                actor: employee,
+                employee,
+                date,
+                previousLabel,
+                nextLabel: 'Comp Off Leave',
+                reason,
+                recordIds: [record._id],
+            });
+        } catch (mailError) {
+            console.error('[requestCompOffLeave] notice email failed:', mailError?.message || mailError);
+        }
 
         return res.status(200).json({
-            message: 'Comp-off request sent to your primary reportee.',
+            message: 'Comp-off leave saved. HR and your primary reportee have been emailed.',
             record,
         });
     } catch (error) {

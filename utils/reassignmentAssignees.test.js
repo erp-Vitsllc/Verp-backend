@@ -40,3 +40,13 @@ test("returned task shows the original assignee only", () => {
     assert.equal(pair.mainAssigneeName, "Raseel Muhammad");
     assert.equal(pair.reassignedAssigneeName, "");
 });
+
+test("a closed reassigned task keeps only the original assignee", () => {
+    const pair = reassignmentAssignees({
+        assigneeName: "Akhila Prasad",
+        originalAssigneeName: "Raseel Muhammad",
+        closed: true,
+    });
+    assert.equal(pair.mainAssigneeName, "Raseel Muhammad");
+    assert.equal(pair.reassignedAssigneeName, "");
+});

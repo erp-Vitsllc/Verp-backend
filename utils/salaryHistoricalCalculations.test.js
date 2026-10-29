@@ -29,6 +29,7 @@ import {
     salaryProcessingStartDay,
     summarizeAttendanceEligibility,
     countPresentCompOffDays,
+    eligibleOvertimeHours,
     sumApprovedOvertimeHours,
     implicitUnauthorizedLeaveForSchedule,
     validateLeaveDates,
@@ -129,6 +130,36 @@ describe('salary historical calculations', () => {
             ]),
             18,
         );
+        const overtime = eligibleOvertimeHours([
+            {
+                date: '2026-08-01',
+                flexibleOtStatus: 'approved',
+                flexibleOtApprovedHours: 14,
+                flexibleOtNextDayDate: '2026-08-02',
+            },
+            { date: '2026-08-02', statusKey: 'on_office', flexibleWorkedHours: 10, flexibleFromOtDate: '2026-08-01' },
+            { date: '2026-08-03', flexibleOtStatus: 'approved', flexibleOtApprovedHours: 8 },
+            {
+                date: '2026-08-04',
+                statusKey: 'compoff_leave',
+                compOff: { state: 'adjusted', otHoursDeducted: 8 },
+            },
+        ]);
+        assert.equal(overtime.hours, 4);
+        assert.equal(overtime.days, 0);
+        const compOffNotOvertime = eligibleOvertimeHours([
+            { date: '2026-10-05', flexibleOtStatus: 'approved', flexibleOtApprovedHours: 10, flexibleOtNextDayDate: '2026-10-06' },
+            { date: '2026-10-06', statusKey: 'on_office', flexibleFromOtDate: '2026-10-05', flexibleWorkedHours: 10, timeIn: 'OT', timeOut: 'OT' },
+            { date: '2026-10-09', flexibleOtStatus: 'approved', flexibleOtApprovedHours: 10, flexibleOtNextDayDate: '2026-10-10' },
+            { date: '2026-10-10', statusKey: 'on_office', flexibleFromOtDate: '2026-10-09', flexibleWorkedHours: 10, timeIn: 'OT', timeOut: 'OT' },
+            { date: '2026-10-22', flexibleOtStatus: 'approved', flexibleOtApprovedHours: 10 },
+            { date: '2026-10-24', statusKey: 'on_office', flexibleFromOtDate: '2026-10-22', flexibleWorkedHours: 10, timeIn: 'OT', timeOut: 'OT' },
+            { date: '2026-10-25', flexibleOtStatus: 'approved', flexibleOtApprovedHours: 10 },
+            { date: '2026-10-27', statusKey: 'on_office', flexibleFromOtDate: '2026-10-25', flexibleWorkedHours: 10, timeIn: 'OT', timeOut: 'OT' },
+            { date: '2026-10-12', flexibleOtStatus: 'approved', flexibleOtApprovedHours: 14 },
+        ]);
+        assert.equal(compOffNotOvertime.hours, 14);
+        assert.equal(compOffNotOvertime.days, 1);
         assert.equal(leaveDeductionDays(pending), 0);
         const result = calculateHistoricalEligibility({
             workingDays: 40 + live.workingDays,

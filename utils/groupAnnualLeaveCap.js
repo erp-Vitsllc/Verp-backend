@@ -1,34 +1,62 @@
 import Attendance from '../models/Attendance.js';
 import EmployeeBasic from '../models/EmployeeBasic.js';
+import { markGroupLeaveDays } from './annualLeaveCalendar.js';
 import { REAL_EMPLOYEE_MONGO_FILTER, isCompanyShellEmployee } from './attendanceEmployeeFilters.js';
 import { resolveEmployeePayrollPolicy } from './employeeLeavePolicy.js';
 import { floorGroupLeaveSlots } from './groupLeaveSlots.js';
 import { employeeIdInList } from './salaryPolicyExclusions.js';
+import { isDateKey } from './salaryHistoricalCalculations.js';
 import { listActiveWorkLocations, normalizeStaffTypeKey, staffTypeMongoClause } from './workLocationHelpers.js';
 
-function isDateKey(value) {
-    return /^\d{4}-\d{2}-\d{2}$/.test(String(value || '').trim());
+const LEAVE_MARK_KEYS = ['on_leave', 'authorized_leave', 'sick_leave', 'compoff_leave'];
+
+function emptyLeaveMarks() {
+    return { yellowSpans: [], cappedDates: [], ownLeaveDates: [] };
+}
+
+function isAnnualLeaveRow(row) {
+    if (String(row?.leaveRequestStatus || '') === 'rejected') return false;
+    if (String(row?.statusKey || '') === 'on_leave') return true;
+    return (
+        String(row?.requestedStatusKey || '') === 'on_leave' &&
+        ['pending', 'approved'].includes(String(row?.leaveRequestStatus || ''))
+    );
 }
 
 /**
  * How many people in this employee's work-location group may be on annual leave,
  * and how many already are on the selected days.
  */
-export async function loadGroupAnnualLeaveCap({ employee, from = '', to = '' } = {}) {
+function earlierDate(a, b) {
+    if (!isDateKey(a)) return isDateKey(b) ? b : '';
+    if (!isDateKey(b)) return a;
+    return a < b ? a : b;
+}
+
+function laterDate(a, b) {
+    if (!isDateKey(a)) return isDateKey(b) ? b : '';
+    if (!isDateKey(b)) return a;
+    return a > b ? a : b;
+}
+
+export async function loadGroupAnnualLeaveCap({
+    employee,
+    from = '',
+    to = '',
+    markFrom = '',
+    markTo = '',
+} = {}) {
     if (!employee?._id || isCompanyShellEmployee(employee)) {
-        return { enabled: false };
+        return { enabled: false, ...emptyLeaveMarks() };
     }
 
     const policy = await resolveEmployeePayrollPolicy(employee);
     if (employeeIdInList(employee.employeeId, policy?.leaveExclusionEmployeeIds)) {
-        return { enabled: false };
+        return { enabled: false, ...emptyLeaveMarks() };
     }
 
     const minPercent = policy?.minAllowedLeavePerGroupPercent ?? null;
     const maxPercent = policy?.maxAllowedLeavePerGroupPercent ?? null;
-    if (minPercent == null && maxPercent == null) {
-        return { enabled: false };
-    }
 
     const staffType = normalizeStaffTypeKey(employee.staffType);
     const [locations, members] = await Promise.all([
@@ -61,7 +89,10 @@ export async function loadGroupAnnualLeaveCap({ employee, from = '', to = '' } =
     let taken = 0;
     let applicantAlreadyCounted = false;
     let blockers = [];
-    if (hasRange && groupMembers.length) {
+    let marks = emptyLeaveMarks();
+    const queryFrom = earlierDate(markFrom, hasRange ? rangeFrom : '');
+    const queryTo = laterDate(markTo, hasRange ? rangeTo : '');
+    if (queryFrom && queryTo && queryTo >= queryFrom && groupMembers.length) {
         const ids = groupMembers.map((row) => String(row._id));
         const names = new Map(
             groupMembers.map((row) => [
@@ -74,22 +105,25 @@ export async function loadGroupAnnualLeaveCap({ employee, from = '', to = '' } =
         );
         const rows = await Attendance.find({
             employeeMongoId: { $in: ids },
-            date: { $gte: rangeFrom, $lte: rangeTo },
+            date: { $gte: queryFrom, $lte: queryTo },
             leaveRequestStatus: { $ne: 'rejected' },
             $or: [
-                { statusKey: 'on_leave' },
+                { statusKey: { $in: LEAVE_MARK_KEYS } },
                 {
-                    requestedStatusKey: 'on_leave',
+                    requestedStatusKey: { $in: LEAVE_MARK_KEYS },
                     leaveRequestStatus: { $in: ['pending', 'approved'] },
                 },
             ],
         })
-            .select({ employeeMongoId: 1, date: 1, leaveRequestStatus: 1, statusKey: 1 })
+            .select({ employeeMongoId: 1, date: 1, leaveRequestStatus: 1, statusKey: 1, requestedStatusKey: 1 })
             .lean()
             .maxTimeMS(8000);
 
+        const annualInRange = (rows || []).filter(
+            (row) => hasRange && isAnnualLeaveRow(row) && row.date >= rangeFrom && row.date <= rangeTo,
+        );
         const byPerson = new Map();
-        for (const row of rows || []) {
+        for (const row of annualInRange) {
             const id = String(row.employeeMongoId || '');
             if (!id) continue;
             const current = byPerson.get(id) || {
@@ -110,16 +144,25 @@ export async function loadGroupAnnualLeaveCap({ employee, from = '', to = '' } =
         const people = new Set(blockers.map((row) => row.employeeMongoId));
         taken = people.size;
         applicantAlreadyCounted = people.has(String(employee._id));
+        marks = markGroupLeaveDays(
+            (rows || []).map((row) => ({
+                employeeMongoId: row.employeeMongoId,
+                date: row.date,
+                countsTowardCap: isAnnualLeaveRow(row),
+            })),
+            { applicantId: String(employee._id), maxAllowed },
+        );
     }
 
     const projected = !hasRange ? taken : applicantAlreadyCounted ? taken : taken + 1;
-    const over = maxAllowed != null && hasRange && projected > maxAllowed;
+    const enabled = minPercent != null || maxPercent != null;
+    const over = enabled && maxAllowed != null && hasRange && projected > maxAllowed;
     const message = over
         ? `Only ${maxAllowed} ${maxAllowed === 1 ? 'employee' : 'employees'} (${maxPercent}%) in ${groupLabel} can be on annual leave on these days. ${taken} already requested or approved.`
         : '';
 
     return {
-        enabled: true,
+        enabled,
         groupLabel,
         employeeCount,
         minPercent,
@@ -130,5 +173,6 @@ export async function loadGroupAnnualLeaveCap({ employee, from = '', to = '' } =
         over,
         message,
         blockers,
+        ...marks,
     };
 }
