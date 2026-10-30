@@ -15,6 +15,7 @@ import {
 import {
     accessPathFor,
     displayTaskType,
+    isGeneralHubRequestType,
     moduleForRequestType,
     moduleForText,
     promoteDueTaskCompletions,
@@ -26,6 +27,7 @@ import {
 import { viewerMayDeleteTask } from "../../utils/taskDeleteAccess.js";
 import { listDeletedNoticeKeys, noticeKeysForRecord } from "../../utils/deletedTaskNotice.js";
 import { assignTaskNumbers } from "../../utils/taskNumber.js";
+import { alignDecidedGeneralHubTasks } from "../../utils/alignDecidedGeneralHubTasks.js";
 import { chooseKeptDuplicate, documentTaskLabel, duplicateOverlayShouldClose, taskMatchHints } from "../../utils/taskDuplicateKey.js";
 import { formatTaskDisplayParts, vehicleRecordId } from "../../utils/taskDisplayName.js";
 import { composeTaskDescription } from "../../utils/taskDetailDescription.js";
@@ -259,12 +261,6 @@ export function displayRequesterName(stored, action, sourceMap) {
     if (name && !isVehicleServicePendingTitle(name)) return name;
     return "System";
 }
-
-const GENERAL_REQUEST_TYPES = new Set([
-    "employee salary request",
-    "employee certificate request",
-    "employee asset request",
-]);
 
 const GENERAL_TITLES = {
     "employee salary request": "Early Salary",
@@ -734,7 +730,7 @@ export function taskTitleAndDescription({
         const subject = [label, storedDescription].find((value) => value && !isFollowUpSentence(value)) || "";
         baseName = subject || requestType || "Task";
         baseDescription = followUp;
-    } else if (!GENERAL_REQUEST_TYPES.has(typeKey)) {
+    } else if (!isGeneralHubRequestType(requestType)) {
         baseName = storedName || body || requestType || "Notification";
         baseDescription = storedDescription || label || body;
     } else {
@@ -787,11 +783,8 @@ export function taskTitleAndDescription({
     return { taskName: nextName, taskSubject, description: composed || nextDescription };
 }
 
-function isGeneralHubRequest(requestType, extra = "") {
-    const type = String(requestType || "").trim().toLowerCase();
-    if (GENERAL_REQUEST_TYPES.has(type)) return true;
-    const label = String(extra || "").trim().toLowerCase();
-    return type === "employee asset request" && /^assets\b/.test(label);
+function isGeneralHubRequest(requestType) {
+    return isGeneralHubRequestType(requestType);
 }
 
 /** One approval step, created by the system (expiry and the same kind of reminder). */
@@ -1288,6 +1281,7 @@ export const getTaskManagerNotifications = async (req, res) => {
         };
 
         const summary = { total: 0, pending: 0, pendingDue: 0, completed: 0 };
+        await alignDecidedGeneralHubTasks(actions);
         const preparedFines = await collapsePendingFineDashboardRows(actions);
         const fineOverlays = new Map();
         for (const row of manualRows) {
@@ -1401,7 +1395,7 @@ export const getTaskManagerNotifications = async (req, res) => {
                 originalAssigneeId,
                 byId,
                 photoForName,
-                closed: assigneeClosed,
+                closed: assigneeClosed || Boolean(overlay?.closeRequest?.reassignmentReleased),
             });
             const destination = moduleForRequestType(action.requestType, `${action.extra1 || ""} ${action.extra2 || ""}`);
             const category = taskCategory(action.requestType, action.extra2 || "");
@@ -1506,7 +1500,7 @@ export const getTaskManagerNotifications = async (req, res) => {
                     assigneeName,
                     row: overlay,
                     requesterName: requesterBase,
-                    closed: assigneeClosed,
+                    closed: assigneeClosed || Boolean(overlay?.closeRequest?.reassignmentReleased),
                 }),
                 displayStatus: status,
                 rawStatus: action.status || "Pending",
@@ -1589,7 +1583,7 @@ export const getTaskManagerNotifications = async (req, res) => {
                 originalAssigneeId,
                 byId,
                 photoForName,
-                closed: assigneeClosed,
+                closed: assigneeClosed || Boolean(row.closeRequest?.reassignmentReleased),
             });
             const requestMonth = monthKeyFromDateKey(requestedKey);
             const completedMonth = monthKeyFromDateKey(dueKey);
@@ -1656,7 +1650,7 @@ export const getTaskManagerNotifications = async (req, res) => {
                     row,
                     requesterName: requesterBase,
                     requestedByUserId: row.requestedByUserId,
-                    closed: assigneeClosed,
+                    closed: assigneeClosed || Boolean(row.closeRequest?.reassignmentReleased),
                 }),
                 displayStatus: status,
                 rawStatus: row.status || "Pending",

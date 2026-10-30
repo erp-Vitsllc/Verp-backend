@@ -16,26 +16,19 @@ function categoryKey(value) {
     return String(value || "").trim().toLowerCase().replace(/\s+/g, " ");
 }
 
-/** Admin delete is only for a system task or a workflow task. */
+/** Admin delete is for a system task or a workflow task. */
 function adminMayDeleteCategory(taskCategory) {
     const category = categoryKey(taskCategory);
     return category === "system task" || category === "workflow task" || category === "work flow task";
 }
 
-/**
- * Admin super user can delete an open System Task or Workflow Task.
- * The requester can delete only a General Task.
- */
-export function viewerMayDeleteTask(viewer, {
-    taskCategory = "",
-    requestedByName = "",
-    requestedByUserId = "",
-    closed = false,
-} = {}) {
-    if (closed) return false;
-    if (viewer?.superUser) return adminMayDeleteCategory(taskCategory);
+/** The requester can delete a general task, a system task, or a workflow task. */
+export function requesterMayDeleteCategory(taskCategory) {
     const category = categoryKey(taskCategory);
-    if (category !== "general task") return false;
+    return category === "general task" || adminMayDeleteCategory(taskCategory);
+}
+
+function viewerIsRequester(viewer, requestedByName, requestedByUserId) {
     if (
         requestedByUserId
         && viewer?.userId
@@ -54,4 +47,20 @@ export function viewerMayDeleteTask(viewer, {
     const owner = baseName(requestedByName);
     if (!owner || owner === "system") return false;
     return owner === baseName(viewer?.name);
+}
+
+/**
+ * Admin super user can delete an open System Task or Workflow Task.
+ * The requester can delete an open General Task, System Task, or Workflow Task.
+ */
+export function viewerMayDeleteTask(viewer, {
+    taskCategory = "",
+    requestedByName = "",
+    requestedByUserId = "",
+    closed = false,
+} = {}) {
+    if (closed) return false;
+    if (viewer?.superUser && adminMayDeleteCategory(taskCategory)) return true;
+    if (!requesterMayDeleteCategory(taskCategory)) return false;
+    return viewerIsRequester(viewer, requestedByName, requestedByUserId);
 }

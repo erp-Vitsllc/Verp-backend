@@ -8,7 +8,9 @@ import {
     HUB_ASSET_TYPES,
     HUB_DASHBOARD_TYPE,
     hubRequestDisplayLabel,
+    isGeneralHubRequestType,
 } from '../../utils/employeeHubRequestTypes.js';
+import { finishGeneralHubTask } from '../../utils/alignDecidedGeneralHubTasks.js';
 import {
     sendEmployeeHubRequestEmails,
     sendEmployeeHubDecisionEmails,
@@ -330,15 +332,18 @@ export async function decideEmployeeHubRequest(req, res) {
         const employee = await EmployeeBasic.findById(row.requester).select(SELECT_PERSON).lean();
         const manager = await EmployeeBasic.findById(row.assignedTo).select(SELECT_PERSON).lean();
 
+        const generalHub = isGeneralHubRequestType(requestType);
         await syncDashboardAction({
             requestId: row._id,
             requestType,
-            assignedTo: row.assignedTo,
+            // Reassignment moves the task to another person. The decision still closes that copy.
+            ...(generalHub ? {} : { assignedTo: row.assignedTo }),
             status: decision,
             subjectEmployee: employee,
             actionedBy: self._id,
             comment: row.decisionNote,
         });
+        if (generalHub) await finishGeneralHubTask(row._id, requestType, decision);
 
         const { email: actorEmail } = resolveEmployeeEmail(self || manager || {});
 

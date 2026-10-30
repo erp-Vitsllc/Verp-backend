@@ -43,6 +43,13 @@ export function isEmployeeHubRequestType(type = '') {
     return HUB_DASHBOARD_TYPES.includes(String(type || '').trim());
 }
 
+const GENERAL_HUB_KINDS = new Set(['salary', 'certificate', 'assets']);
+
+/** Dashboard Early Salary, Salary Certificate, and Assets. Leave, Advance, and Loan are not in this set. */
+export function isGeneralHubRequestType(requestType = '') {
+    return GENERAL_HUB_KINDS.has(hubKindFromType(requestType));
+}
+
 export function hubKindFromType(type = '') {
     return HUB_TYPE_TO_KIND[String(type || '').trim()] || '';
 }

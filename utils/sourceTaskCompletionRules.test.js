@@ -93,6 +93,30 @@ test("the gate is for system and workflow tasks that point at a real record", ()
     assert.equal(sourceGateApplies({ taskType: "General Task" }, action), false);
     assert.equal(sourceGateApplies({ taskType: "System Task" }, { requestType: "Task Manager" }), false);
     assert.equal(sourceGateApplies({ taskType: "System Task" }, null), false);
+    assert.equal(
+        sourceGateApplies({ taskType: "Workflow Task" }, { requestType: "Employee Asset Request" }, "General Task"),
+        false,
+    );
+    assert.equal(
+        sourceGateApplies({ taskType: "General Task" }, { requestType: "Employee Leave Request" }, "Workflow Task"),
+        true,
+    );
+    assert.equal(
+        sourceGateApplies({ taskType: "Workflow Task" }, { requestType: "Employee Document Expiry Reminder" }, "System Task"),
+        true,
+    );
+    assert.equal(
+        sourceGateApplies({ taskType: "Workflow Task" }, { requestType: "Employee Certificate Request" }, "Workflow Task"),
+        false,
+    );
+    assert.equal(
+        sourceGateApplies({ taskType: "Workflow Task" }, { requestType: "Employee Salary Request" }, "System Task"),
+        false,
+    );
+    assert.equal(
+        sourceGateApplies({ taskType: "Workflow Task" }, { requestType: "Employee Asset Request" }, "Workflow Task"),
+        false,
+    );
     assert.match(SOURCE_STILL_PENDING_MESSAGE, /already on Pending/);
     assert.match(SOURCE_STILL_PENDING_MESSAGE, /Completed or Closed/);
 });

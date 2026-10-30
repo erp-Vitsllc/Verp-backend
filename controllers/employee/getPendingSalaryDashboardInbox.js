@@ -23,6 +23,7 @@ import {
 } from '../../utils/salaryEnrollmentApprovalNotify.js';
 import { SALARY_DMF_REQUEST_TYPE } from '../../utils/salaryDmfApproval.js';
 import { isPendingEnrollmentReminder, syncPendingSalaryEnrollmentTasks } from '../../utils/syncPendingSalaryEnrollmentTasks.js';
+import { listDeletedNoticeKeys, noticeKeysForRecord, salaryEnrollmentEmployeeKey } from '../../utils/deletedTaskNotice.js';
 import { viewerIsSalaryFlowchartHr } from '../../utils/viewerIsSalaryFlowchartHr.js';
 
 function parseExtra3(value) {
@@ -79,6 +80,7 @@ async function buildPendingEnrollmentInboxItems(excludeEmployeeKeys = new Set())
             .maxTimeMS(8000),
     ]);
 
+    const deletedKeys = new Set(await listDeletedNoticeKeys());
     const enrolledKeys = new Set();
     for (const row of enrollmentDocs || []) {
         const key = employeeCodeKey(row.employeeId);
@@ -103,6 +105,7 @@ async function buildPendingEnrollmentInboxItems(excludeEmployeeKeys = new Set())
         if (!key || enrolledKeys.has(key) || excludeEmployeeKeys.has(key)) {
             continue;
         }
+        if (deletedKeys.has(salaryEnrollmentEmployeeKey(employeeId))) continue;
         const name = `${emp.firstName || ''} ${emp.lastName || ''}`.trim() || employeeId;
         const href = `/HRM/Salary/enroll/${encodeURIComponent(employeeId)}`;
         items.push({
@@ -218,6 +221,7 @@ export const getPendingSalaryDashboardInbox = async (req, res) => {
 
         const assigneeClauses = buildAssigneeClauses(ctx.relevantIds, ctx.employeeIdCode);
         await syncPendingSalaryEnrollmentTasks();
+        const deletedKeys = new Set(await listDeletedNoticeKeys());
         const items = [];
 
         if (assigneeClauses.length > 0) {
@@ -261,6 +265,16 @@ export const getPendingSalaryDashboardInbox = async (req, res) => {
             const actionableRows = [];
             for (const da of liveRows) {
                 const type = String(da.requestType || '');
+                if (type === SALARY_ENROLLMENT_REQUEST_TYPE) {
+                    const meta = parseExtra3(da.extra3);
+                    const code = da.subjectEmployeeId || meta.employeeId || '';
+                    const removed = noticeKeysForRecord(da).some((key) => deletedKeys.has(key))
+                        || deletedKeys.has(salaryEnrollmentEmployeeKey(code));
+                    if (removed) {
+                        if (da._id) idsToDismiss.push(da._id);
+                        continue;
+                    }
+                }
                 if (isPendingEnrollmentReminder(da)) {
                     actionableRows.push(da);
                     continue;

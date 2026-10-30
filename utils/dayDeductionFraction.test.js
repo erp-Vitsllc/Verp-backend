@@ -63,4 +63,17 @@ describe('day deduction fraction', () => {
         const row = { date: '2026-10-05', statusKey: 'authorized_leave', deductionWaived: true };
         assert.equal(dayDeductionFraction(row, [row], { authorizedLeaveDeductionDays: 1 }, week), 0);
     });
+
+    it('drops a missed punch whose loss hours were waived to zero', () => {
+        const waived = {
+            date: '2026-10-17',
+            statusKey: 'mispunch',
+            hourAdjustStatus: 'approved',
+            hoursApproved: 0,
+        };
+        const open = { date: '2026-10-24', statusKey: 'mispunch' };
+        const policy = { missedPunchRule: { events: 1, deduct: 'half' } };
+        assert.equal(dayDeductionFraction(waived, [waived, open], policy, week), 0);
+        assert.equal(dayDeductionFraction(open, [waived, open], policy, week), 0);
+    });
 });

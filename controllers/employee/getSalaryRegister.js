@@ -31,7 +31,7 @@ import {
     missedPunchDeduction,
 } from '../../utils/lateDeductionPolicy.js';
 import { partialLeavePortion } from '../../utils/partialLeaveWindow.js';
-import { isDeductionWaived } from '../../utils/deductionWaive.js';
+import { isDeductionWaived, isHourLossWaived } from '../../utils/deductionWaive.js';
 import {
     keepAttendanceForProcessingStart,
     resolveSalaryProcessingStartDate,
@@ -1566,12 +1566,12 @@ export const getSalaryRegister = async (req, res) => {
                 date: { $gte: from, $lte: to },
                 statusKey: 'mispunch',
             })
-                .select('employeeMongoId date deductionWaived')
+                .select('employeeMongoId date deductionWaived hourAdjustStatus hoursApproved')
                 .lean()
                 .maxTimeMS(15000);
             const missedByKey = new Map();
             for (const row of missedRows || []) {
-                if (isDeductionWaived(row)) continue;
+                if (isDeductionWaived(row) || isHourLossWaived(row)) continue;
                 const emp = empByMongo.get(String(row.employeeMongoId || ''));
                 if (!emp) continue;
                 const ym = String(row.date || '').slice(0, 7);

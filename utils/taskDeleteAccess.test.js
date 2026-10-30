@@ -7,16 +7,16 @@ const admin = { superUser: true, userId: "admin-1", name: "Admin", employeeId: "
 const requester = { superUser: false, userId: "user-9", name: "Raseel Khan", employeeId: "VITS009" };
 const other = { superUser: false, userId: "user-2", name: "Other Person", employeeId: "VITS002" };
 
-test("admin super user can delete system and workflow tasks only", () => {
+test("admin super user can delete system and workflow tasks", () => {
     assert.equal(viewerMayDeleteTask(admin, { taskCategory: "Workflow Task" }), true);
     assert.equal(viewerMayDeleteTask(admin, { taskCategory: "Work Flow Task" }), true);
     assert.equal(viewerMayDeleteTask(admin, { taskCategory: "System Task" }), true);
     assert.equal(viewerMayDeleteTask(admin, { taskCategory: "General Task" }), false);
-    assert.equal(viewerMayDeleteTask(admin, { taskCategory: "General Task", requestedByUserId: "admin-1" }), false);
+    assert.equal(viewerMayDeleteTask(admin, { taskCategory: "General Task", requestedByUserId: "admin-1" }), true);
     assert.equal(viewerMayDeleteTask(admin, { taskCategory: "System Task", closed: true }), false);
 });
 
-test("only the general task requester can delete besides the admin", () => {
+test("the requester can delete a general, system, or workflow task", () => {
     assert.equal(viewerMayDeleteTask(requester, {
         taskCategory: "General Task",
         requestedByUserId: "user-9",
@@ -33,10 +33,18 @@ test("only the general task requester can delete besides the admin", () => {
     assert.equal(viewerMayDeleteTask(requester, {
         taskCategory: "Workflow Task",
         requestedByUserId: "user-9",
-    }), false);
+    }), true);
     assert.equal(viewerMayDeleteTask(requester, {
         taskCategory: "System Task",
         requestedByName: "Raseel Khan",
+    }), true);
+    assert.equal(viewerMayDeleteTask(other, {
+        taskCategory: "Workflow Task",
+        requestedByName: "Raseel Khan",
+    }), false);
+    assert.equal(viewerMayDeleteTask(requester, {
+        taskCategory: "System Task",
+        requestedByName: "System",
     }), false);
 });
 

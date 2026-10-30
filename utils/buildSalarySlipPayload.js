@@ -35,7 +35,7 @@ import {
     keepAttendanceForProcessingStart,
     resolveSalaryProcessingStartDate,
 } from './leaveSalaryVisibility.js';
-import { isDeductionWaived } from './deductionWaive.js';
+import { isDeductionWaived, isHourLossWaived } from './deductionWaive.js';
 import {
     applySalarySlipCountExclusions,
     salarySlipPolicyExclusions,
@@ -820,7 +820,7 @@ export async function buildSalarySlipPayload({
             sickDays += 1;
         }
         if (key === 'on_leave') annualDays += 1;
-        if (!waived && key === 'mispunch') missedPunchDays += 1;
+        if (!waived && !isHourLossWaived(row) && key === 'mispunch') missedPunchDays += 1;
 
         const isHolidayDate = holidaySet.has(date) || key === 'holiday';
         const punched = Boolean(row.timeIn && row.timeOut);

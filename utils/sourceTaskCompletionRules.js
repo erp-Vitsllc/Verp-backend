@@ -1,4 +1,5 @@
 import { documentTaskLabel } from "./taskDuplicateKey.js";
+import { isGeneralHubRequestType } from "./employeeHubRequestTypes.js";
 
 export const SOURCE_STILL_PENDING_MESSAGE =
     "This task is already on Pending. You can go to the task. It can be completed only when that status is Completed or Closed.";
@@ -188,7 +189,12 @@ export function expiryFollowUpState({ reminderText, liveDocs, oldDocs = [] }) {
 
 export function sourceGateApplies(task, action, category = "") {
     if (!action || String(action.requestType || "") === "Task Manager") return false;
-    const type = String(task?.taskType || category || "").trim().toLowerCase();
+    // Salary Certificate, Early Salary, and Assets are general tasks.
+    // Closing them does not wait on another record.
+    if (isGeneralHubRequestType(action.requestType)) return false;
+    // The request category wins. An overlay can still say Workflow after a
+    // dashboard Assets, Early Salary, or Salary Certificate request, which is General.
+    const type = String(category || task?.taskType || "").trim().toLowerCase();
     if (type === "general task") return false;
     return type === "system task" || type === "workflow task" || type === "work flow task";
 }

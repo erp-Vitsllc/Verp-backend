@@ -18,6 +18,9 @@ import {
     buildUtilitySectionPath,
 } from "./taskSectionPath.js";
 import { resolveVehicleExpiryFocusCard, resolveVehicleExpiryTab } from "./vehicleExpiryScanUtils.js";
+import { isGeneralHubRequestType } from "./employeeHubRequestTypes.js";
+
+export { isGeneralHubRequestType };
 
 const TASK_TYPE_LABELS = new Map([
     ["system", "System Task"],
@@ -652,6 +655,23 @@ function plainCloseRequest(task) {
     return task.closeRequest.toObject ? task.closeRequest.toObject() : { ...task.closeRequest };
 }
 
+async function taskSkipsModuleBell(task) {
+    if (!task) return false;
+    if (canonicalTaskType(task.taskType) === "General Task") return true;
+    if (!isObjectId(task.sourceDashboardActionId)) return false;
+    const action = await DashboardAction.findById(task.sourceDashboardActionId).select("requestType").lean();
+    return isGeneralHubRequestType(action?.requestType);
+}
+
+async function dismissModuleBell(task) {
+    await closeReassignmentNotices(task);
+    if (!task?._id) return;
+    await DashboardAction.updateMany(
+        { requestId: task._id, requestType: "Task Manager", status: "Pending" },
+        { $set: { status: "Dismissed", actionedDate: new Date() } },
+    );
+}
+
 export async function publishReassignmentNotices(task, {
     watchers = [],
     reassigneeName,
@@ -662,6 +682,10 @@ export async function publishReassignmentNotices(task, {
     noticeText = "",
 } = {}) {
     if (!task) return;
+    if (await taskSkipsModuleBell(task)) {
+        await dismissModuleBell(task);
+        return;
+    }
     const saved = plainCloseRequest(task);
     const notices = new Map();
     for (const row of saved.reassignmentNotices || []) {
@@ -749,6 +773,10 @@ export async function upsertTaskNotice(task, {
     noticeText,
 } = {}) {
     if (!task || !isObjectId(employeeId)) return;
+    if (await taskSkipsModuleBell(task)) {
+        await dismissModuleBell(task);
+        return;
+    }
     const saved = plainCloseRequest(task);
     const notices = (saved.reassignmentNotices || []).map((row) => ({
         employeeId: row.employeeId,
@@ -947,6 +975,16 @@ export function taskInboxIdentity(row = {}) {
     return String(meta.taskManagerId || meta.taskKey || "").trim();
 }
 
+export function inboxRowMatchesIds(row = {}, ids) {
+    if (!ids || typeof ids.has !== "function") return false;
+    const meta = readTaskInboxMeta(row?.extra3);
+    const manual = manualTaskId(meta.taskKey);
+    const keys = [meta.taskManagerId, manual, meta.taskKey]
+        .map((value) => String(value || "").trim())
+        .filter(Boolean);
+    return keys.some((key) => ids.has(key));
+}
+
 /** One row per task. Later copies of the same task are dropped. */
 export function dedupeTaskInboxRows(rows = []) {
     const seen = new Set();
@@ -1022,6 +1060,59 @@ async function omitUnopenableReassignmentNotices(rows) {
     return kept;
 }
 
+async function omitGeneralTaskBellRows(rows) {
+    if (!rows.length) return rows;
+    const taskIds = [];
+    const sourceIds = [];
+    for (const row of rows) {
+        const meta = readTaskInboxMeta(row.extra3);
+        const id = String(meta.taskManagerId || "").trim();
+        if (isObjectId(id)) taskIds.push(id);
+        const manual = manualTaskId(meta.taskKey);
+        if (manual) taskIds.push(manual);
+        const key = String(meta.taskKey || "").trim();
+        if (isObjectId(key)) sourceIds.push(key);
+    }
+    const or = [];
+    if (taskIds.length) or.push({ _id: { $in: taskIds } });
+    if (sourceIds.length) or.push({ sourceDashboardActionId: { $in: sourceIds } });
+    const tasks = or.length
+        ? await TaskManagerTask.find({ $or: or }).select("_id taskType sourceDashboardActionId").lean()
+        : [];
+    const actionIds = [...new Set(tasks.map((task) => String(task.sourceDashboardActionId || "")).filter(isObjectId))];
+    const actions = actionIds.length
+        ? await DashboardAction.find({ _id: { $in: actionIds } }).select("requestType").lean()
+        : [];
+    const generalActionIds = new Set(
+        actions.filter((action) => isGeneralHubRequestType(action.requestType)).map((action) => String(action._id)),
+    );
+    const generalIds = new Set();
+    for (const task of tasks) {
+        const general = canonicalTaskType(task.taskType) === "General Task"
+            || generalActionIds.has(String(task.sourceDashboardActionId || ""));
+        if (!general) continue;
+        generalIds.add(String(task._id));
+        if (task.sourceDashboardActionId) generalIds.add(String(task.sourceDashboardActionId));
+    }
+    if (!generalIds.size) return rows;
+    const stale = [];
+    const kept = [];
+    for (const row of rows) {
+        if (!inboxRowMatchesIds(row, generalIds)) {
+            kept.push(row);
+            continue;
+        }
+        if (row.dashboardActionId) stale.push(row.dashboardActionId);
+    }
+    if (stale.length) {
+        await DashboardAction.updateMany(
+            { _id: { $in: stale }, requestType: "Task Manager", status: "Pending" },
+            { $set: { status: "Dismissed", actionedDate: new Date() } },
+        );
+    }
+    return kept;
+}
+
 export async function loadTaskManagerInboxItems(assigneeClauses, moduleName, options = {}) {
     const moduleKey = String(moduleName || "").trim();
     if (!Array.isArray(assigneeClauses) || !assigneeClauses.length || !moduleKey) return [];
@@ -1055,11 +1146,20 @@ export async function loadTaskManagerInboxItems(assigneeClauses, moduleName, opt
     if (options.omitExpiryFollowUps) {
         mapped = mapped.filter((row) => !isExpiryFollowUpTaskRow(row));
     }
+    try {
+        mapped = await omitGeneralTaskBellRows(mapped);
+    } catch (error) {
+        console.error("General task bell cleanup failed:", error);
+    }
     return dedupeTaskInboxRows(mapped);
 }
 
 export async function syncManualTaskNotification(task) {
     if (!task?._id || !task.assignee) return null;
+    if (await taskSkipsModuleBell(task)) {
+        await dismissModuleBell(task);
+        return null;
+    }
     const destination = moduleForText(task.taskName, task.description, task.taskType, task.requestType);
     const closed = task.status === "Completed" || task.status === "Cancelled" || task.status === "Rejected";
     const extra3 = JSON.stringify({

@@ -1,4 +1,5 @@
 import nodemailer from 'nodemailer';
+import SalaryHistoricalProfile from '../models/SalaryHistoricalProfile.js';
 import { syncDashboardAction } from './syncDashboard.js';
 import { resolveFrontendBaseUrl } from './resolveFrontendBaseUrl.js';
 import { listActiveFlowchartManagementCompanyEmails } from './getManagementHOD.js';
@@ -139,6 +140,47 @@ export function emailHrSalaryEnrollmentRevoked({
             <p><a href="${href}">Open salary profile</a></p>
         `,
     });
+}
+
+/** Take a deleted enrolment task off HR approval. The salary profile stays. */
+export async function withdrawPendingSalaryEnrollment(employeeCode) {
+    const code = String(employeeCode || '').trim();
+    if (!code) return false;
+    const existing = await SalaryHistoricalProfile.findOne({
+        employeeId: new RegExp(`^${code.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'i'),
+        workflowStatus: 'pending_hr',
+    }).lean();
+    if (!existing) return false;
+    const log = Array.isArray(existing.auditLog) ? existing.auditLog : [];
+    await SalaryHistoricalProfile.updateOne(
+        { _id: existing._id, workflowStatus: 'pending_hr' },
+        {
+            $set: {
+                workflowStatus: 'verified',
+                status: existing.status === 'created' ? 'created' : 'draft',
+                submittedTo: null,
+                submittedBy: null,
+                submittedByName: '',
+                submittedByEmail: '',
+                submittedAt: null,
+                submitReason: '',
+                auditLog: [
+                    {
+                        action: 'revoke_salary_profile',
+                        recordType: 'historical_profile',
+                        previousValue: 'pending_hr',
+                        newValue: 'verified',
+                        changedByName: 'Task Manager',
+                        at: new Date(),
+                        reason: 'Task deleted by admin super user',
+                        verificationStatus: 'verified',
+                    },
+                    ...log,
+                ].slice(0, 200),
+            },
+        },
+    );
+    return true;
 }
 
 export async function closeSalaryEnrollmentInbox({ profile, status, actionedBy, comment }) {

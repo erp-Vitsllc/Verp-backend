@@ -1,4 +1,4 @@
-import { isDeductionWaived } from './deductionWaive.js';
+import { isDeductionWaived, isHourLossWaived } from './deductionWaive.js';
 import { lateInOutSummary, missedPunchDeduction } from './lateDeductionPolicy.js';
 import { partialLeavePortion, punchAttendanceKind } from './partialLeaveWindow.js';
 
@@ -59,7 +59,12 @@ export function dayDeductionFraction(target, monthRows = [], policy = {}, week =
     }
     const rows = rowsWithTarget(monthRows, target);
     if (kind === 'mispunch') {
-        const count = rows.filter((row) => !isDeductionWaived(row) && salaryKind(row) === 'mispunch').length;
+        if (isHourLossWaived(target)) return 0;
+        const count = rows.filter((row) => (
+            !isDeductionWaived(row)
+            && !isHourLossWaived(row)
+            && salaryKind(row) === 'mispunch'
+        )).length;
         const withDay = missedPunchDeduction(count, policy).dayFraction;
         const withoutDay = missedPunchDeduction(Math.max(0, count - 1), policy).dayFraction;
         return roundFraction(withDay - withoutDay);

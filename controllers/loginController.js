@@ -103,17 +103,48 @@ async function sendWebLoginOtp(user, deviceId) {
         expiresAt: new Date(Date.now() + 5 * 60 * 1000),
     });
 
-    try {
-        await sendWebLoginOtpEmail(email, otp, user.name || user.username);
-    } catch (err) {
+    const maskedEmail = maskEmail(email);
+    const sendPromise = sendWebLoginOtpEmail(email, otp, user.name || user.username);
+    // Office 365 often takes longer than the browser will wait. Answer as soon as
+    // the OTP is stored, and only surface a fast send failure.
+    const EMAIL_WAIT_MS = 2000;
+    let timeoutId;
+    const outcome = await Promise.race([
+        sendPromise.then(() => "sent").catch((err) => ({ failed: err })),
+        new Promise((resolve) => {
+            timeoutId = setTimeout(() => resolve("pending"), EMAIL_WAIT_MS);
+        }),
+    ]);
+    clearTimeout(timeoutId);
+
+    if (outcome && typeof outcome === "object" && outcome.failed) {
         await WebLoginOtp.deleteMany({ otpToken });
+        const err = outcome.failed;
         if (err.status) throw err;
         const error = new Error(err.message || "Could not send login OTP email.");
         error.status = 502;
         throw error;
     }
 
-    const maskedEmail = maskEmail(email);
+    if (outcome === "pending") {
+        console.log("[webLogin] OTP email still sending; login response not waiting", {
+            username: user.username,
+            maskedEmail,
+        });
+        sendPromise
+            .then(() => {
+                console.log("[webLogin] OTP sent to company email", {
+                    username: user.username,
+                    maskedEmail,
+                });
+            })
+            .catch(async (err) => {
+                console.error("[webLogin] OTP email failed after login responded:", err?.message || err);
+                await WebLoginOtp.deleteMany({ otpToken }).catch(() => {});
+            });
+        return { otpToken, maskedEmail };
+    }
+
     console.log("[webLogin] OTP sent to company email", {
         username: user.username,
         maskedEmail,
