@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { generalHubClosures } from "./alignDecidedGeneralHubTasks.js";
+import { generalHubClosures, stageBeforeHubClose } from "./alignDecidedGeneralHubTasks.js";
 
 test("an approved salary certificate closes the still-pending task", () => {
     const certificate = {
@@ -32,4 +32,18 @@ test("an approved salary certificate closes the still-pending task", () => {
     assert.deepEqual(plan.approved.map((action) => action._id), ["action-1"]);
     assert.deepEqual(plan.rejected.map((action) => action._id), ["action-2"]);
     assert.equal(certificate.status, "Pending");
+});
+
+test("closing an early salary task remembers the assignee stage", () => {
+    const stage = stageBeforeHubClose({
+        status: "Pending",
+        assignee: "emp-1",
+        assigneeEmpId: "VEGA-HR-00001",
+        assigneeName: "Raseel Muhammad",
+        closeRequest: { reviewPending: false },
+    });
+    assert.equal(stage.status, "Pending");
+    assert.equal(stage.assigneeId, "emp-1");
+    assert.equal(stage.assigneeName, "Raseel Muhammad");
+    assert.equal(stage.reviewPending, false);
 });

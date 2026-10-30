@@ -20,6 +20,64 @@ export function generalHubClosures(actions, decisionByRequestId) {
     return { approved, rejected };
 }
 
+function closeSnapshot(task) {
+    const saved = task?.closeRequest?.toObject ? task.closeRequest.toObject() : (task?.closeRequest || {});
+    return { ...saved };
+}
+
+function stageWasSaved(stage) {
+    return Boolean(stage && (stage.assigneeId || String(stage.assigneeName || "").trim()));
+}
+
+/** The open stage, kept so a requester can reopen to the same assignee and status. */
+export function stageBeforeHubClose(task) {
+    const saved = closeSnapshot(task);
+    if (stageWasSaved(saved.stageBeforeClose)) return saved.stageBeforeClose;
+    return {
+        status: String(task?.status || "Pending"),
+        assigneeId: task?.assignee || null,
+        assigneeEmpId: task?.assigneeEmpId || "",
+        assigneeName: task?.assigneeName || "",
+        completionRequestedAt: saved.completionRequestedAt || null,
+        completionRequestedById: saved.completionRequestedById || null,
+        completionRequestedByName: saved.completionRequestedByName || "",
+        completionNote: saved.completionNote || "",
+        reassignmentReleased: Boolean(saved.reassignmentReleased),
+        reviewPending: Boolean(saved.reviewPending),
+        reviewReturned: Boolean(saved.reviewReturned),
+        returnAssigneeId: saved.returnAssigneeId || null,
+        returnAssigneeEmpId: saved.returnAssigneeEmpId || "",
+        returnAssigneeName: saved.returnAssigneeName || "",
+    };
+}
+
+async function closeLinkedHubTasks(actionIds, decision) {
+    if (!actionIds.length) return;
+    const tasks = await TaskManagerTask.find({
+        sourceDashboardActionId: { $in: actionIds },
+        status: { $nin: ["Completed", "Cancelled", "Rejected"] },
+    });
+    const now = new Date();
+    await Promise.all(tasks.map(async (task) => {
+        if (decision === "Rejected") {
+            task.status = "Rejected";
+        } else {
+            const stage = stageBeforeHubClose(task);
+            const saved = closeSnapshot(task);
+            task.status = "Completed";
+            task.closeRequest = {
+                ...saved,
+                closedAt: saved.closedAt || now,
+                reviewPending: false,
+                completesAt: null,
+                stageBeforeClose: stage,
+            };
+            task.markModified("closeRequest");
+        }
+        await task.save();
+    }));
+}
+
 async function persistHubClosures({ approved, rejected }) {
     const now = new Date();
     const jobs = [];
@@ -34,13 +92,7 @@ async function persistHubClosures({ approved, rejected }) {
                 { _id: { $in: actionIds }, status: { $in: ["Pending", "On Hold"] } },
                 { $set: { status: "Approved", actionedDate: now } },
             ));
-            jobs.push(TaskManagerTask.updateMany(
-                {
-                    sourceDashboardActionId: { $in: actionIds },
-                    status: { $nin: ["Completed", "Cancelled", "Rejected"] },
-                },
-                { $set: { status: "Completed" } },
-            ));
+            jobs.push(closeLinkedHubTasks(actionIds, "Approved"));
         }
     }
     if (rejected.length) {
@@ -54,13 +106,7 @@ async function persistHubClosures({ approved, rejected }) {
                 { _id: { $in: actionIds }, status: { $in: ["Pending", "On Hold"] } },
                 { $set: { status: "Rejected", actionedDate: now } },
             ));
-            jobs.push(TaskManagerTask.updateMany(
-                {
-                    sourceDashboardActionId: { $in: actionIds },
-                    status: { $nin: ["Completed", "Cancelled", "Rejected"] },
-                },
-                { $set: { status: "Rejected" } },
-            ));
+            jobs.push(closeLinkedHubTasks(actionIds, "Rejected"));
         }
     }
     if (jobs.length) await Promise.all(jobs);
@@ -107,12 +153,5 @@ export async function finishGeneralHubTask(requestId, requestType, decision) {
     const linked = await DashboardAction.find({ requestId, requestType }).select("_id").lean();
     const ids = linked.map((action) => action._id);
     if (!ids.length) return;
-    const status = decision === "Approved" ? "Completed" : "Rejected";
-    await TaskManagerTask.updateMany(
-        {
-            sourceDashboardActionId: { $in: ids },
-            status: { $nin: ["Completed", "Cancelled", "Rejected"] },
-        },
-        { $set: { status } },
-    );
+    await closeLinkedHubTasks(ids, decision);
 }

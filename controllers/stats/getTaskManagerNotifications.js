@@ -872,7 +872,18 @@ function assigneeColumns({ assigneeName, assigneeId, assigneePhoto, originalAssi
     };
 }
 
-function taskMine(viewer, { assigneeId, assigneeEmpId, assigneeName, row, requesterName, requestedByUserId, closed = false }) {
+function requesterSeesClosedGeneral(viewer, { row, requesterName, requestedByUserId, requestType, closed = false }) {
+    if (!closed || !viewer) return false;
+    const general = String(row?.taskType || "") === "General Task" || isGeneralHubRequestType(requestType);
+    if (!general) return false;
+    if (requestedByUserId && viewer.userId && String(requestedByUserId) === String(viewer.userId)) return true;
+    const viewerName = personKey(viewer.name);
+    const requester = personKey(cleanRequester(requesterName));
+    return Boolean(requester && viewerName && requester === viewerName);
+}
+
+function taskMine(viewer, { assigneeId, assigneeEmpId, assigneeName, row, requesterName, requestedByUserId, requestType, closed = false }) {
+    if (requesterSeesClosedGeneral(viewer, { row, requesterName, requestedByUserId, requestType, closed })) return true;
     const originalName = String(row?.closeRequest?.originalAssigneeName || "").trim();
     if (closed && originalName) return viewerOwnsOriginal(viewer, row);
     const shown = String(assigneeName || "").trim();
@@ -1500,7 +1511,11 @@ export const getTaskManagerNotifications = async (req, res) => {
                     assigneeName,
                     row: overlay,
                     requesterName: requesterBase,
-                    closed: assigneeClosed || Boolean(overlay?.closeRequest?.reassignmentReleased),
+                    requestedByUserId: overlay?.requestedByUserId,
+                    requestType: action.requestType,
+                    closed: assigneeClosed
+                        || Boolean(overlay?.closeRequest?.reassignmentReleased)
+                        || (isGeneralHubRequestType(action.requestType) && ["Approved", "Completed", "Closed"].includes(String(action.status || ""))),
                 }),
                 displayStatus: status,
                 rawStatus: action.status || "Pending",
@@ -1650,6 +1665,7 @@ export const getTaskManagerNotifications = async (req, res) => {
                     row,
                     requesterName: requesterBase,
                     requestedByUserId: row.requestedByUserId,
+                    requestType: row.taskType,
                     closed: assigneeClosed || Boolean(row.closeRequest?.reassignmentReleased),
                 }),
                 displayStatus: status,
@@ -2216,11 +2232,15 @@ export async function taskNumbersByRecordId(recordIds) {
         requestId: String(action.requestId || "").trim(),
     }));
     for (const row of manualRows || []) {
-        if (row?.sourceDashboardActionId) continue;
+        const id = String(row?._id || "");
+        if (!id) continue;
+        const sourceId = String(row?.sourceDashboardActionId || "").trim();
+        const actionId = sourceId || `manual-${id}`;
+        if (stubs.some((item) => item.actionId === actionId || item.requestId === id)) continue;
         stubs.push({
-            actionId: `manual-${row._id}`,
+            actionId,
             requestDate: row.createdAt || null,
-            requestId: String(row._id),
+            requestId: id,
         });
     }
 
@@ -2234,8 +2254,20 @@ export async function taskNumbersByRecordId(recordIds) {
 
     const byId = new Map();
     for (const task of stubs) {
-        if (task.requestId) byId.set(task.requestId, task.taskNumber);
+        if (task.requestId) {
+            byId.set(task.requestId, task.taskNumber);
+            byId.set(`manual-${task.requestId}`, task.taskNumber);
+        }
         if (task.actionId) byId.set(task.actionId, task.taskNumber);
+    }
+    for (const row of manualRows || []) {
+        const id = String(row?._id || "");
+        const sourceId = String(row?.sourceDashboardActionId || "").trim();
+        const number = byId.get(id) || byId.get(`manual-${id}`) || (sourceId ? byId.get(sourceId) : "");
+        if (!number) continue;
+        if (id) byId.set(id, number);
+        if (id) byId.set(`manual-${id}`, number);
+        if (sourceId) byId.set(sourceId, number);
     }
     for (const action of actions || []) {
         const requestId = String(action.requestId || "").trim();

@@ -1309,23 +1309,24 @@ describe('annual leave salary and ticket entitlements', () => {
                 from: '2026-10-01',
                 to: '2026-10-29',
                 showOvertime: true,
-                scheduledWorkingDays: 25,
+                workedDays: 21,
                 compOffDays: 4,
                 overtimeHours: 15,
                 leaveRecords: [],
             }),
-            30,
+            26,
         );
         assert.equal(
             liveOverallWorkedDays({
                 from: '2026-10-01',
                 to: '2026-10-29',
                 showOvertime: true,
-                scheduledWorkingDays: 25,
+                presentWorkingDates: Array.from({ length: 21 }, (_, index) => `2026-10-${String(index + 1).padStart(2, '0')}`),
                 compOffDays: 4,
                 overtimeHours: 27,
                 leaveRecords: [{ leaveType: 'sick', eligibleWorkingDays: 1 }],
             }),
-            30,
+            26,
         );
+    });
 });

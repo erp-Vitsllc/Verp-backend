@@ -870,29 +870,29 @@ export function leaveTakenDayCount(leaveRecords = []) {
 }
 
 /**
- * Total worked = total working days − leave taken + comp off work days.
+ * Total worked = total worked days (marked present) − leave taken + comp off work days.
  */
 export function scheduledTotalWorkedDays({
-    scheduledWorkingDays = 0,
+    workedDays = 0,
     leaveTaken = 0,
     compOffDays = 0,
 } = {}) {
-    const working = Number(scheduledWorkingDays) || 0;
+    const worked = Number(workedDays) || 0;
     const leave = Number(leaveTaken) || 0;
     const compOff = Number(compOffDays) || 0;
-    return Math.round((working - leave + compOff) * 100) / 100;
+    return Math.round((worked - leave + compOff) * 100) / 100;
 }
 
 /** Overall worked = total worked days + overtime days. 10 hours = 1 day, 27 hours = 2 days. */
 export function overallWorkedDays({
-    scheduledWorkingDays = 0,
+    workedDays = 0,
     leaveTaken = 0,
     compOffDays = 0,
     overtimeDays = 0,
 } = {}) {
     return (
         Math.round(
-            (scheduledTotalWorkedDays({ scheduledWorkingDays, leaveTaken, compOffDays }) +
+            (scheduledTotalWorkedDays({ workedDays, leaveTaken, compOffDays }) +
                 (Number(overtimeDays) || 0)) *
                 100,
         ) / 100
@@ -906,8 +906,14 @@ export function overallWorkedDays({
 export function liveOverallWorkedDays(liveAttendance = {}) {
     if (!isDateKey(liveAttendance?.from) || !isDateKey(liveAttendance?.to)) return 0;
     const showOvertime = liveAttendance.showOvertime === true;
+    const presentDates = Array.isArray(liveAttendance.presentWorkingDates)
+        ? liveAttendance.presentWorkingDates
+        : null;
+    const workedDays = presentDates
+        ? presentDates.length
+        : Number(liveAttendance.workedDays) || 0;
     return overallWorkedDays({
-        scheduledWorkingDays: liveAttendance.scheduledWorkingDays,
+        workedDays,
         leaveTaken: leaveTakenDayCount(liveAttendance.leaveRecords),
         compOffDays: showOvertime ? liveAttendance.compOffDays : 0,
         overtimeDays: showOvertime ? overtimeHoursToDays(liveAttendance.overtimeHours) : 0,

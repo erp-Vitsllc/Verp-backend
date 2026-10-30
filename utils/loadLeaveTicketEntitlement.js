@@ -31,6 +31,7 @@ import {
     uniqueConsumingCycles,
     liveOverallWorkedDays,
     listPresentCompOffDays,
+    presentScheduledWorkingDates,
     eligibleOvertimeHours,
 } from './salaryHistoricalCalculations.js';
 import { applyEnrollmentMaskToLiveLeave } from './attendanceLeaveDayCover.js';
@@ -401,6 +402,7 @@ async function loadLiveAttendanceEligibility({ employee, from, to, staffType }) 
         to: periodEnd,
         flexibleTiming,
     });
+    const presentWorkingDates = presentScheduledWorkingDates(rows, stats.workingDateKeys);
     const coveredDates = new Set(
         (rows || []).map((row) => String(row?.date || '').trim()).filter((date) => isDateKey(date)),
     );
@@ -419,6 +421,7 @@ async function loadLiveAttendanceEligibility({ employee, from, to, staffType }) 
     return {
         workingDays: live.workingDays,
         scheduledWorkingDays: stats.workingDays,
+        presentWorkingDates,
         compOffDays: compOffRecords.length,
         leaveRecords: liveLeaveRecordsInProcessingWindow(
             [...masked.leaveRecords, ...implicitLeave],
