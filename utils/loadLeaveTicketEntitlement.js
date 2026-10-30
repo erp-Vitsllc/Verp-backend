@@ -29,7 +29,9 @@ import {
     summarizeAttendanceEligibility,
     implicitUnauthorizedLeaveForSchedule,
     uniqueConsumingCycles,
-    overtimeHoursToDays,
+    liveOverallWorkedDays,
+    listPresentCompOffDays,
+    eligibleOvertimeHours,
 } from './salaryHistoricalCalculations.js';
 import { applyEnrollmentMaskToLiveLeave } from './attendanceLeaveDayCover.js';
 import {
@@ -55,8 +57,6 @@ import {
     isFlexibleTiming,
     WEEKDAY_KEYS,
 } from './workingTimeHelpers.js';
-import { summarizeApprovedFlexibleOvertime } from './flexibleAttendance.js';
-
 const ISO = /^\d{4}-\d{2}-\d{2}$/;
 
 function pad2(n) {
@@ -333,8 +333,7 @@ export async function loadEmployeeSalaryWorkingDays(employee, profileHint = null
           })
         : { workingDays: 0, overtimeDays: 0 };
     const historicalWorkingDays = Number(historical.workingDays) || 0;
-    const liveWorkingDays =
-        (Number(live.workingDays) || 0) + overtimeHoursToDays(Number(live.overtimeHours) || 0);
+    const liveWorkingDays = liveOverallWorkedDays(live);
     return {
         historicalWorkingDays,
         liveWorkingDays,
@@ -389,13 +388,19 @@ async function loadLiveAttendanceEligibility({ employee, from, to, staffType }) 
         date: { $gte: periodStart, $lte: periodEnd },
         $or: clauses,
     })
-        .select('date statusKey leaveRequestStatus requestedStatusKey reason timeIn timeOut flexibleOtStatus flexibleOtApprovedHours flexibleOtNextDayDate flexibleFromOtDate')
+        .select('date statusKey leaveRequestStatus requestedStatusKey reason timeIn timeOut flexibleOtStatus flexibleOtApprovedHours flexibleOtNextDayDate flexibleFromOtDate flexibleWorkedHours compOff')
         .lean();
     const live = summarizeAttendanceEligibility(rows, { throughDate: periodEnd });
     const week = getWeekForStaffType(workingTime, staffType);
-    const overtime = isFlexibleTiming(week)
-        ? summarizeApprovedFlexibleOvertime(rows)
+    const flexibleTiming = isFlexibleTiming(week);
+    const overtime = flexibleTiming
+        ? eligibleOvertimeHours(rows)
         : { hours: 0, days: 0, overtimeRecords: [] };
+    const compOffRecords = listPresentCompOffDays(rows, {
+        from: periodStart,
+        to: periodEnd,
+        flexibleTiming,
+    });
     const coveredDates = new Set(
         (rows || []).map((row) => String(row?.date || '').trim()).filter((date) => isDateKey(date)),
     );
@@ -413,6 +418,8 @@ async function loadLiveAttendanceEligibility({ employee, from, to, staffType }) 
     });
     return {
         workingDays: live.workingDays,
+        scheduledWorkingDays: stats.workingDays,
+        compOffDays: compOffRecords.length,
         leaveRecords: liveLeaveRecordsInProcessingWindow(
             [...masked.leaveRecords, ...implicitLeave],
             periodStart,
@@ -421,6 +428,7 @@ async function loadLiveAttendanceEligibility({ employee, from, to, staffType }) 
         overtimeHours: overtime.hours,
         overtimeDays: overtime.days,
         overtimeRecords: overtime.overtimeRecords,
+        showOvertime: flexibleTiming,
         from: periodStart,
         to: periodEnd,
     };
@@ -501,12 +509,9 @@ export async function loadLeaveTicketEntitlement({ employee, profile, salaryDoc,
     );
 
     const calculation = calculateHistoricalEligibility({
-        workingDays:
-            stats.workingDays +
-            (Number(liveAttendance.workingDays) || 0) +
-            overtimeHoursToDays(Number(liveAttendance.overtimeHours) || 0),
+        workingDays: stats.workingDays + liveOverallWorkedDays(liveAttendance),
         calendarDays: stats.calendarDays,
-        leaveRecords: [...leaveRecords, ...(liveAttendance.leaveRecords || [])],
+        leaveRecords,
         annualLeaveRecords,
         paymentCycles,
         cycleDays,

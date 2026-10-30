@@ -582,33 +582,70 @@ export const LIVE_LEAVE_STATUS_MAP = {
     holiday: 'holiday',
 };
 
-/** Next days added from approved overtime that are still present, inside the window. A leave on that day is not a present day. */
-export function countPresentCompOffDays(rows = [], { from, to, flexibleTiming } = {}) {
-    if (!flexibleTiming) return 0;
+function isCompOffPlacementRow(row) {
+    if (!row) return false;
+    if (String(row.flexibleFromOtDate || '').trim()) return true;
+    const timeIn = String(row.timeIn || '').trim();
+    const timeOut = String(row.timeOut || '').trim();
+    return timeIn === 'OT' || timeOut === 'OT';
+}
+
+/** The next day was actually marked. A leave on that day is not a comp off day. */
+export function isMarkedCompOffNextDay(row) {
+    if (!row || resolveOwnedAttendanceLeave(row)) return false;
+    const key = String(row.statusKey || '').trim();
+    return LIVE_WORKING_STATUS_KEYS.has(key) || isCompOffPlacementRow(row);
+}
+
+/**
+ * Next days added from approved overtime that are still marked, inside the window.
+ * One row per next day. The source date is the day the overtime was approved.
+ */
+export function listPresentCompOffDays(rows = [], { from, to, flexibleTiming } = {}) {
+    if (!flexibleTiming) return [];
     const start = String(from || '').trim();
     const end = String(to || '').trim();
-    if (!isDateKey(start) || !isDateKey(end)) return 0;
+    if (!isDateKey(start) || !isDateKey(end)) return [];
     const byDate = new Map();
     for (const row of rows || []) {
         const date = String(row?.date || '').trim();
         if (isDateKey(date)) byDate.set(date, row);
     }
-    const days = new Set();
+    const byNext = new Map();
     for (const row of rows || []) {
         if (String(row?.flexibleOtStatus || '') !== 'approved') continue;
         const next = String(row?.flexibleOtNextDayDate || '').trim();
-        if (!isDateKey(next) || next < start || next > end) continue;
-        const target = byDate.get(next);
-        if (!target) continue;
-        if (resolveOwnedAttendanceLeave(target)) continue;
-        const key = String(target.statusKey || '').trim();
-        const synthetic =
-            String(target.timeIn || '').trim() === 'OT' ||
-            String(target.timeOut || '').trim() === 'OT' ||
-            Boolean(String(target.flexibleFromOtDate || '').trim());
-        if (LIVE_WORKING_STATUS_KEYS.has(key) || synthetic) days.add(next);
+        if (!isDateKey(next) || next < start || next > end || byNext.has(next)) continue;
+        if (!isMarkedCompOffNextDay(byDate.get(next))) continue;
+        byNext.set(next, {
+            date: next,
+            sourceDate: String(row?.date || '').trim(),
+        });
     }
-    return days.size;
+    return [...byNext.values()].sort((left, right) => left.date.localeCompare(right.date));
+}
+
+/** Next days added from approved overtime that are still present, inside the window. A leave on that day is not a present day. */
+export function countPresentCompOffDays(rows = [], options = {}) {
+    return listPresentCompOffDays(rows, options).length;
+}
+
+/**
+ * Present marks on scheduled working days only.
+ * A holiday or weekly off punch is not a worked day. A comp-off next day is not one either.
+ */
+export function presentScheduledWorkingDates(rows = [], scheduledDates = []) {
+    const scheduled = new Set(
+        (scheduledDates || []).map((date) => String(date || '').trim()).filter((date) => isDateKey(date)),
+    );
+    const dates = new Set();
+    for (const row of rows || []) {
+        const date = String(row?.date || '').trim();
+        if (!scheduled.has(date) || isCompOffPlacementRow(row)) continue;
+        if (resolveOwnedAttendanceLeave(row)) continue;
+        if (LIVE_WORKING_STATUS_KEYS.has(String(row?.statusKey || '').trim())) dates.add(date);
+    }
+    return [...dates].sort();
 }
 
 /** Approved overtime hours in the window, including hours that were moved onto a next day. */
@@ -662,10 +699,9 @@ export function eligibleOvertimeHours(rows = []) {
         const date = String(row.date || '').trim();
         const next = String(row?.flexibleOtNextDayDate || '').trim();
         let remain = approved;
-        if (next) {
-            const target = byDate.get(next);
-            const consumed = Math.min(approved, compOffDayHours(target));
-            remain = roundOvertimeHours(approved - consumed);
+        if (next && isMarkedCompOffNextDay(byDate.get(next))) {
+            // The next day was marked, so this approval is comp off. No leftover hours stay as overtime.
+            remain = 0;
             if (date) consumedNextDays.add(`${date}|${next}`);
         }
         if (!(remain > 0)) continue;
@@ -822,6 +858,60 @@ export function overtimeHoursRemainder(hours) {
     const h = Math.max(0, Number(hours) || 0);
     const days = overtimeHoursToDays(h);
     return Math.round((h - days * OVERTIME_HOURS_PER_DAY) * 100) / 100;
+}
+
+/** Leave days in the processing window. Holiday dates are not a loss. */
+export function leaveTakenDayCount(leaveRecords = []) {
+    return (Array.isArray(leaveRecords) ? leaveRecords : []).reduce((sum, row) => {
+        const type = String(row?.leaveType || '').toLowerCase();
+        if (type === 'holiday') return sum;
+        return sum + (Number(row?.eligibleWorkingDays ?? row?.actualDays ?? row?.calendarDays) || 0);
+    }, 0);
+}
+
+/**
+ * Total worked = total working days − leave taken + comp off work days.
+ */
+export function scheduledTotalWorkedDays({
+    scheduledWorkingDays = 0,
+    leaveTaken = 0,
+    compOffDays = 0,
+} = {}) {
+    const working = Number(scheduledWorkingDays) || 0;
+    const leave = Number(leaveTaken) || 0;
+    const compOff = Number(compOffDays) || 0;
+    return Math.round((working - leave + compOff) * 100) / 100;
+}
+
+/** Overall worked = total worked days + overtime days. 10 hours = 1 day, 27 hours = 2 days. */
+export function overallWorkedDays({
+    scheduledWorkingDays = 0,
+    leaveTaken = 0,
+    compOffDays = 0,
+    overtimeDays = 0,
+} = {}) {
+    return (
+        Math.round(
+            (scheduledTotalWorkedDays({ scheduledWorkingDays, leaveTaken, compOffDays }) +
+                (Number(overtimeDays) || 0)) *
+                100,
+        ) / 100
+    );
+}
+
+/**
+ * Days this live window adds toward entitlement.
+ * The attendance object is already limited to the processing start through yesterday.
+ */
+export function liveOverallWorkedDays(liveAttendance = {}) {
+    if (!isDateKey(liveAttendance?.from) || !isDateKey(liveAttendance?.to)) return 0;
+    const showOvertime = liveAttendance.showOvertime === true;
+    return overallWorkedDays({
+        scheduledWorkingDays: liveAttendance.scheduledWorkingDays,
+        leaveTaken: leaveTakenDayCount(liveAttendance.leaveRecords),
+        compOffDays: showOvertime ? liveAttendance.compOffDays : 0,
+        overtimeDays: showOvertime ? overtimeHoursToDays(liveAttendance.overtimeHours) : 0,
+    });
 }
 
 export function calculateHistoricalEligibility({

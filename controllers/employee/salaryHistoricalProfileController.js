@@ -44,7 +44,8 @@ import {
     liveLeaveRecordsInProcessingWindow,
     salaryProcessingStartDay,
     summarizeAttendanceEligibility,
-    countPresentCompOffDays,
+    listPresentCompOffDays,
+    presentScheduledWorkingDates,
     eligibleOvertimeHours,
     implicitUnauthorizedLeaveForSchedule,
     uniqueConsumingCycles,
@@ -53,7 +54,7 @@ import {
     validateVerpStart,
     workflowIsLocked,
     paidLeaveSalaryMutationError,
-    overtimeHoursToDays,
+    liveOverallWorkedDays,
 } from '../../utils/salaryHistoricalCalculations.js';
 import { serializePayrollSettings, requireMainSalaryPolicy } from './payrollSettingsController.js';
 import { applySickAllowanceToLeaveRecords, latestAnnualLeaveEndFromLeaveRecords, leavePolicyEntitlements, resolveEmployeePayrollPolicy, shiftDateKey, sickDaysAfterAnnualLeave } from '../../utils/employeeLeavePolicy.js';
@@ -373,6 +374,9 @@ function emptyLiveAttendance(from = '', to = '', workingDays = 0) {
         overtimeHours: 0,
         overtimeDays: 0,
         overtimeRecords: [],
+        scheduledWorkingDates: [],
+        presentWorkingDates: [],
+        compOffRecords: [],
         from,
         to,
     };
@@ -410,6 +414,12 @@ async function loadLiveAttendanceEligibility({ employee, from, to, staffType }) 
     const overtime = flexibleTiming
         ? eligibleOvertimeHours(rows)
         : { hours: 0, days: 0, overtimeRecords: [] };
+    const compOffRecords = listPresentCompOffDays(rows, {
+        from: periodStart,
+        to: periodEnd,
+        flexibleTiming,
+    });
+    const presentWorkingDates = presentScheduledWorkingDates(rows, stats.workingDateKeys);
     const coveredDates = new Set(
         (rows || []).map((row) => String(row?.date || '').trim()).filter((date) => isDateKey(date)),
     );
@@ -430,11 +440,10 @@ async function loadLiveAttendanceEligibility({ employee, from, to, staffType }) 
         scheduledWorkingDays: stats.workingDays,
         holidayDays: stats.holidays,
         weeklyOffDays: stats.weeklyOffs,
-        compOffDays: countPresentCompOffDays(rows, {
-            from: periodStart,
-            to: periodEnd,
-            flexibleTiming,
-        }),
+        compOffDays: compOffRecords.length,
+        compOffRecords,
+        scheduledWorkingDates: stats.workingDateKeys || [],
+        presentWorkingDates,
         approvedOvertimeHours: overtime.hours,
         leaveRecords: liveLeaveRecordsInProcessingWindow(
             [...masked.leaveRecords, ...implicitLeave],
@@ -938,12 +947,9 @@ export async function buildPayload(req, employeeId, overlay = {}) {
         },
     );
     const calculation = calculateHistoricalEligibility({
-        workingDays:
-            stats.workingDays +
-            (Number(liveAttendance.workingDays) || 0) +
-            overtimeHoursToDays(Number(liveAttendance.overtimeHours) || 0),
+        workingDays: stats.workingDays + liveOverallWorkedDays(liveAttendance),
         calendarDays: stats.calendarDays,
-        leaveRecords: [...leaveRecords, ...(liveAttendance.leaveRecords || [])],
+        leaveRecords,
         annualLeaveRecords,
         paymentCycles,
         cycleDays,
@@ -1045,6 +1051,13 @@ export async function buildPayload(req, employeeId, overlay = {}) {
             holidayDays: Number(liveAttendance.holidayDays) || 0,
             weeklyOffDays: Number(liveAttendance.weeklyOffDays) || 0,
             compOffDays: Number(liveAttendance.compOffDays) || 0,
+            compOffRecords: Array.isArray(liveAttendance.compOffRecords) ? liveAttendance.compOffRecords : [],
+            scheduledWorkingDates: Array.isArray(liveAttendance.scheduledWorkingDates)
+                ? liveAttendance.scheduledWorkingDates
+                : [],
+            presentWorkingDates: Array.isArray(liveAttendance.presentWorkingDates)
+                ? liveAttendance.presentWorkingDates
+                : [],
             overtimeHours: Number(liveAttendance.overtimeHours) || 0,
             approvedOvertimeHours: Number(liveAttendance.approvedOvertimeHours) || 0,
             overtimeDays: Number(liveAttendance.overtimeDays) || 0,

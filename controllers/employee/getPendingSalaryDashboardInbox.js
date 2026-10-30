@@ -23,6 +23,7 @@ import {
 } from '../../utils/salaryEnrollmentApprovalNotify.js';
 import { SALARY_DMF_REQUEST_TYPE } from '../../utils/salaryDmfApproval.js';
 import { isPendingEnrollmentReminder, syncPendingSalaryEnrollmentTasks } from '../../utils/syncPendingSalaryEnrollmentTasks.js';
+import { omitEnrollmentTaskDuplicates } from '../../utils/pendingEnrollmentReminder.js';
 import { listDeletedNoticeKeys, noticeKeysForRecord, salaryEnrollmentEmployeeKey } from '../../utils/deletedTaskNotice.js';
 import { viewerIsSalaryFlowchartHr } from '../../utils/viewerIsSalaryFlowchartHr.js';
 
@@ -333,7 +334,10 @@ export const getPendingSalaryDashboardInbox = async (req, res) => {
             items.push(...(await buildPendingEnrollmentInboxItems(exclude)));
         }
 
-        const taskItems = await loadTaskManagerInboxItems(assigneeClauses, 'salary');
+        const taskItems = omitEnrollmentTaskDuplicates(
+            items,
+            await loadTaskManagerInboxItems(assigneeClauses, 'salary'),
+        );
         const merged = [...items, ...taskItems];
         return res.json({ count: merged.length, items: merged });
     } catch (error) {

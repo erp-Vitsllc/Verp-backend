@@ -17,3 +17,28 @@ export function isPendingEnrollmentReminder(row) {
     if (extra2 === PENDING_ENROLLMENT_EXTRA.toLowerCase()) return true;
     return parseExtra3(row?.extra3).pendingEnrollment === true;
 }
+
+function noticeTitle(row) {
+    return String(row?.extra1 || row?.subjectName || '')
+        .trim()
+        .toLowerCase()
+        .replace(/\s+/g, ' ');
+}
+
+/**
+ * A close attempt on the enrolment task uses the same title as the enrolment row.
+ * The salary bell already shows the enrolment, so that task notice is not a second item.
+ */
+export function omitEnrollmentTaskDuplicates(enrollmentItems = [], taskItems = []) {
+    const titles = new Set();
+    for (const row of enrollmentItems || []) {
+        const title = noticeTitle(row);
+        const name = String(row?.subjectName || '').trim().toLowerCase().replace(/\s+/g, ' ');
+        if (title) titles.add(title);
+        if (name) titles.add(`${name} is pending for enrollment`);
+    }
+    return (taskItems || []).filter((row) => {
+        const title = noticeTitle(row);
+        return !title || !titles.has(title);
+    });
+}
