@@ -13,6 +13,7 @@ import { listProfileEmployeeTasks } from '../stats/getTaskManagerNotifications.j
 import { isCompanyShellEmployee } from '../../utils/attendanceEmployeeFilters.js';
 import { resolveEmployeeFinePayableAmount } from '../../utils/finePayableAmount.js';
 import { normalizeStaffTypeKey } from '../../utils/workLocationHelpers.js';
+import { payLocationFromEmployee } from '../../utils/workPayLocation.js';
 import {
     getScheduledEmailTimeZone,
     getZonedParts,
@@ -795,7 +796,7 @@ export async function getEmployeeAttendanceProfile(req, res) {
 
         const employee = await EmployeeBasic.findById(id)
             .select(
-                '_id employeeId firstName lastName staffType profilePicture salary salaryDetails dateOfJoining joiningDate designation role department status profileStatus primaryReportee attendanceAccountStatus attendanceSuspension',
+                '_id employeeId firstName lastName staffType profilePicture salary salaryDetails dateOfJoining joiningDate designation role department status profileStatus primaryReportee attendanceAccountStatus attendanceSuspension workLocation workingFromCountry workingFromCountryCode salaryCurrency workTimeZone',
             )
             .populate('primaryReportee', 'firstName lastName employeeId')
             .lean();
@@ -1403,6 +1404,13 @@ export async function getEmployeeAttendanceProfile(req, res) {
                 yearsOfServiceLabel: yearsOfServiceLabel(joinKey, dubai),
                 reportsTo,
                 reportsToEmployeeId: String(employee.primaryReportee?.employeeId || '').trim(),
+                ...payLocationFromEmployee({
+                    workLocation: employee.workLocation || salaryDoc?.workLocation,
+                    workingFromCountry: employee.workingFromCountry || salaryDoc?.workingFromCountry,
+                    workingFromCountryCode: employee.workingFromCountryCode || salaryDoc?.workingFromCountryCode,
+                    salaryCurrency: employee.salaryCurrency || salaryDoc?.salaryCurrency,
+                    workTimeZone: employee.workTimeZone || salaryDoc?.workTimeZone,
+                }),
             },
             nextBirthday,
             summary: {

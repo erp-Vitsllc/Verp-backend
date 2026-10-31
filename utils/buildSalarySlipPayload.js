@@ -42,6 +42,8 @@ import {
     shouldHideSalarySlipDeduction,
     shouldHideSalarySlipEarning,
 } from './salaryPolicyExclusions.js';
+import { getAedCurrencyRates } from './currencyRates.js';
+import { payLocationFromEmployee } from './workPayLocation.js';
 
 const MONTH_FULL = [
     'January', 'February', 'March', 'April', 'May', 'June',
@@ -85,6 +87,32 @@ function money(value) {
 
 function formatAed(value) {
     return `AED ${money(value).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+}
+
+/** Local paying-currency amount → AED. Rate is units of that currency for 1 AED. */
+function amountInAed(amount, perAed) {
+    const rate = Number(perAed);
+    if (!(rate > 0) || rate === 1) return money(amount);
+    return money(money(amount) / rate);
+}
+
+function convertSalaryEntryToAed(entry, perAed) {
+    if (!entry) return entry;
+    const scale = (value) => amountInAed(value, perAed);
+    const extras = Array.isArray(entry.additionalAllowances)
+        ? entry.additionalAllowances.map((row) => ({ ...row, amount: scale(row?.amount) }))
+        : entry.additionalAllowances;
+    return {
+        ...entry,
+        basic: scale(entry.basic),
+        houseRentAllowance: scale(entry.houseRentAllowance),
+        otherAllowance: scale(entry.otherAllowance),
+        vehicleAllowance: scale(entry.vehicleAllowance),
+        fuelAllowance: scale(entry.fuelAllowance),
+        totalSalary: scale(entry.totalSalary),
+        monthlySalary: scale(entry.monthlySalary),
+        additionalAllowances: extras,
+    };
 }
 
 export function monthKeyOf(value) {
@@ -669,7 +697,7 @@ export async function buildSalarySlipPayload({
     const emp =
         preloadedEmp ||
         (await EmployeeBasic.findOne({ employeeId: code })
-            .select('employeeId firstName lastName designation staffType status overtime company dateOfJoining noticeRequest.exitDate')
+            .select('employeeId firstName lastName designation staffType status overtime company dateOfJoining noticeRequest.exitDate workLocation workingFromCountry workingFromCountryCode salaryCurrency workTimeZone')
             .populate('company', 'name nickName')
             .lean());
     if (!emp || isCompanyShellEmployee(emp)) {
@@ -757,7 +785,22 @@ export async function buildSalarySlipPayload({
         return null;
     });
 
-    const entry = resolvedSalaryEntry(salaryDoc, ym);
+    const pay = payLocationFromEmployee({
+        workLocation: emp.workLocation || salaryDoc?.workLocation,
+        workingFromCountry: emp.workingFromCountry || salaryDoc?.workingFromCountry,
+        workingFromCountryCode: emp.workingFromCountryCode || salaryDoc?.workingFromCountryCode,
+        salaryCurrency: emp.salaryCurrency || salaryDoc?.salaryCurrency,
+        workTimeZone: emp.workTimeZone || salaryDoc?.workTimeZone,
+    });
+    let perAed = 1;
+    if (pay.workLocation === 'outside_uae' && pay.salaryCurrency && pay.salaryCurrency !== 'AED') {
+        const quote = await getAedCurrencyRates();
+        const rate = Number(quote?.rates?.[pay.salaryCurrency]);
+        if (rate > 0) perAed = rate;
+    }
+    const toAed = (amount) => amountInAed(amount, perAed);
+    let entry = resolvedSalaryEntry(salaryDoc, ym);
+    if (perAed !== 1) entry = convertSalaryEntryToAed(entry, perAed);
     const monthly = monthlySalaryOf(entry);
     const daily = monthly > 0 && daysInMonth > 0 ? money(monthly / daysInMonth) : 0;
     const authTimes = policyTimes(policy?.authorizedLeaveDeductionDays, 1);
@@ -914,7 +957,7 @@ export async function buildSalarySlipPayload({
         if (status === 'draft' || status === 'cancelled' || status === 'rejected') continue;
         const inMonth = cycleBelongsToSlipMonth(cycle, ym);
         if (inMonth.leave) {
-            const cycleLeave = money(cycle.leaveSalaryAmount || cycle.leaveSalary);
+            const cycleLeave = toAed(cycle.leaveSalaryAmount || cycle.leaveSalary);
             leaveSalaryAmount = money(leaveSalaryAmount + cycleLeave);
             if (daily > 0 && cycleLeave > 0) {
                 leaveSalaryDays += Math.round(cycleLeave / daily);
@@ -926,9 +969,9 @@ export async function buildSalarySlipPayload({
     }
     const leaveFromCycles = leaveSalaryAmount;
     const ticketFromCycles = ticketAmount;
-    const leaveRemaining = money(leaveTicketState?.leaveRemaining);
+    const leaveRemaining = toAed(leaveTicketState?.leaveRemaining);
     const ticketRemaining = money(leaveTicketState?.ticketRemaining);
-    const leaveDue = money(leaveTicketState?.leaveDue || leaveTicketState?.entitlements?.totalLeaveSalary);
+    const leaveDue = toAed(leaveTicketState?.leaveDue || leaveTicketState?.entitlements?.totalLeaveSalary);
     const ticketDue = money(leaveTicketState?.ticketDue || leaveTicketState?.entitlements?.totalTicketAmount);
     const leavePayMax = money(leaveRemaining + leaveFromCycles) || leaveDue;
     const ticketPayMax = money(ticketRemaining + ticketFromCycles) || ticketDue;
@@ -979,12 +1022,12 @@ export async function buildSalarySlipPayload({
         'fromDate',
         'toDate',
     ];
-    let yearlyLeaveSalaryAmount = sumBenefitInYear(profile?.paymentCycles, slipYear, {
+    let yearlyLeaveSalaryAmount = toAed(sumBenefitInYear(profile?.paymentCycles, slipYear, {
         amountKeys: ['leaveSalaryAmount', 'leaveSalary'],
         dateKeys: leaveSalaryDateKeys,
-    });
+    }));
     if (yearlyLeaveSalaryAmount <= 0) {
-        yearlyLeaveSalaryAmount = money(
+        yearlyLeaveSalaryAmount = toAed(
             sumBenefitInYear(profile?.annualLeaveRecords, slipYear, {
                 amountKeys: ['leaveSalaryAmount', 'leaveSalary'],
                 dateKeys: leaveSalaryDateKeys,

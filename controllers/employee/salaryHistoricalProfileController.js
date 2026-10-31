@@ -18,6 +18,7 @@ import {
 } from '../../utils/workingTimeHelpers.js';
 import { applyEnrollmentMaskToLiveLeave } from '../../utils/attendanceLeaveDayCover.js';
 import { listActiveWorkLocations, normalizeStaffTypeKey } from '../../utils/workLocationHelpers.js';
+import { payLocationFromEmployee } from '../../utils/workPayLocation.js';
 import { getCalendarPartsInTz, getScheduledEmailTimeZone } from '../../utils/scheduleDailyAtMidnight.js';
 import { hasPermission, isUserAdministrator } from '../../services/permissionService.js';
 import { ensureAttachmentPersistedToS3, signOrKeepAttachmentUrl } from '../../utils/s3Upload.js';
@@ -814,7 +815,7 @@ function mapWorkflow(profile) {
 async function loadEmployee(employeeId) {
     return EmployeeBasic.findOne({ employeeId })
         .select(
-            '_id employeeId firstName lastName status profileStatus designation role department staffType dateOfJoining contractJoiningDate profilePicture primaryReportee reportingAuthority companyEmail company',
+            '_id employeeId firstName lastName status profileStatus designation role department staffType dateOfJoining contractJoiningDate profilePicture primaryReportee reportingAuthority companyEmail company workLocation workingFromCountry workingFromCountryCode salaryCurrency workTimeZone',
         )
         .populate('primaryReportee', 'firstName lastName employeeId')
         .populate('reportingAuthority', 'firstName lastName employeeId companyEmail')
@@ -854,7 +855,7 @@ export async function buildPayload(req, employeeId, overlay = {}) {
         SalaryEnrollment.findOne({ employeeId }).lean(),
         listActiveWorkLocations(),
         EmployeeSalary.findOne({ employeeId }).select(
-            'basic basicSalary monthlySalary salaryHistory.basic salaryHistory.fromDate salaryHistory.toDate salaryHistory.month',
+            'basic basicSalary monthlySalary workLocation workingFromCountry workingFromCountryCode salaryCurrency workTimeZone salaryHistory.basic salaryHistory.fromDate salaryHistory.toDate salaryHistory.month',
         ).lean(),
         PayrollSettings.findOne({ key: 'default' }).select('_id').lean(),
     ]);
@@ -1020,6 +1021,13 @@ export async function buildPayload(req, employeeId, overlay = {}) {
     const isAdminOfficer = await viewerIsFlowchartAdminOfficer(req);
     const enrolledProfile = Boolean(enrollment) || workflowIsLocked(workflowStatus);
     const employeeOut = serializeEmployee(employee, workLocationLabel);
+    Object.assign(employeeOut, payLocationFromEmployee({
+        workLocation: employee.workLocation || salaryDoc?.workLocation,
+        workingFromCountry: employee.workingFromCountry || salaryDoc?.workingFromCountry,
+        workingFromCountryCode: employee.workingFromCountryCode || salaryDoc?.workingFromCountryCode,
+        salaryCurrency: employee.salaryCurrency || salaryDoc?.salaryCurrency,
+        workTimeZone: employee.workTimeZone || salaryDoc?.workTimeZone,
+    }));
     employeeOut.profilePicture = await signedProfilePicture(employee.profilePicture);
 
     return {
