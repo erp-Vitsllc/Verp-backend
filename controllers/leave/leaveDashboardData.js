@@ -1007,16 +1007,17 @@ export async function decideLeavePendingRequest(req, res) {
             approvedStatusKey ||
             String(pendingRecord?.requestedStatusKey || '').trim();
 
+        const rejecting = decision === 'rejected';
         const result = await decideLeaveRequestInternal({
             attendanceId,
             decision,
-            approvedStatusKey: resolvedApprovedKey,
+            approvedStatusKey: rejecting ? '' : resolvedApprovedKey,
             leavePayType,
-            timeIn: req.body?.timeIn,
-            timeOut: req.body?.timeOut,
+            timeIn: rejecting ? '' : req.body?.timeIn,
+            timeOut: rejecting ? '' : req.body?.timeOut,
             rejectReason: req.body?.rejectReason || req.body?.reason,
-            deductionChoice: req.body?.deductionChoice,
-            requestedHours: req.body?.requestedHours,
+            deductionChoice: rejecting ? '' : req.body?.deductionChoice,
+            requestedHours: rejecting ? null : req.body?.requestedHours,
             actor,
             hrBypass: hrFlags.canEdit,
         });

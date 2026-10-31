@@ -5089,7 +5089,7 @@ export async function requestAttendanceFuture(req, res) {
             record.leaveDayFraction = partialLeavePortion(dayPart);
             record.leaveDeductionTimes = 1;
             if (isPunchRequest) {
-                const asked = String(req.body?.deductionChoice || req.body?.deductionType || '').trim();
+                const asked = normalizePunchDeductionChoice(req.body?.deductionChoice || req.body?.deductionType);
                 record.leaveDeductionChoice = asked === 'waived' ? 'waived' : 'authorized';
                 record.leaveRequestedHours = record.leaveDeductionChoice === 'waived' ? 0 : null;
             }
@@ -5170,18 +5170,19 @@ export async function decideAttendanceLeaveRequest(req, res) {
         const approvedStatusKey = String(req.body?.approvedStatusKey || '').trim();
         const leavePayType = normalizeLeavePayType(req.body?.leavePayType);
 
+        const rejecting = decision === 'rejected';
         const result = await decideLeaveRequestInternal({
             attendanceId,
             date,
             employeeMongoId,
             decision,
-            approvedStatusKey,
+            approvedStatusKey: rejecting ? '' : approvedStatusKey,
             leavePayType,
-            timeIn: req.body?.timeIn,
-            timeOut: req.body?.timeOut,
+            timeIn: rejecting ? '' : req.body?.timeIn,
+            timeOut: rejecting ? '' : req.body?.timeOut,
             rejectReason: req.body?.rejectReason || req.body?.reason,
-            deductionChoice: req.body?.deductionChoice,
-            requestedHours: req.body?.requestedHours,
+            deductionChoice: rejecting ? '' : req.body?.deductionChoice,
+            requestedHours: rejecting ? null : req.body?.requestedHours,
             actor: self,
         });
 
@@ -5213,11 +5214,19 @@ function punchRequestKind(record) {
     return '';
 }
 
+function normalizePunchDeductionChoice(value) {
+    const asked = String(value || '').trim().toLowerCase();
+    if (asked === 'waived' || asked === 'waive' || asked === 'waive_off' || asked === 'waiveoff') return 'waived';
+    if (asked === 'authorized' || asked === 'authorised') return 'authorized';
+    return '';
+}
+
 function rememberPunchDeduction(record, { deductionChoice, requestedHours } = {}) {
     const kind = punchRequestKind(record);
     if (!kind) return;
-    const asked = String(deductionChoice || record.leaveDeductionChoice || '').trim();
-    const choice = asked === 'waived' ? 'waived' : 'authorized';
+    const incoming = normalizePunchDeductionChoice(deductionChoice);
+    const stored = normalizePunchDeductionChoice(record.leaveDeductionChoice);
+    const choice = incoming || stored || 'authorized';
     record.leaveDeductionChoice = choice;
     if (choice === 'waived') {
         const hours = requestedHours == null || requestedHours === '' ? 0 : Number(requestedHours);
@@ -5580,7 +5589,44 @@ async function applyLeaveDecisionToRecord({
         record.requestedStatusLabel || leaveStatusLabel(requestedKey);
     const kind = String(record.leaveRequestKind || '');
 
-        if (decision === 'approved') {
+    if (decision === 'rejected') {
+        const clocked = Boolean(String(record.timeIn || '').trim() || String(record.timeOut || '').trim());
+        const previousKey = String(record.previousStatusKey || '').trim();
+        const placeholder =
+            kind.startsWith('future_') &&
+            !clocked &&
+            (!previousKey || previousKey === 'not_marked');
+        if (placeholder) {
+            const recordId = record._id;
+            const dateKey = record.date;
+            const snapshot =
+                typeof record.toObject === 'function' ? record.toObject() : { ...record };
+            await Attendance.deleteOne({ _id: recordId });
+            await syncLeaveDecisionDashboardActions({
+                record: { ...snapshot, _id: recordId, date: dateKey },
+                actor,
+                subject,
+                decision: 'rejected',
+                requestedLabel,
+            });
+            return { ok: true, record: null };
+        }
+        record.leaveRequestStatus = 'rejected';
+        record.leaveApprovalStage = '';
+        record.leaveDecidedAt = new Date();
+        record.leaveDecidedBy = actor._id;
+        await record.save();
+        await syncLeaveDecisionDashboardActions({
+            record,
+            actor,
+            subject,
+            decision: 'rejected',
+            requestedLabel,
+        });
+        return { ok: true, record };
+    }
+
+    if (decision === 'approved') {
         const applyAuthorized = () => {
             const part = String(record.leaveRequestDayPart || 'full');
             record.statusKey = 'authorized_leave';
@@ -5670,26 +5716,6 @@ async function applyLeaveDecisionToRecord({
                 }
             }
         }
-    }
-
-    if (
-        decision === 'rejected' &&
-        kind.startsWith('future_') &&
-        (!record.timeIn || record.previousStatusKey === 'not_marked')
-    ) {
-        const recordId = record._id;
-        const dateKey = record.date;
-        const snapshot =
-            typeof record.toObject === 'function' ? record.toObject() : { ...record };
-        await Attendance.deleteOne({ _id: recordId });
-        await syncLeaveDecisionDashboardActions({
-            record: { ...snapshot, _id: recordId, date: dateKey },
-            actor,
-            subject,
-            decision: 'rejected',
-            requestedLabel,
-        });
-        return { ok: true, record: null };
     }
 
     record.leaveRequestStatus = decision;
