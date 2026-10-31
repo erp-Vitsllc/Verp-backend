@@ -11,7 +11,7 @@ import { listActiveWorkLocations, normalizeStaffTypeKey, staffTypeMongoClause } 
 const LEAVE_MARK_KEYS = ['on_leave', 'authorized_leave', 'sick_leave', 'compoff_leave'];
 
 function emptyLeaveMarks() {
-    return { yellowSpans: [], cappedDates: [], ownLeaveDates: [] };
+    return { yellowSpans: [], cappedDates: [], ownLeaveDates: [], otherLeaves: [] };
 }
 
 function isAnnualLeaveRow(row) {
@@ -89,6 +89,7 @@ export async function loadGroupAnnualLeaveCap({
     let taken = 0;
     let applicantAlreadyCounted = false;
     let blockers = [];
+    let otherLeaves = [];
     let marks = emptyLeaveMarks();
     const queryFrom = earlierDate(markFrom, hasRange ? rangeFrom : '');
     const queryTo = laterDate(markTo, hasRange ? rangeTo : '');
@@ -144,6 +145,24 @@ export async function loadGroupAnnualLeaveCap({
         const people = new Set(blockers.map((row) => row.employeeMongoId));
         taken = people.size;
         applicantAlreadyCounted = people.has(String(employee._id));
+        const applicantId = String(employee._id);
+        const others = new Map();
+        for (const row of rows || []) {
+            const id = String(row.employeeMongoId || '');
+            const date = String(row.date || '');
+            if (!id || id === applicantId || !isDateKey(date)) continue;
+            const current = others.get(id) || {
+                employeeMongoId: id,
+                name: names.get(id)?.name || 'Employee',
+                dates: [],
+            };
+            current.dates.push(date);
+            others.set(id, current);
+        }
+        otherLeaves = [...others.values()].map((row) => ({
+            ...row,
+            dates: [...new Set(row.dates)].sort(),
+        }));
         marks = markGroupLeaveDays(
             (rows || []).map((row) => ({
                 employeeMongoId: row.employeeMongoId,
@@ -174,5 +193,6 @@ export async function loadGroupAnnualLeaveCap({
         message,
         blockers,
         ...marks,
+        otherLeaves,
     };
 }

@@ -564,6 +564,12 @@ const requireAssetFullAccess = async (req, res, next) => {
                             () => false,
                         );
                         if (isAccountsUser) return next();
+                        const serviceMatch = pathNoQuery.match(/\/service\/([^/]+)\//i);
+                        const { viewerInheritsRequestAction } = await import('../utils/reassigneeTaskPower.js');
+                        const inherited = await viewerInheritsRequestAction(req.user, id, {
+                            serviceId: serviceMatch?.[1] || '',
+                        }).catch(() => false);
+                        if (inherited) return next();
                     }
                 }
             }

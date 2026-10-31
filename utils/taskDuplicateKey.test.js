@@ -1,6 +1,13 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { chooseKeptDuplicate, documentTaskLabel, duplicateOverlayShouldClose } from "./taskDuplicateKey.js";
+import {
+    activityTaskKey,
+    chooseKeptDuplicate,
+    documentTaskLabel,
+    duplicateOverlayShouldClose,
+    keepActivityCopy,
+    pickActivityRow,
+} from "./taskDuplicateKey.js";
 
 test("the same expiry document shares one label when only the date differs", () => {
     const fortuner = documentTaskLabel(
@@ -67,6 +74,96 @@ test("the task already shown for that request is not closed again", () => {
         sourceKey: "system|expiry|asset-fortuner|mulkia (registration)",
         liveKeys: new Set(["system|expiry|asset-fortuner|mulkia (registration)"]),
     }), false);
+});
+
+test("two documents on one vehicle stay two reminder tasks", () => {
+    const mulkia = {
+        requestType: "Vehicle Document Expiry Reminder",
+        requestId: "vehicle-1",
+        extra1: "Expiry follow-up required: Mulkia (Registration) (Exp: 21/10/2026)",
+    };
+    const insurance = {
+        ...mulkia,
+        extra1: "Expiry follow-up required: Insurance Card (Exp: 21/10/2026)",
+    };
+    assert.notEqual(
+        activityTaskKey(mulkia, { system: true }),
+        activityTaskKey(insurance, { system: true }),
+    );
+});
+
+test("one fine, loan, or advance keeps every approval on the same task", () => {
+    const hr = {
+        requestType: "Loan",
+        requestId: "loan-1",
+        assignedTo: "hr",
+        subjectName: "Zeeshan Muhammad",
+        extra1: "AED 5000",
+        status: "Approved",
+    };
+    const payment = {
+        requestType: "Loan",
+        requestId: "loan-1",
+        assignedTo: "accounts",
+        subjectName: "Zeeshan Muhammad",
+        extra1: "Pay to employee — Loan Pending Payment",
+        status: "Pending",
+    };
+    const otherLoan = { ...payment, requestId: "loan-2", extra1: "AED 5000" };
+    assert.equal(activityTaskKey(hr), activityTaskKey(payment));
+    assert.notEqual(activityTaskKey(payment), activityTaskKey(otherLoan));
+
+    const finePerson = { requestType: "Fine", requestId: "fine-a", fineBaseId: "FN-26-10", status: "Approved" };
+    const fineCompany = { requestType: "Group Fine Request", requestId: "fine-b", fineBaseId: "FN-26-10", status: "Pending" };
+    const otherFine = { requestType: "Fine", requestId: "fine-c", fineBaseId: "FN-26-11", status: "Pending" };
+    assert.equal(activityTaskKey(finePerson), activityTaskKey(fineCompany));
+    assert.notEqual(activityTaskKey(fineCompany), activityTaskKey(otherFine));
+
+    const advanceHr = { requestType: "Loan", requestId: "adv-1", extra1: "AED 200", status: "Approved" };
+    const advanceAccounts = { requestType: "Loan", requestId: "adv-1", extra1: "AED 200", assignedTo: "accounts", status: "Pending" };
+    assert.equal(activityTaskKey(advanceHr), activityTaskKey(advanceAccounts));
+});
+
+test("a second service or the admin track is its own task", () => {
+    const service = (id, extra3) => ({
+        requestType: "Vehicle Service Request",
+        requestId: "vehicle-1",
+        extra3,
+        status: "Pending",
+    });
+    const hr = service("a", JSON.stringify({ serviceRecordId: "service-a" }));
+    const accounts = service("a", JSON.stringify({ serviceRecordId: "service-a" }));
+    const otherService = service("b", JSON.stringify({ serviceRecordId: "service-b" }));
+    const adminTrack = service("track", JSON.stringify({ serviceRecordId: "service-a", adminOfficerServiceTrack: true }));
+    assert.equal(activityTaskKey(hr), activityTaskKey(accounts));
+    assert.notEqual(activityTaskKey(hr), activityTaskKey(otherService));
+    assert.notEqual(activityTaskKey(hr), activityTaskKey(adminTrack));
+});
+
+test("a later approver stays when an older step was reassigned", () => {
+    const hr = { _id: "hr", assignedTo: "hr-user", requestedDate: "2026-10-01T00:00:00.000Z" };
+    const accounts = { _id: "accounts", assignedTo: "accounts-user", requestedDate: "2026-10-20T00:00:00.000Z" };
+    assert.equal(
+        keepActivityCopy([hr, accounts], { reassignedIds: new Set(["hr"]) })._id,
+        "accounts",
+    );
+    const olderCopy = { _id: "old", assignedTo: "hr-user", requestedDate: "2026-10-01T00:00:00.000Z" };
+    const newerCopy = { _id: "new", assignedTo: "hr-user", requestedDate: "2026-10-20T00:00:00.000Z" };
+    assert.equal(
+        keepActivityCopy([olderCopy, newerCopy], { reassignedIds: new Set(["old"]) })._id,
+        "old",
+    );
+});
+
+test("the next approval continues the open task, not the hold notice", () => {
+    const rows = [
+        { _id: "hold", status: "On Hold", updatedAt: 3 },
+        { _id: "approved", status: "Approved", updatedAt: 2 },
+        { _id: "old", status: "Approved", updatedAt: 1 },
+    ];
+    assert.equal(pickActivityRow(rows)._id, "approved");
+    assert.equal(pickActivityRow([{ _id: "open", status: "Pending" }, ...rows])._id, "open");
+    assert.equal(pickActivityRow([{ _id: "paused", status: "On Hold" }])._id, "paused");
 });
 
 test("a second expiry row for the same vehicle is closed and the other vehicle stays", () => {

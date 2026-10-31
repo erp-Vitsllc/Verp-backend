@@ -899,6 +899,7 @@ export const saveEmployeeData = async (employeeId, updatePayload) => {
             'status', 'probationPeriod', 'reportingAuthority', 'primaryReportee', 'secondaryReportee', 'overtime',
             'profileApprovalStatus', 'profileStatus', 'email', 'companyEmail', 'password',
             'enablePortalAccess', 'loginThrough', 'dateOfJoining', 'contractJoiningDate', 'staffType',
+            'workLocation', 'workingFromCountry', 'workingFromCountryCode', 'salaryCurrency', 'workTimeZone',
             'profilePicture', 'documents', 'oldDocuments', 'trainingDetails'
         ];
 
@@ -950,6 +951,13 @@ export const saveEmployeeData = async (employeeId, updatePayload) => {
                 bankUpdate[field] = updatePayload[field];
             }
         });
+
+        const payFields = ['workLocation', 'workingFromCountry', 'workingFromCountryCode', 'salaryCurrency', 'workTimeZone'];
+        for (const field of payFields) {
+            if (Object.prototype.hasOwnProperty.call(updatePayload, field)) {
+                salaryUpdate[field] = updatePayload[field];
+            }
+        }
 
         if (Object.prototype.hasOwnProperty.call(basicUpdate, 'staffType')) {
             const next = await resolveStoredStaffType(basicUpdate.staffType);

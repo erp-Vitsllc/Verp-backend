@@ -297,10 +297,19 @@ function actorIsPendingStageApprover(status, accountsGate, hrGate) {
     return false;
 }
 
-function withBillActorFlags(bill, actor, accountsGate, hrGate, { isAdmin = false, isSuperUser = false } = {}) {
+function billWasReassignedToActor(bill, inheritedIds) {
+    if (!inheritedIds || !bill) return false;
+    return inheritedIds.has(String(bill._id || '')) || inheritedIds.has(String(bill.batchId || ''));
+}
+
+function withBillActorFlags(bill, actor, accountsGate, hrGate, { isAdmin = false, isSuperUser = false, inheritedIds = null } = {}) {
     const decorated = decorateBill(bill);
-    const canApproveReject = actorIsPendingStageApprover(bill.status, accountsGate, hrGate);
-    const canPay = bill.status === 'Approved' && Boolean(accountsGate?.allowed);
+    const inherited = billWasReassignedToActor(bill, inheritedIds);
+    const canApproveReject = actorIsPendingStageApprover(bill.status, accountsGate, hrGate) || (
+        inherited && ['Pending Accounts', 'Pending HR'].includes(String(bill.status || ''))
+    );
+    const canPay = (bill.status === 'Approved' && Boolean(accountsGate?.allowed))
+        || (bill.status === 'Approved' && inherited);
     const canMutate = actorCanMutateUtilityBill(actor, bill, { isAdmin });
     return {
         ...decorated,
@@ -782,11 +791,15 @@ export async function listUtilityBillPayments(req, res) {
         const hrGate = await isActorHrOrAdmin(actor, req.user);
         const isAdminUser = isUtilityAdminSuperUser(req);
         const isSuperUser = isJwtSystemSuperUser(req.user);
+        const { findInheritedTaskActions } = await import('../../utils/reassigneeTaskPower.js');
+        const inheritedUtility = await findInheritedTaskActions(req.user);
+        const inheritedIds = new Set(inheritedUtility.map((row) => row.requestId));
 
         const withPermissions = (bill) =>
             withBillActorFlags(bill, actor, accountsGate, hrGate, {
                 isAdmin: isAdminUser,
                 isSuperUser,
+                inheritedIds,
             });
 
         const syncBillsVendorPaymentFromZoho = async (bills, { entryId: syncEntryId = null } = {}) => {
@@ -976,6 +989,11 @@ export async function getUtilityBillBatch(req, res) {
         const actor = await resolveRequesterEmployee(req.user);
         const accountsGate = await isActorAccountsOrAdmin(actor, req.user);
         const hrGate = await isActorHrOrAdmin(actor, req.user);
+        const { findInheritedTaskActions } = await import('../../utils/reassigneeTaskPower.js');
+        const inheritedRows = await findInheritedTaskActions(req.user);
+        const inheritedIds = new Set(inheritedRows.map((row) => row.requestId));
+        const batchInherited = inheritedIds.has(String(batchId))
+            || bills.some((bill) => billWasReassignedToActor(bill, inheritedIds));
 
         // Prefer a stage this user can act on (mixed-status batches after partial approve)
         const isAdmin = isUtilityAdminSuperUser(req);
@@ -996,7 +1014,8 @@ export async function getUtilityBillBatch(req, res) {
         const stageStatus = focus.status;
         const canEditAccounts = stageStatus === 'Pending Accounts' && accountsGate.allowed;
         const canEditHr = stageStatus === 'Pending HR' && hrGate.allowed;
-        const canEdit = Boolean(canEditAccounts || canEditHr);
+        const stageOpen = ['Pending Accounts', 'Pending HR'].includes(String(stageStatus || ''));
+        const canEdit = Boolean(canEditAccounts || canEditHr || (batchInherited && stageOpen));
         // Approved = not paid; Accounts may Pay only when Zoho bill is Open (not Draft).
         const hasZohoDraft = bills.some(
             (b) =>
@@ -1004,16 +1023,16 @@ export async function getUtilityBillBatch(req, res) {
                 String(b.zohoBillStatus || '').toLowerCase() === 'draft',
         );
         const canPay =
-            stageStatus === 'Approved' && accountsGate.allowed && !hasZohoDraft;
+            stageStatus === 'Approved' && (accountsGate.allowed || batchInherited) && !hasZohoDraft;
         const canApproveReject = actorIsPendingStageApprover(
             stageStatus,
             accountsGate,
             hrGate,
-        );
+        ) || (batchInherited && stageOpen);
         const canCreatorResend = actorCanCreatorResend(actor, focus, canApproveReject, {
             isAdmin,
         });
-        const needsZohoOpen = hasZohoDraft && (accountsGate.allowed || hrGate.allowed);
+        const needsZohoOpen = hasZohoDraft && (accountsGate.allowed || hrGate.allowed || batchInherited);
 
         const paidCount = bills.filter((b) => b.status === 'Paid').length;
         const approvedCount = bills.filter((b) => b.status === 'Approved').length;
@@ -1044,8 +1063,8 @@ export async function getUtilityBillBatch(req, res) {
             canCreatorResend,
             canPay,
             needsZohoOpen,
-            actorIsAccounts: Boolean(accountsGate.isAccounts || accountsGate.isAdminUser),
-            actorIsHr: Boolean(hrGate.isHr || hrGate.isAdminUser),
+            actorIsAccounts: Boolean(accountsGate.isAccounts || accountsGate.isAdminUser || (batchInherited && stageStatus === 'Pending Accounts')),
+            actorIsHr: Boolean(hrGate.isHr || hrGate.isAdminUser || (batchInherited && stageStatus === 'Pending HR')),
             bills: (
                 await attachZohoBillNumbers(bills, {
                     persistModel: UtilityBillPayment,
@@ -1055,6 +1074,7 @@ export async function getUtilityBillBatch(req, res) {
                 withBillActorFlags(b, actor, accountsGate, hrGate, {
                     isAdmin,
                     isSuperUser: isJwtSystemSuperUser(req.user),
+                    inheritedIds,
                 }),
             ),
             reviewPath: reviewPath(resolvedBatchId, focus.utilityType, focus.billMonth, focus),
@@ -1876,9 +1896,17 @@ export async function updateUtilityBillBatch(req, res) {
             accountsGate,
             hrGate,
         );
-        const canEditAccounts = stageStatus === 'Pending Accounts' && accountsGate.allowed;
-        const canEditHr = stageStatus === 'Pending HR' && hrGate.allowed;
-        const canEditApproved = stageStatus === 'Approved' && accountsGate.allowed;
+        const { findInheritedTaskActions } = await import('../../utils/reassigneeTaskPower.js');
+        const inheritedEditRows = await findInheritedTaskActions(req.user);
+        const inheritedEditIds = new Set(inheritedEditRows.map((row) => row.requestId));
+        const batchInherited = inheritedEditIds.has(String(batchId))
+            || liveBills.some((bill) => billWasReassignedToActor(bill, inheritedEditIds));
+        const canEditAccounts = (stageStatus === 'Pending Accounts' && accountsGate.allowed)
+            || (stageStatus === 'Pending Accounts' && batchInherited);
+        const canEditHr = (stageStatus === 'Pending HR' && hrGate.allowed)
+            || (stageStatus === 'Pending HR' && batchInherited);
+        const canEditApproved = (stageStatus === 'Approved' && accountsGate.allowed)
+            || (stageStatus === 'Approved' && batchInherited);
         const targetPool = requestedIds.length
             ? liveBills.filter((bill) => requestedIds.includes(String(bill._id)))
             : liveBills;
@@ -2141,9 +2169,15 @@ export async function respondUtilityBillBatch(req, res) {
                   .lean()
             : null;
 
+        const { findInheritedTaskActions } = await import('../../utils/reassigneeTaskPower.js');
+        const inheritedRows = await findInheritedTaskActions(req.user);
+        const inheritedIds = new Set(inheritedRows.map((row) => row.requestId));
+        const batchInherited = inheritedIds.has(String(batchId))
+            || allBills.some((bill) => billWasReassignedToActor(bill, inheritedIds));
+
         if (stageStatus === 'Pending Accounts') {
             const gate = accountsGateEarly;
-            if (!gate.isAccounts) {
+            if (!gate.isAccounts && !batchInherited) {
                 return res.status(403).json({
                     message: `Only Accounts (${empDisplayName(gate.accounts) || 'flowchart Accounts'}) can respond at this stage.`,
                 });
@@ -2424,7 +2458,7 @@ export async function respondUtilityBillBatch(req, res) {
 
         // Pending HR
         const gate = hrGateEarly;
-        if (!gate.isHr) {
+        if (!gate.isHr && !batchInherited) {
             const hrName = empDisplayName(gate.hr) || 'HR';
             return res.status(403).json({
                 message: `Only HR (${hrName}) can respond at this stage. Open this from the HR login / HR pending inbox.`,
@@ -2790,7 +2824,13 @@ export async function payUtilityBillBatch(req, res) {
 
         const actor = await resolveRequesterEmployee(req.user);
         const gate = await isActorAccountsOrAdmin(actor, req.user);
-        if (!gate.allowed) {
+        const { findInheritedTaskActions } = await import('../../utils/reassigneeTaskPower.js');
+        const inheritedRows = await findInheritedTaskActions(req.user);
+        const inheritedIds = new Set(inheritedRows.map((row) => row.requestId));
+        const selectedIds = Array.isArray(billIds) ? billIds.map((value) => String(value)) : [];
+        const inheritedPay = inheritedIds.has(String(batchId))
+            || selectedIds.some((value) => inheritedIds.has(value));
+        if (!gate.allowed && !inheritedPay) {
             return res.status(403).json({ message: 'Only Accounts can mark bills as paid.' });
         }
 
@@ -3001,10 +3041,14 @@ export async function getUtilityBillPayment(req, res) {
         const actor = await resolveRequesterEmployee(req.user);
         const accountsGate = await isActorAccountsOrAdmin(actor, req.user);
         const hrGate = await isActorHrOrAdmin(actor, req.user);
+        const { findInheritedTaskActions } = await import('../../utils/reassigneeTaskPower.js');
+        const inheritedRows = await findInheritedTaskActions(req.user);
+        const inheritedIds = new Set(inheritedRows.map((row) => row.requestId));
         return res.status(200).json({
             bill: withBillActorFlags(numbered, actor, accountsGate, hrGate, {
                 isAdmin: isUtilityAdminSuperUser(req),
                 isSuperUser: isJwtSystemSuperUser(req.user),
+                inheritedIds,
             }),
         });
     } catch (err) {

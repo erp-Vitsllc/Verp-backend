@@ -72,6 +72,7 @@ export const updateEmployee = async (req, res) => {
         // Prepare data for saveEmployeeData
         const updatePayload = {
             ...req.body,
+            ...validation.normalized.workPay,
             employeeId: newEmployeeId,
             age,
             status: normalizedStatus,

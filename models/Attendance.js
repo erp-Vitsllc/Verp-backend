@@ -211,6 +211,18 @@ const attendanceSchema = new mongoose.Schema(
             type: Number,
             default: 1,
         },
+        /** Late arrival / early go request: authorized keeps the policy deduction, waived asks for 0. */
+        leaveDeductionChoice: {
+            type: String,
+            enum: ['', 'authorized', 'waived'],
+            default: '',
+            trim: true,
+        },
+        /** Hours the approver set when the late or early request is waived into custom. */
+        leaveRequestedHours: {
+            type: Number,
+            default: null,
+        },
         /** HR waived the salary deduction. Status, punches, and the rest of the day stay as they are. */
         deductionWaived: {
             type: Boolean,

@@ -1,5 +1,6 @@
 import { getDepartmentHOD } from './getDepartmentHOD.js';
 import { getManagementHOD } from './getManagementHOD.js';
+import { viewerInheritsRequestAction } from './reassigneeTaskPower.js';
 
 const STATUS_ROLE_MAP = {
     'Pending HR': 'HR',
@@ -267,13 +268,17 @@ export function canUserActOnFineStage({
 
 export async function canUserActOnFineStageAsync({ user, fine, isAdmin = false, employeeObjectId = null }) {
     const flowchartAssignee = await resolveCurrentStageAssignee(fine);
-    return canUserActOnFineStage({
+    const allowed = canUserActOnFineStage({
         user,
         fine,
         isAdmin,
         employeeObjectId,
         flowchartAssignee,
     });
+    if (allowed) return true;
+    const status = String(fine?.fineStatus || '');
+    if (!FINE_PENDING_APPROVAL_STATUSES.has(status)) return false;
+    return viewerInheritsRequestAction(user, fine?._id);
 }
 
 export function getFlowchartEmployeeIdForRole(fine, expectedRole) {

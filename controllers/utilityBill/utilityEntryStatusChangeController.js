@@ -217,7 +217,9 @@ export async function getUtilityEntryStatusChange(req, res) {
 
         const actor = await resolveRequesterEmployee(req.user);
         const hrGate = await isActorHrOrAdmin(actor, req.user);
-        const canRespond = doc.status === 'Pending' && hrGate.allowed;
+        const { viewerInheritsRequestAction } = await import('../../utils/reassigneeTaskPower.js');
+        const inherited = doc.status === 'Pending' && await viewerInheritsRequestAction(req.user, doc._id);
+        const canRespond = doc.status === 'Pending' && (hrGate.allowed || inherited);
 
         return res.status(200).json({
             request: doc,
@@ -265,7 +267,9 @@ export async function respondUtilityEntryStatusChange(req, res) {
 
         const actor = await resolveRequesterEmployee(req.user);
         const hrGate = await isActorHrOrAdmin(actor, req.user);
-        if (!hrGate.allowed) {
+        const { viewerInheritsRequestAction } = await import('../../utils/reassigneeTaskPower.js');
+        const inherited = await viewerInheritsRequestAction(req.user, req.params.id);
+        if (!hrGate.allowed && !inherited) {
             return res.status(403).json({ message: 'Only HR (or Admin) can approve this request.' });
         }
 

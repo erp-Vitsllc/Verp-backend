@@ -1389,6 +1389,13 @@ export const respondVehicleServiceWorkflow = async (req, res) => {
             allowed = await isUserInFlowchart(req.user, 'hr').catch(() => false);
         }
         if (!allowed) {
+            const { viewerInheritsRequestAction } = await import('../utils/reassigneeTaskPower.js');
+            const serviceRecordId = String(wf?.serviceRecordId || '').trim();
+            allowed = serviceRecordId
+                ? await viewerInheritsRequestAction(req.user, asset._id, { serviceId: serviceRecordId }).catch(() => false)
+                : false;
+        }
+        if (!allowed) {
             return res.status(403).json({
                 message: oilCashAtPaymentStage
                     ? stage === STAGE.HR

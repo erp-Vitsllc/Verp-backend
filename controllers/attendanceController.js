@@ -40,6 +40,7 @@ import { describePartialLeave, partialLeaveOutcome, partialLeavePortion, storedP
 import { attachAttendanceDeductionDays } from '../utils/attachAttendanceDeductionDays.js';
 import { closedMissingCheckout } from '../utils/attendanceApprovalAllowance.js';
 import { staffTypeMongoClause } from '../utils/workLocationHelpers.js';
+import { payLocationFromEmployee } from '../utils/workPayLocation.js';
 import { getDepartmentHOD } from '../utils/getDepartmentHOD.js';
 import { syncDashboardAction } from '../utils/syncDashboard.js';
 import {
@@ -82,6 +83,7 @@ import {
     leaveApproverCanDecide,
     openingLeaveApprovalStage,
 } from '../utils/leaveRequestApproval.js';
+import { viewerInheritsRequestAction } from '../utils/reassigneeTaskPower.js';
 import {
     parsePunchLocation,
     resolvePunchSource,
@@ -836,13 +838,15 @@ function resolveStaffTypeFilter(raw) {
     return normalizeStaffType(value);
 }
 
-/** Holiday / weekly off do not need HR approval queue. Comp-off leave is already final. */
+/** Holiday / weekly off do not need HR approval queue. A saved leave day is already final. */
 function approvalStatusForMark(statusKey) {
     const key = String(statusKey || '').trim();
     if (!key || key === 'holiday' || key === 'weekly_off' || key === 'clear_attendance' || key === 'clear') {
         return '';
     }
-    if (key === 'compoff_leave') return 'approved';
+    if (key === 'compoff_leave' || key === 'sick_leave' || key === 'on_leave' || key === 'authorized_leave') {
+        return 'approved';
+    }
     return 'pending';
 }
 
@@ -888,7 +892,7 @@ export async function getAttendanceMarkRoster(req, res) {
         }
 
         const rows = await EmployeeBasic.find(filter)
-            .select('_id employeeId firstName lastName staffType primaryReportee profileStatus status attendanceAccountStatus attendanceSuspension')
+            .select('_id employeeId firstName lastName staffType primaryReportee profileStatus status attendanceAccountStatus attendanceSuspension workLocation workingFromCountry workingFromCountryCode salaryCurrency workTimeZone')
             .sort({ firstName: 1, lastName: 1 })
             .lean()
             .maxTimeMS(8000);
@@ -934,6 +938,7 @@ export async function getAttendanceMarkRoster(req, res) {
                 status: e.status || '',
                 attendanceSuspended: isAttendanceSuspendedOn(e, dateKey),
                 attendanceSuspension: e.attendanceSuspension || null,
+                ...payLocationFromEmployee(e),
             }));
 
         return res.status(200).json({
@@ -1952,7 +1957,7 @@ export async function getMyAttendanceMonth(req, res) {
                 }
             }
             const target = await EmployeeBasic.findById(forEmployeeId)
-                .select('_id employeeId firstName lastName staffType companyEmail attendanceAccountStatus attendanceSuspension dateOfJoining joiningDate')
+                .select('_id employeeId firstName lastName staffType companyEmail attendanceAccountStatus attendanceSuspension dateOfJoining joiningDate workLocation workingFromCountry workingFromCountryCode salaryCurrency workTimeZone')
                 .lean();
             if (!target) {
                 return res.status(404).json({ message: 'Employee not found.' });
@@ -1960,7 +1965,7 @@ export async function getMyAttendanceMonth(req, res) {
             employee = target;
         } else if (self) {
             employee = await EmployeeBasic.findById(self._id)
-                .select('_id employeeId firstName lastName staffType companyEmail attendanceAccountStatus attendanceSuspension dateOfJoining joiningDate')
+                .select('_id employeeId firstName lastName staffType companyEmail attendanceAccountStatus attendanceSuspension dateOfJoining joiningDate workLocation workingFromCountry workingFromCountryCode salaryCurrency workTimeZone')
                 .lean();
             if (!employee) employee = self;
         }
@@ -2005,6 +2010,7 @@ export async function getMyAttendanceMonth(req, res) {
             web: contactGate.web,
             attendanceSuspended: isAttendanceSuspendedOn(employee, todayKey),
             attendanceSuspension: employee.attendanceSuspension || null,
+            ...payLocationFromEmployee(employee),
         };
         const attendanceMatch = employeeAttendanceMatch(employee);
         const loadTodayPunch = async () => {
@@ -3984,14 +3990,16 @@ export async function decideAttendanceChangeRequest(req, res) {
         const actorIsHr = await viewerIsFlowchartHr(req);
         const actorIsRequester = String(actor._id) === String(request.requestedBy || '');
 
-        if (request.stage === 'pending_reportee' && !actorIsReportee) {
+        const inheritedChange = await viewerInheritsRequestAction(req.user, request._id);
+        if (request.stage === 'pending_reportee' && !actorIsReportee && !actorIsHr && !inheritedChange) {
             return res.status(403).json({ message: 'Only the primary reportee can approve this change.' });
         }
-        if (request.stage === 'pending_hr' && !actorIsHr) {
+        if (request.stage === 'pending_hr' && !actorIsHr && !inheritedChange) {
             return res.status(403).json({ message: 'Only flowchart HR can approve this change.' });
         }
         if (
             request.stage === 'pending_requester' &&
+            !inheritedChange &&
             (!['hour_adjust', 'flexible_ot'].includes(request.action) || !actorIsRequester)
         ) {
             return res.status(403).json({ message: 'Only the requester can update this request.' });
@@ -4158,7 +4166,7 @@ export async function decideAttendanceChangeRequest(req, res) {
             request.markModified('proposed');
         }
 
-        if (request.stage === 'pending_requester') {
+        if (request.stage === 'pending_requester' && !actorIsHr) {
             const hr = await getDepartmentHOD('hr').catch(() => null);
             const sent = await resubmitHourAttendanceChange({
                 request,
@@ -4170,7 +4178,8 @@ export async function decideAttendanceChangeRequest(req, res) {
             return res.status(200).json({ message: sent.message });
         }
 
-        if (request.stage === 'pending_reportee') {
+        // HR's own approval writes the day. It does not wait for a second HR step.
+        if (request.stage === 'pending_reportee' && !actorIsHr) {
             const hr = await getDepartmentHOD('hr').catch(() => null);
             if (!hr?._id) {
                 return res.status(400).json({
@@ -5079,6 +5088,11 @@ export async function requestAttendanceFuture(req, res) {
             record.leaveRequestSession = session;
             record.leaveDayFraction = partialLeavePortion(dayPart);
             record.leaveDeductionTimes = 1;
+            if (isPunchRequest) {
+                const asked = String(req.body?.deductionChoice || req.body?.deductionType || '').trim();
+                record.leaveDeductionChoice = asked === 'waived' ? 'waived' : 'authorized';
+                record.leaveRequestedHours = record.leaveDeductionChoice === 'waived' ? 0 : null;
+            }
             record.leaveRequestTimeIn = partialLeave
                 ? partialLeave.workStart || ''
                 : normalizeClockHHmm(req.body?.timeIn);
@@ -5166,6 +5180,8 @@ export async function decideAttendanceLeaveRequest(req, res) {
             timeIn: req.body?.timeIn,
             timeOut: req.body?.timeOut,
             rejectReason: req.body?.rejectReason || req.body?.reason,
+            deductionChoice: req.body?.deductionChoice,
+            requestedHours: req.body?.requestedHours,
             actor: self,
         });
 
@@ -5189,6 +5205,62 @@ export async function decideAttendanceLeaveRequest(req, res) {
     }
 }
 
+function punchRequestKind(record) {
+    const kind = String(record?.leaveRequestKind || '');
+    const key = String(record?.requestedStatusKey || record?.statusKey || '');
+    if (kind === 'future_early' || key === 'early_go') return 'early_go';
+    if (kind === 'future_late' || kind === 'past_late' || key === 'late_arrived') return 'late_arrived';
+    return '';
+}
+
+function rememberPunchDeduction(record, { deductionChoice, requestedHours } = {}) {
+    const kind = punchRequestKind(record);
+    if (!kind) return;
+    const asked = String(deductionChoice || record.leaveDeductionChoice || '').trim();
+    const choice = asked === 'waived' ? 'waived' : 'authorized';
+    record.leaveDeductionChoice = choice;
+    if (choice === 'waived') {
+        const hours = requestedHours == null || requestedHours === '' ? 0 : Number(requestedHours);
+        record.leaveRequestedHours = Number.isFinite(hours) && hours >= 0 ? hours : 0;
+    } else {
+        record.leaveRequestedHours = null;
+    }
+}
+
+/** Final HR approval of a late or early request. Authorized keeps the policy hours. Waive off is 0 unless custom hours were entered. */
+async function applyPunchRequestOutcome(record, { deductionChoice, requestedHours } = {}) {
+    const kind = punchRequestKind(record);
+    if (!kind) return { ok: true };
+    rememberPunchDeduction(record, { deductionChoice, requestedHours });
+    const proposal = await exactHourProposal(record, { hourAdjustKind: kind });
+    const taken = Number(proposal.hoursTaken) || 0;
+    const max = Number(proposal.hoursMax) || 0;
+    const waived = record.leaveDeductionChoice === 'waived';
+    let hours = waived ? Number(record.leaveRequestedHours) || 0 : taken;
+    if (!Number.isFinite(hours) || hours < 0) hours = 0;
+    if (max > 0 && hours > max + 0.001) {
+        return { ok: false, status: 400, message: `Approved hours cannot be more than ${max}.` };
+    }
+    hours = Math.round(hours * 1e6) / 1e6;
+    const zero = waived && !(hours > 0);
+    record.hourAdjustStatus = 'approved';
+    record.hourAdjustKind = kind;
+    record.hoursTaken = taken;
+    record.hoursMax = max;
+    record.hoursApproved = hours;
+    record.hourAdjustMode = waived ? 'custom' : 'authorized';
+    record.deductionWaived = zero;
+    record.leaveDeductionChoice = zero ? 'waived' : 'authorized';
+    record.leaveRequestedHours = hours;
+    record.statusKey = kind;
+    record.statusLabel = zero
+        ? (kind === 'early_go' ? 'Early Go (Waived off)' : 'Late Arrival (Waived off)')
+        : (kind === 'early_go' ? 'Early Go (Approved)' : 'Late Arrival (Approved)');
+    record.approvalStatus = 'approved';
+    if (record.leaveRequestReason) record.reason = record.leaveRequestReason;
+    return { ok: true };
+}
+
 export async function decideLeaveRequestInternal({
     attendanceId,
     date,
@@ -5199,6 +5271,8 @@ export async function decideLeaveRequestInternal({
     timeIn = '',
     timeOut = '',
     rejectReason = '',
+    deductionChoice = '',
+    requestedHours = null,
     actor,
     hrBypass = false,
 }) {
@@ -5231,15 +5305,23 @@ export async function decideLeaveRequestInternal({
         reporteeId,
         hrId,
     });
+    const leaveActor = { employeeObjectId: actor?._id, employeeId: actor?.employeeId, id: actor?._id };
+    const inheritedLeave = canDecide
+        ? false
+        : (
+            await viewerInheritsRequestAction(leaveActor, record._id)
+            || await viewerInheritsRequestAction(leaveActor, record.leaveRequestGroupId)
+        );
+    const mayDecideLeave = canDecide || inheritedLeave;
     if (decision === 'updated') {
-        if (!canDecide && hrBypass !== true) {
+        if (!mayDecideLeave && hrBypass !== true) {
             return {
                 ok: false,
                 status: 403,
                 message: 'Only HR or the assigned approver can edit this request.',
             };
         }
-    } else if (!canDecide) {
+    } else if (!mayDecideLeave) {
         return {
             ok: false,
             status: 403,
@@ -5329,6 +5411,7 @@ export async function decideLeaveRequestInternal({
                 if (nextLabel && nextLabel !== chosen) groupRecord.requestedStatusLabel = nextLabel;
             }
             groupRecord.leaveApprovalStage = LEAVE_STAGE_HR;
+            rememberPunchDeduction(groupRecord, { deductionChoice, requestedHours });
             await groupRecord.save();
         }
         const from = groupRecords[0].leaveRequestFromDate || groupRecords[0].date;
@@ -5399,6 +5482,8 @@ export async function decideLeaveRequestInternal({
             decision,
             approvedStatusKey: dayKey,
             leavePayType: '',
+            deductionChoice,
+            requestedHours,
             actor,
             subject,
         });
@@ -5485,6 +5570,8 @@ async function applyLeaveDecisionToRecord({
     decision,
     approvedStatusKey = '',
     leavePayType = '',
+    deductionChoice = '',
+    requestedHours = null,
     actor,
     subject,
 }) {
@@ -5492,19 +5579,6 @@ async function applyLeaveDecisionToRecord({
     const requestedLabel =
         record.requestedStatusLabel || leaveStatusLabel(requestedKey);
     const kind = String(record.leaveRequestKind || '');
-    const partialLabel = partialDayLabel(
-        record.leaveRequestDayPart,
-        record.leaveRequestSession,
-        {
-            flexible: !record.leaveRequestTimeIn,
-            workStart: record.leaveRequestTimeIn,
-            workEnd: record.leaveRequestTimeOut,
-        },
-    );
-    const partialSuffix =
-        record.leaveRequestDayPart === 'half' || record.leaveRequestDayPart === 'quarter'
-            ? ` · ${partialLabel}`
-            : '';
 
         if (decision === 'approved') {
         const applyAuthorized = () => {
@@ -5561,11 +5635,7 @@ async function applyLeaveDecisionToRecord({
             record.leavePayType = '';
             record.approvalStatus = 'approved';
             if (record.leaveRequestReason) record.reason = record.leaveRequestReason;
-        } else if (kind === 'future_late' || kind === 'past_late') {
-            record.statusKey = 'late_arrived';
-            record.statusLabel = kind === 'past_late' ? 'Late Arrival' : `Late arrival approved${partialSuffix}`;
-            record.leavePayType = '';
-            record.approvalStatus = 'approved';
+        } else if (kind === 'future_late' || kind === 'past_late' || kind === 'future_early') {
             if (kind === 'past_late') {
                 const clock = (value) => {
                     const hhmm = normalizeClockHHmm(value);
@@ -5576,13 +5646,8 @@ async function applyLeaveDecisionToRecord({
                 if (arrived) record.timeIn = arrived;
                 if (left) record.timeOut = left;
             }
-            if (record.leaveRequestReason) record.reason = record.leaveRequestReason;
-        } else if (kind === 'future_early') {
-            record.statusKey = 'early_go';
-            record.statusLabel = 'Early go approved';
-            record.leavePayType = '';
-            record.approvalStatus = 'approved';
-            if (record.leaveRequestReason) record.reason = record.leaveRequestReason;
+            const punchOutcome = await applyPunchRequestOutcome(record, { deductionChoice, requestedHours });
+            if (!punchOutcome.ok) return punchOutcome;
         } else {
             const chosenKey = String(approvedStatusKey || '').trim() || requestedKey;
             if (!REPORTEE_APPROVE_LEAVE_KEYS.has(chosenKey)) {

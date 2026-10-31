@@ -74,6 +74,7 @@ export async function settleFulfilledLeaveRequest(record) {
     const employeeMongoId = String(record.employeeMongoId || '');
     const recordId = record._id;
     clearRequestFields(record);
+    record.approvalStatus = 'approved';
     await record.save();
     await closeBellWhenGroupHasNoPending({
         groupId,

@@ -56,6 +56,7 @@ import {
     TWO_STEP_LEAVE_KINDS,
 } from '../../utils/leaveRequestApproval.js';
 import { isRequestUserDesignatedFlowchartHr } from '../../utils/isDesignatedFlowchartHr.js';
+import { findInheritedTaskActions, viewerInheritsRequestAction } from '../../utils/reassigneeTaskPower.js';
 import { calcWorkingDays, dateEmployeeReachesWorkingDays, dubaiDateKey, loadCurrentLeaveCycleEligibility } from '../../utils/loadLeaveTicketEntitlement.js';
 import { loadGroupAnnualLeaveCap } from '../../utils/groupAnnualLeaveCap.js';
 import { annualLeaveRequestBlock, loadAnnualLeaveAllowance } from '../../utils/annualLeaveAllowance.js';
@@ -65,6 +66,7 @@ import {
     reopenApprovedLeaveRecords,
     settleFulfilledLeaveRows,
 } from '../../utils/leaveRequestSettlement.js';
+import { reopenExistingLeaveRequestTask } from '../../utils/reopenLeaveRequestTask.js';
 
 const LEAVE_TRACK_KEYS = [
     'authorized_leave',
@@ -363,6 +365,7 @@ function groupPendingRows(rows) {
         if (!groups.has(groupKey)) {
             groups.set(groupKey, {
                 id: String(row._id),
+                leaveRequestGroupId: String(row.leaveRequestGroupId || '').trim(),
                 attendanceIds: [],
                 employeeMongoId: String(row.employeeMongoId || ''),
                 employeeId: row.employeeId || '',
@@ -382,6 +385,8 @@ function groupPendingRows(rows) {
                 attachmentName: String(row.attachmentName || '').trim(),
                 timeIn: row.leaveRequestTimeIn || row.timeIn || '',
                 timeOut: row.leaveRequestTimeOut || row.timeOut || '',
+                leaveDeductionChoice: row.leaveDeductionChoice === 'waived' ? 'waived' : 'authorized',
+                leaveRequestedHours: row.leaveRequestedHours,
                 requestedAt: requestStamp(row),
                 requestedDate: formatRequestedDate(requestStamp(row)),
                 sortAt: requestStamp(row) || row.leaveDecidedAt || row.date || '',
@@ -893,6 +898,15 @@ export async function getLeavePendingRequests(req, res) {
         const reporteeNameById = new Map(
             (reporteePeople || []).map((person) => [String(person._id), leaveApprovalPersonName(person)]),
         );
+        const powerIds = [];
+        for (const item of requestItems) {
+            if (item.id) powerIds.push(item.id);
+            if (item.changeRequestId) powerIds.push(item.changeRequestId);
+            if (item.leaveRequestGroupId) powerIds.push(item.leaveRequestGroupId);
+            for (const attendanceId of item.attendanceIds || []) powerIds.push(attendanceId);
+        }
+        const inheritedRows = await findInheritedTaskActions(req.user, powerIds);
+        const inheritedIds = new Set(inheritedRows.map((row) => row.requestId));
 
         const items = requestItems
             .map((item) => {
@@ -905,14 +919,21 @@ export async function getLeavePendingRequests(req, res) {
                     item.statusKey === 'pending'
                         ? inferLeaveApprovalStage(item, { reporteeId, hrId })
                         : '';
+                const inherited = [
+                    item.id,
+                    item.changeRequestId,
+                    item.leaveRequestGroupId,
+                    ...(item.attendanceIds || []),
+                ].some((value) => value && inheritedIds.has(String(value)));
                 const canDecide =
                     item.statusKey === 'pending' &&
-                    leaveApproverCanDecide({
-                        stage: approvalStage,
-                        actorId,
-                        reporteeId,
-                        hrId,
-                    });
+                    (inherited ||
+                        leaveApproverCanDecide({
+                            stage: approvalStage,
+                            actorId,
+                            reporteeId,
+                            hrId,
+                        }));
                 const pendingWithName =
                     approvalStage === LEAVE_STAGE_HR
                         ? hrName
@@ -994,6 +1015,8 @@ export async function decideLeavePendingRequest(req, res) {
             timeIn: req.body?.timeIn,
             timeOut: req.body?.timeOut,
             rejectReason: req.body?.rejectReason || req.body?.reason,
+            deductionChoice: req.body?.deductionChoice,
+            requestedHours: req.body?.requestedHours,
             actor,
             hrBypass: hrFlags.canEdit,
         });
@@ -1743,8 +1766,11 @@ export async function applyLeaveRange(req, res) {
                 reporteeId: reporteeIdForEdit,
                 hrId: hrIdForEdit,
             });
+            const inheritedEdit = await viewerInheritsRequestAction(req.user, seed?._id)
+                || await viewerInheritsRequestAction(req.user, seed?.leaveRequestGroupId);
             const allowed =
                 flowchartHr ||
+                inheritedEdit ||
                 leaveApproverCanDecide({
                     stage,
                     actorId: actor?._id,
@@ -2035,29 +2061,32 @@ export async function returnLeaveRequest(req, res) {
                 record.leaveApprovalStage = approvalStage;
                 await record.save();
             }
+            const groupId = seed.leaveRequestGroupId || group?.groupId || '';
             try {
-                if (approver?._id) {
-                    await notifyLeaveRequestApprover({
-                        employee,
-                        approver,
-                        stage: approvalStage,
-                        from,
-                        to,
-                        attendanceId: String(seed._id),
-                        groupId: seed.leaveRequestGroupId || group?.groupId || '',
-                        requestedLabel: seed.requestedStatusLabel || seed.statusLabel || 'Leave',
-                        requestedStatusKey: seed.requestedStatusKey || '',
-                        leaveRequestKind: seed.leaveRequestKind || 'leave',
-                        reason: seed.leaveRequestReason || '',
-                    });
-                }
-            } catch (notifyError) {
-                console.warn('[returnLeaveRequest] leave notify failed:', notifyError?.message || notifyError);
+                await reopenExistingLeaveRequestTask({
+                    requestIds: [
+                        leaveDashboardRequestObjectId(groupId, seed._id),
+                        groupId,
+                        ...reopened.map((row) => row._id),
+                    ],
+                    approver: approver?._id ? approver : null,
+                    employee,
+                    stage: approvalStage,
+                    from,
+                    to,
+                    attendanceId: String(seed._id),
+                    groupId,
+                    requestedLabel: seed.requestedStatusLabel || seed.statusLabel || 'Leave',
+                    requestedStatusKey: seed.requestedStatusKey || '',
+                    leaveRequestKind: seed.leaveRequestKind || 'leave',
+                });
+            } catch (taskError) {
+                console.warn('[returnLeaveRequest] task reopen failed:', taskError?.message || taskError);
             }
         }
 
         return res.status(200).json({
-            message: 'Leave returned to a request. Those attendance days are back, and the request is pending again.',
+            message: 'Leave returned to a request. Attendance for those days is back, and the existing task is open again.',
             attendanceId: String(seed._id),
             leaveRequestStatus: 'pending',
             count: reopened.length,

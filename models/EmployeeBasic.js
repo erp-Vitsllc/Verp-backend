@@ -165,6 +165,16 @@ const employeeBasicSchema = new mongoose.Schema(
 
         // EMPLOYMENT INFO
         dateOfJoining: { type: Date, required: true },
+        /** uae keeps AED and UAE office time. outside_uae pays in the working country's currency. */
+        workLocation: {
+            type: String,
+            enum: ['uae', 'outside_uae'],
+            default: 'uae',
+        },
+        workingFromCountry: { type: String, default: '', trim: true },
+        workingFromCountryCode: { type: String, default: '', trim: true, uppercase: true },
+        salaryCurrency: { type: String, default: 'AED', trim: true, uppercase: true },
+        workTimeZone: { type: String, default: 'Asia/Dubai', trim: true },
         contractJoiningDate: { type: Date }, // Auto from first visa issue date; flowchart HR may override
         contractExpiryDate: { type: Date }, // Optional field for contract end date
 

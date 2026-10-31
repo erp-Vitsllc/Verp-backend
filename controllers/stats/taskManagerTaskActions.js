@@ -16,6 +16,7 @@ import Reward from "../../models/Reward.js";
 import TaskManagerTask from "../../models/TaskManagerTask.js";
 import { deleteDashboardActionsForVehicleService } from "../../utils/cleanupAssetDashboardActions.js";
 import { evaluateSourceTaskCompletion } from "../../utils/sourceTaskCompletion.js";
+import { releaseCompletedTaskFromNotificationBars } from "../../utils/completeFinishedSystemWorkflowTasks.js";
 import { alignDecidedGeneralHubTasks, applyHubDecisionToTask } from "../../utils/alignDecidedGeneralHubTasks.js";
 import { withdrawPendingSalaryEnrollment } from "../../utils/salaryEnrollmentApprovalNotify.js";
 import { getDepartmentHOD } from "../../utils/getDepartmentHOD.js";
@@ -72,9 +73,11 @@ import {
     upsertTaskNotice,
     viewerCanReassign,
 } from "../../utils/taskManagerModule.js";
-import { requesterMayDeleteCategory, viewerMayDeleteTask } from "../../utils/taskDeleteAccess.js";
+import { recordIsFinishedForDelete, requesterMayDeleteCategory, viewerMayDeleteTask } from "../../utils/taskDeleteAccess.js";
+import { adminDeletedTaskEmail } from "../../utils/adminDeletedTaskEmail.js";
 import { isSystemOrWorkflowTask, superUserRejectsImmediately } from "../../utils/taskRejectAccess.js";
 import { purgePendingCopiesOf } from "../../utils/deletedTaskNotice.js";
+import { attachHoldSteps } from "../../utils/taskWaitingSteps.js";
 
 const DUBAI_DATE = new Intl.DateTimeFormat("en-CA", {
     timeZone: "Asia/Dubai",
@@ -975,6 +978,7 @@ async function closeFlags(task, viewer, currentAssigneeId, assigneeEmpId, action
         canSubmitCompletion: open && viewerIsReassignee && !completionPending && !saved.reassignmentReleased && !closeScheduled,
         canApproveCompletion: open && reassigned && completionPending && !saved.reassignmentReleased && (viewerIsOriginal || viewer?.superUser) && !closeScheduled,
         canRejectCompletion: open && reassigned && completionPending && !saved.reassignmentReleased && (viewerIsOriginal || viewer?.superUser) && !closeScheduled,
+        canRecallCompletion: open && reassigned && completionPending && !saved.reassignmentReleased && (viewerIsReassignee || Boolean(viewer?.superUser)) && !closeScheduled,
         canConfirmComplete: false,
         canCloseNow: open && !closeScheduled && !reviewPending && (
             Boolean(viewer?.superUser)
@@ -1383,13 +1387,20 @@ async function buildDetail(target, viewer) {
         : categoryFromRequestType(action?.requestType, action?.extra2 || "");
     const requesterMayDelete = requesterMayDeleteCategory(deleteCategory)
         && await viewerIsTaskRequester(task, viewer, action);
-    const canDelete = !generalTaskClosed(task) && (
-        requesterMayDelete
-        || viewerMayDeleteTask(viewer, {
-            taskCategory: deleteCategory,
-            requestedByName: task?.requestedByName || action?.requestedByName || "",
-            requestedByUserId: task?.requestedByUserId,
-        })
+    const finishedForDelete = recordIsFinishedForDelete(task, action);
+    const deleteSealed = ["Cancelled", "Rejected"].includes(String(task?.status || ""))
+        || ["Rejected", "Dismissed", "Cancelled"].includes(String(action?.status || ""));
+    const canDelete = !deleteSealed && (
+        finishedForDelete
+            ? Boolean(viewer?.superUser)
+            : !generalTaskClosed(task) && (
+                requesterMayDelete
+                || viewerMayDeleteTask(viewer, {
+                    taskCategory: deleteCategory,
+                    requestedByName: task?.requestedByName || action?.requestedByName || "",
+                    requestedByUserId: task?.requestedByUserId,
+                })
+            )
     );
     const sourceGate = await evaluateSourceTaskCompletion(
         { task, action: action || mailAction || null },
@@ -1414,6 +1425,30 @@ async function buildDetail(target, viewer) {
         taskNumber = numberKeys.map((id) => numberMap.get(String(id))).find(Boolean) || "";
     } catch (numberError) {
         console.error("Task number lookup failed:", numberError);
+    }
+
+    const savedClose = task?.closeRequest || {};
+    const taskDone = ["Completed", "Cancelled", "Rejected"].includes(String(task?.status || ""))
+        || (Boolean(savedClose.closedAt) && !savedClose.reviewPending);
+    const holdRow = {
+        requestType: manual ? "" : (action?.requestType || ""),
+        id: manual ? "" : String(action?.requestId || ""),
+        assigneeId: String(currentAssigneeId || ""),
+        assigneeName: cardAssignee.name,
+        reassignedAssigneeName: assigneePair.reassignedAssigneeName,
+        reassignedAssigneeId: assigneePair.reassignedAssigneeName ? String(currentAssigneeId || "") : "",
+        originalAssigneeName,
+        mainAssigneeName: assigneePair.mainAssigneeName || "",
+        requesterName: cardRequester.name,
+        displayStatus: detailDisplayStatus(task, action, manual),
+        completionPending: Boolean(savedClose.completionRequestedAt) && !savedClose.completionConfirmedAt && !savedClose.reassignmentReleased && !taskDone,
+        reviewPending: Boolean(savedClose.reviewPending) && !taskDone,
+        closeScheduled: completionWindowOpen(task),
+    };
+    try {
+        await attachHoldSteps([holdRow]);
+    } catch (holdError) {
+        console.error("Task waiting steps failed:", holdError);
     }
 
     return {
@@ -1457,6 +1492,7 @@ async function buildDetail(target, viewer) {
             ? (displayTaskType(task?.taskType) || "General Task")
             : categoryFromRequestType(action?.requestType, action?.extra2 || ""),
         displayStatus: detailDisplayStatus(task, action, manual),
+        holdSteps: holdRow.holdSteps || [],
         requestType: manual ? displayTaskType(task.taskType) : action.requestType,
         priority: (manual
             ? (displayTaskType(task?.taskType) || "General Task")
@@ -2007,6 +2043,11 @@ async function closeTaskForRequester(res, target, viewer, noteText, taskKey) {
     }, SILENT_MAIL);
     await task.save();
     if (!task.sourceDashboardActionId) await syncManualTaskNotification(task);
+    try {
+        await releaseCompletedTaskFromNotificationBars(task, target.action);
+    } catch (noticeError) {
+        console.error("Completed task notification clear failed:", noticeError);
+    }
     let requesterMailed = false;
     try {
         const requester = await resolveTaskRequesterEmployee(task);
@@ -2595,6 +2636,108 @@ export const confirmTaskCompletion = async (req, res) => {
     } catch (error) {
         console.error("Confirm close error:", error);
         return res.status(500).json({ message: "Failed to update the completed task" });
+    }
+};
+
+export const recallTaskCompletion = async (req, res) => {
+    try {
+        if (!(await denyUnlessViewer(req, res))) return;
+        const target = await loadTarget(req.params.taskKey);
+        if (!target?.task) return res.status(404).json({ message: "Task not found." });
+        const viewer = await resolveTaskViewer(req);
+        const task = target.task;
+        if (!taskWasReassigned(task)) {
+            return res.status(400).json({ message: "Only a reassigned task can be recalled." });
+        }
+        if (task.status === "Completed" || task.status === "Cancelled" || task.status === "Rejected") {
+            return res.status(400).json({ message: "This task is already closed." });
+        }
+        const original = await resolveOriginalAssignee(task);
+        const current = assigneeOf(target);
+        const viewerIsReassignee = viewerIsCurrentAssignee(viewer, current) && !viewerMatchesEmployee(viewer, original);
+        if (!viewerIsReassignee && !viewer?.superUser) {
+            return res.status(403).json({ message: "Only the reassigned employee can recall this task." });
+        }
+        const saved = closeSnapshot(task);
+        if (!saved.completionRequestedAt || saved.completionConfirmedAt || saved.reassignmentReleased) {
+            return res.status(400).json({ message: "This task is not waiting for the original assignee." });
+        }
+        const originalName = personName(original) || String(saved.originalAssigneeName || "").trim() || "the original assignee";
+        const reassigneeName = saved.completionRequestedByName || task.assigneeName || viewer.name || "The reassigned employee";
+        task.closeRequest = {
+            ...saved,
+            completionRequestedAt: null,
+            completionRequestedById: null,
+            completionRequestedByName: "",
+            completionNote: "",
+            completionConfirmedAt: null,
+            reassignmentReleased: false,
+        };
+        task.markModified("closeRequest");
+        task.history = task.history || [];
+        task.history.push(historyEntry(
+            "Recalled",
+            `${viewer.name} recalled this task. It is no longer pending with ${originalName}.`,
+            viewer.name,
+        ));
+        await pushWorkUpdate(task, {
+            authorName: viewer.name,
+            authorRole: await authorRoleFor(viewer),
+            kind: "Work Update",
+            badge: "Recalled",
+            text: `${viewer.name} recalled this task. It is back with ${reassigneeName}.`,
+        }, SILENT_MAIL);
+        await task.save();
+        if (original?._id) {
+            try {
+                const destination = target.kind === "manual"
+                    ? moduleForText(task.taskName, task.description, task.taskType)
+                    : moduleForRequestType(target.action?.requestType, `${target.action?.extra1 || ""} ${target.action?.extra2 || ""}`);
+                await upsertTaskNotice(task, {
+                    employeeId: original._id,
+                    empId: original.employeeId || saved.originalAssigneeEmpId || "",
+                    taskName: task.taskName,
+                    moduleName: destination.module,
+                    taskKey: taskRecordKey(target, task),
+                    noticeText: `Reassigned to: ${reassigneeName}`,
+                });
+            } catch (noticeError) {
+                console.error("Recall notice failed:", noticeError);
+            }
+        }
+        let emailSent = false;
+        if (original) {
+            try {
+                const sent = await mailEmployee(original, {
+                    subject: `Task recalled: ${task.taskName || "Task"}`,
+                    html: taskActionHtml({
+                        hello: originalName,
+                        lines: [
+                            `${viewer.name} recalled this task.`,
+                            "It is no longer waiting for your approval.",
+                        ],
+                        taskName: task.taskName,
+                        link: taskDetailLink(target),
+                    }),
+                    recordId: String(target.action?._id || task._id || ""),
+                    emailType: "Task recalled",
+                });
+                emailSent = Boolean(sent?.sent);
+            } catch (mailError) {
+                console.error("Recall email failed:", mailError);
+            }
+        }
+        const fresh = await loadTarget(req.params.taskKey);
+        return res.status(200).json({
+            message: emailSent
+                ? "Recalled. The task is back with the reassigned employee. The original assignee was emailed."
+                : "Recalled. The task is back with the reassigned employee.",
+            emailSent,
+            task: await buildDetail(fresh, viewer),
+        });
+    } catch (error) {
+        console.error("Recall task error:", error);
+        return res.status(500).json({ message: "Failed to recall the task" });
     }
 };
 
@@ -3857,6 +4000,11 @@ export const decideTaskManagerWorkflow = async (req, res) => {
                 await task.save();
                 await closeReassignmentNotices(task);
                 await syncManualTaskNotification(task);
+                try {
+                    await releaseCompletedTaskFromNotificationBars(task, target.action);
+                } catch (noticeError) {
+                    console.error("Completed task notification clear failed:", noticeError);
+                }
             }
         }
 
@@ -4354,6 +4502,86 @@ function categoryOfTarget(target) {
     return displayTaskType(target?.task?.taskType) || "General Task";
 }
 
+async function assigneeEmployee(assigneeId, assigneeEmpId, storedName = "") {
+    let person = isObjectId(assigneeId) ? await findAssignee(assigneeId) : null;
+    if (!person && assigneeEmpId) {
+        person = await EmployeeBasic.findOne({
+            employeeId: String(assigneeEmpId).trim(),
+            status: { $ne: "Left User" },
+        })
+            .select("firstName lastName employeeId designation companyEmail workEmail profilePicture primaryReportee status")
+            .lean();
+    }
+    const name = personBaseName(storedName);
+    if (!person && name) person = await findEmployeeByName(name);
+    return {
+        person,
+        name: personName(person) || name,
+    };
+}
+
+async function taskNumberFor(target) {
+    const manual = target?.kind === "manual";
+    const task = target?.task;
+    const action = target?.action;
+    const numberKeys = [
+        manual ? `manual-${task?._id || ""}` : String(action?._id || ""),
+        task?.sourceDashboardActionId ? String(task.sourceDashboardActionId) : "",
+        action?._id ? String(action._id) : "",
+        task?._id ? String(task._id) : "",
+        task?._id ? `manual-${task._id}` : "",
+    ].filter(Boolean);
+    if (!numberKeys.length) return "";
+    const numberMap = await taskNumbersByRecordId(numberKeys);
+    return numberKeys.map((id) => numberMap.get(String(id))).find(Boolean) || "";
+}
+
+/** Snapshot the assignee mail before the task row is removed. */
+async function prepareAdminDeletedTaskMail(target, actorName, viewer = null) {
+    const { assigneeId, assigneeEmpId } = assigneeOf(target);
+    const assignee = await assigneeEmployee(
+        assigneeId,
+        assigneeEmpId,
+        target?.task?.assigneeName || "",
+    );
+    if (!assignee.person || !assignee.name) return null;
+    if (viewer && viewerMatchesEmployee(viewer, assignee.person)) return null;
+    const manual = target.kind === "manual";
+    const task = target.task;
+    const action = target.action;
+    const titled = taskTitleAndDescription({
+        requestType: manual ? task?.taskType : action?.requestType,
+        extra1: manual ? task?.description : action?.extra1,
+        extra2: manual ? "" : action?.extra2,
+        extra3: manual ? "" : action?.extra3,
+        subjectName: manual ? "" : action?.subjectName,
+        subjectEmployeeId: manual ? "" : action?.subjectEmployeeId,
+        taskName: task?.taskName,
+        description: task?.description || (manual ? "" : action?.extra2),
+        manual,
+    });
+    let taskNumber = "";
+    try {
+        taskNumber = await taskNumberFor(target);
+    } catch (numberError) {
+        console.error("Deleted task number lookup failed:", numberError);
+    }
+    const mail = adminDeletedTaskEmail({
+        assigneeName: assignee.name,
+        taskName: titled.taskName || task?.taskName || action?.extra1 || "Task",
+        taskNumber,
+        description: titled.description || "",
+        actorName,
+    });
+    return {
+        person: assignee.person,
+        assigneeName: assignee.name,
+        subject: mail.subject,
+        html: mail.html,
+        recordId: String(action?._id || task?._id || ""),
+    };
+}
+
 /** Remove the task, its workflow, and its notifications. Caller checks permission. */
 export async function eraseTaskByKey(taskKey, { preserveSource = false } = {}) {
     const target = await loadTarget(taskKey);
@@ -4385,31 +4613,75 @@ export const deleteTaskManagerTask = async (req, res) => {
         if (!(await denyUnlessViewer(req, res))) return;
         const target = await loadTarget(req.params.taskKey);
         if (!target) return res.status(404).json({ message: "Task not found." });
-        if (generalTaskClosed(target.task)) {
-            return res.status(400).json({ message: "This task is closed. Delete is disabled." });
-        }
         const viewer = await resolveTaskViewer(req);
         const deleteCategory = categoryOfTarget(target);
-        const closed = generalTaskClosed(target.task);
-        const requesterMayDelete = requesterMayDeleteCategory(deleteCategory)
-            && await viewerIsTaskRequester(target.task, viewer, target.action);
-        const allowed = requesterMayDelete || viewerMayDeleteTask(viewer, {
-            taskCategory: deleteCategory,
-            requestedByName: target.task?.requestedByName || target.action?.requestedByName || "",
-            requestedByUserId: target.task?.requestedByUserId,
-            closed,
-        });
-        if (!allowed) {
-            return res.status(403).json({
-                message: deleteCategory === "General Task"
-                    ? "Only the person who requested this task can delete it."
-                    : "Only the person who requested this task, or an admin super user, can delete it.",
+        const finished = recordIsFinishedForDelete(target.task, target.action);
+        const deleteSealed = ["Cancelled", "Rejected"].includes(String(target.task?.status || ""))
+            || ["Rejected", "Dismissed", "Cancelled"].includes(String(target.action?.status || ""));
+        if (deleteSealed) {
+            return res.status(400).json({ message: "This task is closed. Delete is disabled." });
+        }
+        if (finished) {
+            if (!viewer.superUser) {
+                return res.status(403).json({
+                    message: "Only an admin super user can delete a completed or closed task.",
+                });
+            }
+        } else if (generalTaskClosed(target.task)) {
+            return res.status(400).json({ message: "This task is closed. Delete is disabled." });
+        } else {
+            const requesterMayDelete = requesterMayDeleteCategory(deleteCategory)
+                && await viewerIsTaskRequester(target.task, viewer, target.action);
+            const allowed = requesterMayDelete || viewerMayDeleteTask(viewer, {
+                taskCategory: deleteCategory,
+                requestedByName: target.task?.requestedByName || target.action?.requestedByName || "",
+                requestedByUserId: target.task?.requestedByUserId,
             });
+            if (!allowed) {
+                return res.status(403).json({
+                    message: deleteCategory === "General Task"
+                        ? "Only the person who requested this task can delete it."
+                        : "Only the person who requested this task, or an admin super user, can delete it.",
+                });
+            }
         }
         const systemOrWorkflow = deleteCategory === "System Task" || deleteCategory === "Workflow Task";
+        let pendingMail = null;
+        if (viewer.superUser) {
+            try {
+                pendingMail = await prepareAdminDeletedTaskMail(target, viewer.name || "Admin", viewer);
+            } catch (prepareError) {
+                console.error("Deleted task email prepare failed:", prepareError);
+            }
+        }
         const result = await eraseTaskByKey(req.params.taskKey, { preserveSource: systemOrWorkflow });
         if (!result.ok) return res.status(result.status || 400).json({ message: result.message });
-        return res.status(200).json({ message: result.message || "Task deleted." });
+        let emailSent = false;
+        const assigneeName = pendingMail?.assigneeName || "";
+        if (pendingMail?.person) {
+            try {
+                const sent = await mailEmployee(pendingMail.person, {
+                    subject: pendingMail.subject,
+                    html: pendingMail.html,
+                    recordId: pendingMail.recordId,
+                    emailType: "Task deleted",
+                });
+                emailSent = Boolean(sent?.sent);
+            } catch (mailError) {
+                console.error("Deleted task email failed:", mailError);
+            }
+        }
+        const message = emailSent && assigneeName
+            ? `Task deleted. ${assigneeName} was emailed that admin deleted this task and they no longer need to work on it.`
+            : pendingMail && assigneeName
+                ? `Task deleted. ${assigneeName} could not be emailed.`
+                : (result.message || "Task deleted.");
+        return res.status(200).json({
+            message,
+            emailSent,
+            emailAttempted: Boolean(pendingMail),
+            assigneeName,
+        });
     } catch (error) {
         console.error("Delete task error:", error);
         return res.status(500).json({ message: "Failed to delete task" });

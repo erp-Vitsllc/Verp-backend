@@ -865,6 +865,11 @@ export async function promoteDueTaskCompletions() {
         await task.save();
         await closeReassignmentNotices(task);
         if (!task.sourceDashboardActionId) await syncManualTaskNotification(task);
+        const finishedType = canonicalTaskType(task.taskType);
+        if (finishedType === "System Task" || finishedType === "Workflow Task") {
+            const { releaseCompletedTaskFromNotificationBars } = await import("./completeFinishedSystemWorkflowTasks.js");
+            await releaseCompletedTaskFromNotificationBars(task);
+        }
     }
 }
 
@@ -1116,6 +1121,12 @@ async function omitGeneralTaskBellRows(rows) {
 export async function loadTaskManagerInboxItems(assigneeClauses, moduleName, options = {}) {
     const moduleKey = String(moduleName || "").trim();
     if (!Array.isArray(assigneeClauses) || !assigneeClauses.length || !moduleKey) return [];
+    try {
+        const { completeFinishedSystemWorkflowTasks } = await import("./completeFinishedSystemWorkflowTasks.js");
+        await completeFinishedSystemWorkflowTasks();
+    } catch (error) {
+        console.error("Complete finished system and workflow tasks:", error);
+    }
     const rows = await DashboardAction.find({
         status: "Pending",
         requestType: "Task Manager",

@@ -51,6 +51,11 @@ const employeeSalarySchema = new mongoose.Schema(
         },
 
         // SALARY STRUCTURE
+        workLocation: { type: String, enum: ['uae', 'outside_uae'], default: 'uae' },
+        workingFromCountry: { type: String, default: '', trim: true },
+        workingFromCountryCode: { type: String, default: '', trim: true, uppercase: true },
+        salaryCurrency: { type: String, default: 'AED', trim: true, uppercase: true },
+        workTimeZone: { type: String, default: 'Asia/Dubai', trim: true },
         monthlySalary: { type: Number, default: 0 },
         totalSalary: { type: Number, default: 0 }, // Total salary calculated and stored
         basic: { type: Number, default: 0 },

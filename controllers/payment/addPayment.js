@@ -95,17 +95,23 @@ export const addPayment = async (req, res) => {
         const isFinanceUser = isEmployeePaySettlement
             ? await isUserInFlowchart(req.user, 'finance').catch(() => false)
             : false;
+        const { viewerInheritsRequestAction } = await import('../../utils/reassigneeTaskPower.js');
+        const inheritedAccountsAction = relatedEntityId
+            ? await viewerInheritsRequestAction(req.user, relatedEntityId).catch(() => false)
+            : false;
         const isAccountsLike =
             isAccountsUser ||
             isFinanceUser ||
+            inheritedAccountsAction ||
             req.user?.isAdmin === true ||
             String(req.user?.role || '').toLowerCase() === 'admin';
         
         // DEFAULT STATUS logic:
         // If Accounts user creates it, it can be 'Completed' immediately
-        // Otherwise it must be 'Processing' (or Pending) and needs approval
+        // Otherwise it must be 'Processing' (or Pending) and needs approval.
+        // A reassignee of this loan, fine, or bill keeps the original Accounts power.
         let finalStatus = status;
-        if (!isAccountsUser) {
+        if (!isAccountsUser && !inheritedAccountsAction) {
             finalStatus = 'Processing';
         }
         if (isEmployeePaySettlement) {

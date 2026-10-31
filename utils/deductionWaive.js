@@ -13,6 +13,7 @@ export function isDeductionWaived(row) {
 
 /** Approved hour request that sets the loss to zero. Status stays the same, and the salary cut does not. */
 export function isHourLossWaived(row) {
+    if (String(row?.statusKey || '') === 'authorized_leave') return false;
     return String(row?.hourAdjustStatus || '') === 'approved' && !(Number(row?.hoursApproved) > 0);
 }
 

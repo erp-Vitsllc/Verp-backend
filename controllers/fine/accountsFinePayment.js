@@ -8,6 +8,7 @@ import {
     closeAccountsPaymentInbox,
     emailManagementAccountsSettlement,
 } from '../../utils/fineAccountsPaymentFlow.js';
+import { viewerInheritsRequestAction } from '../../utils/reassigneeTaskPower.js';
 
 const COMPANY_IDS = new Set(['VEGA-HR-0000', 'VEGA_INTERNAL']);
 
@@ -94,15 +95,18 @@ export const accountsFinePayment = async (req, res) => {
             });
         }
 
-        if (!(await isAccountsActor(req))) {
-            return res.status(403).json({
-                message: 'Only Accounts can settle an approved fine.',
-            });
-        }
-
         const fines = await loadFineGroup(id);
         if (fines.length === 0) {
             return res.status(404).json({ message: 'Fine(s) not found' });
+        }
+
+        const inherited = await Promise.all(
+            fines.map((row) => viewerInheritsRequestAction(req.user, row._id)),
+        );
+        if (!(await isAccountsActor(req)) && !inherited.some(Boolean)) {
+            return res.status(403).json({
+                message: 'Only Accounts can settle an approved fine.',
+            });
         }
 
         const fine = fines[0];

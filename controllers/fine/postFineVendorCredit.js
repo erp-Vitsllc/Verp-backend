@@ -11,6 +11,7 @@ import {
 import { createOpenZohoVendorCredit } from '../zoho/postZohoVendorCredit.js';
 import { mapZohoErrorStatus } from '../zoho/zohoVendorPaymentUtils.js';
 import { sendPaymentNotificationEmail } from '../../utils/sendCombinedPaymentEmail.js';
+import { viewerInheritsRequestAction } from '../../utils/reassigneeTaskPower.js';
 
 async function findFine(id) {
     const raw = String(id || '').trim();
@@ -46,7 +47,8 @@ async function findEmployee(paidBy) {
 export const postFineVendorCredit = async (req, res) => {
     try {
         const isAccountsUser = await isAccountsActor(req.user);
-        if (!isAccountsUser) {
+        const inherited = await viewerInheritsRequestAction(req.user, req.params?.id);
+        if (!isAccountsUser && !inherited) {
             return res.status(403).json({
                 success: false,
                 message: 'Only Accounts can create a Zoho vendor credit from a fine.',

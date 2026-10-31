@@ -1,5 +1,6 @@
 import mongoose from "mongoose";
 import Company from "../models/Company.js";
+import { normalizeWorkPay } from "./workPayLocation.js";
 
 export const EMPLOYEE_ADD_PATTERNS = {
     PERSON_NAME: /^[A-Za-z\s'-]{2,50}$/,
@@ -186,7 +187,10 @@ export function validateEmployeeAddBody(body) {
         errors.push("Salary percentages must total 100%");
     }
 
-    return { errors, normalized: { employeeId, email, firstName, lastName } };
+    const workPay = normalizeWorkPay(b);
+    if (workPay.errors.length) errors.push(...workPay.errors);
+
+    return { errors, normalized: { employeeId, email, firstName, lastName, workPay: workPay.value } };
 }
 
 export async function assertActiveCompany(companyId) {

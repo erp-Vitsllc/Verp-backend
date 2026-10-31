@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { viewerMayDeleteTask } from "./taskDeleteAccess.js";
+import { recordIsFinishedForDelete, viewerMayDeleteTask } from "./taskDeleteAccess.js";
 import { noticeKeysForRecord } from "./deletedTaskNotice.js";
 
 const admin = { superUser: true, userId: "admin-1", name: "Admin", employeeId: "VITS000" };
@@ -14,6 +14,31 @@ test("admin super user can delete system and workflow tasks", () => {
     assert.equal(viewerMayDeleteTask(admin, { taskCategory: "General Task" }), false);
     assert.equal(viewerMayDeleteTask(admin, { taskCategory: "General Task", requestedByUserId: "admin-1" }), true);
     assert.equal(viewerMayDeleteTask(admin, { taskCategory: "System Task", closed: true }), false);
+});
+
+test("only an admin can delete a completed or closed task of any type", () => {
+    for (const status of ["Completed", "Closed"]) {
+        assert.equal(viewerMayDeleteTask(admin, { taskCategory: "Workflow Task", status }), true);
+        assert.equal(viewerMayDeleteTask(admin, { taskCategory: "General Task", status }), true);
+        assert.equal(viewerMayDeleteTask(admin, { taskCategory: "System Task", status }), true);
+        assert.equal(viewerMayDeleteTask(requester, {
+            taskCategory: "Workflow Task",
+            status,
+            requestedByUserId: "user-9",
+        }), false);
+        assert.equal(viewerMayDeleteTask(requester, {
+            taskCategory: "General Task",
+            status,
+            requestedByUserId: "user-9",
+        }), false);
+    }
+});
+
+test("an approved workflow and a completed general task are finished", () => {
+    assert.equal(recordIsFinishedForDelete(null, { status: "Approved" }), true);
+    assert.equal(recordIsFinishedForDelete({ status: "Completed", taskType: "General Task" }, null), true);
+    assert.equal(recordIsFinishedForDelete({ status: "Pending", closeRequest: { closedAt: "2026-10-30" } }, null), true);
+    assert.equal(recordIsFinishedForDelete({ status: "Pending" }, { status: "Pending" }), false);
 });
 
 test("the requester can delete a general, system, or workflow task", () => {

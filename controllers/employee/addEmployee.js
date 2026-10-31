@@ -95,6 +95,7 @@ export const addEmployee = async (req, res) => {
                 errors: validation.errors,
             });
         }
+        const workPay = validation.normalized.workPay;
 
         const companyError = await assertActiveCompany(company);
         if (companyError) {
@@ -251,6 +252,7 @@ export const addEmployee = async (req, res) => {
                 enablePortalAccess: enablePortalAccess || false,
                 dateOfJoining,
                 company: company || null,
+                ...workPay,
                 contractJoiningDate: null,
                 contractExpiryDate: contractExpiryDate || null,
             }),
@@ -289,6 +291,7 @@ export const addEmployee = async (req, res) => {
             // 5. EmployeeSalary
             EmployeeSalary.create({
                 employeeId: cleanedEmployeeId,
+                ...workPay,
                 monthlySalary: calculatedTotal,
                 totalSalary: calculatedTotal,
                 basic: basicAmount,

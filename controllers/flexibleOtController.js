@@ -3,11 +3,12 @@ import Attendance from '../models/Attendance.js';
 import Holiday from '../models/Holiday.js';
 import AttendanceChangeRequest from '../models/AttendanceChangeRequest.js';
 import EmployeeBasic from '../models/EmployeeBasic.js';
-import { getDepartmentHOD } from '../utils/getDepartmentHOD.js';
+import { getDepartmentHOD, isUserActiveInFlowchart } from '../utils/getDepartmentHOD.js';
 import { hasPermission } from '../services/permissionService.js';
 import {
     attendanceChangeQueuedMessage,
     openAttendanceChangeForEmployee,
+    supersedeOpenAttendanceChanges,
 } from '../utils/attendanceChangeApproval.js';
 import { isAttendanceSuspendedOn } from '../utils/attendanceSuspension.js';
 import {
@@ -57,8 +58,14 @@ function roundHours(value) {
 }
 
 async function actorIsFlowchartHr(actor) {
+    if (!actor?._id) return false;
+    const active = await isUserActiveInFlowchart(
+        { employeeObjectId: actor._id, employeeId: actor.employeeId || '' },
+        'hr',
+    );
+    if (active) return true;
     const hr = await getDepartmentHOD('hr').catch(() => null);
-    return Boolean(hr?._id && actor?._id && String(hr._id) === String(actor._id));
+    return Boolean(hr?._id && String(hr._id) === String(actor._id));
 }
 
 async function workingDayHours(record) {
@@ -347,6 +354,33 @@ export async function requestFlexibleOvertime(req, res) {
             }
             return res.status(200).json({
                 message: 'Present set on the selected day.',
+                applied: true,
+                ...applied.body,
+            });
+        }
+
+        if (isHr) {
+            const editedIn = String(req.body?.timeIn || '').trim();
+            const editedOut = String(req.body?.timeOut || '').trim();
+            if (editedIn) record.timeIn = storedClock(editedIn);
+            if (editedOut) record.timeOut = storedClock(editedOut);
+            const applied = await approveFlexibleOvertimeRecord(record, {
+                approvedHours,
+                reason,
+                confirmNextDay: false,
+                targetDate: '',
+                actor,
+            });
+            if (applied.status !== 200) {
+                return res.status(applied.status).json(applied.body);
+            }
+            await supersedeOpenAttendanceChanges({
+                date: record.date,
+                employeeMongoId: String(record.employeeMongoId),
+                actorId: actor._id,
+            });
+            return res.status(200).json({
+                message: 'Overtime applied.',
                 applied: true,
                 ...applied.body,
             });

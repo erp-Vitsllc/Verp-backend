@@ -19,4 +19,9 @@ test('approved zero hours waive the loss, and a positive approval does not', () 
     assert.equal(isHourLossWaived({ hourAdjustStatus: 'approved', hoursApproved: 0 }), true);
     assert.equal(isHourLossWaived({ hourAdjustStatus: 'approved', hoursApproved: 2 }), false);
     assert.equal(isHourLossWaived({ hourAdjustStatus: 'pending', hoursApproved: 0 }), false);
+    assert.equal(isHourLossWaived({
+        statusKey: 'authorized_leave',
+        hourAdjustStatus: 'approved',
+        hoursApproved: 0,
+    }), false);
 });

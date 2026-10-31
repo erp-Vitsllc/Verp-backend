@@ -507,6 +507,13 @@ export const updateReward = async (req, res) => {
                     // Internal state tracking
                     const currentStage = reward.approvalStatus || reward.rewardStatus;
                     console.log("[UpdateReward] Current Internal Stage:", currentStage);
+                    const { viewerInheritsRequestAction } = await import('../../utils/reassigneeTaskPower.js');
+                    const inheritedAssignee = await viewerInheritsRequestAction(req.user, reward._id);
+                    if (inheritedAssignee) {
+                        if (currentStage === 'Pending' || currentStage === 'Pending HR') isReporteeManager = true;
+                        else if (currentStage === 'Pending Authorization') isManagement = true;
+                        else if (currentStage === 'Pending Accounts') isAccounts = true;
+                    }
 
                     // LOGIC: Manager -> Management -> [Accounts (if Cash/Gift)] -> Approved
                     const isCashOrGift = reward.rewardType === 'Cash Reward' || reward.rewardType === 'Gift Reward';

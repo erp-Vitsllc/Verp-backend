@@ -1,11 +1,60 @@
 import DashboardAction from "../models/DashboardAction.js";
 import EmployeeBasic from "../models/EmployeeBasic.js";
+import TaskManagerTask from "../models/TaskManagerTask.js";
 import {
     buildProfileActivationHoldMessage,
     buildProfileActivationRejectedMessage,
 } from "./employeeProfileNotificationMessages.js";
 import { foldIntoAdminOfficerServiceTrackIfOpen } from "./vehicleServiceAdminOfficerNotification.js";
 import { noticeAlreadyDeleted } from "./deletedTaskNotice.js";
+import { activityExtra3Lock, pickActivityRow } from "./taskDuplicateKey.js";
+
+function rowMeta(extra3) {
+    if (!extra3) return null;
+    if (typeof extra3 === "object") return extra3;
+    try {
+        const parsed = JSON.parse(String(extra3));
+        return parsed && typeof parsed === "object" ? parsed : null;
+    } catch {
+        return null;
+    }
+}
+
+function isAdminTrack(row) {
+    return Boolean(rowMeta(row?.extra3)?.adminOfficerServiceTrack);
+}
+
+/** Reminders can have several open tasks on one record, one per document or bill. */
+function sharesOneTask(requestType) {
+    return !/expiry|not renew|card deleted|value missing|asset overdue|profile incomplete|payment reminder|fuel reminder/i.test(
+        String(requestType || ""),
+    );
+}
+
+/** The next approval stays on the task already open for this activity. */
+async function followActivityAssignee(actionId, assignee, assigneeId, { reopen = false } = {}) {
+    if (!actionId) return;
+    const name = `${assignee?.firstName || ""} ${assignee?.lastName || ""}`.trim();
+    const set = {
+        assignee: assigneeId,
+        assigneeEmpId: assignee?.employeeId || "",
+        assigneeName: name,
+        status: "Pending",
+        "closeRequest.originalAssigneeId": null,
+        "closeRequest.originalAssigneeEmpId": "",
+        "closeRequest.originalAssigneeName": "",
+        "closeRequest.reassignmentReleased": false,
+        "closeRequest.completionRequestedAt": null,
+        "closeRequest.completionConfirmedAt": null,
+        "closeRequest.reviewPending": false,
+    };
+    const filter = {
+        sourceDashboardActionId: actionId,
+        status: { $nin: ["Cancelled", "Rejected"] },
+    };
+    if (!reopen) filter.assignee = { $ne: assigneeId };
+    await TaskManagerTask.updateMany(filter, { $set: set });
+}
 
 /**
  * Synchronize a request with the DashboardAction collection.
@@ -358,37 +407,51 @@ export const syncDashboardAction = async (data) => {
                         : undefined;
 
         const fineInboxType = requestType === 'Fine' || requestType === 'Group Fine Request';
-        // One open task per fine. Matching either fine type updates the existing row
-        // instead of leaving both "Fine" and "Group Fine Request" pending.
-        const pendingUpsertFilter = fineInboxType
-            ? {
-                requestId: requestId,
-                status: 'Pending',
-                requestType: { $in: ['Fine', 'Group Fine Request'] },
-            }
-            : {
-                requestId: requestId,
+        if (!sharesOneTask(requestType)) {
+            const separateFilter = {
+                requestId,
                 assignedTo: actualAssignedTo,
                 status: 'Pending',
                 ...(requestType ? { requestType } : {}),
             };
-        // Parallel disposition + inspection: separate bell rows per extra3.
-        // Vehicle service: Admin create-track folds stage updates above; HR/Accounts keep extra3 rows.
-        if (
-            (requestType === 'Vehicle Disposition Request' || requestType === 'Vehicle Inspection') &&
-            pendingExtra3
-        ) {
-            pendingUpsertFilter.extra3 = pendingExtra3;
-        } else if (requestType === 'Vehicle Service Request' && pendingExtra3) {
-            try {
-                const meta = JSON.parse(String(pendingExtra3));
-                if (meta?.adminOfficerServiceTrack || meta?.oilStage || meta?.serviceRecordId) {
-                    pendingUpsertFilter.extra3 = pendingExtra3;
-                }
-            } catch {
-                /* keep default filter */
-            }
+            const separateLock = activityExtra3Lock(requestType, pendingExtra3);
+            if (separateLock) separateFilter.extra3 = separateLock;
+            const separateDoc = {
+                assignedTo: actualAssignedTo,
+                assignedToEmpId: assignee.employeeId,
+                requestId,
+                requestType,
+                status: 'Pending',
+                subjectEmployeeId: subjectEmployee?.employeeId,
+                subjectName: subjectEmployee
+                    ? `${subjectEmployee.firstName || ''} ${subjectEmployee.lastName || ''}`.trim() || data.subjectName || 'Vehicle'
+                    : data.subjectName || '',
+                requestedByName: requestedByName || '',
+                requestedDate: new Date(),
+                extra1,
+                extra2,
+                ...(pendingExtra3 ? { extra3: pendingExtra3 } : {}),
+            };
+            await DashboardAction.findOneAndUpdate(
+                separateFilter,
+                { $set: separateDoc },
+                { upsert: true, new: true },
+            );
+            return;
         }
+
+        // One activity keeps one row. The next approval (HR, then Accounts, then payment)
+        // updates that row instead of opening a second task.
+        // A parallel job stays separate: another service on the same vehicle, the admin
+        // create-track, or a disposition / inspection lane stored on extra3.
+        const lockedExtra3 = activityExtra3Lock(requestType, pendingExtra3);
+        const identity = {
+            requestId,
+            ...(fineInboxType
+                ? { requestType: { $in: ['Fine', 'Group Fine Request'] } }
+                : (requestType ? { requestType } : {})),
+            ...(lockedExtra3 ? { extra3: lockedExtra3 } : {}),
+        };
 
         const updateDoc = {
             assignedTo: actualAssignedTo,
@@ -403,51 +466,52 @@ export const syncDashboardAction = async (data) => {
                   'Vehicle'
                 : data.subjectName || '',
             requestedByName: requestedByName || '',
-            requestedDate: new Date(),
             extra1: extra1,
             extra2: extra2,
             ...(pendingExtra3 ? { extra3: pendingExtra3 } : {}),
         };
 
-        // Never overwrite Admin Officer create-track with a generic same-asset Pending upsert.
-        if (requestType === 'Vehicle Service Request' && !pendingUpsertFilter.extra3) {
-            const candidates = await DashboardAction.find(pendingUpsertFilter).select('_id extra3').lean();
-            const nonTrack = candidates.find((row) => {
-                try {
-                    const raw = row?.extra3;
-                    const meta =
-                        raw && typeof raw === 'object'
-                            ? raw
-                            : raw
-                              ? JSON.parse(String(raw))
-                              : null;
-                    return !meta?.adminOfficerServiceTrack;
-                } catch {
-                    return true;
-                }
-            });
-            if (nonTrack?._id) {
-                await DashboardAction.findByIdAndUpdate(nonTrack._id, { $set: updateDoc }, { new: true });
-            } else {
-                await DashboardAction.create(updateDoc);
-            }
-            return;
-        }
-
-        const pendingDupes = await DashboardAction.find(pendingUpsertFilter)
-            .select('_id')
-            .sort({ requestedDate: 1 })
+        const candidates = await DashboardAction.find(identity)
+            .select('_id status extra3 assignedTo updatedAt')
+            .sort({ updatedAt: -1 })
             .lean();
-        if (pendingDupes.length > 1) {
-            await DashboardAction.deleteMany({
-                _id: { $in: pendingDupes.slice(1).map((row) => row._id) },
+        const pool = requestType === 'Vehicle Service Request' && !lockedExtra3
+            ? candidates.filter((row) => !isAdminTrack(row))
+            : candidates;
+        const target = pickActivityRow(pool);
+        let keptId = target?._id || null;
+
+        if (keptId) {
+            const assigneeChanged = String(target.assignedTo || "") !== String(actualAssignedTo);
+            const revived = target.status !== "Pending" && target.status !== "On Hold";
+            await DashboardAction.findByIdAndUpdate(keptId, { $set: updateDoc });
+            if (assigneeChanged || revived) {
+                await followActivityAssignee(keptId, assignee, actualAssignedTo, { reopen: true });
+            }
+        } else {
+            const created = await DashboardAction.create({
+                ...updateDoc,
+                requestedDate: new Date(),
             });
+            keptId = created?._id || null;
         }
 
-        await DashboardAction.findOneAndUpdate(
-            pendingUpsertFilter,
-            { $set: updateDoc },
-            { upsert: true, new: true },
+        await DashboardAction.updateMany(
+            {
+                ...identity,
+                ...(keptId ? { _id: { $ne: keptId } } : {}),
+                status: "Pending",
+                ...(requestType === "Vehicle Service Request" && !lockedExtra3
+                    ? { extra3: { $not: { $regex: '"adminOfficerServiceTrack"\\s*:\\s*true', $options: "i" } } }
+                    : {}),
+            },
+            {
+                $set: {
+                    status: "Dismissed",
+                    actionedDate: new Date(),
+                    comment: "Closed: this activity already has one task",
+                },
+            },
         );
 
     } catch (error) {

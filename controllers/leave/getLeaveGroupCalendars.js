@@ -8,7 +8,7 @@ import {
 } from '../../utils/attendanceEmployeeFilters.js';
 import { preferPunchedRows } from '../../utils/attendanceDayLookup.js';
 import { applyLeaveCoverIndex, loadLeaveCoverIndex } from '../../utils/attendanceLeaveDayCover.js';
-import { calendarDaysForEmployee, calendarStatusKey } from '../../utils/leaveGroupCalendarDays.js';
+import { calendarDaysForEmployee, calendarStatusKey, calendarTagsForEmployee } from '../../utils/leaveGroupCalendarDays.js';
 import { overlaySuspendedAttendance } from '../../utils/attendanceSuspension.js';
 import { storedPunchGapPatch } from '../../utils/partialLeaveWindow.js';
 import EmployeeSalary from '../../models/EmployeeSalary.js';
@@ -168,7 +168,7 @@ export async function getLeaveGroupCalendars(req, res) {
                   })
                       .select(detail
                           ? 'employeeMongoId employeeId employeeName date statusKey statusLabel timeIn timeOut timeOutDate checkInLocation checkOutLocation reason leaveRequestReason hourAdjustReason flexibleOtReason hourAdjustStatus hourAdjustKind deductionWaived leaveRequestSession leaveRequestStatus leaveApprovalStage leaveRequestKind requestedStatusKey requestedStatusLabel flexibleOtStatus flexibleOtApprovedHours approvalStatus hoursApproved hoursTaken flexibleWorkedHours flexibleRequiredHours flexibleFromOtDate flexibleOtNextDayDate compOff leavePayType updatedAt historical'
-                          : 'employeeMongoId employeeId date statusKey timeIn timeOut updatedAt historical')
+                          : 'employeeMongoId employeeId date statusKey timeIn timeOut flexibleOtStatus flexibleOtApprovedHours flexibleOtNextDayDate flexibleFromOtDate updatedAt historical')
                       .lean()
                       .maxTimeMS(12000)
                 : [],
@@ -315,6 +315,7 @@ export async function getLeaveGroupCalendars(req, res) {
                         todayKey: today,
                         visibleFrom,
                     }),
+                    tags: calendarTagsForEmployee(rows, { visibleFrom }),
                 };
             })
             .sort((a, b) => a.employeeName.localeCompare(b.employeeName));

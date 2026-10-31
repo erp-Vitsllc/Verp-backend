@@ -274,17 +274,28 @@ export async function closeOilServicePendingDashboardActions(
         })
         .map((row) => row._id);
 
-    if (!idsToClose.length) return;
+    if (idsToClose.length) {
+        await DashboardAction.updateMany(
+            { _id: { $in: idsToClose } },
+            {
+                status: 'Approved',
+                actionedDate: new Date(),
+                actionedBy: actionedBy || null,
+                comment: comment || 'Oil service completed',
+            },
+        );
+    }
 
-    await DashboardAction.updateMany(
-        { _id: { $in: idsToClose } },
-        {
-            status: 'Approved',
-            actionedDate: new Date(),
-            actionedBy: actionedBy || null,
-            comment: comment || 'Oil service completed',
-        },
-    );
+    try {
+        const { completeFinishedSystemWorkflowTasks } = await import('./completeFinishedSystemWorkflowTasks.js');
+        await completeFinishedSystemWorkflowTasks({
+            requestId: assetObjectId,
+            requestType: 'Vehicle Service Request',
+            force: true,
+        });
+    } catch (finishError) {
+        console.error('Complete vehicle service task:', finishError?.message || finishError);
+    }
 }
 
 /**
@@ -782,7 +793,9 @@ export async function userMayApproveOilAccountsQuote(reqUser, asset, serviceId) 
     if (stage !== STAGE_SCHEDULED && stage !== STAGE_PENDING_HR) return false;
     if (String(remark.accountsQuoteApprovedAt || '').trim()) return false;
 
-    return userIsOilServiceAccounts(reqUser);
+    if (await userIsOilServiceAccounts(reqUser)) return true;
+    const { viewerInheritsRequestAction } = await import('./reassigneeTaskPower.js');
+    return viewerInheritsRequestAction(reqUser, asset?._id || asset?.id, { serviceId });
 }
 
 /** Accounts quote approval — records approval only, does not create Zoho bill.

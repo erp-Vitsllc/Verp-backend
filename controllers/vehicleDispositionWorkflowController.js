@@ -77,6 +77,15 @@ const targetStatusLabel = (s) => (String(s || '').toLowerCase() === 'sold' ? 'So
 
 const canProcessHr = async (req) => isUserInFlowchart(req.user, 'hr').catch(() => false);
 
+async function inheritsDispositionRole(req, role) {
+    const { viewerInheritsRequestAction } = await import('../utils/reassigneeTaskPower.js');
+    return viewerInheritsRequestAction(req.user, req.params.id, {
+        requestType: 'Vehicle Disposition Request',
+        metaField: 'dispositionViewerRole',
+        metaValue: role,
+    }).catch(() => false);
+}
+
 const canProcessAccounts = async (req) => isUserInFlowchart(req.user, 'accounts').catch(() => false);
 
 const canProcessManagement = async (req) => {
@@ -438,7 +447,7 @@ export const submitVehicleDispositionRequest = async (req, res) => {
  */
 export const respondVehicleDispositionHr = async (req, res) => {
     try {
-        if (!(await canProcessHr(req))) {
+        if (!(await canProcessHr(req)) && !(await inheritsDispositionRole(req, 'hr'))) {
             return res.status(403).json({ message: 'Only the flowchart HR assignee can approve or reject this request.' });
         }
 
@@ -592,10 +601,10 @@ export const submitVehicleDispositionFinance = async (req, res) => {
             return res.status(400).json({ message: 'role must be accounts or management.' });
         }
 
-        if (role === 'accounts' && !(await canProcessAccounts(req))) {
+        if (role === 'accounts' && !(await canProcessAccounts(req)) && !(await inheritsDispositionRole(req, 'accounts'))) {
             return res.status(403).json({ message: 'Only the flowchart Accounts assignee can submit this step.' });
         }
-        if (role === 'management' && !(await canProcessManagement(req))) {
+        if (role === 'management' && !(await canProcessManagement(req)) && !(await inheritsDispositionRole(req, 'management'))) {
             return res.status(403).json({ message: 'Only Management can submit this step.' });
         }
 

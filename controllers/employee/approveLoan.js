@@ -12,6 +12,7 @@ import { resolveEmployeeEmail, getFallbackEmailNote, addEmployeeEmailToSet } fro
 import { LOAN_PENDING_PAYMENT_STATUS } from "../../utils/loanStatusConstants.js";
 import { runAfterResponse } from "../../utils/runAfterResponse.js";
 import { rememberSentEmail } from "../../utils/emailDispatch.js";
+import { viewerInheritsRequestAction } from "../../utils/reassigneeTaskPower.js";
 
 export const approveLoan = async (req, res) => {
     try {
@@ -73,6 +74,7 @@ export const approveLoan = async (req, res) => {
 
         // Determine Current Stage
         const currentStage = loan.approvalStatus || loan.status;
+        const inheritedAssignee = await viewerInheritsRequestAction(req.user, loan._id);
 
         // 0. SUBMIT / CANCEL STAGE
         if (status === 'Cancelled') {
@@ -133,7 +135,7 @@ export const approveLoan = async (req, res) => {
                     const isHR = approverBasic?.department && /human resource|hr|hrm/i.test(approverBasic.department) || (approverBasic?.designation && /hr/i.test(approverBasic.designation));
                     const isAssignedHR = loan.submittedTo && (String(loan.submittedTo) === String(requestingUserId) || String(loan.submittedTo) === String(approverBasic?._id));
 
-                    if (isHR || isAssignedHR || isAdmin) {
+                    if (isHR || isAssignedHR || isAdmin || inheritedAssignee) {
                         // VALIDATION: Check if Accounts HOD is assigned before proceeding
                         const accountsHOD = await getDepartmentHOD('finance');
                         if (!accountsHOD) {
@@ -159,7 +161,7 @@ export const approveLoan = async (req, res) => {
                     const isFinance = approverBasic?.department && /finance|accounts|payroll/i.test(approverBasic.department) || (approverBasic?.designation && /account/i.test(approverBasic.designation));
                     const isAssignedFinance = loan.submittedTo && (String(loan.submittedTo) === String(requestingUserId) || String(loan.submittedTo) === String(approverBasic?._id));
 
-                    if (isFinance || isAssignedFinance || isAdmin) {
+                    if (isFinance || isAssignedFinance || isAdmin || inheritedAssignee) {
                         if (!String(loan.expenseAccountId || '').trim()) {
                             return res.status(400).json({
                                 message:
@@ -208,7 +210,7 @@ export const approveLoan = async (req, res) => {
                     const isMgtTitle = ['ceo', 'c.e.o', 'c.e.o.', 'chief executive officer', 'director', 'managing director', 'general manager', 'gm', 'g.m', 'g.m.'].includes(approverBasic?.designation?.toLowerCase());
                     const isAssignedMgt = loan.submittedTo && (String(loan.submittedTo) === String(requestingUserId) || String(loan.submittedTo) === String(approverBasic?._id));
 
-                    if (isMgtTitle || isMgtDept || isAssignedMgt || isAdmin) {
+                    if (isMgtTitle || isMgtDept || isAssignedMgt || isAdmin || inheritedAssignee) {
                         nextStage = LOAN_PENDING_PAYMENT_STATUS;
                         publicStatus = LOAN_PENDING_PAYMENT_STATUS;
                     } else {

@@ -28,10 +28,12 @@ import { viewerMayDeleteTask } from "../../utils/taskDeleteAccess.js";
 import { listDeletedNoticeKeys, noticeKeysForRecord } from "../../utils/deletedTaskNotice.js";
 import { assignTaskNumbers } from "../../utils/taskNumber.js";
 import { alignDecidedGeneralHubTasks } from "../../utils/alignDecidedGeneralHubTasks.js";
-import { chooseKeptDuplicate, documentTaskLabel, duplicateOverlayShouldClose, taskMatchHints } from "../../utils/taskDuplicateKey.js";
+import { completeFinishedSystemWorkflowTasks } from "../../utils/completeFinishedSystemWorkflowTasks.js";
+import { activityTaskKey, duplicateOverlayShouldClose, keepActivityCopy, taskMatchHints } from "../../utils/taskDuplicateKey.js";
 import { formatTaskDisplayParts, vehicleRecordId } from "../../utils/taskDisplayName.js";
 import { composeTaskDescription } from "../../utils/taskDetailDescription.js";
 import { attendanceFactsByActionId } from "../../utils/loadAttendanceTaskFacts.js";
+import { attachHoldSteps } from "../../utils/taskWaitingSteps.js";
 import { syncPendingSalaryEnrollmentTasks } from "../../utils/syncPendingSalaryEnrollmentTasks.js";
 import { getDepartmentHOD } from "../../utils/getDepartmentHOD.js";
 import { getManagementHOD } from "../../utils/getManagementHOD.js";
@@ -383,6 +385,10 @@ export async function fineFamilyByRequestId(actions = []) {
  */
 export async function collapsePendingFineDashboardRows(actions = []) {
     const fineInfo = await fineFamilyByRequestId(actions);
+    for (const action of actions) {
+        const info = fineInfo.get(String(action?.requestId || ""));
+        if (info?.baseId) action.fineBaseId = info.baseId;
+    }
     const drop = new Set();
     const keptByBase = new Map();
     for (const action of actions) {
@@ -810,6 +816,17 @@ export function taskCategory(requestType, extra = "") {
     return "Workflow Task";
 }
 
+function closeWaitFlags(closeRequest, rawStatus) {
+    const saved = closeRequest || {};
+    const raw = String(rawStatus || "");
+    const done = raw === "Completed" || raw === "Cancelled" || raw === "Rejected"
+        || (Boolean(saved.closedAt) && !saved.reviewPending);
+    return {
+        completionPending: Boolean(saved.completionRequestedAt) && !saved.completionConfirmedAt && !saved.reassignmentReleased && !done,
+        reviewPending: Boolean(saved.reviewPending) && !done,
+    };
+}
+
 function generalLifecycleStatus(taskType, closeRequest, storedStatus) {
     if (String(taskType || "") !== "General Task") return "";
     const saved = closeRequest || {};
@@ -927,24 +944,17 @@ function assigneeIsViewer(viewer, assigneeId, assigneeEmpId, assigneeName = "") 
 
 const DUPLICATE_TASK_COMMENT = "Closed: duplicate task";
 
+/** One activity is one task. Later approval steps of that same fine, loan, or advance are not new tasks. */
 function actionDuplicateKey(action) {
-    const type = String(action.requestType || "");
-    const requestId = String(action.requestId || "").trim();
-    const extra = documentTaskLabel(action.extra1);
-    const subject = String(action.subjectName || action.requestedByName || "").trim().toLowerCase();
-    const assignee = String(action.assignedTo || action.assignedToEmpId || "");
-    if (taskCategory(type) === "System Task") {
-        if (!requestId && !extra) return "";
-        return `system|${type}|${requestId}|${extra}`;
-    }
-    if (/^(fine|group fine request)$/i.test(type)) {
-        return requestId ? `fine|${requestId}` : "";
-    }
-    const detail = extra && extra !== type.toLowerCase() ? extra : "";
-    if (detail) return `request|${type}|${subject}|${detail}`;
-    if (subject || assignee) return `request|${type}|${subject}|${assignee}`;
-    if (requestId) return `request|${type}|${requestId}`;
-    return "";
+    return activityTaskKey(action, {
+        system: taskCategory(action?.requestType) === "System Task",
+    });
+}
+
+function stageRank(status) {
+    if (status === "Pending") return 0;
+    if (status === "On Hold") return 1;
+    return 2;
 }
 
 function dedupeOpenActions(actions) {
@@ -962,11 +972,10 @@ function dedupeOpenActions(actions) {
             seenRequest.set(key, action);
             continue;
         }
-        const openness = (status) => (status === "Pending" || status === "On Hold" ? 0 : 1);
         const previousTime = new Date(previous.requestedDate || previous.createdAt || 0).getTime();
         const nextTime = new Date(action.requestedDate || action.createdAt || 0).getTime();
-        const nextIsBetter = openness(action.status) < openness(previous.status)
-            || (openness(action.status) === openness(previous.status) && nextTime >= previousTime);
+        const nextIsBetter = stageRank(action.status) < stageRank(previous.status)
+            || (stageRank(action.status) === stageRank(previous.status) && nextTime >= previousTime);
         if (nextIsBetter) seenRequest.set(key, action);
     }
     uniqueActions.push(...seenRequest.values());
@@ -981,7 +990,7 @@ function overlayWasCopied(overlay) {
 }
 
 /**
- * One open task per request. Extra copies are closed, and a reassigned copy is the one kept.
+ * One open task per activity. Extra approval copies are closed, and a reassigned copy is the one kept.
  * An overlay that belonged to a closed copy moves onto the kept task when that task has none.
  */
 export async function collapseDuplicateDashboardTasks(actions = [], overlays = null, { preferId = "" } = {}) {
@@ -1043,7 +1052,7 @@ export async function collapseDuplicateDashboardTasks(actions = [], overlays = n
     const moves = [];
     for (const list of groups.values()) {
         if (list.length < 2) continue;
-        const kept = chooseKeptDuplicate(list, { reassignedIds: reassignedActionIds, preferId });
+        const kept = keepActivityCopy(list, { reassignedIds: reassignedActionIds, preferId });
         const keptId = String(kept?._id || "");
         if (!keptId) continue;
         for (const action of list) {
@@ -1300,6 +1309,11 @@ export const getTaskManagerNotifications = async (req, res) => {
         }
         await alignOpenFineDashboardRows(preparedFines.rows, fineOverlays);
         const collapsedTasks = await collapseDuplicateDashboardTasks(preparedFines.rows, manualRows);
+        try {
+            await completeFinishedSystemWorkflowTasks({ actions, tasks: manualRows, force: true });
+        } catch (finishError) {
+            console.error("Complete finished system and workflow tasks:", finishError);
+        }
         const overlayByAction = collapsedTasks.overlayByAction;
         const hiddenOverlayIds = collapsedTasks.hiddenOverlayIds;
         const actionById = new Map((actions || []).map((action) => [String(action._id), action]));
@@ -1467,12 +1481,14 @@ export const getTaskManagerNotifications = async (req, res) => {
                 workflowLocked: action.requestType !== "Task Manager",
                 canReassign: !actionsLocked && (viewerCanReassign(viewer, assigneeId, assigneeEmpId) || viewerOwnsOriginal(viewer, overlay)),
                 canReturn: viewerCanReturnTask(viewer, overlay),
-                canDelete: !actionsLocked && canDeleteTask(viewer, {
-                    taskCategory: category,
-                    requestedByName: requesterBase,
-                    requestedByUserId: overlay?.requestedByUserId,
-                    closed: actionsLocked,
-                }),
+                canDelete: status === "Rejected" || status === "Cancelled"
+                    ? false
+                    : canDeleteTask(viewer, {
+                        taskCategory: category,
+                        requestedByName: requesterBase,
+                        requestedByUserId: overlay?.requestedByUserId,
+                        status,
+                    }),
                 taskNumber: "",
                 requestDate: requestedAt,
                 reassignedAt: latestReassignedAt(overlay),
@@ -1517,6 +1533,7 @@ export const getTaskManagerNotifications = async (req, res) => {
                         || Boolean(overlay?.closeRequest?.reassignmentReleased)
                         || (isGeneralHubRequestType(action.requestType) && ["Approved", "Completed", "Closed"].includes(String(action.status || ""))),
                 }),
+                ...closeWaitFlags(overlay?.closeRequest, overlay?.status),
                 displayStatus: status,
                 rawStatus: action.status || "Pending",
                 id: action.requestId ? String(action.requestId) : "",
@@ -1625,12 +1642,14 @@ export const getTaskManagerNotifications = async (req, res) => {
                 workflowLocked: false,
                 canReassign: !actionsLocked && (viewerCanReassign(viewer, assigneeId, row.assigneeEmpId) || viewerOwnsOriginal(viewer, row)),
                 canReturn: viewerCanReturnTask(viewer, row),
-                canDelete: !actionsLocked && canDeleteTask(viewer, {
-                    taskCategory: category,
-                    requestedByName: requesterName,
-                    requestedByUserId: row.requestedByUserId,
-                    closed: actionsLocked,
-                }),
+                canDelete: status === "Rejected" || status === "Cancelled"
+                    ? false
+                    : canDeleteTask(viewer, {
+                        taskCategory: category,
+                        requestedByName: requesterName,
+                        requestedByUserId: row.requestedByUserId,
+                        status,
+                    }),
                 taskNumber: "",
                 requestDate: requestedAt,
                 reassignedAt: latestReassignedAt(row),
@@ -1668,6 +1687,7 @@ export const getTaskManagerNotifications = async (req, res) => {
                     requestType: row.taskType,
                     closed: assigneeClosed || Boolean(row.closeRequest?.reassignmentReleased),
                 }),
+                ...closeWaitFlags(row.closeRequest, row.status),
                 displayStatus: status,
                 rawStatus: row.status || "Pending",
                 id: String(row._id),
@@ -1685,6 +1705,11 @@ export const getTaskManagerNotifications = async (req, res) => {
         }
 
         assignTaskNumbers(tasks);
+        try {
+            await attachHoldSteps(tasks);
+        } catch (holdError) {
+            console.error("Task waiting steps failed:", holdError);
+        }
 
         const statusRank = {
             "Pending Due": 0,
@@ -1909,6 +1934,11 @@ function leaveCardFromAction(action, ownerName, { ownRequest = false, reassigned
 
 export async function listProfileEmployeeTasks({ employeeId, employeeCode, employeeName, limit = 10 } = {}) {
     try {
+        try {
+            await completeFinishedSystemWorkflowTasks();
+        } catch (finishError) {
+            console.error("Complete finished system and workflow tasks:", finishError);
+        }
         const id = String(employeeId || "");
         const code = String(employeeCode || "").trim();
         const name = String(employeeName || "").trim();

@@ -54,6 +54,104 @@ function sameAssignee(leftIds, action) {
     return leftIds.some((id) => right.has(id));
 }
 
+function parsedMeta(extra3) {
+    if (!extra3) return null;
+    if (typeof extra3 === "object") return extra3;
+    try {
+        const parsed = JSON.parse(String(extra3));
+        return parsed && typeof parsed === "object" ? parsed : null;
+    } catch {
+        return null;
+    }
+}
+
+function viewerRole(meta) {
+    if (!meta) return "";
+    const role = meta.activationViewerRole
+        || meta.companyActivationViewerRole
+        || meta.assetCreationViewerRole
+        || meta.lossDamageViewerRole
+        || "";
+    return String(role).trim().toLowerCase();
+}
+
+/**
+ * A second open job on the same record.
+ * One vehicle can have two services, and the admin create-track stays beside the approval.
+ * A profile can sit with HR and with the person who must fix it. Those are not approval copies.
+ */
+export function activityLane(requestType, extra3) {
+    const type = String(requestType || "");
+    const meta = parsedMeta(extra3);
+    const role = viewerRole(meta);
+    if (role && /activation|asset approval|asset loss damage/i.test(type)) return `role:${role}`;
+    if (type === "Vehicle Service Request") {
+        if (meta?.adminOfficerServiceTrack) return "admin-track";
+        const serviceId = String(meta?.serviceRecordId || "").trim();
+        if (serviceId) return `service:${serviceId}`;
+        const oil = String(meta?.oilStage || "").trim();
+        if (oil) return `oil:${oil}`;
+        return "";
+    }
+    if (type === "Vehicle Disposition Request" || type === "Vehicle Inspection") {
+        return String(extra3 || "").trim();
+    }
+    return "";
+}
+
+/** The stored extra3 that keeps a parallel job on its own dashboard row. */
+export function activityExtra3Lock(requestType, extra3) {
+    const raw = extra3 !== undefined && extra3 !== null ? String(extra3) : "";
+    if (!raw) return "";
+    const type = String(requestType || "");
+    if (type === "Vehicle Disposition Request" || type === "Vehicle Inspection") return raw;
+    if (type === "Vehicle Service Request" && activityLane(type, raw)) return raw;
+    return "";
+}
+
+/**
+ * One activity, one task.
+ * HR, Accounts, and Management approvals of the same fine, loan, or advance share this key.
+ * A different request, document, or parallel job does not.
+ */
+export function activityTaskKey(action, { system = false } = {}) {
+    const type = String(action?.requestType || "");
+    const requestId = String(action?.requestId || "").trim();
+    const extra = documentTaskLabel(action?.extra1);
+    if (system) {
+        if (!requestId && !extra) return "";
+        return `system|${type}|${requestId}|${extra}`;
+    }
+    if (/^(fine|group fine request)$/i.test(type)) {
+        const id = String(action?.fineBaseId || "").trim() || requestId;
+        return id ? `fine|${id}` : "";
+    }
+    if (requestId) {
+        const lane = activityLane(type, action?.extra3);
+        return lane ? `activity|${type}|${requestId}|${lane}` : `activity|${type}|${requestId}`;
+    }
+    const subject = String(action?.subjectName || action?.requestedByName || "").trim().toLowerCase();
+    const assignee = String(action?.assignedTo || action?.assignedToEmpId || "");
+    const detail = extra && extra !== type.toLowerCase() ? extra : "";
+    if (detail) return `request|${type}|${subject}|${detail}`;
+    if (subject || assignee) return `request|${type}|${subject}|${assignee}`;
+    return "";
+}
+
+/**
+ * The dashboard row that already belongs to this activity.
+ * Rows should be newest first. The open approval wins, then the step just closed,
+ * so the next approval continues that same task. A hold notice for someone else
+ * stays put while an approval row exists.
+ */
+export function pickActivityRow(rows = []) {
+    const list = (Array.isArray(rows) ? rows : []).filter(Boolean);
+    return list.find((row) => row.status === "Pending")
+        || list.find((row) => row.status === "Approved")
+        || list.find((row) => row.status === "On Hold")
+        || null;
+}
+
 /**
  * An extra task row left behind after assign, reassign, or an expiry date change.
  * The live task stays. A different vehicle or document does not match.
@@ -117,6 +215,19 @@ export function duplicateOverlayShouldClose({
  * Which open copy to keep.
  * The task the user just assigned wins, then a reassigned copy, then the newest.
  */
+/**
+ * Which open copy to keep when one activity has more than one pending row.
+ * A later approval step (a different person) wins over an older reassignment.
+ * Two copies for the same person still keep the reassigned one.
+ */
+export function keepActivityCopy(rows = [], options = {}) {
+    const holders = new Set(
+        (rows || []).map((row) => String(row?.assignedTo || row?.assignedToEmpId || "")),
+    );
+    const reassignedIds = holders.size > 1 ? new Set() : options.reassignedIds;
+    return chooseKeptDuplicate(rows, { ...options, reassignedIds });
+}
+
 export function chooseKeptDuplicate(rows = [], { reassignedIds = new Set(), preferId = "" } = {}) {
     let kept = null;
     for (const row of rows) {

@@ -177,6 +177,7 @@ router.get("/request-loan", (req, res) => {
 import { getDashboardStats } from "../controllers/stats/getDashboardStats.js";
 import { getTaskManagerAssigneeCount, getTaskManagerNotifications } from "../controllers/stats/getTaskManagerNotifications.js";
 import { createTaskManagerTask, getTaskManagerAssignees } from "../controllers/stats/createTaskManagerTask.js";
+import { getInheritedTaskAction } from "../utils/reassigneeTaskPower.js";
 import {
     addTaskManagerComment,
     addTaskManagerUpdate,
@@ -186,6 +187,7 @@ import {
     getTaskManagerWorkflow,
     closeTaskManagerRequest,
     confirmTaskCompletion,
+    recallTaskCompletion,
     reassignTaskManagerTask,
     reopenTaskManagerTask,
     returnTaskManagerTask,
@@ -608,6 +610,7 @@ router.get("/dashboard/user-stats", getUserActivityStats);
 
 // Company-wide notification list for Task Manager. Read-only.
 router.get("/task-manager/notifications", getTaskManagerNotifications);
+router.get("/task-manager/inherited-action", getInheritedTaskAction);
 router.get("/task-manager/assignee-count", getTaskManagerAssigneeCount);
 router.get("/task-manager/assignees", getTaskManagerAssignees);
 router.post("/task-manager/tasks", createTaskManagerTask);
@@ -621,6 +624,7 @@ router.post("/task-manager/tasks/:taskKey/return", returnTaskManagerTask);
 router.post("/task-manager/tasks/:taskKey/completion", submitTaskCompletion);
 router.post("/task-manager/tasks/:taskKey/review", reviewGeneralTask);
 router.post("/task-manager/tasks/:taskKey/confirm-completion", confirmTaskCompletion);
+router.post("/task-manager/tasks/:taskKey/recall", recallTaskCompletion);
 router.post("/task-manager/tasks/:taskKey/reopen", reopenTaskManagerTask);
 router.post("/task-manager/tasks/:taskKey/status", updateTaskManagerTaskStatus);
 router.post("/task-manager/tasks/:taskKey/close", closeTaskManagerRequest);

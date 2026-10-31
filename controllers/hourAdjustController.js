@@ -1,7 +1,7 @@
 import mongoose from 'mongoose';
 import Attendance from '../models/Attendance.js';
 import EmployeeBasic from '../models/EmployeeBasic.js';
-import { getDepartmentHOD } from '../utils/getDepartmentHOD.js';
+import { getDepartmentHOD, isUserActiveInFlowchart } from '../utils/getDepartmentHOD.js';
 import { flexibleExactLossHours, requiredHoursForDate } from '../utils/flexibleAttendance.js';
 import {
     getScheduledPunchMinutes,
@@ -71,8 +71,14 @@ async function resolveActor(req) {
 }
 
 async function actorIsFlowchartHr(actor) {
+    if (!actor?._id) return false;
+    const active = await isUserActiveInFlowchart(
+        { employeeObjectId: actor._id, employeeId: actor.employeeId || '' },
+        'hr',
+    );
+    if (active) return true;
     const hr = await getDepartmentHOD('hr').catch(() => null);
-    return Boolean(hr?._id && actor?._id && String(hr._id) === String(actor._id));
+    return Boolean(hr?._id && String(hr._id) === String(actor._id));
 }
 
 export function hourAdjustKindOf(record) {
@@ -353,10 +359,23 @@ export async function requestHourAdjust(req, res) {
                 deductionHours: measured.deductionHours,
                 approvedHours: storedHours,
             });
-        if (isHr && !zeroNeedsBothApprovers) {
-            applyApproved(record, { kind, approvedHours: storedHours, taken, max, reason, mode });
+        if (isHr) {
+            if (storedHours === 0) {
+                applyDirectZeroHour(record, { kind, reason });
+            } else {
+                applyApproved(record, { kind, approvedHours: storedHours, taken, max, reason, mode });
+            }
             await record.save();
-            return res.status(200).json({ message: 'Hours approved.', record });
+            await supersedeOpenAttendanceChanges({
+                date: record.date,
+                employeeMongoId: String(record.employeeMongoId),
+                actorId: actor._id,
+            });
+            return res.status(200).json({
+                message: storedHours === 0 ? 'Hours saved.' : 'Hours approved.',
+                record,
+                applied: true,
+            });
         }
         if (route === 'direct' && !zeroNeedsBothApprovers) {
             const previousLabel = record.statusLabel || 'Not marked';

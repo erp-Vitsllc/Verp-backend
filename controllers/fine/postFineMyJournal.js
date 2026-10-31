@@ -4,6 +4,7 @@ import { isUserInFlowchart } from '../../utils/getDepartmentHOD.js';
 import { withZohoOrganization } from '../../utils/zohoOrgContext.js';
 import { closeAccountsPaymentInbox } from '../../utils/fineAccountsPaymentFlow.js';
 import { createZohoJournal, uploadJournalAttachment } from '../../services/zohoService.js';
+import { viewerInheritsRequestAction } from '../../utils/reassigneeTaskPower.js';
 
 const upload = multer({
     storage: multer.memoryStorage(),
@@ -172,13 +173,16 @@ export async function postFineMyJournal(req, res) {
     }
 
     try {
-        if (!(await isAccountsActor(req))) {
-            return res.status(403).json({ message: 'Only Accounts can add a journal for this fine.' });
-        }
-
         const fines = await loadFineGroup(id);
         if (!fines.length) {
             return res.status(404).json({ message: 'Fine(s) not found' });
+        }
+
+        const inherited = await Promise.all(
+            fines.map((row) => viewerInheritsRequestAction(req.user, row._id)),
+        );
+        if (!(await isAccountsActor(req)) && !inherited.some(Boolean)) {
+            return res.status(403).json({ message: 'Only Accounts can add a journal for this fine.' });
         }
 
         const fine = fines[0];

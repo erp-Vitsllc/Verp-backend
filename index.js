@@ -35,6 +35,7 @@ import workingTimeRoute from "./routes/workingTimeRoutes.js";
 import workLocationRoute from "./routes/workLocationRoutes.js";
 import whatsappRoute from "./routes/whatsappRoutes.js";
 import notificationEmailPermissionRoute from "./routes/notificationEmailPermissionRoutes.js";
+import currencyRoute from "./routes/currencyRoutes.js";
 import { startLocatorWebSocket } from "./services/locatorWebSocketService.js";
 import { syncLocatorToErpDatabase } from "./services/locatorSnapshotService.js";
 import { syncZohoIntoErp, ZOHO_ERP_SYNC_MS } from "./services/zohoHourlySync.js";
@@ -255,6 +256,7 @@ app.use("/api/WorkingTime", workingTimeRoute);
 app.use("/api/WorkLocation", workLocationRoute);
 app.use("/api/whatsapp", whatsappRoute);
 app.use("/api/NotificationEmailPermission", notificationEmailPermissionRoute);
+app.use("/api/Currency", currencyRoute);
 
 app.use((err, req, res, next) => {
     console.error("Express error:", err?.stack || err?.message || err);

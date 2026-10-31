@@ -269,6 +269,11 @@ export const getEmployees = async (req, res) => {
                         firstName: 1, lastName: 1, employeeId: 1, role: 1, department: 1, designation: 1,
                         status: 1, probationPeriod: 1, overtime: 1, profileApprovalStatus: 1, profileStatus: 1,
                         staffType: 1,
+                        workLocation: 1,
+                        workingFromCountry: 1,
+                        workingFromCountryCode: 1,
+                        salaryCurrency: 1,
+                        workTimeZone: 1,
                         profileWorkflow: 1,
                         email: 1, companyEmail: 1,
                         // Update enablePortalAccess to be true if they have an active user OR manual flag, AND a company email

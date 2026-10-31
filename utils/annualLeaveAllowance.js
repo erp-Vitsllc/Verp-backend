@@ -64,17 +64,19 @@ function collectHistorical(profile) {
         const dates = eachDate(range.from, range.to);
         deductionDates.push(...dates);
         if (isAnnualRow(row)) {
-            const storedDays = Math.max(0, Number(row?.eligibleWorkingDays ?? row?.actualDays ?? row?.deductionDays) || 0);
             const source = String(row?.source || 'manual').trim().toLowerCase();
+            const multiplier = Math.max(0, Number(row?.multiplier ?? row?.rule) || 1) || 1;
+            const deductionDays = deductionDayCount(row, dates);
             annual.push({
                 id: String(row?._id || row?.id || ''),
                 dates,
-                days: storedDays || dates.length,
+                days: deductionDays,
+                deductionDays,
                 startDate: range.from,
                 endDate: range.to,
                 status: status === 'pending' ? 'pending' : 'approved',
                 source: source === 'system' || source === 'erp' ? 'system' : 'manual',
-                multiplier: Math.max(0, Number(row?.multiplier ?? row?.rule) || 1) || 1,
+                multiplier,
                 remarks: String(row?.remarks || ''),
             });
         }
@@ -82,19 +84,13 @@ function collectHistorical(profile) {
     return { deductionDates, annual, undatedDeduction };
 }
 
-function spreadAcrossDates(dates, dayCount) {
-    const list = (dates || []).filter((date) => isDateKey(date));
-    const total = Math.max(0, Number(dayCount) || 0);
-    if (!total || !list.length) return [];
-    const base = Math.floor(total / list.length);
-    let extra = total - base * list.length;
-    const out = [];
-    for (const date of list) {
-        const days = base + (extra > 0 ? 1 : 0);
-        if (extra > 0) extra -= 1;
-        if (days > 0) out.push({ date, days });
-    }
-    return out;
+function deductionDayCount(row, dates) {
+    const stored = Number(row?.deductionDays ?? row?.deduction);
+    if (Number.isFinite(stored) && stored > 0) return stored;
+    const eligible = Math.max(0, Number(row?.eligibleWorkingDays ?? row?.actualDays ?? row?.days) || 0);
+    const multiplier = Math.max(0, Number(row?.multiplier ?? row?.rule) || 1) || 1;
+    const span = Array.isArray(dates) ? dates.length : 0;
+    return (eligible || span) * multiplier;
 }
 
 /**
@@ -123,15 +119,51 @@ function allocateAnnualLeave(periods, leaves, allowed) {
 
     for (const leave of ordered) {
         const dates = [...new Set((leave?.dates || []).filter((date) => isDateKey(date)))].sort();
-        const storedDays = Math.max(0, Number(leave?.days) || 0);
-        const dayCount = storedDays || dates.length;
+        const dayCount = deductionDayCount(leave, dates);
         if (!dayCount || !periods.length) continue;
         const anchor = isDateKey(leave?.startDate) ? leave.startDate : dates[0] || '';
         const endAnchor = isDateKey(leave?.endDate) ? leave.endDate : dates[dates.length - 1] || anchor;
-        const units = spreadAcrossDates(dates.length ? dates : anchor ? [anchor] : [], dayCount);
-        if (!units.length) continue;
+        // Deduction days stay as one total. They are not divided back onto the dates.
+        const pooled = Boolean(dates.length) && dayCount !== dates.length;
+        const units = pooled
+            ? []
+            : (dates.length ? dates : anchor ? [anchor] : []).slice(0, dates.length ? dayCount : 1).map((date) => ({
+                  date,
+                  days: 1,
+              }));
+        if (!pooled && !units.length) continue;
         const pending = leave?.status === 'pending';
         const placed = periods.map(() => ({ days: 0, dates: [] }));
+        let cappedSpill = false;
+        const give = (index, take, date) => {
+            if (take <= 0) return;
+            usedDaysByRow[index] += take;
+            if (pending) pendingDaysByRow[index] += take;
+            placed[index].days += take;
+            if (date) placed[index].dates.push(date);
+        };
+
+        if (pooled) {
+            const covering = [];
+            periods.forEach((period, index) => {
+                if (dates.some((date) => date >= period.startDate && date <= period.takeUntil)) covering.push(index);
+            });
+            const targets = covering.length ? covering : [rowIndexForDate(anchor || dates[0])];
+            let left = dayCount;
+            for (const index of targets) {
+                if (left <= 0) break;
+                const room = allowed - usedDaysByRow[index];
+                if (room <= 0) {
+                    cappedSpill = true;
+                    continue;
+                }
+                const take = Math.min(room, left);
+                give(index, take);
+                left -= take;
+                if (left > 0) cappedSpill = true;
+            }
+            if (left > 0) give(targets[0], left);
+        }
 
         for (const unit of units) {
             const covering = [];
@@ -143,35 +175,30 @@ function allocateAnnualLeave(periods, leaves, allowed) {
             for (const index of targets) {
                 if (left <= 0) break;
                 const room = allowed - usedDaysByRow[index];
-                if (room <= 0) continue;
+                if (room <= 0) {
+                    cappedSpill = true;
+                    continue;
+                }
                 const take = Math.min(room, left);
-                usedDaysByRow[index] += take;
-                if (pending) pendingDaysByRow[index] += take;
-                placed[index].days += take;
-                placed[index].dates.push(unit.date);
+                give(index, take, unit.date);
                 left -= take;
             }
-            if (left > 0) {
-                const index = targets[0];
-                usedDaysByRow[index] += left;
-                if (pending) pendingDaysByRow[index] += left;
-                placed[index].days += left;
-                placed[index].dates.push(unit.date);
-            }
+            if (left > 0) give(targets[0], left, unit.date);
         }
 
         const touched = placed
             .map((bucket, index) => ({ bucket, index }))
             .filter((item) => item.bucket.days > 0);
+        const split = cappedSpill && touched.length > 1;
         touched.forEach((item, position) => {
             const earlier = new Set();
             for (let prev = 0; prev < position; prev += 1) {
                 touched[prev].bucket.dates.forEach((date) => earlier.add(date));
             }
-            const sorted = [...new Set(item.bucket.dates)].sort();
-            let from = sorted[0] || anchor;
-            let to = sorted[sorted.length - 1] || endAnchor || from;
-            if (from && earlier.has(from)) {
+            const sorted = [...new Set(item.bucket.dates.length ? item.bucket.dates : dates)].sort();
+            let from = pooled ? anchor : sorted[0] || anchor;
+            let to = pooled ? endAnchor || from : sorted[sorted.length - 1] || endAnchor || from;
+            if (!pooled && from && earlier.has(from)) {
                 const next = addDays(from, 1);
                 if (next && next <= to) from = next;
             }
@@ -189,6 +216,7 @@ function allocateAnnualLeave(periods, leaves, allowed) {
                 source: leave?.source === 'system' ? 'system' : 'manual',
                 status: pending ? 'pending' : 'approved',
                 remarks: String(leave?.remarks || ''),
+                split,
             });
         });
     }
