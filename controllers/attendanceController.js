@@ -29,6 +29,7 @@ import {
     restoreClearedAttendance,
 } from '../utils/attendanceNonWorkingDay.js';
 import { loadOffDayWorkInboxItems } from '../utils/offDayWorkNotice.js';
+import { ensureAttendanceRequestTasks } from '../utils/ensureOpenLeaveAttendanceTasks.js';
 import { isNextDayPresentMark, nonHrMarkableDateKeys } from '../utils/nonHrMarkWindow.js';
 import { attendanceMarkRoute, yellowMarkHours } from '../utils/attendanceMarkPolicy.js';
 import {
@@ -3625,10 +3626,13 @@ export async function getAttendancePendingInbox(req, res) {
             .select('_id')
             .lean();
         const reporteeIds = (reportees || []).map((r) => String(r._id));
-        const offDayPromise = loadOffDayWorkInboxItems(reporteeIds).catch((error) => {
-            console.error('[getAttendancePendingInbox] off-day work', error);
-            return [];
-        });
+        const offDayPromise = loadOffDayWorkInboxItems(reporteeIds).then(
+            (items) => ({ items, dismissSettled: true }),
+            (error) => {
+                console.error('[getAttendancePendingInbox] off-day work', error);
+                return { items: [], dismissSettled: false };
+            },
+        );
         const hrResolved = await resolveFlowchartHrEmployee().catch(() => null);
         const hr = hrResolved?.employee || null;
         const viewerIsHr = hr && String(hr._id) === String(self._id);
@@ -3838,11 +3842,51 @@ export async function getAttendancePendingInbox(req, res) {
                 };
             });
 
-        const offDayItems = await offDayPromise;
+        const offDayLoaded = await offDayPromise;
+        const offDayItems = offDayLoaded.items || [];
+        const hourCovered = new Set(
+            (changeItems || [])
+                .filter((item) => item.action === 'hour_adjust')
+                .map((item) => `${item.employeeMongoId}|${item.date}`),
+        );
+        const otCovered = new Set(
+            (changeItems || [])
+                .filter((item) => item.action === 'flexible_ot')
+                .map((item) => `${item.employeeMongoId}|${item.date}`),
+        );
+        const visibleHourItems = hourItems.filter(
+            (item) => !hourCovered.has(`${item.employeeMongoId}|${item.date}`),
+        );
+        const visibleOtItems = otItems.filter(
+            (item) => !otCovered.has(`${item.employeeMongoId}|${item.date}`),
+        );
+        try {
+            await ensureAttendanceRequestTasks({
+                leaveRows: pendingRows,
+                hourItems: visibleHourItems,
+                otItems: visibleOtItems,
+                offDayItems,
+                offDayDismissSettled: offDayLoaded.dismissSettled === true,
+                assigneeId: self._id,
+                viewerId: self._id,
+                viewerIsHr,
+                reporteeIds,
+            });
+        } catch (taskError) {
+            console.error('[getAttendancePendingInbox] request task sync', taskError);
+        }
+        const visibleItems = [
+            ...offDayItems,
+            ...changeItems,
+            ...visibleOtItems,
+            ...visibleHourItems,
+            ...items,
+            ...attendanceTaskItems,
+        ];
         return res.status(200).json({
             message: 'Attendance pending inbox fetched successfully',
-            count: items.length + otItems.length + hourItems.length + attendanceTaskItems.length + changeItems.length + offDayItems.length,
-            items: [...offDayItems, ...changeItems, ...otItems, ...hourItems, ...items, ...attendanceTaskItems],
+            count: visibleItems.length,
+            items: visibleItems,
         });
     } catch (error) {
         console.error('[getAttendancePendingInbox]', error);

@@ -246,22 +246,163 @@ function changeReviewPath(request, employee) {
     return `/HRM/Attendance/mark?${params.toString()}`;
 }
 
-async function closeChangeBells(requestId, status, actorId) {
-    if (!requestId) return;
-    await syncDashboardAction({
-        requestId,
-        requestType: ATTENDANCE_CHANGE_REQUEST_TYPE,
-        status,
-        actionedBy: actorId || null,
-    });
+const CHANGE_DASHBOARD_TYPES = [
+    ATTENDANCE_CHANGE_REQUEST_TYPE,
+    'Hour Approval Request',
+    'Flexible OT Request',
+];
+
+/** Hour and overtime each keep their own request. A mark, map, or clear stays an attendance change. */
+export function dashboardTypeForChange(request) {
+    if (request?.action === 'hour_adjust') return 'Hour Approval Request';
+    if (request?.action === 'flexible_ot') return 'Flexible OT Request';
+    return ATTENDANCE_CHANGE_REQUEST_TYPE;
 }
 
-async function openChangeBell({ request, approver, employee, summary, notice = 'request' }) {
-    if (!approver?._id || !request?._id) return;
-    const path = changeReviewPath(request, employee);
+function approverIdForChange(request) {
+    if (request?.stage === 'pending_hr') return request.hrId;
+    if (request?.stage === 'pending_requester') return request.requestedBy;
+    return request.reporteeId;
+}
+
+async function closeChangeBells(requestId, status, actorId) {
+    if (!requestId) return;
+    await Promise.all(CHANGE_DASHBOARD_TYPES.map((requestType) => syncDashboardAction({
+        requestId,
+        requestType,
+        status,
+        actionedBy: actorId || null,
+    })));
+    const change = await AttendanceChangeRequest.findById(requestId)
+        .select('action proposed.attendanceId')
+        .lean();
+    const attendanceId = String(change?.proposed?.attendanceId || '').trim();
+    if (!attendanceId) return;
+    const linkedType = change.action === 'hour_adjust'
+        ? 'Hour Approval Request'
+        : change.action === 'flexible_ot'
+            ? 'Flexible OT Request'
+            : '';
+    if (linkedType) {
+        await syncDashboardAction({
+            requestId: attendanceId,
+            requestType: linkedType,
+            status,
+            actionedBy: actorId || null,
+        });
+    }
+    if (change.action === 'flexible_ot' && status === 'Approved') {
+        await syncDashboardAction({
+            requestId: attendanceId,
+            requestType: 'Attendance Off Day Work',
+            status: 'Approved',
+            actionedBy: actorId || null,
+        });
+    }
+}
+
+export async function findOpenChangeRequestsForViewer({ viewerId, viewerIsHr, reporteeIds }) {
+    const clauses = [];
+    const viewer = String(viewerId || '').trim();
+    if (viewer) {
+        clauses.push({ stage: 'pending_reportee', reporteeId: viewer });
+        clauses.push({ stage: 'pending_requester', requestedBy: viewer });
+    }
+    if (Array.isArray(reporteeIds) && reporteeIds.length) {
+        clauses.push({
+            stage: 'pending_reportee',
+            employeeMongoId: { $in: reporteeIds.map(String) },
+        });
+    }
+    if (viewerIsHr) {
+        clauses.push({ stage: 'pending_hr' });
+    }
+    if (!clauses.length) return [];
+    return AttendanceChangeRequest.find({ $or: clauses })
+        .sort({ updatedAt: -1 })
+        .limit(200)
+        .lean();
+}
+
+/** A change that is still open must have its own dashboard row and task. Does not send mail. */
+export async function ensureOpenChangeDashboards(requests = []) {
+    const open = (requests || []).filter((request) => request?._id);
+    if (!open.length) return;
+    const actions = await DashboardAction.find({
+        requestId: { $in: open.map((request) => request._id) },
+        requestType: { $in: CHANGE_DASHBOARD_TYPES },
+        status: { $in: ['Pending', 'On Hold'] },
+    }).lean();
+    const { attachMissingRequestTasks, completeOwnRequestTasks } = await import('./ensureRequestTask.js');
+    const byRequest = new Map();
+    for (const action of actions) {
+        const key = String(action.requestId);
+        const list = byRequest.get(key) || [];
+        list.push(action);
+        byRequest.set(key, list);
+    }
+    const missing = [];
+    const dismissIds = [];
+    const kept = [];
+    for (const request of open) {
+        const wanted = dashboardTypeForChange(request);
+        const rows = byRequest.get(String(request._id)) || [];
+        let match = rows.find((row) => row.requestType === wanted) || null;
+        if (!match && rows.length) {
+            match = rows[0];
+            const summary = attendanceChangeSummary(request);
+            await DashboardAction.updateOne(
+                { _id: match._id },
+                { $set: { requestType: wanted, extra1: summary, extra2: summary } },
+            );
+            match.requestType = wanted;
+        }
+        for (const extra of rows) {
+            if (match && String(extra._id) === String(match._id)) continue;
+            dismissIds.push(extra._id);
+        }
+        if (match) kept.push(match);
+        else missing.push(request);
+    }
+    if (dismissIds.length) {
+        await DashboardAction.updateMany(
+            { _id: { $in: dismissIds }, status: { $in: ['Pending', 'On Hold'] } },
+            { $set: { status: 'Dismissed', actionedDate: new Date(), comment: 'Closed: this request already has one task' } },
+        );
+        await completeOwnRequestTasks(dismissIds, 'Dismissed');
+    }
+    await attachMissingRequestTasks(kept);
+    if (!missing.length) return;
+    const approverIds = [...new Set(missing.map((request) => String(approverIdForChange(request) || '')).filter(Boolean))];
+    const people = approverIds.length
+        ? await EmployeeBasic.find({ _id: { $in: approverIds } })
+            .select('_id employeeId firstName lastName')
+            .lean()
+        : [];
+    const byId = new Map((people || []).map((person) => [String(person._id), person]));
+    for (const request of missing) {
+        const approver = byId.get(String(approverIdForChange(request) || ''));
+        if (!approver?._id) continue;
+        await syncChangeRequestDashboard({
+            request,
+            approver,
+            employee: {
+                _id: request.employeeMongoId,
+                employeeId: request.employeeId || '',
+                firstName: request.employeeName || '',
+                staffType: request.staffType || '',
+            },
+            summary: attendanceChangeSummary(request),
+        });
+    }
+}
+
+export async function syncChangeRequestDashboard({ request, approver, employee, summary }) {
+    if (!approver?._id || !request?._id) return null;
+    const requestType = dashboardTypeForChange(request);
     await syncDashboardAction({
         requestId: request._id,
-        requestType: ATTENDANCE_CHANGE_REQUEST_TYPE,
+        requestType,
         assignedTo: approver._id,
         status: 'Pending',
         subjectEmployee: employee,
@@ -276,8 +417,12 @@ async function openChangeBell({ request, approver, employee, summary, notice = '
             employeeId: request.employeeId || employee?.employeeId || '',
             employeeName: request.employeeName || '',
             staffType: normalizeStaffType(request.staffType || employee?.staffType) || 'office',
-            leaveRequestKind: 'attendance_change',
-            attendanceId: String(request._id),
+            leaveRequestKind: request.action === 'hour_adjust'
+                ? 'hour_adjust'
+                : request.action === 'flexible_ot'
+                    ? 'flexible_ot'
+                    : 'attendance_change',
+            attendanceId: String(request.proposed?.attendanceId || request._id),
             action: request.action || 'mark',
             statusKey: request.proposed?.statusKey || '',
             statusLabel: request.proposed?.statusLabel || '',
@@ -296,10 +441,17 @@ async function openChangeBell({ request, approver, employee, summary, notice = '
             targetDate: request.proposed?.targetDate || '',
         }),
     });
-    const action = await DashboardAction.findOne({
+    return DashboardAction.findOne({
         requestId: request._id,
-        requestType: ATTENDANCE_CHANGE_REQUEST_TYPE,
+        requestType,
+        status: 'Pending',
     }).sort({ updatedAt: -1 }).select('_id').lean();
+}
+
+async function openChangeBell({ request, approver, employee, summary, notice = 'request' }) {
+    if (!approver?._id || !request?._id) return;
+    const path = changeReviewPath(request, employee);
+    const action = await syncChangeRequestDashboard({ request, approver, employee, summary });
     const recordIds = [action?._id || request._id];
     if (notice === 'rejected') {
         const requestNoun =
@@ -664,27 +816,7 @@ export async function openAttendanceChangeForEmployee({
 }
 
 export async function loadAttendanceChangeInboxItems({ viewerId, viewerIsHr, reporteeIds }) {
-    const clauses = [];
-    const viewer = String(viewerId || '').trim();
-    if (viewer) {
-        clauses.push({ stage: 'pending_reportee', reporteeId: viewer });
-        clauses.push({ stage: 'pending_requester', requestedBy: viewer });
-    }
-    if (Array.isArray(reporteeIds) && reporteeIds.length) {
-        clauses.push({
-            stage: 'pending_reportee',
-            employeeMongoId: { $in: reporteeIds.map(String) },
-        });
-    }
-    if (viewerIsHr) {
-        clauses.push({ stage: 'pending_hr' });
-    }
-    if (!clauses.length) return [];
-
-    const rows = await AttendanceChangeRequest.find({ $or: clauses })
-        .sort({ updatedAt: -1 })
-        .limit(200)
-        .lean();
+    const rows = await findOpenChangeRequestsForViewer({ viewerId, viewerIsHr, reporteeIds });
     const staffIds = [...new Set((rows || []).map((row) => String(row.employeeMongoId || '')).filter(Boolean))];
     const staffRows = staffIds.length
         ? await EmployeeBasic.find({ _id: { $in: staffIds } }).select('staffType').lean()
@@ -709,7 +841,7 @@ export async function loadAttendanceChangeInboxItems({ viewerId, viewerIsHr, rep
             return {
                 id: String(row._id),
                 dashboardActionId: String(row._id),
-                requestType: ATTENDANCE_CHANGE_REQUEST_TYPE,
+                requestType: dashboardTypeForChange(row),
                 requestObjectId: String(row._id),
                 date: row.date,
                 employeeMongoId: row.employeeMongoId,

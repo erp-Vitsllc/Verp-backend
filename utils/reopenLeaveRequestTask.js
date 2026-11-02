@@ -4,6 +4,7 @@ import TaskManagerTask from '../models/TaskManagerTask.js';
 import { LEAVE_DASHBOARD_REQUEST_TYPE } from './notifyLeaveDashboardRequest.js';
 import { LEAVE_STAGE_HR, LEAVE_STAGE_REPORTEE } from './leaveRequestApproval.js';
 import { normalizeStaffTypeKey } from './workLocationHelpers.js';
+import { ensureOwnRequestTask } from './ensureRequestTask.js';
 
 const CLOSED_TASK = new Set(['Completed', 'Rejected']);
 const OPEN_ACTION = new Set(['Pending', 'On Hold']);
@@ -90,8 +91,8 @@ export function applyLeaveTaskReopen(task, approver, approverName = '') {
 }
 
 /**
- * Reopen the dashboard task for a leave that was returned to a request.
- * Does not create a task and does not send the leave email.
+ * Reopen the dashboard row for a leave that was returned to a request.
+ * The same task is opened again. A request with no task gets one. No email is sent.
  */
 export async function reopenExistingLeaveRequestTask({
     requestIds = [],
@@ -168,6 +169,8 @@ export async function reopenExistingLeaveRequestTask({
             overlay.assigneeName = personName(approver) || overlay.assigneeName || '';
         }
         await overlay.save();
+    } else {
+        await ensureOwnRequestTask(action, approver);
     }
 
     if (plan.dismissIds.length) {

@@ -18,6 +18,8 @@ export const addDocument = async (req, res) => {
             description,
             issueDate,
             expiryDate,
+            countryIssued,
+            outsideUaeIdentity,
             cost,
             basicSalary,
             houseRentAllowance,
@@ -36,6 +38,12 @@ export const addDocument = async (req, res) => {
         const employee = await EmployeeBasic.findById(resolved._id);
         if (!employee) {
             return res.status(404).json({ message: "Employee not found" });
+        }
+
+        const isOutsideUaeIdentity = outsideUaeIdentity === true;
+        if (isOutsideUaeIdentity) {
+            req.body.documentName = String(type || "").trim();
+            req.body.outsideUaeIdentity = true;
         }
 
         const isLabourModal = String(type || "").trim() === "Labour Card Salary";
@@ -85,10 +93,12 @@ export const addDocument = async (req, res) => {
 
         const newDocument = {
             type,
-            documentName: documentName || '',
+            documentName: isOutsideUaeIdentity ? String(type || "").trim() : (documentName || ''),
             description,
             issueDate: issueDate || null,
             expiryDate,
+            countryIssued: isOutsideUaeIdentity ? String(countryIssued || "").trim() : "",
+            outsideUaeIdentity: isOutsideUaeIdentity,
             cost: parseCost(cost),
             basicSalary: basicSalary !== undefined && basicSalary !== null && basicSalary !== '' ? Number(basicSalary) : null,
             houseRentAllowance: houseRentAllowance !== undefined && houseRentAllowance !== null && houseRentAllowance !== '' ? Number(houseRentAllowance) : null,

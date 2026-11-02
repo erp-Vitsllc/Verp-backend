@@ -3,9 +3,11 @@ import { describe, it } from "node:test";
 import {
     applyStableTaskNumbers,
     assignTaskNumbers,
+    canonicalTaskNumber,
     earlierTaskNumber,
     firstStoredTaskNumber,
     formatTaskNumber,
+    listedNumberAfterRefresh,
     parseTaskNumber,
 } from "./taskNumber.js";
 
@@ -38,6 +40,26 @@ describe("parseTaskNumber", () => {
         assert.equal(parseTaskNumber("task 218"), null);
         assert.equal(firstStoredTaskNumber("", "TSK-26-216", "TSK-26-218"), "TSK-26-216");
         assert.equal(earlierTaskNumber("TSK-26-218", "TSK-26-216"), "TSK-26-216");
+    });
+});
+
+describe("listedNumberAfterRefresh", () => {
+    it("keeps the number already stored on that task", () => {
+        const kept = listedNumberAfterRefresh("TSK-26-977", "TSK-26-982", "TSK-26-977");
+        assert.equal(kept.taskNumber, "TSK-26-982");
+        assert.equal(kept.numberSaved, true);
+        assert.equal(kept.copySaved, true);
+        const own = listedNumberAfterRefresh("", "TSK-26-982", "");
+        assert.equal(own.taskNumber, "TSK-26-982");
+        assert.equal(own.numberSaved, true);
+    });
+
+    it("uses the task copy only when that task has no number yet", () => {
+        const fromCopy = listedNumberAfterRefresh("", "", "TSK-26-977");
+        assert.equal(fromCopy.taskNumber, "TSK-26-977");
+        assert.equal(fromCopy.numberSaved, false);
+        assert.equal(fromCopy.copySaved, true);
+        assert.equal(canonicalTaskNumber("TSK-26-982"), "TSK-26-982");
     });
 });
 

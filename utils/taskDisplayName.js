@@ -93,6 +93,7 @@ const PERSON_LABELS = {
     "attendance change request": "Attendance Change",
     "hour approval request": "Hour Approval",
     "flexible ot request": "Flexible OT",
+    "attendance off day work": "Off Day Work",
     "notice request": "Notice",
     "responsibility approval": "Responsibility Approval",
 };

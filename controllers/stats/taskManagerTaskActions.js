@@ -17,6 +17,7 @@ import TaskManagerTask from "../../models/TaskManagerTask.js";
 import { deleteDashboardActionsForVehicleService } from "../../utils/cleanupAssetDashboardActions.js";
 import { evaluateSourceTaskCompletion } from "../../utils/sourceTaskCompletion.js";
 import { firstStoredTaskNumber } from "../../utils/taskNumber.js";
+import { oneTaskNumber } from "../../utils/taskNumberStore.js";
 import { releaseCompletedTaskFromNotificationBars } from "../../utils/completeFinishedSystemWorkflowTasks.js";
 import { alignDecidedGeneralHubTasks, applyHubDecisionToTask } from "../../utils/alignDecidedGeneralHubTasks.js";
 import { withdrawPendingSalaryEnrollment } from "../../utils/salaryEnrollmentApprovalNotify.js";
@@ -38,7 +39,6 @@ import { resolveEmployeeEmailWithReporteeLoaded } from "../../utils/resolveEmplo
 import {
     alignOpenFineDashboardRows,
     displayStatus,
-    taskNumbersByRecordId,
     taskCategory as categoryFromRequestType,
     displayRequesterName,
     preferRequesterName,
@@ -79,6 +79,7 @@ import { adminDeletedTaskEmail } from "../../utils/adminDeletedTaskEmail.js";
 import { isSystemOrWorkflowTask, superUserRejectsImmediately } from "../../utils/taskRejectAccess.js";
 import { purgePendingCopiesOf } from "../../utils/deletedTaskNotice.js";
 import { attachHoldSteps } from "../../utils/taskWaitingSteps.js";
+import { buildActionTracks, parseReassignment } from "../../utils/taskActionTracks.js";
 
 const DUBAI_DATE = new Intl.DateTimeFormat("en-CA", {
     timeZone: "Asia/Dubai",
@@ -1413,26 +1414,7 @@ async function buildDetail(target, viewer) {
         },
     );
 
-    const numberKeys = [
-        manual ? `manual-${task?._id || ""}` : String(action?._id || ""),
-        manual ? String(task?._id || "") : String(action?.requestId || ""),
-        task?.sourceDashboardActionId ? String(task.sourceDashboardActionId) : "",
-        action?._id ? String(action._id) : "",
-        action?.requestId ? String(action.requestId) : "",
-    ].filter(Boolean);
-    let taskNumber = firstStoredTaskNumber(
-        manual ? task?.taskNumber : action?.taskNumber,
-        task?.taskNumber,
-        action?.taskNumber,
-    );
-    if (!taskNumber) {
-        try {
-            const numberMap = await taskNumbersByRecordId(numberKeys, { storedOnly: true });
-            taskNumber = numberKeys.map((id) => firstStoredTaskNumber(numberMap.get(String(id)))).find(Boolean) || "";
-        } catch (numberError) {
-            console.error("Task number lookup failed:", numberError);
-        }
-    }
+    const taskNumber = await taskNumberFor(target);
 
     const savedClose = task?.closeRequest || {};
     const taskDone = ["Completed", "Cancelled", "Rejected"].includes(String(task?.status || ""))
@@ -1746,7 +1728,7 @@ export const updateTaskManagerTask = async (req, res) => {
                 await sendTaskReassignedEmail({
                     toEmp: assignee,
                     taskName,
-                    taskNumber: "",
+                    taskNumber: await taskNumberFor(target),
                     reason: "The task was updated and assigned to you.",
                     modulePath: destination.path,
                     taskPath: taskOpenPath(taskRecordKey(target, saved)),
@@ -1889,7 +1871,7 @@ export const reassignTaskManagerTask = async (req, res) => {
             const result = await sendTaskReassignedEmail({
                 toEmp: assignee,
                 taskName,
-                taskNumber: "",
+                taskNumber: await taskNumberFor(target),
                 reason,
                 modulePath,
                 taskPath: openPath,
@@ -1968,16 +1950,7 @@ export const returnTaskManagerTask = async (req, res) => {
         const recordId = String(target.action?._id || task._id || "");
         let emailSent = false;
         try {
-            const numberMap = await taskNumbersByRecordId([
-                task.sourceDashboardActionId,
-                target.action?._id,
-                task._id,
-                `manual-${task._id}`,
-            ]);
-            const taskNumber = numberMap.get(String(task.sourceDashboardActionId || target.action?._id || ""))
-                || numberMap.get(`manual-${task._id}`)
-                || numberMap.get(String(task._id || ""))
-                || "";
+            const taskNumber = await taskNumberFor(target);
             const sent = await mailEmployee(original, {
                 subject: `Task returned to you: ${taskNumber || task.taskName || "Task"}`,
                 html: taskActionHtml({
@@ -2896,16 +2869,7 @@ export const reopenTaskManagerTask = async (req, res) => {
         let emailSent = false;
         let taskNumber = "";
         try {
-            const numberMap = await taskNumbersByRecordId([
-                task.sourceDashboardActionId,
-                target.action?._id,
-                task._id,
-                `manual-${task._id}`,
-            ]);
-            taskNumber = numberMap.get(String(task.sourceDashboardActionId || target.action?._id || ""))
-                || numberMap.get(`manual-${task._id}`)
-                || numberMap.get(String(task._id || ""))
-                || "";
+            taskNumber = await taskNumberFor(target);
             const mailTarget = worker
                 || (isObjectId(stage.assigneeId) ? await employeeById(stage.assigneeId) : await findEmployeeByName(workerName));
             const sent = await mailEmployee(mailTarget, {
@@ -3489,14 +3453,6 @@ function personBaseName(value) {
     return String(value || "").trim().replace(/\s*\([^)]*\)\s*$/, "").trim();
 }
 
-function parseReassignment(detail, actorName) {
-    const text = String(detail || "");
-    const fromTo = text.match(/reassigned from\s+(.+?)\s+to\s+(.+?)\./i);
-    if (fromTo) return { from: fromTo[1].trim(), to: fromTo[2].trim() };
-    const toOnly = text.match(/reassigned to\s+(.+?)\./i);
-    return { from: personBaseName(actorName), to: toOnly ? toOnly[1].trim() : "" };
-}
-
 async function handoffPeople(history, currentName) {
     const events = (Array.isArray(history) ? history : []).filter((item) => item?.event === "Reassigned");
     const rows = [];
@@ -3566,30 +3522,14 @@ async function buildTaskWorkflow(target, viewer) {
     const category = manual
         ? (displayTaskType(task?.taskType) || "General Task")
         : categoryFromRequestType(action?.requestType, action?.extra2 || "");
-    // A general task has no approval chain. Words such as "asset" or "tools" in the title must not add Admin, HR, or Manager.
-    const keys = category === "General Task"
-        ? WORKFLOW_CHAINS.general
-        : (WORKFLOW_CHAINS[destination.module] || WORKFLOW_CHAINS.general);
-    const manager = category === "General Task"
-        ? null
-        : ((await reportingManager(requesterEmp)) || (await reportingManager(assigneeEmp)));
-    const [hr, accounts, admin] = category === "General Task"
-        ? [null, null, null]
-        : await Promise.all([
-            getDepartmentHOD("hr").catch(() => null),
-            getDepartmentHOD("finance").catch(() => null),
-            getDepartmentHOD("admincontroller").catch(() => null),
-        ]);
-    const holders = { manager, hr, accounts, admin };
     const requestDate = manual ? task?.createdAt : action?.requestedDate || action?.createdAt || null;
     const updatedAt = task?.updatedAt || action?.updatedAt || requestDate;
     const requester = stepPerson(requesterEmp, requesterName);
     const assignee = stepPerson(assigneeEmp, assigneeName);
-    const steps = [];
 
     let changeRequest = null;
-    if (!manual && isObjectId(action?.requestId)) {
-        const changeSelect = "stage reporteeId reporteeName hrId hrName decidedAtReportee decidedAtHr";
+    if (!manual && isAttendanceTaskType(action?.requestType) && isObjectId(action?.requestId)) {
+        const changeSelect = "stage reporteeName hrName rejectedByName requestedByName decidedAtReportee decidedAtHr";
         changeRequest = await AttendanceChangeRequest.findById(action.requestId).select(changeSelect).lean();
         if (!changeRequest) {
             changeRequest = await AttendanceChangeRequest.findOne({
@@ -3602,170 +3542,10 @@ async function buildTaskWorkflow(target, viewer) {
         }
     }
 
-    async function employeeStep(id, fallbackName) {
-        let emp = null;
-        if (isObjectId(id)) {
-            emp = await EmployeeBasic.findById(id)
-                .select("firstName lastName employeeId designation companyEmail profilePicture status")
-                .lean();
-        }
-        return stepPerson(emp, fallbackName);
-    }
-
-    async function slotPeople(base, active) {
-        const person = {
-            ...base,
-            role: base.personRole || "Assignee",
-            at: base.at || null,
-            current: false,
-        };
-        if (!active || !person.personName) return person.personName ? [person] : [];
-        const handoff = await handoffPeople(task?.history, person.personName);
-        if (handoff.length <= 1) return [{ ...person, current: true }];
-        return handoff.map((row, index) => ({
-            ...row,
-            current: index === handoff.length - 1,
-        }));
-    }
-
-    if (changeRequest && (changeRequest.reporteeName || changeRequest.reporteeId || changeRequest.hrName || changeRequest.hrId)) {
-        steps.push({
-            key: "created",
-            title: "Task Created",
-            detail: `By ${requester.personName || "System"} (Requester)`,
-            ...requester,
-            at: requestDate,
-        });
-        const reportee = await employeeStep(changeRequest.reporteeId, changeRequest.reporteeName);
-        const hrPerson = await employeeStep(changeRequest.hrId, changeRequest.hrName);
-        const reporteeActive = changeRequest.stage === "pending_reportee";
-        const hrActive = changeRequest.stage === "pending_hr";
-        const reporteeChain = await slotPeople(
-            { ...reportee, personRole: reportee.personRole || "Primary reportee", at: changeRequest.decidedAtReportee },
-            reporteeActive,
-        );
-        reporteeChain.forEach((person, index) => {
-            const first = index === 0;
-            steps.push({
-                key: first ? "reportee" : "reassigned",
-                title: first
-                    ? `Reportee ${person.personName}`
-                    : `Reassigned to ${person.personName}`,
-                detail: first
-                    ? "Approves the request, then it goes to HR"
-                    : `Passed from ${reporteeChain[index - 1]?.personName || "the previous approver"}`,
-                ...person,
-                at: person.at || null,
-            });
-        });
-        const hrChain = await slotPeople(
-            { ...hrPerson, personRole: hrPerson.personRole || "HR", at: changeRequest.decidedAtHr },
-            hrActive,
-        );
-        hrChain.forEach((person, index) => {
-            const first = index === 0;
-            steps.push({
-                key: first ? "hr" : "reassigned",
-                title: first
-                    ? `HR ${person.personName}`
-                    : `Reassigned to ${person.personName}`,
-                detail: first
-                    ? "Final approval on the Attendance page"
-                    : `Passed from ${hrChain[index - 1]?.personName || "the previous approver"}`,
-                ...person,
-                at: person.at || null,
-            });
-        });
-        steps.push({
-            key: "done",
-            title: "Completed",
-            detail: "Pending",
-            personId: "",
-            personName: "",
-            personRole: "",
-            personPhoto: "",
-            at: null,
-        });
-    } else for (const key of keys) {
-        if (key === "created") {
-            steps.push({
-                key,
-                title: "Task Created",
-                detail: `By ${requester.personName || "System"} (Requester)`,
-                ...requester,
-                at: requestDate,
-            });
-            continue;
-        }
-        if (key === "assigned") {
-            const handoff = await handoffPeople(task?.history, assignee.personName);
-            const chain = handoff.length ? handoff : [{ ...assignee, role: "Assignee", at: requestDate, current: true }];
-            chain.forEach((person, index) => {
-                const first = index === 0;
-                steps.push({
-                    key: first ? "assigned" : "reassigned",
-                    title: first
-                        ? `Assignee ${person.personName || "Unassigned"}`
-                        : `Reassigned to ${person.personName || "Unassigned"}`,
-                    detail: first
-                        ? `From ${personBaseName(requester.personName) || "Requester"}`
-                        : `Passed from ${chain[index - 1]?.personName || "the previous assignee"}`,
-                    ...person,
-                    at: person.at || requestDate,
-                });
-            });
-            continue;
-        }
-        if (key === "leaveBalance") {
-            steps.push({
-                key,
-                title: "Update Leave Balance",
-                detail: "Pending",
-                personId: "",
-                personName: "",
-                personRole: "",
-                personPhoto: "",
-                at: null,
-            });
-            continue;
-        }
-        if (key === "done") {
-            steps.push({
-                key,
-                title: "Completed",
-                detail: "Pending",
-                personId: "",
-                personName: "",
-                personRole: "",
-                personPhoto: "",
-                at: null,
-            });
-            continue;
-        }
-        const holder = holders[key];
-        const person = stepPerson(holder);
-        if (!person.personName) continue;
-        const role = ROLE_STEP[key];
-        if (person.personId && steps[steps.length - 1]?.personId === person.personId) {
-            const previous = steps[steps.length - 1];
-            if (previous && !previous.approvalTitle) previous.approvalTitle = role.title;
-            continue;
-        }
-        steps.push({
-            key,
-            title: role.title,
-            detail: `Pending with ${person.personName} (${role.label})`,
-            approvalTitle: role.title,
-            ...person,
-            personRole: person.personRole || role.label,
-            at: null,
-        });
-    }
-
     const stage = String(changeRequest?.stage || "");
     const requestOpen = stage === "pending_reportee" || stage === "pending_hr" || stage === "pending_requester";
     const requestRejected = stage === "rejected";
-    if (task?.save && requestRejected && task.status !== "Cancelled") {
+    if (task?.save && requestRejected && task.status !== "Cancelled" && task.status !== "Rejected") {
         task.status = "Cancelled";
         await task.save();
     } else if (task?.save && requestOpen && ["Completed", "Cancelled", "Rejected"].includes(String(task.status || ""))) {
@@ -3777,56 +3557,49 @@ async function buildTaskWorkflow(target, viewer) {
         : requestOpen
           ? "In Progress"
           : String(task?.status || action?.status || "Pending");
-    const finished = !requestRejected && !requestOpen && (raw === "Completed" || raw === "Approved");
-    const rejected = requestRejected || raw === "Cancelled" || raw === "Rejected" || raw === "Dismissed";
-    const workflowLocked = !manual && action?.requestType !== "Task Manager";
-    let current = -1;
-    for (let index = steps.length - 1; index >= 0; index -= 1) {
-        if (steps[index].current) {
-            current = index;
-            break;
-        }
-    }
-    if (current < 0) {
-        steps.forEach((step, index) => {
-            if (
-                (step.key === "assigned" || step.key === "reassigned")
-                && step.personId
-                && assigneeId
-                && step.personId === String(assigneeId)
-            ) current = index;
+    let holderName = assignee.personName;
+    if (stage === "pending_reportee" && changeRequest?.reporteeName) holderName = personBaseName(changeRequest.reporteeName);
+    else if (stage === "pending_hr" && changeRequest?.hrName) holderName = personBaseName(changeRequest.hrName);
+    else if (stage === "pending_requester" && requester.personName) holderName = personBaseName(requester.personName);
+
+    const tracks = buildActionTracks({
+        requesterName: requester.personName || requesterName,
+        assigneeName: holderName,
+        originalAssigneeName: task?.closeRequest?.originalAssigneeName || "",
+        requestDate,
+        status: raw,
+        history: task?.history || [],
+        change: changeRequest,
+    });
+    const people = new Map();
+    const personFor = async (name) => {
+        const key = personBaseName(name).toLowerCase();
+        if (!key || key === "system") return { personId: "", personName: "", personRole: "", personPhoto: "" };
+        if (!people.has(key)) people.set(key, stepPerson(await findEmployeeByName(name), personBaseName(name)));
+        return people.get(key);
+    };
+    const steps = [];
+    for (const track of tracks) {
+        const sameAssignee = personBaseName(track.personName).toLowerCase() === personBaseName(assignee.personName).toLowerCase();
+        const person = sameAssignee && assignee.personId ? assignee : await personFor(track.personName);
+        steps.push({
+            ...track,
+            personId: person.personId || "",
+            personName: person.personName || track.personName || "",
+            personRole: person.personRole || "",
+            personPhoto: person.personPhoto || "",
+            at: track.at || (track.key === "created" ? requestDate : updatedAt),
         });
     }
-    if (current < 0) current = Math.max(0, steps.findIndex((step) => step.key === "assigned" || step.key === "reassigned"));
-    if (requestRejected) {
-        const rejectedKey = changeRequest?.decidedAtHr ? "hr" : "reportee";
-        const rejectedIndex = steps.findIndex((step) => step.key === rejectedKey);
-        if (rejectedIndex >= 0) current = rejectedIndex;
-    }
 
-    steps.forEach((step, index) => {
-        if (finished) step.status = "Completed";
-        else if (rejected) step.status = index < current ? "Completed" : index === current ? "Rejected" : "Not Started";
-        else step.status = index < current ? "Completed" : index === current ? "In Progress" : "Not Started";
-
-        if (step.status === "Completed" && step.key !== "created") {
-            if (step.key === "done") step.detail = "Completed";
-            else if (step.key === "leaveBalance") step.detail = "Updated";
-            else if (step.personName && step.key !== "assigned" && step.key !== "reassigned") step.detail = `By ${step.personName}`;
-        }
-        if (step.status === "Not Started" && !step.personName) step.detail = "Pending";
-        if (step.status === "Rejected") step.detail = step.personName ? `Rejected by ${step.personName}` : "Rejected";
-        if (step.status === "Completed" || step.status === "In Progress" || step.status === "Rejected") {
-            step.at = step.at || (index === 0 ? requestDate : updatedAt);
-        } else {
-            step.at = null;
-        }
-        const systemOrWorkflow = isSystemOrWorkflowTask(task, category);
-        const originalId = String(task?.closeRequest?.originalAssigneeId || '');
-        const backWithOriginal = systemOrWorkflow
-            && taskWasReassigned(task)
-            && originalId
-            && String(assigneeId || '') === originalId;
+    const workflowLocked = !manual && action?.requestType !== "Task Manager";
+    const systemOrWorkflow = isSystemOrWorkflowTask(task, category);
+    const originalId = String(task?.closeRequest?.originalAssigneeId || "");
+    const backWithOriginal = systemOrWorkflow
+        && taskWasReassigned(task)
+        && originalId
+        && String(assigneeId || "") === originalId;
+    steps.forEach((step) => {
         const holderCanDecide = step.status === "In Progress"
             && Boolean(step.personId)
             && !workflowLocked
@@ -3873,6 +3646,45 @@ export const getTaskManagerWorkflow = async (req, res) => {
     }
 };
 
+/** The next person an approval is sent to. They are not listed until that acceptance is recorded. */
+async function nextRoleAssignee(target) {
+    const manual = target.kind === "manual";
+    const task = target.task;
+    const action = target.action;
+    const destination = manual
+        ? moduleForText(task?.taskName, task?.description, task?.taskType)
+        : moduleForRequestType(action?.requestType, `${action?.extra1 || ""} ${action?.extra2 || ""}`);
+    const category = manual
+        ? (displayTaskType(task?.taskType) || "General Task")
+        : categoryFromRequestType(action?.requestType, action?.extra2 || "");
+    if (category === "General Task") return null;
+    const roleKeys = (WORKFLOW_CHAINS[destination.module] || WORKFLOW_CHAINS.general).filter((key) => ROLE_STEP[key]);
+    if (!roleKeys.length) return null;
+    const { assigneeId } = assigneeOf(target);
+    const assigneeEmp = await findAssignee(assigneeId);
+    const sourceRequesters = await sourceRequesterNameMap(action ? [action] : []);
+    const requesterName = displayRequesterName(
+        preferRequesterName(task?.requestedByName, action?.requestedByName),
+        action,
+        sourceRequesters,
+    ) || "System";
+    const requesterEmp = await findEmployeeByName(requesterName);
+    const manager = (await reportingManager(requesterEmp)) || (await reportingManager(assigneeEmp));
+    const [hr, accounts, admin] = await Promise.all([
+        getDepartmentHOD("hr").catch(() => null),
+        getDepartmentHOD("finance").catch(() => null),
+        getDepartmentHOD("admincontroller").catch(() => null),
+    ]);
+    const holders = { manager, hr, accounts, admin };
+    const currentId = String(assigneeId || "");
+    const matched = roleKeys.findIndex((key) => holders[key]?._id && String(holders[key]._id) === currentId);
+    for (let index = matched >= 0 ? matched + 1 : 0; index < roleKeys.length; index += 1) {
+        const person = holders[roleKeys[index]];
+        if (person?._id && String(person._id) !== currentId) return person;
+    }
+    return null;
+}
+
 export const decideTaskManagerWorkflow = async (req, res) => {
     try {
         if (!(await denyUnlessViewer(req, res))) return;
@@ -3908,18 +3720,18 @@ export const decideTaskManagerWorkflow = async (req, res) => {
                 applyFinalRejection(task);
                 task.history.push(historyEntry(
                     "Rejected",
-                    `${viewer.name} rejected this task. The status is Rejected. ${current.title} was rejected.`,
+                    `${viewer.name} rejected this task. The status is Rejected.`,
                     viewer.name,
                 ));
             } else {
                 task.status = "Cancelled";
-                task.history.push(historyEntry("Rejected", `${current.title} was rejected.`, viewer.name));
+                task.history.push(historyEntry("Rejected", `${viewer.name} rejected this task.`, viewer.name));
             }
             await emailTaskHistory(task, {
                 event: "Rejected",
                 detail: finalReject
                     ? `${viewer.name} rejected this task. The status is Rejected.`
-                    : `${current.title} was rejected.`,
+                    : `${viewer.name} rejected this task.`,
                 actorName: viewer.name,
             });
             await task.save();
@@ -3937,9 +3749,9 @@ export const decideTaskManagerWorkflow = async (req, res) => {
             await closeReassignmentNotices(task);
             await syncManualTaskNotification(task);
         } else {
-            const next = workflow.steps.slice(currentIndex + 1).find((step) => step.personId && step.personId !== String(task.assignee));
-            if (next?.personId) {
-                const assignee = await findAssignee(next.personId);
+            const nextPerson = await nextRoleAssignee(target);
+            if (nextPerson?._id) {
+                const assignee = await findAssignee(nextPerson._id);
                 if (!assignee) return res.status(400).json({ message: "The next person in this workflow was not found." });
                 const assigneeName = personName(assignee) || assignee.employeeId || "Unassigned";
                 const previousAssignee = { assigneeId: task.assignee, assigneeEmpId: task.assigneeEmpId || "" };
@@ -3948,10 +3760,10 @@ export const decideTaskManagerWorkflow = async (req, res) => {
                 task.assigneeEmpId = assignee.employeeId || "";
                 task.assigneeName = assigneeName;
                 task.status = "In Progress";
-                task.history.push(historyEntry("Approved", `${current.title} approved. Sent to ${assigneeName}.`, viewer.name));
+                task.history.push(historyEntry("Approved", `${viewer.name} accepted. Sent to ${assigneeName}.`, viewer.name));
                 await emailTaskHistory(task, {
                     event: "Approved",
-                    detail: `${current.title} approved. Sent to ${assigneeName}.`,
+                    detail: `${viewer.name} accepted. Sent to ${assigneeName}.`,
                     actorName: viewer.name,
                 });
                 await task.save();
@@ -3972,7 +3784,7 @@ export const decideTaskManagerWorkflow = async (req, res) => {
                     await sendTaskReassignedEmail({
                         toEmp: assignee,
                         taskName: task.taskName,
-                        reason: `${current.title} was approved. This step is now with you.`,
+                        reason: `${viewer.name} accepted this task. It is now with you.`,
                         modulePath: workflow.modulePath,
                         taskPath: taskOpenPath(taskRecordKey(target, task)),
                         requesterName: task.requestedByName,
@@ -3998,10 +3810,10 @@ export const decideTaskManagerWorkflow = async (req, res) => {
                     };
                     task.markModified("closeRequest");
                 }
-                task.history.push(historyEntry("Approved", `${current.title} approved. The task is completed.`, viewer.name));
+                task.history.push(historyEntry("Approved", `${viewer.name} accepted. The task is completed.`, viewer.name));
                 await emailTaskHistory(task, {
                     event: "Approved",
-                    detail: `${current.title} approved. The task is completed.`,
+                    detail: `${viewer.name} accepted. The task is completed.`,
                     actorName: viewer.name,
                 });
                 await task.save();
@@ -4531,16 +4343,21 @@ async function taskNumberFor(target) {
     const manual = target?.kind === "manual";
     const task = target?.task;
     const action = target?.action;
-    const numberKeys = [
-        manual ? `manual-${task?._id || ""}` : String(action?._id || ""),
-        task?.sourceDashboardActionId ? String(task.sourceDashboardActionId) : "",
-        action?._id ? String(action._id) : "",
-        task?._id ? String(task._id) : "",
-        task?._id ? `manual-${task._id}` : "",
-    ].filter(Boolean);
-    if (!numberKeys.length) return "";
-    const numberMap = await taskNumbersByRecordId(numberKeys);
-    return numberKeys.map((id) => numberMap.get(String(id))).find(Boolean) || "";
+    const actionId = manual
+        ? String(task?.sourceDashboardActionId || "")
+        : String(action?._id || task?.sourceDashboardActionId || "");
+    const manualId = task?._id ? String(task._id) : "";
+    if (!actionId && !manualId) return "";
+    try {
+        return await oneTaskNumber({
+            actionId,
+            manualId,
+            requestDate: action?.requestedDate || action?.createdAt || task?.createdAt,
+        });
+    } catch (numberError) {
+        console.error("Task number lookup failed:", numberError);
+        return firstStoredTaskNumber(task?.taskNumber, action?.taskNumber);
+    }
 }
 
 /** Snapshot the assignee mail before the task row is removed. */

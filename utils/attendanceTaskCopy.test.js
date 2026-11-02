@@ -1,6 +1,12 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { factsFromAttendanceRows, factsFromChangeRequest } from "./attendanceTaskCopy.js";
+import {
+    attendanceFactsFromAction,
+    attendanceTaskTitle,
+    factsFromAttendanceRows,
+    factsFromChangeRequest,
+    isAttendanceTaskType,
+} from "./attendanceTaskCopy.js";
 
 test("a change request keeps the exact attendance kind, times, and duration", () => {
     const late = factsFromChangeRequest({
@@ -116,4 +122,18 @@ test("leave rows name comp off, sick leave, and the date range", () => {
     assert.equal(sick.timeIn, "09:00");
     assert.equal(sick.timeOut, "13:00");
     assert.equal(sick.duration, "4h");
+});
+
+test("off-day work is its own attendance request", () => {
+    assert.equal(isAttendanceTaskType("Attendance Off Day Work"), true);
+    const facts = attendanceFactsFromAction({
+        requestType: "Attendance Off Day Work",
+        extra2: "Sara worked on 2 Nov 2026 (Sunday)",
+        extra3: { leaveRequestKind: "off_day_work", date: "2026-11-02" },
+        subjectName: "Sara",
+        subjectEmployeeId: "VITS010",
+    });
+    assert.equal(facts.requestKind, "Off Day Work");
+    assert.equal(facts.date, "2026-11-02");
+    assert.equal(attendanceTaskTitle(facts), "Off Day Work Request");
 });

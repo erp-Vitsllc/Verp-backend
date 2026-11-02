@@ -3,6 +3,7 @@ import { describe, it } from 'node:test';
 import {
     inferLeaveApprovalStage,
     isTwoStepLeaveKind,
+    approvalWaitsOnLoggedInEmployee,
     leaveApproverCanDecide,
     openingLeaveApprovalStage,
 } from './leaveRequestApproval.js';
@@ -90,6 +91,63 @@ describe('leaveApproverCanDecide', () => {
                 hrId: 'hr',
             }),
             false,
+        );
+    });
+});
+
+describe('approvalWaitsOnLoggedInEmployee', () => {
+    it('matches the Leave Approval box for the logged-in reportee and HR', () => {
+        assert.equal(
+            approvalWaitsOnLoggedInEmployee({
+                actorId: 'mgr',
+                reporteeId: 'mgr',
+                hrId: 'hr',
+                approvalStage: 'pending_reportee',
+            }),
+            true,
+        );
+        assert.equal(
+            approvalWaitsOnLoggedInEmployee({
+                actorId: 'hr',
+                reporteeId: 'mgr',
+                hrId: 'hr',
+                approvalStage: 'pending_hr',
+            }),
+            true,
+        );
+        assert.equal(
+            approvalWaitsOnLoggedInEmployee({
+                actorId: 'someone',
+                reporteeId: 'mgr',
+                hrId: 'hr',
+                approvalStage: 'pending_reportee',
+            }),
+            false,
+        );
+    });
+
+    it('keeps a reassigned approval on the person who now holds the task', () => {
+        assert.equal(
+            approvalWaitsOnLoggedInEmployee({
+                actorId: 'cover',
+                reporteeId: 'mgr',
+                hrId: 'hr',
+                approvalStage: 'pending_reportee',
+                inherited: true,
+            }),
+            true,
+        );
+    });
+
+    it('treats a blank stage as waiting on the primary reportee', () => {
+        assert.equal(
+            approvalWaitsOnLoggedInEmployee({
+                actorId: 'mgr',
+                reporteeId: 'mgr',
+                hrId: 'hr',
+                approvalStage: '',
+            }),
+            true,
         );
     });
 });

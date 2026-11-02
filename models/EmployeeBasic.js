@@ -200,6 +200,8 @@ const employeeBasicSchema = new mongoose.Schema(
                 description: { type: String },
                 issueDate: { type: Date },
                 expiryDate: { type: Date },
+                countryIssued: { type: String, default: "" },
+                outsideUaeIdentity: { type: Boolean, default: false },
                 cost: { type: Number, default: null },
                 basicSalary: { type: Number, default: null },
                 houseRentAllowance: { type: Number, default: null },

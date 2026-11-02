@@ -38,6 +38,25 @@ export function inferLeaveApprovalStage(record, { reporteeId = '', hrId = '' } =
     return openingLeaveApprovalStage(reporteeId, hrId);
 }
 
+/**
+ * Same rule as the Leave Approval box: this pending request is waiting on the logged-in employee.
+ * A reassigned task counts as theirs while that reassignment is still open.
+ */
+export function approvalWaitsOnLoggedInEmployee({
+    actorId = '',
+    reporteeId = '',
+    hrId = '',
+    approvalStage = '',
+    inherited = false,
+} = {}) {
+    if (inherited) return true;
+    const stage = inferLeaveApprovalStage(
+        { leaveApprovalStage: approvalStage },
+        { reporteeId, hrId },
+    );
+    return leaveApproverCanDecide({ stage, actorId, reporteeId, hrId });
+}
+
 export function leaveApproverCanDecide({ stage, actorId, reporteeId, hrId }) {
     const actor = String(actorId || '').trim();
     if (!actor) return false;

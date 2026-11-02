@@ -4,6 +4,7 @@ import {
     approvalRequestType,
     approvalStageForAttendanceChange,
     attendanceChangeSummary,
+    dashboardTypeForChange,
     attendanceMarksMatch,
     describeAttendanceSave,
     hourRejectNextStage,
@@ -258,6 +259,16 @@ describe('approvalRequestType', () => {
             }),
             'Unauth to Auth',
         );
+    });
+});
+
+describe('dashboardTypeForChange', () => {
+    it('gives hour and overtime their own request, and keeps a mark as an attendance change', () => {
+        assert.equal(dashboardTypeForChange({ action: 'hour_adjust' }), 'Hour Approval Request');
+        assert.equal(dashboardTypeForChange({ action: 'flexible_ot' }), 'Flexible OT Request');
+        assert.equal(dashboardTypeForChange({ action: 'mark' }), 'Attendance Change Request');
+        assert.equal(dashboardTypeForChange({ action: 'map' }), 'Attendance Change Request');
+        assert.equal(dashboardTypeForChange({ action: 'clear' }), 'Attendance Change Request');
     });
 });
 

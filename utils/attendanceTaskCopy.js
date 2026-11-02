@@ -8,6 +8,7 @@
 const ATTENDANCE_TYPES = new Set([
     "attendance leave request",
     "attendance change request",
+    "attendance off day work",
     "hour approval request",
     "flexible ot request",
     "employee leave request",
@@ -32,6 +33,7 @@ const KIND_BY_KEY = {
     unauthorized_leave: "Unauthorized Leave",
     on_office: "Present",
     work_from_home: "Work From Home",
+    off_day_work: "Off Day Work",
 };
 
 export function isAttendanceTaskType(requestType) {

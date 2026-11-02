@@ -23,6 +23,7 @@ import {
 } from '../utils/attendanceChangeApproval.js';
 import { attendanceMarkRoute, yellowMarkHours } from '../utils/attendanceMarkPolicy.js';
 import { sendAttendanceDirectChangeEmail } from '../utils/sendAttendanceLeaveEmails.js';
+import { closeLeaveAttendanceRequest } from '../utils/ensureRequestTask.js';
 
 const UNAUTH_TIMES = 2;
 
@@ -475,6 +476,12 @@ export async function decideHourAdjust(req, res) {
             record.hoursApproved = 0;
             record.hourAdjustReason = rejectReason;
             await record.save();
+            await closeLeaveAttendanceRequest({
+                requestId: record._id,
+                requestType: 'Hour Approval Request',
+                status: 'Rejected',
+                actorId: actor._id,
+            });
             return res.status(200).json({ message: 'Request rejected. Deduction is unchanged.', record });
         }
 
@@ -513,6 +520,12 @@ export async function decideHourAdjust(req, res) {
             timeOut: req.body?.timeOut,
         });
         await record.save();
+        await closeLeaveAttendanceRequest({
+            requestId: record._id,
+            requestType: 'Hour Approval Request',
+            status: 'Approved',
+            actorId: actor._id,
+        });
         return res.status(200).json({ message: 'Hours approved.', record });
     } catch (error) {
         console.error('[decideHourAdjust]', error);

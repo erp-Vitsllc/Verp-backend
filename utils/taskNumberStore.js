@@ -4,6 +4,7 @@ import TaskNumberCounter from "../models/TaskNumberCounter.js";
 import {
     applyStableTaskNumbers,
     formatTaskNumber,
+    listedNumberAfterRefresh,
     parseTaskNumber,
     taskNumberYear,
 } from "./taskNumber.js";
@@ -31,6 +32,12 @@ function ownerKey(task) {
     return `${kind}:${String(task?.numberOwner?.id || "")}`;
 }
 
+function alsoKey(task) {
+    if (!task?.alsoOwner?.id) return "";
+    const kind = task.alsoOwner.kind === "manual" ? "manual" : "action";
+    return `${kind}:${String(task.alsoOwner.id)}`;
+}
+
 async function readNumber(kind, id) {
     if (!isObjectId(id)) return "";
     const row = await modelFor(kind).findById(id).select("taskNumber").lean();
@@ -40,10 +47,18 @@ async function readNumber(kind, id) {
 
 async function writeIfEmpty(kind, id, taskNumber) {
     if (!isObjectId(id) || !parseTaskNumber(taskNumber)) return;
-    await modelFor(kind).updateOne(
-        { _id: id, taskNumber: { $in: [null, ""] } },
-        { $set: { taskNumber } },
-    );
+    await modelFor(kind).updateOne(emptyNumberFilter(id), { $set: { taskNumber } });
+}
+
+function emptyNumberFilter(id) {
+    return {
+        _id: id,
+        $or: [
+            { taskNumber: { $exists: false } },
+            { taskNumber: null },
+            { taskNumber: "" },
+        ],
+    };
 }
 
 async function storedMaxByYear() {
@@ -79,15 +94,20 @@ async function raiseCounters(maxByYear) {
     if (writes.length) await Promise.all(writes);
 }
 
+function rememberOwnerId(task, actionIds, manualIds) {
+    const owners = [task?.numberOwner, task?.alsoOwner];
+    for (const owner of owners) {
+        const id = String(owner?.id || "");
+        if (!isObjectId(id)) continue;
+        if (owner.kind === "manual") manualIds.push(id);
+        else actionIds.push(id);
+    }
+}
+
 async function refreshSavedNumbers(tasks) {
     const actionIds = [];
     const manualIds = [];
-    for (const task of tasks) {
-        const id = String(task?.numberOwner?.id || "");
-        if (!isObjectId(id)) continue;
-        if (task.numberOwner.kind === "manual") manualIds.push(id);
-        else actionIds.push(id);
-    }
+    for (const task of tasks) rememberOwnerId(task, actionIds, manualIds);
     const [actions, manuals] = await Promise.all([
         actionIds.length
             ? DashboardAction.find({ _id: { $in: actionIds } }).select("taskNumber").lean()
@@ -106,14 +126,30 @@ async function refreshSavedNumbers(tasks) {
         if (parseTaskNumber(number)) found.set(`manual:${row._id}`, number);
     }
     for (const task of tasks) {
-        const number = found.get(ownerKey(task));
-        if (!number) {
-            task.numberSaved = false;
-            continue;
-        }
-        task.taskNumber = number;
-        task.numberSaved = true;
+        const copyKey = alsoKey(task);
+        const next = listedNumberAfterRefresh(
+            task.taskNumber,
+            found.get(ownerKey(task)) || "",
+            copyKey ? (found.get(copyKey) || "") : "",
+        );
+        task.taskNumber = next.taskNumber;
+        task.numberSaved = next.numberSaved;
+        task.copySaved = copyKey ? next.copySaved : true;
+        task.storedOnTask = next.storedOnTask;
     }
+}
+
+function pushNumberWrite(actionOps, manualOps, kind, id, taskNumber) {
+    if (!isObjectId(id) || !parseTaskNumber(taskNumber)) return false;
+    const op = {
+        updateOne: {
+            filter: emptyNumberFilter(id),
+            update: { $set: { taskNumber } },
+        },
+    };
+    if (kind === "manual") manualOps.push(op);
+    else actionOps.push(op);
+    return true;
 }
 
 async function persistUnsaved(tasks) {
@@ -121,16 +157,25 @@ async function persistUnsaved(tasks) {
     const manualOps = [];
     for (const task of tasks) {
         const number = String(task?.taskNumber || "").trim();
-        const id = String(task?.numberOwner?.id || "");
-        if (task?.numberSaved || !parseTaskNumber(number) || !isObjectId(id)) continue;
-        const op = {
-            updateOne: {
-                filter: { _id: id, taskNumber: { $in: [null, ""] } },
-                update: { $set: { taskNumber: number } },
-            },
-        };
-        if (task.numberOwner.kind === "manual") manualOps.push(op);
-        else actionOps.push(op);
+        if (!parseTaskNumber(number)) continue;
+        if (!task?.numberSaved) {
+            pushNumberWrite(
+                actionOps,
+                manualOps,
+                task?.numberOwner?.kind === "manual" ? "manual" : "action",
+                task?.numberOwner?.id,
+                number,
+            );
+        }
+        if (task?.alsoOwner && !task.copySaved) {
+            pushNumberWrite(
+                actionOps,
+                manualOps,
+                task.alsoOwner.kind === "manual" ? "manual" : "action",
+                task.alsoOwner.id,
+                number,
+            );
+        }
     }
     if (actionOps.length) await DashboardAction.bulkWrite(actionOps, { ordered: false });
     if (manualOps.length) await TaskManagerTask.bulkWrite(manualOps, { ordered: false });
@@ -157,33 +202,63 @@ export async function saveListedTaskNumbers(tasks) {
         }
         await raiseCounters(after);
         await refreshSavedNumbers(list);
+        for (const task of list) {
+            if (!task.storedOnTask) task.taskNumber = "";
+        }
         if (wrote) console.log(`Saved task numbers: ${wrote}`);
         return tasks;
     });
 }
 
+/**
+ * The saved number for this task. A number already stored is returned unchanged.
+ * A task with no number yet gets the next unused number, saved only into the empty field.
+ */
+export async function oneTaskNumber({ actionId = "", manualId = "", requestDate } = {}) {
+    const actionKey = isObjectId(actionId) ? String(actionId) : "";
+    const manualKey = isObjectId(manualId) ? String(manualId) : "";
+    if (!actionKey && !manualKey) return "";
+    return withTaskNumberLock(async () => {
+        const actionNumber = actionKey ? await readNumber("action", actionKey) : "";
+        if (actionNumber) return actionNumber;
+        const manualNumber = manualKey ? await readNumber("manual", manualKey) : "";
+        if (manualNumber) {
+            if (actionKey) await writeIfEmpty("action", actionKey, manualNumber);
+            return (actionKey ? await readNumber("action", actionKey) : "") || manualNumber;
+        }
+        return claimUnlocked({
+            kind: actionKey ? "action" : "manual",
+            id: actionKey || manualKey,
+            requestDate,
+        });
+    });
+}
+
+async function claimUnlocked({ kind = "action", id, requestDate } = {}) {
+    if (!isObjectId(id)) return "";
+    const current = await readNumber(kind, id);
+    if (current) return current;
+    const storedMax = await storedMaxByYear();
+    if (!storedMax.size) return "";
+    const year = taskNumberYear(requestDate || new Date());
+    const base = storedMax.get(year) || 0;
+    await TaskNumberCounter.updateOne(
+        { _id: year },
+        { $max: { seq: base } },
+        { upsert: true },
+    );
+    const doc = await TaskNumberCounter.findOneAndUpdate(
+        { _id: year },
+        { $inc: { seq: 1 } },
+        { new: true, upsert: true },
+    );
+    const number = formatTaskNumber(year, doc?.seq || base + 1);
+    await writeIfEmpty(kind, id, number);
+    return (await readNumber(kind, id)) || "";
+}
+
 /** Give one task the next saved number. Returns "" until the list has saved its numbers once. */
 export async function claimTaskNumber({ kind = "action", id, requestDate } = {}) {
     if (!isObjectId(id)) return "";
-    return withTaskNumberLock(async () => {
-        const current = await readNumber(kind, id);
-        if (current) return current;
-        const storedMax = await storedMaxByYear();
-        if (!storedMax.size) return "";
-        const year = taskNumberYear(requestDate || new Date());
-        const base = storedMax.get(year) || 0;
-        await TaskNumberCounter.updateOne(
-            { _id: year },
-            { $max: { seq: base } },
-            { upsert: true },
-        );
-        const doc = await TaskNumberCounter.findOneAndUpdate(
-            { _id: year },
-            { $inc: { seq: 1 } },
-            { new: true, upsert: true },
-        );
-        const number = formatTaskNumber(year, doc?.seq || base + 1);
-        await writeIfEmpty(kind, id, number);
-        return (await readNumber(kind, id)) || number;
-    });
+    return withTaskNumberLock(() => claimUnlocked({ kind, id, requestDate }));
 }

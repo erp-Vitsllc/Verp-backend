@@ -54,6 +54,28 @@ test("leave, hour, and OT requests open their own modals", () => {
         meta: { date: "2026-08-03" },
     });
     assert.match(ot, /otAttendanceId=/);
+    const offDay = buildAttendanceSectionPath({
+        requestType: "Attendance Off Day Work",
+        requestId,
+        meta: { date: "2026-11-02", staffType: "office", employeeMongoId },
+    });
+    assert.match(offDay, /date=2026-11-02/);
+    assert.match(offDay, new RegExp(`blinkEmployee=${employeeMongoId}`));
+    assert.doesNotMatch(offDay, /leaveAttendanceId=/);
+    const hourChange = buildAttendanceSectionPath({
+        requestType: "Hour Approval Request",
+        requestId,
+        meta: { attendanceChange: true, date: "2026-08-04", action: "hour_adjust", employeeMongoId },
+    });
+    assert.match(hourChange, new RegExp(`changeRequestId=${requestId}`));
+    assert.doesNotMatch(hourChange, /hourAttendanceId=/);
+    const otChange = buildAttendanceSectionPath({
+        requestType: "Flexible OT Request",
+        requestId,
+        meta: { attendanceChange: true, date: "2026-08-05", action: "flexible_ot" },
+    });
+    assert.match(otChange, new RegExp(`changeRequestId=${requestId}`));
+    assert.doesNotMatch(otChange, /otAttendanceId=/);
 });
 
 test("utility payment opens the review modal and a reminder opens add bill", () => {

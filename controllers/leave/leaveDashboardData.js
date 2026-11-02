@@ -40,6 +40,7 @@ import { loadTaskManagerInboxItems } from '../../utils/taskManagerModule.js';
 import { dubaiTodayKey, selectOpenLeaveBellItems } from '../../utils/leaveBellVisibility.js';
 import { dismissDecidedLeaveBells } from '../../utils/dismissDecidedLeaveBells.js';
 import { syncDashboardAction } from '../../utils/syncDashboard.js';
+import { ensureLeaveRequestTasks } from '../../utils/ensureOpenLeaveAttendanceTasks.js';
 import {
     LEAVE_DASHBOARD_REQUEST_TYPE,
     leaveDashboardRequestObjectId,
@@ -47,6 +48,7 @@ import {
 } from '../../utils/notifyLeaveDashboardRequest.js';
 import { resolveFlowchartHrEmployee } from '../../utils/resolveFlowchartHrEmployee.js';
 import {
+    approvalWaitsOnLoggedInEmployee,
     inferLeaveApprovalStage,
     LEAVE_STAGE_HR,
     LEAVE_STAGE_REPORTEE,
@@ -440,6 +442,7 @@ function groupPendingRows(rows) {
 async function resolveLeaveHrFlags(req) {
     const userId = req.user?._id || req.user?.id;
     const isSuper = await isReqUserSystemSuperUser(req.user);
+    const isFlowchartHr = await isRequestUserDesignatedFlowchartHr(req);
     const canView = Boolean(userId && (await hasPermission(userId, 'hrm_leave', 'view')));
     const canEdit = Boolean(
         isSuper ||
@@ -447,10 +450,18 @@ async function resolveLeaveHrFlags(req) {
                 ((await hasPermission(userId, 'hrm_leave', 'edit')) ||
                     (await hasPermission(userId, 'hrm_leave', 'create')))),
     );
+    // Edit and Return to request: flowchart HR assignee or admin super user only.
+    // Delete: admin super user only.
+    const canReviseLeave = Boolean(isSuper || isFlowchartHr);
+    const canDeleteLeave = Boolean(isSuper);
     return {
         userId,
         canEdit,
         isHr: Boolean(isSuper || canView || canEdit),
+        isSuper,
+        isFlowchartHr,
+        canReviseLeave,
+        canDeleteLeave,
     };
 }
 
@@ -946,8 +957,9 @@ export async function getLeavePendingRequests(req, res) {
                     approvalStage,
                     pendingWithName,
                     canDecide,
-                    canEdit: Boolean(hrFlags.canEdit || canDecide),
-                    canMaintain: Boolean(hrFlags.canEdit),
+                    canEdit: hrFlags.canReviseLeave,
+                    canMaintain: hrFlags.canReviseLeave,
+                    canDelete: hrFlags.canDeleteLeave,
                 };
             })
             .sort((a, b) => {
@@ -1046,6 +1058,42 @@ export async function decideLeavePendingRequest(req, res) {
     }
 }
 
+const LEAVE_APPROVAL_CHANGE_STATUSES = new Set([
+    'sick_leave',
+    'authorized_leave',
+    'on_leave',
+    'compoff_leave',
+    'unauthorized_leave',
+    'mispunch',
+    'late_arrived',
+    'early_go',
+]);
+
+function leaveApprovalChangeFacts(change) {
+    const proposed = change?.proposed || {};
+    const action = String(change?.action || '');
+    const nextDay = action === 'flexible_ot' && proposed.confirmNextDay === true;
+    const statusKey = String(
+        nextDay
+            ? 'on_office'
+            : proposed.statusKey || proposed.hourAdjustKind || (action === 'flexible_ot' ? 'flexible_ot' : ''),
+    ).trim();
+    const date = String((nextDay && proposed.targetDate) || change?.date || '').trim();
+    return { action, proposed, nextDay, statusKey, date };
+}
+
+/** The Leave Approval box lists these attendance changes next to leave requests. */
+function changeBelongsOnLeaveApproval(change) {
+    const { action, statusKey } = leaveApprovalChangeFacts(change);
+    if (!['mark', 'hour_adjust', 'flexible_ot'].includes(action)) return false;
+    if (action === 'flexible_ot' || action === 'hour_adjust') return true;
+    return LEAVE_APPROVAL_CHANGE_STATUSES.has(statusKey);
+}
+
+function requestIsInherited(ids, inheritedIds) {
+    return (ids || []).some((id) => id && inheritedIds.has(String(id)));
+}
+
 /**
  * GET /api/Leave/dashboard/pending-inbox
  * Pending leave requests waiting on this employee (or ?targetUserId= for Team Performance).
@@ -1065,7 +1113,8 @@ export async function getLeavePendingInbox(req, res) {
             });
         }
 
-        const actor = ctx.employee;
+        let actor = ctx.employee;
+        if (!actor) actor = await resolveActorEmployee(req);
         if (!actor) {
             return res.status(200).json({
                 message: 'Leave pending inbox fetched successfully',
@@ -1079,28 +1128,46 @@ export async function getLeavePendingInbox(req, res) {
             kinds: ['leave'],
         });
 
+        const actorId = String(actor._id);
         const reportees = await EmployeeBasic.find({ primaryReportee: actor._id })
             .select('_id')
             .lean();
         const reporteeIds = (reportees || []).map((row) => String(row._id)).filter(Boolean);
         const hrResolved = await resolveFlowchartHrEmployee();
         const hrId = hrResolved?.employee?._id ? String(hrResolved.employee._id) : '';
-        const actorIsHr = Boolean(hrId) && String(actor._id) === hrId;
+        const actorIsHr = Boolean(hrId) && actorId === hrId;
+        const inheritedRows = await findInheritedTaskActions(req.user).catch(() => []);
+        const inheritedIds = new Set(
+            (inheritedRows || []).map((row) => String(row.requestId || '')).filter(Boolean),
+        );
+        const inheritedObjectIds = [...inheritedIds].filter((id) => mongoose.Types.ObjectId.isValid(id));
         const waitingOnActor = [];
         if (reporteeIds.length) {
-            waitingOnActor.push({
-                employeeMongoId: { $in: reporteeIds },
-                $or: [
-                    { leaveApprovalStage: 'pending_reportee' },
-                    { leaveApprovalStage: { $in: ['', null] } },
-                ],
-            });
+            waitingOnActor.push({ employeeMongoId: { $in: reporteeIds } });
         }
         if (actorIsHr) {
-            waitingOnActor.push({ leaveApprovalStage: 'pending_hr' });
+            waitingOnActor.push({ leaveApprovalStage: LEAVE_STAGE_HR });
+            const unassigned = await EmployeeBasic.find({
+                profileStatus: 'active',
+                status: { $ne: 'Left User' },
+                $or: [{ primaryReportee: null }, { primaryReportee: { $exists: false } }],
+            })
+                .select('_id')
+                .limit(2000)
+                .lean();
+            const unassignedIds = (unassigned || []).map((row) => String(row._id)).filter(Boolean);
+            if (unassignedIds.length) {
+                waitingOnActor.push({ employeeMongoId: { $in: unassignedIds } });
+            }
+        }
+        if (inheritedObjectIds.length) {
+            waitingOnActor.push({ _id: { $in: inheritedObjectIds } });
+            waitingOnActor.push({ leaveRequestGroupId: { $in: inheritedObjectIds } });
         }
 
         let grouped = [];
+        let pendingLeaveRows = [];
+        let reporteeByMongoId = new Map(reporteeIds.map((id) => [id, actorId]));
         if (waitingOnActor.length) {
             const rows = await Attendance.find({
                 leaveRequestStatus: 'pending',
@@ -1113,12 +1180,28 @@ export async function getLeavePendingInbox(req, res) {
                 .lean();
 
             const openRows = await settleFulfilledLeaveRows(rows || []);
-            const leaveRows = openRows.filter((row) => {
-                if (isCompanyShellEmployee(row.employeeName) || isCompanyShellEmployee(row)) {
-                    return false;
-                }
-                return PENDING_LEAVE_KINDS.includes(String(row.leaveRequestKind || '').trim());
+            const peopleIds = [...new Set((openRows || []).map((row) => String(row.employeeMongoId || '')).filter(Boolean))];
+            if (peopleIds.length) {
+                const people = await EmployeeBasic.find({ _id: { $in: peopleIds } })
+                    .select('_id primaryReportee')
+                    .lean();
+                reporteeByMongoId = new Map(
+                    (people || []).map((person) => [String(person._id), String(person.primaryReportee || '')]),
+                );
+            }
+            const leaveRows = (openRows || []).filter((row) => {
+                if (isCompanyShellEmployee(row.employeeName) || isCompanyShellEmployee(row)) return false;
+                if (!PENDING_LEAVE_KINDS.includes(String(row.leaveRequestKind || '').trim())) return false;
+                const reporteeId = reporteeByMongoId.get(String(row.employeeMongoId || '')) || '';
+                return approvalWaitsOnLoggedInEmployee({
+                    actorId,
+                    reporteeId,
+                    hrId,
+                    approvalStage: row.leaveApprovalStage,
+                    inherited: requestIsInherited([row._id, row.leaveRequestGroupId], inheritedIds),
+                });
             });
+            pendingLeaveRows = leaveRows;
             grouped = groupPendingRows(leaveRows).filter((item) => item.statusKey === 'pending');
         }
 
@@ -1164,6 +1247,101 @@ export async function getLeavePendingInbox(req, res) {
             };
         });
 
+        const coveredPending = new Set(
+            grouped
+                .filter((item) => item.statusKey === 'pending')
+                .map((item) => `${item.employeeMongoId}|${item.startDateKey}|${item.requestedStatusKey}`),
+        );
+        const changeOr = [];
+        if (reporteeIds.length) changeOr.push({ employeeMongoId: { $in: reporteeIds } });
+        changeOr.push({ reporteeId: actor._id });
+        if (actorIsHr) changeOr.push({ stage: 'pending_hr' });
+        if (inheritedObjectIds.length) changeOr.push({ _id: { $in: inheritedObjectIds } });
+        const changeRows = await AttendanceChangeRequest.find({
+            stage: { $in: ['pending_reportee', 'pending_hr', 'pending_requester'] },
+            action: { $in: ['mark', 'hour_adjust', 'flexible_ot'] },
+            $or: changeOr,
+        })
+            .sort({ createdAt: -1 })
+            .limit(500)
+            .lean();
+        const changeEmployeeIds = [...new Set(
+            (changeRows || []).map((row) => String(row.employeeMongoId || '')).filter((id) => !reporteeByMongoId.has(id)),
+        )];
+        if (changeEmployeeIds.length) {
+            const changePeople = await EmployeeBasic.find({ _id: { $in: changeEmployeeIds } })
+                .select('_id primaryReportee')
+                .lean();
+            for (const person of changePeople || []) {
+                reporteeByMongoId.set(String(person._id), String(person.primaryReportee || ''));
+            }
+        }
+        const changeItems = [];
+        for (const change of changeRows || []) {
+            if (isCompanyShellEmployee(change.employeeName) || isCompanyShellEmployee(change)) continue;
+            if (!changeBelongsOnLeaveApproval(change)) continue;
+            const facts = leaveApprovalChangeFacts(change);
+            const cover = `${change.employeeMongoId}|${facts.date}|${facts.statusKey}`;
+            if (coveredPending.has(cover)) continue;
+            const reporteeId = reporteeByMongoId.get(String(change.employeeMongoId || '')) || '';
+            const forcedStage = change.stage === 'pending_hr' ? LEAVE_STAGE_HR : LEAVE_STAGE_REPORTEE;
+            const inherited = requestIsInherited(
+                [change._id, change.proposed?.attendanceId],
+                inheritedIds,
+            );
+            if (!approvalWaitsOnLoggedInEmployee({
+                actorId,
+                reporteeId,
+                hrId,
+                approvalStage: forcedStage,
+                inherited,
+            })) continue;
+            const leaveType = facts.nextDay
+                ? 'Next day attendance'
+                : facts.action === 'flexible_ot'
+                    ? 'OT'
+                    : facts.action === 'hour_adjust' && /mispunch/i.test(facts.statusKey)
+                        ? 'Miss Punch'
+                        : leaveTypeLabel({
+                            requestedStatusKey: facts.statusKey,
+                            requestedStatusLabel: facts.proposed.statusLabel || '',
+                            leaveRequestKind: facts.proposed.hourAdjustKind ? 'yellow' : 'leave',
+                        });
+            const summary = `${leaveType} request for ${facts.date}`;
+            changeItems.push({
+                id: String(change._id),
+                dashboardActionId: String(change._id),
+                requestType: 'Employee Leave Request',
+                requestObjectId: String(change._id),
+                employeeMongoId: String(change.employeeMongoId || ''),
+                employeeId: change.employeeId || '',
+                subjectName: change.employeeName || 'Employee',
+                startDateKey: facts.date,
+                endDateKey: facts.date,
+                requestedStatusKey: facts.statusKey,
+                leaveType,
+                leaveRequestKind: 'leave',
+                reason: String(facts.proposed.reason || '').trim(),
+                attachmentName: String(facts.proposed.attachmentName || '').trim(),
+                status: 'Pending',
+                extra1: facts.date,
+                extra2: summary,
+                extra3: JSON.stringify({
+                    changeRequestId: String(change._id),
+                    attendanceId: String(change._id),
+                    employeeMongoId: String(change.employeeMongoId || ''),
+                    from: facts.date,
+                    to: facts.date,
+                    requestedStatusKey: facts.statusKey,
+                    leaveDashboard: true,
+                    approvalStage: forcedStage,
+                    canDecide: true,
+                }),
+                message: summary,
+                requestedDate: change.createdAt || new Date(),
+            });
+        }
+
         const hubMapped = hubItems.map((item) => {
             let meta = {};
             try {
@@ -1183,10 +1361,22 @@ export async function getLeavePendingInbox(req, res) {
         });
 
         const taskItems = await loadTaskManagerInboxItems(
-            buildAssigneeClauses(ctx.relevantIds || [], ctx.employeeIdCode),
+            buildAssigneeClauses(
+                [...new Set([...(ctx.relevantIds || []), actor._id].filter(Boolean))],
+                ctx.employeeIdCode || actor.employeeId,
+            ),
             'leave',
         );
-        const items = await keepOpenLeaveBellItems([...hubMapped, ...attendanceItems, ...taskItems]);
+        try {
+            await ensureLeaveRequestTasks({
+                leaveRows: pendingLeaveRows,
+                hubItems,
+            });
+        } catch (taskError) {
+            console.error('[getLeavePendingInbox] request task sync', taskError);
+        }
+        const otherItems = await keepOpenLeaveBellItems([...hubMapped, ...taskItems]);
+        const items = [...attendanceItems, ...changeItems, ...otherItems];
         return res.status(200).json({
             message: 'Leave pending inbox fetched successfully',
             count: items.length,
@@ -1743,13 +1933,12 @@ export async function applyLeaveRange(req, res) {
                     LEAVE_TRACK_KEYS.includes(String(row.statusKey || '')),
                 ),
         );
-        if (existingGroup && existingIsSettled && !hrFlags.canEdit) {
-            const flowchartHr = await isRequestUserDesignatedFlowchartHr(req);
-            if (!flowchartHr) {
-                return res.status(403).json({ message: 'Only HR can edit completed leave.' });
-            }
+        if (existingGroup && existingIsSettled && !hrFlags.canReviseLeave) {
+            return res.status(403).json({
+                message: 'Only the flowchart HR or an admin super user can edit this leave.',
+            });
         }
-        if (existingGroup && !existingIsSettled && !hrFlags.canEdit) {
+        if (existingGroup && !existingIsSettled && !hrFlags.canReviseLeave) {
             const actor = await resolveActorEmployee(req);
             const flowchartHr = await isRequestUserDesignatedFlowchartHr(req);
             const hrResolvedForEdit = flowchartHr ? null : await resolveFlowchartHrEmployee();
@@ -2025,8 +2214,10 @@ export async function returnLeaveRequest(req, res) {
         }
 
         const hrFlags = await resolveLeaveHrFlags(req);
-        if (!hrFlags.canEdit) {
-            return res.status(403).json({ message: 'Only HR can return a leave to a request.' });
+        if (!hrFlags.canReviseLeave) {
+            return res.status(403).json({
+                message: 'Only the flowchart HR or an admin super user can return a leave to a request.',
+            });
         }
 
         const attendanceId = String(req.body?.attendanceId || req.body?.approvalId || '').trim();
@@ -2260,7 +2451,7 @@ export async function deleteLeaveInboxItem(req, res) {
 
 /**
  * POST /api/Leave/pending-requests/remove
- * HR removes an approved or pending leave request and clears it from those attendance days.
+ * Admin super user removes an approved or pending leave request and clears it from those attendance days.
  */
 export async function removeLeaveRequest(req, res) {
     try {
@@ -2269,8 +2460,8 @@ export async function removeLeaveRequest(req, res) {
         }
 
         const hrFlags = await resolveLeaveHrFlags(req);
-        if (!hrFlags.canEdit) {
-            return res.status(403).json({ message: 'Only HR can remove a leave request.' });
+        if (!hrFlags.canDeleteLeave) {
+            return res.status(403).json({ message: 'Only an admin super user can delete a leave request.' });
         }
 
         const attendanceId = String(req.body?.attendanceId || req.body?.approvalId || '').trim();

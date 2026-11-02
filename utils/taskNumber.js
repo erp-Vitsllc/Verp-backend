@@ -50,6 +50,33 @@ export function earlierTaskNumber(left, right) {
     return a.count <= b.count ? first : second;
 }
 
+/** One task has one number: the earliest number already stored for it. */
+export function canonicalTaskNumber(...values) {
+    let best = "";
+    for (const value of values) {
+        const number = firstStoredTaskNumber(value);
+        if (!number) continue;
+        best = best ? earlierTaskNumber(best, number) : number;
+    }
+    return best;
+}
+
+/**
+ * The number a listed task shows after the saved copies are read back.
+ * A number already stored on the task stays. Another task's number is not copied over it.
+ */
+export function listedNumberAfterRefresh(proposed, ownerStored = "", copyStored = "") {
+    const owner = firstStoredTaskNumber(ownerStored);
+    const copy = firstStoredTaskNumber(copyStored);
+    const chosen = owner || copy || firstStoredTaskNumber(proposed);
+    return {
+        taskNumber: chosen,
+        numberSaved: Boolean(owner),
+        copySaved: Boolean(copy),
+        storedOnTask: Boolean(owner || copy),
+    };
+}
+
 function byRequestOrder(left, right) {
     const aTime = new Date(left?.requestDate || 0).getTime();
     const bTime = new Date(right?.requestDate || 0).getTime();

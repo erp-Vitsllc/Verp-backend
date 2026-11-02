@@ -29,6 +29,7 @@ import { compensableNonWorkingContext } from '../utils/attendanceNonWorkingDay.j
 import { refreshFlexibleOtRecords } from '../utils/syncFlexibleOt.js';
 import { notifyEmployeeFlexibleOtWhatsApp } from '../utils/sendFlexibleOtWhatsApp.js';
 import { sendAttendanceDirectChangeEmail } from '../utils/sendAttendanceLeaveEmails.js';
+import { closeLeaveAttendanceRequest } from '../utils/ensureRequestTask.js';
 
 async function resolveActor(req) {
     const select = '_id employeeId firstName lastName companyEmail';
@@ -157,6 +158,18 @@ export async function approveFlexibleOvertimeRecord(record, { approvedHours, rea
             approvedHours: approved,
             actor,
         });
+        await closeLeaveAttendanceRequest({
+            requestId: record._id,
+            requestType: 'Attendance Off Day Work',
+            status: 'Approved',
+            actorId: actor?._id,
+        });
+        await closeLeaveAttendanceRequest({
+            requestId: record._id,
+            requestType: 'Flexible OT Request',
+            status: 'Approved',
+            actorId: actor?._id,
+        });
         return {
             status: 200,
             body: { record, displayOtHours: approved, nextDayPresent: false },
@@ -212,6 +225,18 @@ export async function approveFlexibleOvertimeRecord(record, { approvedHours, rea
         approvedHours: approved,
         remainderHours: split.remainderHours,
         actor,
+    });
+    await closeLeaveAttendanceRequest({
+        requestId: record._id,
+        requestType: 'Attendance Off Day Work',
+        status: 'Approved',
+        actorId: actor?._id,
+    });
+    await closeLeaveAttendanceRequest({
+        requestId: record._id,
+        requestType: 'Flexible OT Request',
+        status: 'Approved',
+        actorId: actor?._id,
     });
     return {
         status: 200,
@@ -473,6 +498,12 @@ export async function decideFlexibleOvertime(req, res) {
             record.flexibleOtNextDayDate = '';
             await record.save();
             await refreshFlexibleOtRecords([record]);
+            await closeLeaveAttendanceRequest({
+                requestId: record._id,
+                requestType: 'Flexible OT Request',
+                status: 'Rejected',
+                actorId: actor._id,
+            });
             return res.status(200).json({
                 message: 'Overtime rejected. The request button is available again.',
                 record,

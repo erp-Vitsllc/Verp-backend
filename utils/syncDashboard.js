@@ -8,6 +8,11 @@ import {
 import { foldIntoAdminOfficerServiceTrackIfOpen } from "./vehicleServiceAdminOfficerNotification.js";
 import { noticeAlreadyDeleted } from "./deletedTaskNotice.js";
 import { activityExtra3Lock, pickActivityRow } from "./taskDuplicateKey.js";
+import {
+    completeOwnRequestTasks,
+    ensureOwnRequestTask,
+    isLeaveAttendanceTaskType,
+} from "./ensureRequestTask.js";
 
 function rowMeta(extra3) {
     if (!extra3) return null;
@@ -124,6 +129,11 @@ export const syncDashboardAction = async (data) => {
                     }
                 }
 
+                let closingTaskIds = [];
+                if (isLeaveAttendanceTaskType(requestType)) {
+                    const closing = await DashboardAction.find(query).select("_id").lean();
+                    closingTaskIds = closing.map((row) => row._id);
+                }
                 await DashboardAction.updateMany(
                     query,
                     {
@@ -133,6 +143,9 @@ export const syncDashboardAction = async (data) => {
                         comment: comment
                     }
                 );
+                if (closingTaskIds.length) {
+                    await completeOwnRequestTasks(closingTaskIds, status);
+                }
             }
 
             // Profile Activation — On Hold / Rejected: dashboard / task row for the **submitter** (not the profile subject).
@@ -432,11 +445,14 @@ export const syncDashboardAction = async (data) => {
                 extra2,
                 ...(pendingExtra3 ? { extra3: pendingExtra3 } : {}),
             };
-            await DashboardAction.findOneAndUpdate(
+            const separateSaved = await DashboardAction.findOneAndUpdate(
                 separateFilter,
                 { $set: separateDoc },
                 { upsert: true, new: true },
             );
+            if (isLeaveAttendanceTaskType(requestType)) {
+                await ensureOwnRequestTask(separateSaved, assignee);
+            }
             return;
         }
 
@@ -496,15 +512,21 @@ export const syncDashboardAction = async (data) => {
             keptId = created?._id || null;
         }
 
+        const duplicateFilter = {
+            ...identity,
+            ...(keptId ? { _id: { $ne: keptId } } : {}),
+            status: "Pending",
+            ...(requestType === "Vehicle Service Request" && !lockedExtra3
+                ? { extra3: { $not: { $regex: '"adminOfficerServiceTrack"\\s*:\\s*true', $options: "i" } } }
+                : {}),
+        };
+        let duplicateTaskIds = [];
+        if (isLeaveAttendanceTaskType(requestType)) {
+            const duplicates = await DashboardAction.find(duplicateFilter).select("_id").lean();
+            duplicateTaskIds = duplicates.map((row) => row._id);
+        }
         await DashboardAction.updateMany(
-            {
-                ...identity,
-                ...(keptId ? { _id: { $ne: keptId } } : {}),
-                status: "Pending",
-                ...(requestType === "Vehicle Service Request" && !lockedExtra3
-                    ? { extra3: { $not: { $regex: '"adminOfficerServiceTrack"\\s*:\\s*true', $options: "i" } } }
-                    : {}),
-            },
+            duplicateFilter,
             {
                 $set: {
                     status: "Dismissed",
@@ -513,6 +535,14 @@ export const syncDashboardAction = async (data) => {
                 },
             },
         );
+        if (duplicateTaskIds.length) {
+            await completeOwnRequestTasks(duplicateTaskIds, "Dismissed");
+        }
+
+        if (keptId && isLeaveAttendanceTaskType(requestType)) {
+            const fresh = await DashboardAction.findById(keptId);
+            await ensureOwnRequestTask(fresh, assignee);
+        }
 
     } catch (error) {
         console.error(`[syncDashboardAction] Failed to sync ${data.requestType}:`, error);

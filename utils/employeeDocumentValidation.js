@@ -109,6 +109,12 @@ export function validateEmployeeDocumentPayload(body = {}, options = {}) {
         push(validateExpiryDate(body.expiryDate, body.issueDate, hasExpiry));
         const hasValue = body.cost !== null && body.cost !== undefined && body.cost !== "";
         push(validateDocumentValue(body.cost ?? body.value, hasValue));
+        if (body.outsideUaeIdentity === true) {
+            if (!String(body.issueDate || "").trim()) push("Issue Date is required");
+            if (!String(body.expiryDate || "").trim()) push("Expiry Date is required");
+            const country = stripDangerousText(body.countryIssued);
+            if (!country) push("Country Issued is required");
+        }
     }
 
     push(

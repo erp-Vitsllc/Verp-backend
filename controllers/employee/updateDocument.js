@@ -20,6 +20,8 @@ export const updateDocument = async (req, res) => {
             description,
             issueDate,
             expiryDate,
+            countryIssued,
+            outsideUaeIdentity,
             cost,
             isRenewMode,
             basicSalary,
@@ -49,15 +51,20 @@ export const updateDocument = async (req, res) => {
         }
 
         const currentDoc = employee.documents[docIndex];
+        const isOutsideUaeIdentity = outsideUaeIdentity === true || currentDoc?.outsideUaeIdentity === true;
+        const identityType = type ?? currentDoc?.type;
+        const identityName = isOutsideUaeIdentity ? String(identityType || "").trim() : (documentName ?? currentDoc?.documentName);
         const isLabourModal = String(type ?? currentDoc?.type ?? "").trim() === "Labour Card Salary";
         const hasExistingFile = Boolean(currentDoc?.document?.url || currentDoc?.document?.name);
         const validation = validateEmployeeDocumentPayload(
             {
-                type: type ?? currentDoc?.type,
-                documentName: documentName ?? currentDoc?.documentName,
+                type: identityType,
+                documentName: identityName,
                 description: description ?? currentDoc?.description,
                 issueDate: issueDate ?? currentDoc?.issueDate,
                 expiryDate: expiryDate ?? currentDoc?.expiryDate,
+                countryIssued: countryIssued ?? currentDoc?.countryIssued,
+                outsideUaeIdentity: isOutsideUaeIdentity,
                 cost: cost ?? currentDoc?.cost,
                 document: document ?? currentDoc?.document,
             },
@@ -73,7 +80,13 @@ export const updateDocument = async (req, res) => {
 
         const proposedDoc = currentDoc?.toObject ? currentDoc.toObject() : JSON.parse(JSON.stringify(currentDoc || {}));
         if (type !== undefined) proposedDoc.type = type;
-        if (documentName !== undefined) proposedDoc.documentName = documentName;
+        if (isOutsideUaeIdentity) {
+            proposedDoc.documentName = String(proposedDoc.type || identityType || "").trim();
+            proposedDoc.outsideUaeIdentity = true;
+            if (countryIssued !== undefined) proposedDoc.countryIssued = String(countryIssued || "").trim();
+        } else if (documentName !== undefined) {
+            proposedDoc.documentName = documentName;
+        }
         if (description !== undefined) proposedDoc.description = description;
         if (issueDate !== undefined) proposedDoc.issueDate = issueDate || null;
         if (expiryDate !== undefined) proposedDoc.expiryDate = expiryDate;

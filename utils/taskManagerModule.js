@@ -84,6 +84,15 @@ export function moduleForRequestType(requestType, extraText = "") {
         return { module: "vehicle", label: "Vehicle", path: "/HRM/Asset/Vehicle" };
     }
     if (low.includes("fine")) return { module: "fine", label: "Fine", path: "/HRM/Fine" };
+    if (
+        low === "attendance leave request"
+        || low === "attendance change request"
+        || low === "attendance off day work"
+        || low === "hour approval request"
+        || low === "flexible ot request"
+    ) {
+        return { module: "attendance", label: "Attendance", path: "/HRM/Attendance" };
+    }
     if (low.includes("leave")) return { module: "leave", label: "Leave", path: "/HRM/Leave/annual-leave" };
     if (low.includes("attendance")) return { module: "attendance", label: "Attendance", path: "/HRM/Attendance" };
     if (low.includes("loan") || low.includes("advance")) {

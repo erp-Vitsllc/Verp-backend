@@ -960,11 +960,10 @@ function rememberActivityNumber(savedByActivity, action, number) {
     savedByActivity.set(key, earlierTaskNumber(savedByActivity.get(key), saved));
 }
 
-function actionNumberState(action, savedByActivity) {
+function actionNumberState(action, _savedByActivity, overlay = null) {
     const own = firstStoredTaskNumber(action?.taskNumber);
-    const inherited = own ? "" : firstStoredTaskNumber(savedByActivity.get(actionDuplicateKey(action)));
     return {
-        taskNumber: own || inherited,
+        taskNumber: own || firstStoredTaskNumber(overlay?.taskNumber),
         numberSaved: Boolean(own),
         numberOwner: { kind: "action", id: String(action?._id || "") },
     };
@@ -974,11 +973,10 @@ function manualNumberState(row, actionById, savedByActivity) {
     const sourceId = String(row?.sourceDashboardActionId || "");
     const source = sourceId ? actionById.get(sourceId) : null;
     if (source) {
-        const state = actionNumberState(source, savedByActivity);
-        if (state.taskNumber) return state;
-        const own = firstStoredTaskNumber(row?.taskNumber);
-        if (!own) return state;
-        return { ...state, taskNumber: own, numberSaved: false };
+        return {
+            ...actionNumberState(source, savedByActivity, row),
+            alsoOwner: row?._id ? { kind: "manual", id: String(row._id) } : undefined,
+        };
     }
     const own = firstStoredTaskNumber(row?.taskNumber);
     return {
@@ -1532,7 +1530,8 @@ export const getTaskManagerNotifications = async (req, res) => {
                         requestedByUserId: overlay?.requestedByUserId,
                         status,
                     }),
-                ...actionNumberState(action, savedByActivity),
+                ...actionNumberState(action, savedByActivity, overlay),
+                alsoOwner: overlay?._id ? { kind: "manual", id: String(overlay._id) } : undefined,
                 requestDate: requestedAt,
                 reassignedAt: latestReassignedAt(overlay),
                 completionDate: overlay?.completionDate || action.actionedDate || null,
@@ -1760,6 +1759,9 @@ export const getTaskManagerNotifications = async (req, res) => {
         for (const task of tasks) {
             delete task.numberOwner;
             delete task.numberSaved;
+            delete task.alsoOwner;
+            delete task.copySaved;
+            delete task.storedOnTask;
         }
 
         const statusRank = {
@@ -2270,7 +2272,7 @@ export async function listProfileEmployeeTasks({ employeeId, employeeCode, emplo
         openRows.sort((a, b) => (rank[a.status] ?? 9) - (rank[b.status] ?? 9) || b.sortAt - a.sortAt);
         const tasks = openRows.slice(0, Math.max(1, Number(limit) || 10)).map((row) => ({
             actionId: row.actionId,
-            taskNumber: numbers.get(row.actionId) || numbers.get(row.requestId) || "",
+            taskNumber: numbers.get(row.actionId) || "",
             taskType: row.taskType || "Workflow Task",
             requesterName: row.requesterName,
             requestedDate: formatProfileDay(row.requestedAt),
@@ -2286,57 +2288,31 @@ export async function listProfileEmployeeTasks({ employeeId, employeeCode, emplo
     }
 }
 
-function rememberRequestNumber(map, requestWinners, requestId, number, isWinner) {
-    const saved = firstStoredTaskNumber(number);
-    const id = String(requestId || "").trim();
-    if (!saved || !id) return;
-    const previous = requestWinners.get(id);
-    if (!previous) {
-        requestWinners.set(id, { winner: Boolean(isWinner) });
-        map.set(id, saved);
-        return;
-    }
-    if (previous.winner && !isWinner) return;
-    if (!previous.winner && isWinner) {
-        requestWinners.set(id, { winner: true });
-        map.set(id, saved);
-        return;
-    }
-    map.set(id, earlierTaskNumber(map.get(id), saved));
-}
-
-async function storedTaskNumberMap(wanted, actions, manualRows, unique) {
+async function storedTaskNumberMap(wanted, actions, manualRows) {
     const map = new Map();
-    const activityNumber = new Map();
-    const requestWinners = new Map();
-    const winnerIds = new Set((unique || []).map((action) => String(action._id)));
     const actionById = new Map((actions || []).map((action) => [String(action._id), action]));
     const manualById = new Map((manualRows || []).map((row) => [String(row._id), row]));
+    const actionsByRequest = new Map();
 
     for (const action of actions || []) {
+        const id = String(action?._id || "");
+        if (!id) continue;
+        const requestId = String(action?.requestId || "").trim();
+        if (requestId) {
+            const ids = actionsByRequest.get(requestId) || [];
+            ids.push(id);
+            actionsByRequest.set(requestId, ids);
+        }
         const number = firstStoredTaskNumber(action?.taskNumber);
-        if (!number) continue;
-        map.set(String(action._id), number);
-        rememberActivityNumber(activityNumber, action, number);
-        rememberRequestNumber(map, requestWinners, action.requestId, number, winnerIds.has(String(action._id)));
-    }
-    for (const action of actions || []) {
-        const id = String(action._id);
-        if (map.has(id)) continue;
-        const number = firstStoredTaskNumber(activityNumber.get(actionDuplicateKey(action)));
-        if (!number) continue;
-        map.set(id, number);
-        rememberRequestNumber(map, requestWinners, action.requestId, number, winnerIds.has(id));
+        if (number) map.set(id, number);
     }
     for (const row of manualRows || []) {
         const id = String(row?._id || "");
         if (!id) continue;
-        const sourceId = String(row.sourceDashboardActionId || "");
-        const number = firstStoredTaskNumber(row.taskNumber) || (sourceId ? firstStoredTaskNumber(map.get(sourceId)) : "");
-        if (!number) continue;
-        map.set(id, number);
-        map.set(`manual-${id}`, number);
-        if (sourceId && !firstStoredTaskNumber(map.get(sourceId))) map.set(sourceId, number);
+        const own = firstStoredTaskNumber(row.taskNumber);
+        if (!own) continue;
+        map.set(id, own);
+        map.set(`manual-${id}`, own);
     }
 
     for (const id of wanted) {
@@ -2348,9 +2324,7 @@ async function storedTaskNumberMap(wanted, actions, manualRows, unique) {
                 id: action._id,
                 requestDate: action.requestedDate || action.createdAt,
             });
-            if (!number) continue;
-            map.set(String(action._id), number);
-            rememberRequestNumber(map, requestWinners, action.requestId, number, winnerIds.has(String(action._id)));
+            if (number) map.set(String(action._id), number);
             continue;
         }
         const manualId = id.startsWith("manual-") ? id.slice("manual-".length) : id;
@@ -2366,6 +2340,12 @@ async function storedTaskNumberMap(wanted, actions, manualRows, unique) {
         map.set(`manual-${manual._id}`, number);
     }
 
+    for (const [requestId, ids] of actionsByRequest) {
+        if (ids.length !== 1) continue;
+        const number = firstStoredTaskNumber(map.get(ids[0]));
+        if (number && requestId !== ids[0]) map.set(requestId, number);
+    }
+
     const found = new Map();
     for (const id of wanted) {
         const number = firstStoredTaskNumber(map.get(id));
@@ -2375,8 +2355,8 @@ async function storedTaskNumberMap(wanted, actions, manualRows, unique) {
 }
 
 /**
- * The saved TSK number for a task, keyed by the request id and the action id.
- * storedOnly skips the old calculated number, so a task page does not invent a second one.
+ * The saved TSK number for a task, keyed by that task's own id.
+ * A request id is included only when one task owns it, so shared requests stay separate.
  */
 export async function taskNumbersByRecordId(recordIds, { storedOnly = false } = {}) {
     const wanted = [...new Set((recordIds || []).map((id) => String(id || "").trim()).filter(Boolean))];
@@ -2397,7 +2377,7 @@ export async function taskNumbersByRecordId(recordIds, { storedOnly = false } = 
     const collapsedNumbers = await collapseDuplicateDashboardTasks(preparedNumbers.rows);
     const unique = dedupeOpenActions(collapsedNumbers.rows);
     const backfilled = [...(actions || []), ...(manualRows || [])].some((row) => firstStoredTaskNumber(row?.taskNumber));
-    if (backfilled) return storedTaskNumberMap(wanted, actions, manualRows, unique);
+    if (backfilled) return storedTaskNumberMap(wanted, actions, manualRows);
     if (storedOnly) return new Map();
 
     const stubs = unique.map((action) => ({
@@ -2419,16 +2399,15 @@ export async function taskNumbersByRecordId(recordIds, { storedOnly = false } = 
     }
 
     assignTaskNumbers(stubs);
-    const numberByActionId = new Map(stubs.map((task) => [task.actionId, task.taskNumber]));
-    const winnerIdByKey = new Map();
-    for (const action of unique) {
-        const key = actionDuplicateKey(action);
-        if (key) winnerIdByKey.set(key, String(action._id));
+    const requestCounts = new Map();
+    for (const task of stubs) {
+        if (!task.requestId) continue;
+        requestCounts.set(task.requestId, (requestCounts.get(task.requestId) || 0) + 1);
     }
 
     const byId = new Map();
     for (const task of stubs) {
-        if (task.requestId) {
+        if (task.requestId && requestCounts.get(task.requestId) === 1 && task.requestId !== task.actionId) {
             byId.set(task.requestId, task.taskNumber);
             byId.set(`manual-${task.requestId}`, task.taskNumber);
         }
@@ -2439,16 +2418,9 @@ export async function taskNumbersByRecordId(recordIds, { storedOnly = false } = 
         const sourceId = String(row?.sourceDashboardActionId || "").trim();
         const number = byId.get(id) || byId.get(`manual-${id}`) || (sourceId ? byId.get(sourceId) : "");
         if (!number) continue;
-        if (id) byId.set(id, number);
-        if (id) byId.set(`manual-${id}`, number);
-        if (sourceId) byId.set(sourceId, number);
-    }
-    for (const action of actions || []) {
-        const requestId = String(action.requestId || "").trim();
-        if (!requestId || byId.has(requestId)) continue;
-        const winnerId = winnerIdByKey.get(actionDuplicateKey(action));
-        const number = winnerId ? numberByActionId.get(winnerId) : "";
-        if (number) byId.set(requestId, number);
+        if (id && !byId.has(id)) byId.set(id, number);
+        if (id && !byId.has(`manual-${id}`)) byId.set(`manual-${id}`, number);
+        if (sourceId && !byId.has(sourceId)) byId.set(sourceId, number);
     }
 
     const found = new Map();

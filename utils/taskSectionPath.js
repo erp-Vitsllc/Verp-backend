@@ -38,7 +38,9 @@ export function buildAttendanceSectionPath({ meta = {}, requestId = "", requestT
     const sickLeave =
         clean(meta.requestedStatusKey) === "sick_leave" ||
         /sick leave/i.test(`${type} ${clean(meta.requestedStatusLabel)}`);
+    const offDay = type === "attendance off day work";
     const markTask =
+        offDay ||
         type === "attendance leave request" ||
         type === "attendance change request" ||
         type === "hour approval request" ||
@@ -64,7 +66,7 @@ export function buildAttendanceSectionPath({ meta = {}, requestId = "", requestT
         if (id) params.set("hourAttendanceId", id);
     } else if (type === "flexible ot request") {
         if (id) params.set("otAttendanceId", id);
-    } else if (id) {
+    } else if (!offDay && id) {
         params.set("leaveAttendanceId", id);
     }
 
