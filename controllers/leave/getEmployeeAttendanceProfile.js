@@ -41,6 +41,7 @@ import { loadCurrentLeaveCycleEligibility } from '../../utils/loadLeaveTicketEnt
 import { laterDateKey } from '../../utils/currentLeaveCycle.js';
 import { leaveStatusKeyForCount } from '../../utils/flexibleAttendance.js';
 import {
+    joiningMonthProcessingStart,
     keepAttendanceForProcessingStart,
     loadEnrolledLeaveVisibilityByMongoId,
 } from '../../utils/leaveSalaryVisibility.js';
@@ -1399,6 +1400,7 @@ export async function getEmployeeAttendanceProfile(req, res) {
                 attendanceAccountStatus: String(employee.attendanceAccountStatus || 'active'),
                 attendanceSuspension: employee.attendanceSuspension || null,
                 dateOfJoining: joinKey,
+                salaryProcessingStart: joiningMonthProcessingStart(processingStart, joinKey) || '',
                 dateOfBirth: dobKey,
                 birthdayLabel: formatDayMonthLong(dobKey),
                 yearsOfServiceLabel: yearsOfServiceLabel(joinKey, dubai),

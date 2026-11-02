@@ -1,0 +1,195 @@
+import { monthKeyOf } from './buildSalarySlipPayload.js';
+import { fineNeedsAccountsPaymentInbox, fineStillNeedsInbox } from './fineStageAuth.js';
+import { isLoanAwaitingEmployeePayment } from './loanStatusConstants.js';
+
+const CLOSED_LOAN_STATUSES = new Set(['Rejected', 'Cancelled', 'Draft', 'Paid']);
+
+export const PAYROLL_LOAN_QUERY_STATUSES = [
+    'Pending',
+    'Pending HR',
+    'Pending Accounts',
+    'Pending Authorization',
+    'Pending Payment to Employee',
+    'Approved',
+];
+
+export const PAYROLL_FINE_QUERY_STATUSES = [
+    'Pending',
+    'Pending HR',
+    'Pending Accounts',
+    'Pending Authorization',
+    'Approved',
+    'Active',
+];
+
+const ASSET_RETURN_ACTIONS = new Set(['Return Asset', 'Asset Transfer']);
+
+/**
+ * A loan or advance blocks Ready while approval is open, or while Accounts still
+ * has to disburse it (Zoho or employee pay). Salary repayment of money already
+ * paid out does not block.
+ */
+export function loanBlocksPayrollReady(loan) {
+    if (!loan) return false;
+    const status = String(loan.approvalStatus || loan.status || '').trim();
+    if (!status || CLOSED_LOAN_STATUSES.has(status)) return false;
+    if (status === 'Approved') return isLoanAwaitingEmployeePayment(loan);
+    return /pending/i.test(status);
+}
+
+export function loanPayrollTitle(loan) {
+    const kind = String(loan?.type || 'Loan').trim() || 'Loan';
+    if (isLoanAwaitingEmployeePayment(loan)) return `${kind} · Accounts payment`;
+    return `${kind} approval`;
+}
+
+export function loanPayrollRole(loan) {
+    if (isLoanAwaitingEmployeePayment(loan)) return 'Accounts';
+    const status = String(loan?.approvalStatus || loan?.status || '');
+    if (/account|finance/i.test(status)) return 'Accounts';
+    if (/authoriz|management/i.test(status)) return 'Management';
+    return 'HR';
+}
+
+export function fineBlocksPayrollReady(fine) {
+    return fineStillNeedsInbox(fine);
+}
+
+export function finePayrollTitle(fine) {
+    return fineNeedsAccountsPaymentInbox(fine) ? 'Fine · Accounts payment' : 'Fine approval';
+}
+
+export function finePayrollRole(fine) {
+    if (fineNeedsAccountsPaymentInbox(fine)) return 'Accounts';
+    const status = String(fine?.fineStatus || '');
+    if (/account|finance/i.test(status)) return 'Accounts';
+    if (/authoriz|management/i.test(status)) return 'Management';
+    return 'HR';
+}
+
+export function utilityBillPending(bill) {
+    return ['Pending Accounts', 'Pending HR'].includes(String(bill?.status || '').trim());
+}
+
+export function utilityPayeeCodes(bill) {
+    const codes = [];
+    const header = String(bill?.payByEmployeeId || '').trim();
+    if (header) codes.push(header);
+    for (const line of bill?.zohoLineItems || []) {
+        const code = String(line?.payByEmployeeId || '').trim();
+        if (code) codes.push(code);
+    }
+    return codes;
+}
+
+/** Unpaid employee excess on this salary month. Pending bills are a separate blocker. */
+export function utilityExcessForMonth(bill, monthKey) {
+    if (!bill || utilityBillPending(bill)) return false;
+    const status = String(bill.status || '').trim();
+    if (!['Approved', 'Paid'].includes(status)) return false;
+    if (String(bill.paymentBy || '').toLowerCase() === 'company') return false;
+    const excess = Number(bill.employeeDiffAmount);
+    if (!(excess > 0.009)) return false;
+    const target = monthKeyOf(monthKey);
+    return Boolean(target) && monthKeyOf(bill.billMonth) === target;
+}
+
+export function partyBalanceDueInMonth(expense, monthKey) {
+    if (!expense || expense.kind !== 'balance') return false;
+    if (String(expense.status || '') === 'Paid') return false;
+    const target = monthKeyOf(monthKey);
+    if (!target) return false;
+    if (monthKeyOf(expense.billMonth) === target) return true;
+    return (expense.installments || []).some(
+        (row) => monthKeyOf(row?.monthKey) === target && String(row?.status || '') !== 'Paid',
+    );
+}
+
+function refId(value) {
+    if (value == null || value === '') return '';
+    if (typeof value === 'object') {
+        if (value._id) return String(value._id);
+        if (typeof value.toHexString === 'function') return value.toHexString();
+    }
+    return String(value);
+}
+
+/**
+ * Assignment still waiting to be accepted, or a return / transfer still open.
+ * `employeeMongoId` is either the person it is pending on, or the person who sent it.
+ */
+export function assetPayrollInvolvement(asset, employeeMongoId) {
+    const emp = String(employeeMongoId || '').trim();
+    if (!asset || !emp) return null;
+    const assignedTo = refId(asset.assignedTo);
+    const assignedBy = refId(asset.assignedBy);
+    const actionBy = refId(asset.actionRequiredBy);
+    const requestedBy = refId(asset.pendingActionDetails?.requestedBy);
+    const accepting = String(asset.acceptanceStatus || '') === 'Pending' && Boolean(assignedTo);
+    const action = String(asset.pendingAction || '').trim();
+    const returning = ASSET_RETURN_ACTIONS.has(action);
+    const onHim = emp === assignedTo || (Boolean(actionBy) && emp === actionBy);
+    const sentByHim = emp === assignedBy || emp === requestedBy;
+    if (!accepting && !returning) return null;
+    if (!onHim && !sentByHim) return null;
+
+    if (returning && onHim) {
+        return {
+            title: action === 'Asset Transfer' ? 'Asset transfer pending' : 'Asset return pending',
+            assigneeMongoId: actionBy || emp,
+            responsibleRole: !actionBy || actionBy === emp ? 'Employee' : 'Approver',
+            onSubject: !actionBy || actionBy === emp,
+        };
+    }
+    if (returning && sentByHim) {
+        return {
+            title: action === 'Asset Transfer' ? 'Asset transfer sent' : 'Asset return sent',
+            assigneeMongoId: actionBy || assignedTo,
+            responsibleRole: 'Approver',
+            onSubject: false,
+        };
+    }
+    if (accepting && emp === assignedTo) {
+        return {
+            title: 'Asset assignment pending',
+            assigneeMongoId: emp,
+            responsibleRole: 'Employee',
+            onSubject: true,
+        };
+    }
+    if (accepting && sentByHim) {
+        return {
+            title: 'Asset assignment sent',
+            assigneeMongoId: actionBy || assignedTo,
+            responsibleRole: 'Employee',
+            onSubject: false,
+        };
+    }
+    return null;
+}
+
+export function assetTaskPath(asset) {
+    const id = String(asset?._id || '').trim();
+    if (!id) return '/HRM/Asset';
+    const vehicle = String(asset.plateNumber || asset.vehicleCode || '').trim();
+    const base = vehicle ? `/HRM/Asset/Vehicle/details/${id}` : `/HRM/Asset/details/${id}`;
+    return `${base}?tab=document`;
+}
+
+export function utilityBillPath(bill) {
+    const entryId = String(bill?.entryId || '').trim();
+    const billId = String(bill?._id || '').trim();
+    if (!entryId) return '/HRM/Asset/UtilityBills';
+    const base = `/HRM/Asset/UtilityBills/details/${encodeURIComponent(entryId)}`;
+    return billId ? `${base}?billId=${encodeURIComponent(billId)}` : base;
+}
+
+export function utilityPendingRole(bill) {
+    const role = String(bill?.pendingWithRole || '').trim().toLowerCase();
+    if (role === 'accounts') return 'Accounts';
+    if (role === 'hr') return 'HR';
+    const status = String(bill?.status || '');
+    if (/account/i.test(status)) return 'Accounts';
+    if (/hr/i.test(status)) return 'HR';
+    return 'Approver';
+}

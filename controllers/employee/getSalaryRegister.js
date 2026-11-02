@@ -10,9 +10,35 @@ import PayrollSettings from '../../models/PayrollSettings.js';
 import Company from '../../models/Company.js';
 import Fine from '../../models/Fine.js';
 import Loan from '../../models/Loan.js';
+import AssetItem from '../../models/AssetItem.js';
+import UtilityBillPayment from '../../models/UtilityBillPayment.js';
+import UtilityEntry from '../../models/UtilityEntry.js';
+import PartyExpense from '../../models/PartyExpense.js';
 import EmployeeHubRequest from '../../models/EmployeeHubRequest.js';
+import AttendanceChangeRequest from '../../models/AttendanceChangeRequest.js';
 import DashboardAction from '../../models/DashboardAction.js';
 import User from '../../models/User.js';
+import { ATTENDANCE_CHANGE_OPEN_STAGES } from '../../utils/attendanceChangeApproval.js';
+import { buildSalaryPreparationPending } from '../../utils/salaryPreparationPending.js';
+import { leaveDashboardRequestObjectId } from '../../utils/notifyLeaveDashboardRequest.js';
+import {
+    PAYROLL_FINE_QUERY_STATUSES,
+    PAYROLL_LOAN_QUERY_STATUSES,
+    assetPayrollInvolvement,
+    assetTaskPath,
+    fineBlocksPayrollReady,
+    finePayrollRole,
+    finePayrollTitle,
+    loanBlocksPayrollReady,
+    loanPayrollRole,
+    loanPayrollTitle,
+    partyBalanceDueInMonth,
+    utilityBillPath,
+    utilityBillPending,
+    utilityExcessForMonth,
+    utilityPayeeCodes,
+    utilityPendingRole,
+} from '../../utils/payrollReadyRules.js';
 import { unsettledCompOffMessage } from '../../utils/compOffSettlement.js';
 import { getDepartmentHOD } from '../../utils/getDepartmentHOD.js';
 import { getManagementHOD } from '../../utils/getManagementHOD.js';
@@ -37,6 +63,7 @@ import {
     resolveSalaryProcessingStartDate,
 } from '../../utils/leaveSalaryVisibility.js';
 import { resolveEmployeeFinePayableAmount } from '../../utils/finePayableAmount.js';
+import { collectSalarySlipPayrollFigures } from '../../utils/buildSalarySlipPayload.js';
 import { buildLoanInstallments } from '../../utils/upsertLoanPartyExpenseFromPayment.js';
 import {
     getScheduledEmailTimeZone,
@@ -255,19 +282,6 @@ function titleCaseLocation(key) {
     return String(key || '')
         .replace(/-/g, ' ')
         .replace(/\b\w/g, (c) => c.toUpperCase()) || 'Office';
-}
-
-const PENDING_FINANCE_STATUSES = ['Pending', 'Pending HR', 'Pending Accounts', 'Pending Authorization'];
-const ATTENDANCE_CORRECTION_KINDS = new Set(['yellow', 'future_late', 'future_early']);
-const LEAVE_REQUEST_KINDS = new Set(['leave', 'future_leave', 'future_annual']);
-
-function pendingRequestCategory(kind, requestedStatusKey) {
-    const status = String(requestedStatusKey || '').trim().toLowerCase();
-    const k = String(kind || '').trim().toLowerCase();
-    if (status === 'compoff_leave' || k === 'compoff' || k === 'compoff_leave') return 'compoff';
-    if (ATTENDANCE_CORRECTION_KINDS.has(k)) return 'attendance';
-    if (LEAVE_REQUEST_KINDS.has(k)) return 'leave';
-    return 'leave';
 }
 
 function monthDateRange(ym) {
@@ -522,46 +536,68 @@ async function buildGroupPendingRequests(people, monthKey) {
     const objectIds = rows.map((emp) => emp._id).filter(Boolean);
     const codes = rows.map((emp) => String(emp.employeeId || '').trim()).filter(Boolean);
 
-    const dateFilter = range
+    const monthWindow = range
         ? {
               $or: [
                   { date: { $gte: range.from, $lte: range.to } },
                   { leaveRequestFromDate: { $gte: range.from, $lte: range.to } },
+                  { leaveRequestToDate: { $gte: range.from, $lte: range.to } },
+                  { leaveRequestFromDate: { $lte: range.from }, leaveRequestToDate: { $gte: range.to } },
               ],
           }
-        : {};
+        : null;
 
-    const [attendanceRows, loans, fines, hubRows] = await Promise.all([
+    const [attendanceRows, changeRows, loans, fines, hubRows, assets, utilityBills, utilityEntries, utilityBalances] =
+        await Promise.all([
         mongoIds.length
             ? Attendance.find({
                   employeeMongoId: { $in: mongoIds },
-                  leaveRequestStatus: 'pending',
-                  ...dateFilter,
+                  ...(monthWindow ? { $and: [monthWindow] } : {}),
+                  $or: [
+                      { leaveRequestStatus: 'pending' },
+                      { approvalStatus: 'pending' },
+                      { hourAdjustStatus: 'pending' },
+                      { flexibleOtStatus: 'pending' },
+                  ],
               })
                   .select(
-                      '_id employeeMongoId employeeId employeeName date leaveRequestKind requestedStatusKey requestedStatusLabel leaveRequestGroupId leaveRequestFromDate leaveRequestToDate createdAt',
+                      '_id employeeMongoId employeeId employeeName date leaveRequestKind requestedStatusKey requestedStatusLabel leaveRequestGroupId leaveRequestFromDate leaveRequestToDate leaveRequestedAt leaveApprovalStage approvalStatus hourAdjustStatus hoursApproved flexibleOtStatus flexibleOtApprovedHours createdAt',
                   )
                   .lean()
                   .maxTimeMS(12000)
+            : [],
+        mongoIds.length
+            ? AttendanceChangeRequest.find({
+                  employeeMongoId: { $in: mongoIds },
+                  stage: { $in: ATTENDANCE_CHANGE_OPEN_STAGES },
+                  ...(range ? { date: { $gte: range.from, $lte: range.to } } : {}),
+              })
+                  .select(
+                      'date employeeMongoId stage action proposed previous requestedByName reporteeId reporteeName hrId hrName staffType createdAt',
+                  )
+                  .lean()
+                  .maxTimeMS(8000)
             : [],
         codes.length
             ? Loan.find({
                   employeeId: { $in: codes },
                   $or: [
-                      { status: { $in: PENDING_FINANCE_STATUSES } },
-                      { approvalStatus: { $in: PENDING_FINANCE_STATUSES } },
+                      { status: { $in: PAYROLL_LOAN_QUERY_STATUSES } },
+                      { approvalStatus: { $in: PAYROLL_LOAN_QUERY_STATUSES } },
                   ],
               })
-                  .select('_id employeeId type status approvalStatus amount workflow createdAt updatedAt')
+                  .select('_id employeeId type status approvalStatus amount paidAmount workflow submittedTo createdAt updatedAt')
                   .lean()
                   .maxTimeMS(8000)
             : [],
         codes.length
             ? Fine.find({
-                  fineStatus: { $in: PENDING_FINANCE_STATUSES },
+                  fineStatus: { $in: PAYROLL_FINE_QUERY_STATUSES },
                   'assignedEmployees.employeeId': { $in: codes },
               })
-                  .select('_id fineId fineStatus fineType assignedEmployees workflow createdAt updatedAt')
+                  .select(
+                      '_id fineId fineStatus fineType assignedEmployees workflow accountsPaymentPath zohoBillId zohoBillNumber zohoJournalId zohoJournalNumber vendorBillStatus createdAt updatedAt',
+                  )
                   .lean()
                   .maxTimeMS(8000)
             : [],
@@ -575,10 +611,70 @@ async function buildGroupPendingRequests(people, monthKey) {
                   .maxTimeMS(8000)
                   .catch(() => [])
             : [],
+        objectIds.length
+            ? AssetItem.find({
+                  $or: [
+                      { assignedTo: { $in: objectIds }, acceptanceStatus: 'Pending' },
+                      {
+                          assignedBy: { $in: objectIds },
+                          acceptanceStatus: 'Pending',
+                          assignedTo: { $ne: null },
+                      },
+                      {
+                          pendingAction: { $in: ['Return Asset', 'Asset Transfer'] },
+                          $or: [
+                              { assignedTo: { $in: objectIds } },
+                              { actionRequiredBy: { $in: objectIds } },
+                              { 'pendingActionDetails.requestedBy': { $in: [...objectIds, ...mongoIds] } },
+                          ],
+                      },
+                  ],
+              })
+                  .select(
+                      '_id assetId name plateNumber vehicleCode pendingAction acceptanceStatus assignedTo assignedBy actionRequiredBy pendingActionDetails',
+                  )
+                  .lean()
+                  .maxTimeMS(8000)
+            : [],
+        codes.length
+            ? UtilityBillPayment.find({
+                  status: { $in: ['Pending Accounts', 'Pending HR', 'Approved', 'Paid'] },
+                  $or: [
+                      { payByEmployeeId: { $in: codes } },
+                      { 'zohoLineItems.payByEmployeeId': { $in: codes } },
+                  ],
+              })
+                  .select(
+                      '_id entryId utilityType billMonth status paymentBy payByEmployeeId pendingWithName pendingWithRole employeeDiffAmount zohoLineItems createdAt updatedAt',
+                  )
+                  .lean()
+                  .maxTimeMS(8000)
+            : [],
+        codes.length
+            ? UtilityEntry.find({
+                  assignedToType: 'Employee',
+                  assignedToId: { $in: codes },
+                  pendingStatusChange: { $ne: null },
+              })
+                  .select('_id type assignedToId pendingStatusChange updatedAt createdAt')
+                  .lean()
+                  .maxTimeMS(8000)
+            : [],
+        codes.length
+            ? PartyExpense.find({
+                  partyType: 'employee',
+                  kind: 'balance',
+                  employeeId: { $in: codes },
+                  status: 'Not Paid',
+              })
+                  .select('employeeId status kind amount billMonth installments utilityBillId utilityType accountNo')
+                  .lean()
+                  .maxTimeMS(8000)
+            : [],
     ]);
 
     const items = [];
-    const seenLeaveGroups = new Set();
+    const seenUtilityBills = new Set();
 
     const pushItem = (emp, payload) => {
         if (!emp) return;
@@ -587,58 +683,166 @@ async function buildGroupPendingRequests(people, monthKey) {
             mongoId: String(emp._id),
             name: `${emp.firstName || ''} ${emp.lastName || ''}`.trim() || emp.employeeId,
             staffType: normalizeStaffTypeKey(emp.staffType),
+            monthKey: monthKey || '',
             ...payload,
         });
     };
 
+    const attendanceByEmp = new Map();
     for (const row of attendanceRows || []) {
-        const emp =
-            empByMongo.get(String(row.employeeMongoId || '')) ||
-            getByEmployeeCode(empByCode, row.employeeId);
-        const category = pendingRequestCategory(row.leaveRequestKind, row.requestedStatusKey);
-        if (category === 'leave' || category === 'compoff') {
-            const groupKey = String(row.leaveRequestGroupId || row._id);
-            if (seenLeaveGroups.has(groupKey)) continue;
-            seenLeaveGroups.add(groupKey);
-        }
-        const label =
-            String(row.requestedStatusLabel || '').trim() ||
-            (category === 'attendance' ? 'Attendance correction' : category === 'compoff' ? 'Comp-off request' : 'Leave request');
-        pushItem(emp, {
-            id: `att-${row._id}`,
-            requestId: String(row._id),
-            category,
-            title: label,
-            detail: String(row.leaveRequestFromDate || row.date || ''),
-            dateKey: String(row.leaveRequestFromDate || row.date || ''),
-            notifiedAt: row.createdAt || row.leaveRequestFromDate || row.date,
+        const key = String(row.employeeMongoId || '');
+        if (!key) continue;
+        if (!attendanceByEmp.has(key)) attendanceByEmp.set(key, []);
+        attendanceByEmp.get(key).push(row);
+    }
+    const changesByEmp = new Map();
+    for (const row of changeRows || []) {
+        const key = String(row.employeeMongoId || '');
+        if (!key) continue;
+        if (!changesByEmp.has(key)) changesByEmp.set(key, []);
+        changesByEmp.get(key).push(row);
+    }
+
+    for (const mongoKey of new Set([...attendanceByEmp.keys(), ...changesByEmp.keys()])) {
+        const emp = empByMongo.get(mongoKey);
+        if (!emp) continue;
+        const empRows = attendanceByEmp.get(mongoKey) || [];
+        const empChanges = changesByEmp.get(mongoKey) || [];
+        const prep = buildSalaryPreparationPending({
+            attendanceRows: empRows,
+            changeRows: empChanges,
+            staffType: normalizeStaffTypeKey(emp.staffType),
+            yearFrom: range?.from || '',
+            yearTo: range?.to || '',
+            todayKey: range?.to || '',
         });
+        const leaveByGroup = new Map();
+        for (const row of empRows) {
+            if (String(row.leaveRequestStatus || '') !== 'pending') continue;
+            const groupId =
+                String(row.leaveRequestGroupId || '').trim() ||
+                `${row.date}-${String(row.leaveRequestKind || '')}`;
+            if (!leaveByGroup.has(groupId)) leaveByGroup.set(groupId, row);
+        }
+        const changeById = new Map(empChanges.map((row) => [String(row._id), row]));
+
+        for (const item of prep) {
+            const appliedKey = String(item.appliedKey || '');
+            let category = 'attendance';
+            if (appliedKey === 'compoff_leave') category = 'compoff';
+            else if (appliedKey === 'flexible_ot') category = 'overtime';
+            else if (['on_leave', 'sick_leave', 'authorized_leave', 'unauthorized_leave'].includes(appliedKey)) {
+                category = 'leave';
+            }
+            let responsibleRole = 'Approver';
+            let assigneeMongoId = '';
+            let responsibleId = '';
+            let responsibleName = '';
+            let requestId = '';
+            if (String(item.id || '').startsWith('leave-')) {
+                const source = leaveByGroup.get(String(item.id).slice(6));
+                const stage = String(source?.leaveApprovalStage || '');
+                requestId = source
+                    ? String(leaveDashboardRequestObjectId(source.leaveRequestGroupId, source._id))
+                    : '';
+                if (stage === 'pending_hr') responsibleRole = 'HR';
+                else {
+                    responsibleRole = 'Manager';
+                    assigneeMongoId = String(emp.primaryReportee || '');
+                }
+            } else if (String(item.id || '').startsWith('change-')) {
+                const source = changeById.get(String(item.id).slice(7));
+                requestId = String(source?._id || '');
+                const stage = String(source?.stage || '');
+                if (stage === 'pending_hr') {
+                    responsibleRole = 'HR';
+                    responsibleName = String(source?.hrName || '').trim();
+                    const hrId = String(source?.hrId || '').trim();
+                    if (mongoose.isValidObjectId(hrId)) assigneeMongoId = hrId;
+                    else responsibleId = hrId;
+                } else if (stage === 'pending_requester') {
+                    responsibleRole = 'Employee';
+                    responsibleId = String(emp.employeeId || '');
+                    responsibleName = `${emp.firstName || ''} ${emp.lastName || ''}`.trim();
+                } else {
+                    responsibleRole = 'Manager';
+                    responsibleName = String(source?.reporteeName || '').trim();
+                    const reporteeId = String(source?.reporteeId || '').trim();
+                    if (mongoose.isValidObjectId(reporteeId)) assigneeMongoId = reporteeId;
+                    else responsibleId = reporteeId || String(emp.primaryReportee || '');
+                    if (!assigneeMongoId && !responsibleId) assigneeMongoId = String(emp.primaryReportee || '');
+                }
+            } else if (appliedKey === 'hour_adjust' || appliedKey === 'flexible_ot') {
+                responsibleRole = 'HR';
+            }
+            pushItem(emp, {
+                id: `att-${item.id}`,
+                requestId,
+                category,
+                title: item.title || 'Attendance request',
+                detail: item.subtitle || item.fromDate || '',
+                dateKey: item.fromDate || item.dateKey || '',
+                path: item.href || '',
+                notifiedAt: item.dateKey || item.fromDate || '',
+                assigneeMongoId,
+                responsibleId,
+                responsibleName,
+                responsibleRole,
+            });
+        }
+
+        for (const row of empRows) {
+            if (String(row.approvalStatus || '') !== 'pending') continue;
+            const date = String(row.date || '').slice(0, 10);
+            if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) continue;
+            if (range && (date < range.from || date > range.to)) continue;
+            const covered = prep.some((item) => {
+                const from = String(item.fromDate || '');
+                const to = String(item.toDate || from);
+                return from && date >= from && date <= to;
+            });
+            if (covered) continue;
+            const params = new URLSearchParams({ date, staffType: normalizeStaffTypeKey(emp.staffType) || 'office' });
+            params.set('blinkEmployee', String(emp._id));
+            pushItem(emp, {
+                id: `att-approval-${row._id}`,
+                requestId: String(row._id),
+                category: 'attendance',
+                title: 'Attendance approval',
+                detail: date,
+                dateKey: date,
+                path: `/HRM/Attendance/mark?${params.toString()}`,
+                notifiedAt: row.createdAt || date,
+                responsibleRole: 'HR',
+            });
+        }
     }
 
     for (const loan of loans || []) {
+        if (!loanBlocksPayrollReady(loan)) continue;
         const emp = getByEmployeeCode(empByCode, loan.employeeId);
-        const kind = String(loan.type || 'Loan');
         const pendingStep = (loan.workflow || []).find((step) => step.status === 'Pending');
         pushItem(emp, {
             id: `loan-${loan._id}`,
             requestId: String(loan._id),
             category: 'finance',
-            title: `${kind} approval`,
+            title: loanPayrollTitle(loan),
             detail: String(loan.approvalStatus || loan.status || 'Pending'),
             dateKey: '',
+            path: `/HRM/LoanAndAdvance/${loan._id}`,
             notifiedAt: pendingStep?.assignedAt || loan.updatedAt || loan.createdAt,
             assigneeMongoId: pendingStep?.assignedTo || loan.submittedTo || '',
-            responsibleRole: roleForPendingStatus(loan.approvalStatus || loan.status) || 'HR',
+            responsibleRole: loanPayrollRole(loan),
         });
     }
 
     for (const fine of fines || []) {
+        if (!fineBlocksPayrollReady(fine)) continue;
         const assignees = Array.isArray(fine.assignedEmployees) ? fine.assignedEmployees : [];
         const matched = assignees
             .map((row) => getByEmployeeCode(empByCode, row?.employeeId))
             .filter(Boolean);
-        const targets = matched.length ? matched : [];
-        for (const emp of targets) {
+        for (const emp of matched) {
             const pendingStep = (fine.workflow || []).find((step) => step.status === 'Pending');
             pushItem(emp, {
                 id: `fine-${fine._id}-${emp.employeeId}`,
@@ -646,15 +850,112 @@ async function buildGroupPendingRequests(people, monthKey) {
                 fineId: String(fine.fineId || '').trim(),
                 isGroup: assignees.filter((row) => String(row?.employeeId || '').trim()).length > 1,
                 category: 'finance',
-                title: 'Fine approval',
+                title: finePayrollTitle(fine),
                 detail: String(fine.fineStatus || 'Pending'),
                 dateKey: '',
-                path: '/HRM/Fine',
+                path: `/HRM/Fine/${fine._id}`,
                 notifiedAt: pendingStep?.assignedAt || fine.updatedAt || fine.createdAt,
                 assigneeMongoId: pendingStep?.assignedTo || '',
-                responsibleRole: roleForPendingStatus(fine.fineStatus) || 'HR',
+                responsibleRole: finePayrollRole(fine),
             });
         }
+    }
+
+    for (const asset of assets || []) {
+        const involved = [
+            asset.assignedTo,
+            asset.assignedBy,
+            asset.actionRequiredBy,
+            asset.pendingActionDetails?.requestedBy,
+        ];
+        const seen = new Set();
+        for (const ref of involved) {
+            const id = ref && typeof ref === 'object' ? String(ref._id || ref) : String(ref || '');
+            if (!id || seen.has(id)) continue;
+            seen.add(id);
+            const hit = assetPayrollInvolvement(asset, id);
+            const emp = empByMongo.get(id);
+            if (!hit || !emp) continue;
+            const assetLabel = [asset.assetId, asset.name].filter(Boolean).join(' · ');
+            const onSubject = Boolean(hit.onSubject);
+            pushItem(emp, {
+                id: `asset-${asset._id}-${emp.employeeId}`,
+                requestId: String(asset._id),
+                category: 'asset',
+                title: hit.title,
+                detail: assetLabel,
+                dateKey: '',
+                path: assetTaskPath(asset),
+                notifiedAt: asset.pendingActionDetails?.requestedAt || asset.updatedAt || '',
+                assigneeMongoId: onSubject ? '' : hit.assigneeMongoId || '',
+                responsibleId: onSubject ? String(emp.employeeId || '') : '',
+                responsibleName: onSubject ? `${emp.firstName || ''} ${emp.lastName || ''}`.trim() : '',
+                responsibleRole: hit.responsibleRole || 'Approver',
+            });
+        }
+    }
+
+    for (const bill of utilityBills || []) {
+        const pending = utilityBillPending(bill);
+        const excess = utilityExcessForMonth(bill, monthKey);
+        if (!pending && !excess) continue;
+        const title = pending ? 'Utility bill pending' : 'Utility excess';
+        const role = pending ? utilityPendingRole(bill) : 'Accounts';
+        const payeeNames = new Set();
+        for (const code of utilityPayeeCodes(bill)) {
+            const emp = getByEmployeeCode(empByCode, code);
+            if (!emp || payeeNames.has(String(emp.employeeId))) continue;
+            if (!pending && excess && employeeCodeKey(code) !== employeeCodeKey(bill.payByEmployeeId)) continue;
+            payeeNames.add(String(emp.employeeId));
+            seenUtilityBills.add(`${employeeCodeKey(emp.employeeId)}|${String(bill._id)}`);
+            pushItem(emp, {
+                id: `util-${bill._id}-${emp.employeeId}`,
+                requestId: String(bill._id),
+                category: 'finance',
+                title,
+                detail: [bill.utilityType, bill.billMonth].filter(Boolean).join(' · '),
+                dateKey: '',
+                path: utilityBillPath(bill),
+                notifiedAt: bill.updatedAt || bill.createdAt,
+                responsibleName: pending ? String(bill.pendingWithName || '').trim() : '',
+                responsibleRole: role,
+            });
+        }
+    }
+
+    for (const entry of utilityEntries || []) {
+        if (!entry?.pendingStatusChange) continue;
+        const emp = getByEmployeeCode(empByCode, entry.assignedToId);
+        pushItem(emp, {
+            id: `util-entry-${entry._id}`,
+            requestId: String(entry._id),
+            category: 'finance',
+            title: 'Utility account pending',
+            detail: String(entry.type || ''),
+            dateKey: '',
+            path: `/HRM/Asset/UtilityBills/details/${encodeURIComponent(entry._id)}`,
+            notifiedAt: entry.updatedAt || entry.createdAt,
+            responsibleRole: 'Approver',
+        });
+    }
+
+    for (const expense of utilityBalances || []) {
+        if (!partyBalanceDueInMonth(expense, monthKey)) continue;
+        const emp = getByEmployeeCode(empByCode, expense.employeeId);
+        if (!emp) continue;
+        const billId = String(expense.utilityBillId || '').trim();
+        if (billId && seenUtilityBills.has(`${employeeCodeKey(emp.employeeId)}|${billId}`)) continue;
+        pushItem(emp, {
+            id: `util-balance-${expense._id}-${emp.employeeId}`,
+            requestId: billId || String(expense._id),
+            category: 'finance',
+            title: 'Utility excess',
+            detail: [expense.utilityType, expense.billMonth || monthKey].filter(Boolean).join(' · '),
+            dateKey: '',
+            path: '/HRM/Asset/UtilityBills',
+            notifiedAt: '',
+            responsibleRole: 'Accounts',
+        });
     }
 
     for (const hub of hubRows || []) {
@@ -675,8 +976,11 @@ async function buildGroupPendingRequests(people, monthKey) {
             title = 'Utility bill request';
         } else if (kind === 'fine') {
             title = 'Fine request';
+        } else if (kind === 'assets') {
+            category = 'asset';
+            title = 'Asset request';
         } else if (kind === 'salary') {
-            title = 'Salary request';
+            title = 'Early salary request';
         }
         pushItem(emp, {
             id: `hub-${hub._id}`,
@@ -685,6 +989,7 @@ async function buildGroupPendingRequests(people, monthKey) {
             title,
             detail: 'Pending approval',
             dateKey: '',
+            path: `/dashboard?hubRequestId=${encodeURIComponent(String(hub._id))}`,
             notifiedAt: hub.createdAt,
             responsibleId: String(hub.assignedToEmpId || '').trim(),
             assigneeMongoId: hub.assignedTo || '',
@@ -720,7 +1025,7 @@ async function buildEnrollmentOverview(enrollments, monthKey) {
             status: { $ne: 'Left User' },
             ...REAL_EMPLOYEE_MONGO_FILTER,
         })
-            .select('employeeId company lastName firstName staffType designation status profileStatus')
+            .select('employeeId company lastName firstName staffType designation status profileStatus primaryReportee')
             .lean()
             .maxTimeMS(12000),
         listActiveWorkLocations().catch(() => []),
@@ -1777,6 +2082,41 @@ export const getSalaryRegister = async (req, res) => {
             };
         });
 
+        if (detailYm && employeesForMonth.length) {
+            const slipFigures = await collectSalarySlipPayrollFigures(
+                employeesForMonth.map((row) => row.employeeId),
+                detailYm,
+            );
+            let appliedSlipFigures = 0;
+            for (const row of employeesForMonth) {
+                const figures = slipFigures.get(employeeCodeKey(row.employeeId));
+                if (!figures) continue;
+                appliedSlipFigures += 1;
+                if (figures.monthlySalary > 0) row.monthlySalary = figures.monthlySalary;
+                if (figures.basicSalary > 0) row.basicSalary = figures.basicSalary;
+                row.deduction = figures.deduction;
+                row.extra = figures.extra;
+                row.ot = figures.ot;
+                row.actualSalary = figures.actualSalary;
+            }
+            const monthRow = months.find((row) => row.monthKey === detailYm);
+            if (monthRow && appliedSlipFigures > 0) {
+                const summed = employeesForMonth.reduce((total, row) => {
+                    total.monthlySalary += Number(row.monthlySalary) || 0;
+                    total.basicSalary += Number(row.basicSalary) || 0;
+                    total.ot += Number(row.ot) || 0;
+                    total.deduction += Number(row.deduction) || 0;
+                    total.actualSalary += Number(row.actualSalary) || 0;
+                    return total;
+                }, { monthlySalary: 0, basicSalary: 0, ot: 0, deduction: 0, actualSalary: 0 });
+                monthRow.monthlySalary = roundMoney(summed.monthlySalary);
+                monthRow.basicSalary = roundMoney(summed.basicSalary);
+                monthRow.ot = roundMoney(summed.ot);
+                monthRow.deduction = roundMoney(summed.deduction);
+                monthRow.actualSalary = roundMoney(summed.actualSalary);
+            }
+        }
+
         let visibleMonths = months.filter((row) => !hiddenMonths.has(row.monthKey));
         if (registerFilters.year) {
             visibleMonths = visibleMonths.filter((row) => String(row.monthKey || '').startsWith(registerFilters.year));
@@ -1908,14 +2248,19 @@ function escapeHtml(value) {
 }
 
 function payrollBlockerPath(item) {
+    const explicit = String(item?.path || '').trim();
+    if (explicit.startsWith('/')) return explicit;
     const id = encodeURIComponent(String(item?.employeeId || '').trim());
+    const mongoId = String(item?.mongoId || '').trim();
     const key = String(item?.id || '');
     const category = String(item?.category || '');
     const title = String(item?.title || '');
     if (key.startsWith('fine-') || (/fine/i.test(title) && !key.startsWith('hub-') && !key.startsWith('loan-'))) {
+        const fineId = String(item?.requestId || '').trim();
+        if (fineId && mongoose.isValidObjectId(fineId)) return `/HRM/Fine/${fineId}`;
         const params = new URLSearchParams({ status: 'Pending' });
         params.set('tab', item?.isGroup ? 'group' : 'individual');
-        const focus = String(item?.fineId || item?.requestId || '').trim();
+        const focus = String(item?.fineId || fineId).trim();
         if (focus) params.set('focusFine', focus);
         return `/HRM/Fine?${params.toString()}`;
     }
@@ -1923,20 +2268,31 @@ function payrollBlockerPath(item) {
         const hubId = key.slice(4);
         return hubId ? `/dashboard?hubRequestId=${encodeURIComponent(hubId)}` : '/dashboard';
     }
-    if (key.startsWith('loan-') || category === 'finance') return '/HRM/LoanAndAdvance';
+    if (key.startsWith('loan-')) {
+        const loanId = key.slice(5);
+        return loanId ? `/HRM/LoanAndAdvance/${loanId}` : '/HRM/LoanAndAdvance';
+    }
+    if (key.startsWith('asset-') || category === 'asset') return '/HRM/Asset';
+    if (key.startsWith('util-')) return '/HRM/Asset/UtilityBills';
+    if (category === 'finance') return '/HRM/LoanAndAdvance';
     if (category === 'attendance' || category === 'leave' || category === 'overtime' || category === 'compoff') {
+        if (mongoId) {
+            const month = String(item?.monthKey || '').trim();
+            return `/HRM/Leave/${mongoId}${month ? `?month=${encodeURIComponent(month)}` : ''}`;
+        }
         return id ? `/HRM/Leave?employee=${id}` : '/HRM/Leave';
     }
     return id ? `/HRM/Salary/enroll/${id}` : '/HRM/Salary';
 }
 
-const BLOCKER_CATEGORIES = new Set(['attendance', 'leave', 'finance', 'overtime', 'compoff']);
+const BLOCKER_CATEGORIES = new Set(['attendance', 'leave', 'finance', 'overtime', 'compoff', 'asset']);
 const BLOCKER_CATEGORY_LABEL = {
     attendance: 'Attendance',
     leave: 'Leave',
     finance: 'Finance',
     overtime: 'Overtime',
     compoff: 'Comp-off',
+    asset: 'Asset',
 };
 
 function employeeReminderEmail(emp) {
@@ -2039,7 +2395,7 @@ export const sendPayrollBlockerReminders = async (req, res) => {
                 profileStatus: 'active',
                 ...REAL_EMPLOYEE_MONGO_FILTER,
             })
-                .select('employeeId firstName lastName staffType email companyEmail')
+                .select('employeeId firstName lastName staffType email companyEmail primaryReportee')
                 .lean()
                 .maxTimeMS(12000);
 

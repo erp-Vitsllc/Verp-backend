@@ -1,15 +1,17 @@
 import User from "../../models/User.js";
 import EmployeeBasic from "../../models/EmployeeBasic.js";
+import { isEligibleReportee } from "../../utils/reporteeEligibility.js";
 
-// Returns employees that also have a linked user account.
+// Primary and secondary reportee lists: active profile, Web access, company email.
 export const getReporteeOptions = async (req, res) => {
     try {
         const { excludeEmployeeId } = req.query || {};
 
         const users = await User.find({
             employeeId: { $ne: null },
+            status: "Active",
         })
-            .select("employeeId status")
+            .select("employeeId")
             .lean();
 
         const employeeIdSet = new Set(
@@ -30,17 +32,25 @@ export const getReporteeOptions = async (req, res) => {
         const employees = await EmployeeBasic.find({
             employeeId: { $in: employeeIds },
             status: { $ne: "Left User" },
+            "loginThrough.web": true,
+            companyEmail: { $regex: /\S/ },
+            $or: [
+                { profileStatus: "active" },
+                { profileApprovalStatus: "active" },
+                { "profileWorkflow.status": "active" },
+            ],
         })
-            .select("_id employeeId firstName lastName designation companyEmail workEmail email")
+            .select("_id employeeId firstName lastName designation companyEmail profileStatus profileApprovalStatus profileWorkflow status loginThrough")
             .lean();
 
         const options = employees
+            .filter((emp) => isEligibleReportee(emp))
             .map((emp) => {
                 const fullName = `${emp.firstName || ""} ${emp.lastName || ""}`.trim() || emp.employeeId;
                 return {
                     value: String(emp._id),
                     label: `${fullName} (${emp.designation || "No designation"})`,
-                    email: emp.companyEmail || emp.workEmail || emp.email || "",
+                    email: String(emp.companyEmail || "").trim(),
                     sortKey: fullName.toLowerCase(),
                 };
             })

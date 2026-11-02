@@ -18,7 +18,7 @@ export const INACTIVE_LEAVE = new Set(['cancelled', 'rejected', 'pending', 'draf
 export const LOCKED_STATUSES = new Set(['locked', 'created']);
 
 export const MESSAGES = {
-    verpAfterJoining: 'VERP salary start date must be after the contract joining date.',
+    verpAfterJoining: 'VERP salary start date cannot be before the contract joining date.',
     leaveOverlap: 'This leave period overlaps with an existing record.',
     leaveOutsidePeriod: 'Leave dates cannot be before the contract joining date.',
     leaveCountRequired: 'Enter a day count for this leave record.',
@@ -145,6 +145,9 @@ export function historicalPeriod(joiningDate, verpStartDate) {
         return { start: joiningDate || '', end: '', calendarDays: 0 };
     }
     const end = addDays(verpStartDate, -1);
+    if (joiningDate.slice(0, 7) === verpStartDate.slice(0, 7)) {
+        return { start: joiningDate, end: '', calendarDays: 0 };
+    }
     return {
         start: joiningDate,
         end,
@@ -154,7 +157,7 @@ export function historicalPeriod(joiningDate, verpStartDate) {
 
 export function validateVerpStart(joiningDate, verpStartDate) {
     if (!isDateKey(verpStartDate)) return 'VERP salary processing start date is required.';
-    if (joiningDate && verpStartDate <= joiningDate) return MESSAGES.verpAfterJoining;
+    if (joiningDate && verpStartDate < joiningDate) return MESSAGES.verpAfterJoining;
     return '';
 }
 
@@ -1391,7 +1394,15 @@ export function buildReadinessItems({
     const items = [
         { key: 'employeeJoining', label: 'Contract joining date available', done: Boolean(joiningDate) },
         { key: 'verpStart', label: 'VERP salary-processing start date entered', done: Boolean(verpStartDate) },
-        { key: 'period', label: 'Historical period calculated', done: Boolean(joiningDate && periodEnd) },
+        {
+            key: 'period',
+            label: 'Historical period calculated',
+            done: Boolean(
+                joiningDate &&
+                    verpStartDate &&
+                    (periodEnd || String(joiningDate).slice(0, 7) === String(verpStartDate).slice(0, 7)),
+            ),
+        },
         { key: 'workingDays', label: 'Historical working days calculated', done: Boolean(workingDaysCalculated) },
         { key: 'leave', label: 'Existing leave history completed', done: Boolean(leaveComplete) },
         { key: 'annual', label: 'Annual leave history completed', done: Boolean(annualComplete) },

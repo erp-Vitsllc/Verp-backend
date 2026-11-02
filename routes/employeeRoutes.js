@@ -220,7 +220,7 @@ import {
     resetSalaryHistoricalEnrollment,
     getSalaryHistoricalAudit,
 } from "../controllers/employee/salaryHistoricalProfileController.js";
-import { downloadSalarySlipPdf, listEmployeeSalarySlipMonths, saveSalarySlipMonth } from "../controllers/employee/downloadSalarySlipPdf.js";
+import { downloadSalarySlipPdf, getSalarySlipPayFigures, listEmployeeSalarySlipMonths, saveSalarySlipMonth } from "../controllers/employee/downloadSalarySlipPdf.js";
 import { getPendingSalaryDashboardInbox } from "../controllers/employee/getPendingSalaryDashboardInbox.js";
 import {
     getMonthSalaryDmf,
@@ -432,6 +432,14 @@ router.get(
         ['hrm_employees_view_salary', 'view'],
     ]),
     listEmployeeSalarySlipMonths,
+);
+router.get(
+    "/salary-enroll/:employeeId/historical/salary-slip-pay",
+    checkAnyModulePermission([
+        ['hrm_salary', 'view'],
+        ['hrm_employees_view_salary', 'view'],
+    ]),
+    getSalarySlipPayFigures,
 );
 router.get(
     "/salary-enroll/:employeeId/historical/salary-slip",

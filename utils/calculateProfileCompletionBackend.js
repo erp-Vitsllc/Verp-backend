@@ -4,7 +4,7 @@ import {
     employeeRequiresBankDetails,
 } from "./employeeRequiresEmiratesId.js";
 import { isEmployeeUaeNationality } from "./employeeUaeNationality.js";
-import { hasCompleteOutsideUaeIdentityDocument } from "./outsideUaeIdentityDocument.js";
+import { outsideUaeProfileIdentitySatisfied } from "./outsideUaeIdentityDocument.js";
 
 const checkField = (val) => {
     if (val === null || val === undefined) return false;
@@ -59,7 +59,7 @@ export const calculateProfileCompletionBackend = (employee = {}) => {
 
     if (String(employee?.workLocation || "").trim().toLowerCase() === "outside_uae") {
         totalFields++;
-        if (hasCompleteOutsideUaeIdentityDocument(employee)) {
+        if (outsideUaeProfileIdentitySatisfied(employee)) {
             completedFields++;
         } else {
             pendingFields.push({ section: "Document", field: "Add document" });

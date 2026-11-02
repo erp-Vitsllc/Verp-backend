@@ -39,6 +39,21 @@ export function processingMonthFromStart(value) {
     return String(value?.fromMonth || '').trim();
 }
 
+/**
+ * When salary processing starts in the contract joining month, live attendance
+ * opens on the stored day (the enrollment day, or the joining date if later).
+ * Any other month still opens on the 1st.
+ */
+export function joiningMonthProcessingStart(verpStartDate, joiningDate) {
+    const verp = String(verpStartDate || '').trim();
+    const joining = String(joiningDate || '').trim();
+    const monthStart = firstOfProcessingMonth(verp);
+    if (!isDateKey(verp) || !isDateKey(joining)) return monthStart;
+    if (verp.slice(0, 7) !== joining.slice(0, 7)) return monthStart;
+    if (verp < joining) return joining;
+    return verp;
+}
+
 /** Attendance always opens on the 1st of the salary processing month. */
 export function firstOfProcessingMonth(value) {
     const month = processingMonthFromStart(value);
@@ -57,7 +72,9 @@ export function daysUntilDateKey(fromKey, toKey) {
 }
 
 export function daysUntilProcessingStart(todayKey, processingStart) {
-    return daysUntilDateKey(todayKey, firstOfProcessingMonth(processingStart));
+    const raw = String(processingStart || '').trim();
+    const start = isDateKey(raw) ? raw : firstOfProcessingMonth(raw);
+    return daysUntilDateKey(todayKey, start);
 }
 
 /** Live attendance is taken from the 1st of the salary processing month. */
@@ -69,10 +86,28 @@ export function isAttendanceDateOpen(dateKey, processingStart) {
 
 /** Map of enrolled employee mongo id → first live attendance date (yyyy-MM-01). */
 export async function loadAttendanceOpenStartByMongoId(employees) {
-    const visibility = await loadEnrolledLeaveVisibilityByMongoId(employees);
+    const list = Array.isArray(employees) ? employees : [];
+    const visibility = await loadEnrolledLeaveVisibilityByMongoId(list);
+    const codes = [...new Set(list.map((emp) => String(emp?.employeeId || '').trim()).filter(Boolean))];
+    const profiles = codes.length
+        ? await SalaryHistoricalProfile.find({ employeeId: { $in: codes } })
+              .select('employeeId contractJoiningDate')
+              .lean()
+              .maxTimeMS(12000)
+        : [];
+    const joinByCode = new Map(
+        (profiles || []).map((row) => [
+            String(row.employeeId || '').trim(),
+            String(row.contractJoiningDate || '').trim(),
+        ]),
+    );
     const starts = new Map();
-    for (const [mongoId, start] of visibility.entries()) {
-        const openFrom = firstOfProcessingMonth(start);
+    for (const emp of list) {
+        const mongoId = String(emp?._id || '');
+        const start = visibility.get(mongoId);
+        if (!start) continue;
+        const joining = joinByCode.get(String(emp?.employeeId || '').trim()) || '';
+        const openFrom = joiningMonthProcessingStart(start, joining) || firstOfProcessingMonth(start);
         if (openFrom) starts.set(mongoId, openFrom);
     }
     return starts;
@@ -104,7 +139,8 @@ export function formatProcessingDateLabel(value) {
 }
 
 export function salaryOpensFromMessage(monthKey, todayKey = '') {
-    const start = firstOfProcessingMonth(monthKey) || String(monthKey || '').trim();
+    const raw = String(monthKey || '').trim();
+    const start = isDateKey(raw) ? raw : firstOfProcessingMonth(raw) || raw;
     const label = formatProcessingDateLabel(start);
     if (!label) return '';
     const days = todayKey ? daysUntilProcessingStart(todayKey, start) : 0;

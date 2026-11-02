@@ -14,10 +14,12 @@ import {
     monthKeyOf,
     SalarySlipError,
     serializeSalarySlipForClient,
+    salarySlipPayrollFigures,
     summarizeSalarySlipListRow,
 } from '../../utils/buildSalarySlipPayload.js';
 import { unsettledCompOffMessage } from '../../utils/compOffSettlement.js';
 import {
+    currentSalaryMonthKey,
     salarySlipMonthAllowed,
     salarySlipMonthRange,
     salaryYearMonth,
@@ -193,6 +195,41 @@ export async function listEmployeeSalarySlipMonths(req, res) {
     } catch (error) {
         console.error('[listEmployeeSalarySlipMonths]', error?.message || error);
         return res.status(500).json({ message: error.message || 'Failed to load salary months.' });
+    }
+}
+
+/**
+ * GET /api/Employee/salary-enroll/:employeeId/historical/salary-slip-pay?month=YYYY-MM
+ * Net, additions, and deductions for one month, including saved slip edits.
+ * The current calendar month is included so the employee page can show the running total.
+ */
+export async function getSalarySlipPayFigures(req, res) {
+    try {
+        const employeeId = String(req.params.employeeId || '').trim();
+        if (!employeeId) {
+            return res.status(400).json({ message: 'Employee is required.' });
+        }
+        if (!(await userCanViewSalarySetup(req))) {
+            return res.status(403).json({ message: 'You do not have permission to open this salary slip.' });
+        }
+        const monthKey = monthKeyOf(req.query.month || req.query.monthKey);
+        if (!monthKey) {
+            return res.status(400).json({ message: 'Salary month is required.' });
+        }
+        const gate = await loadSalarySlipEnrollment(employeeId);
+        const current = currentSalaryMonthKey();
+        const start = salaryYearMonth(gate.fromMonth);
+        if (!gate.enrolled || (start && monthKey < start) || (current && monthKey > current)) {
+            return res.json({ monthKey, figures: null });
+        }
+        const slip = await buildSalarySlipPayload({ employeeId: gate.code || employeeId, monthKey });
+        return res.json({ monthKey, figures: salarySlipPayrollFigures(slip) });
+    } catch (error) {
+        const status = error instanceof SalarySlipError ? error.statusCode : 500;
+        console.error('[getSalarySlipPayFigures]', error?.message || error);
+        return res.status(status).json({
+            message: error.message || 'Failed to load salary figures.',
+        });
     }
 }
 

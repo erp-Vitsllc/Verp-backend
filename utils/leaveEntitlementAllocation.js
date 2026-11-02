@@ -319,6 +319,16 @@ function sum(values) {
     return values.reduce((total, value) => total + (Number(value) || 0), 0);
 }
 
+function applyDayOverrides(leaves, dayOverrides) {
+    if (!dayOverrides || typeof dayOverrides !== 'object') return;
+    for (const leave of leaves) {
+        if (!Object.prototype.hasOwnProperty.call(dayOverrides, leave.id)) continue;
+        const next = Math.round(Number(dayOverrides[leave.id]));
+        if (!Number.isFinite(next)) continue;
+        leave.days = Math.max(0, Math.min(next, 3660));
+    }
+}
+
 /**
  * Build the entitlement, utilization, and excess view for one employee.
  * Pure: records are not changed, and repeating the call cannot deduct twice.
@@ -329,6 +339,7 @@ export function buildLeaveEntitlementCalculation({
     leaveRecords = [],
     allowedDays = ANNUAL_LEAVE_DAYS_PER_CYCLE,
     firstEligibilityDate = '',
+    dayOverrides = null,
 } = {}) {
     const allowed = Math.max(1, Math.round(Number(allowedDays) || ANNUAL_LEAVE_DAYS_PER_CYCLE));
     const joining = dateKey(joiningDate);
@@ -345,6 +356,7 @@ export function buildLeaveEntitlementCalculation({
     }
 
     const prepared = prepareLeaves(leaveRecords);
+    applyDayOverrides(prepared.leaves, dayOverrides);
     const cycles = cyclesThrough(joining, asOfDate, allowed);
     for (const leave of prepared.leaves) allocateLeave(cycles, leave, joining, allowed);
     const expiredLeave = applyExpiry(cycles, asOfDate);

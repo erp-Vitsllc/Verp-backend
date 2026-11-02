@@ -77,6 +77,7 @@ import {
     buildDmfViewerContext,
     serializeDmf,
 } from '../../utils/salaryDmfApproval.js';
+import { joiningMonthProcessingStart } from '../../utils/leaveSalaryVisibility.js';
 import { awaitAdminDeletionArchive } from '../../utils/adminDeletionArchiveRun.js';
 import { verifyLoggedInUserPassword } from '../../utils/verifyCurrentUserPassword.js';
 import { SALARY_ENROLLMENT_RESET_RETENTION_DAYS } from '../../constants/adminDeletionArchiveConstants.js';
@@ -383,11 +384,11 @@ function emptyLiveAttendance(from = '', to = '', workingDays = 0) {
     };
 }
 
-async function loadLiveAttendanceEligibility({ employee, from, to, staffType }) {
+async function loadLiveAttendanceEligibility({ employee, from, to, staffType, joiningDate = '' }) {
     if (!isDateKey(from) || !employee) {
         return emptyLiveAttendance();
     }
-    const periodStart = salaryProcessingStartDay(from) || from;
+    const periodStart = joiningMonthProcessingStart(from, joiningDate) || salaryProcessingStartDay(from) || from;
     const periodEnd = isDateKey(to) && to >= periodStart ? to : '';
     if (!periodEnd) {
         return emptyLiveAttendance();
@@ -930,6 +931,7 @@ export async function buildPayload(req, employeeId, overlay = {}) {
               from: verpStartDate,
               to: yesterdayKey,
               staffType: employee.staffType,
+              joiningDate,
           })
         : emptyLiveAttendance();
     const lastHolidayEnd = latestAnnualLeaveEndFromLeaveRecords(
@@ -1830,7 +1832,11 @@ async function applySalaryEnrollmentFromProfile({ employee, profile, employeeId,
         throw err;
     }
     const verpStartYm = verpStartDate.slice(0, 7);
-    const salaryDay = String(Math.min(28, Math.max(1, Number(verpStartDate.slice(8, 10)) || 1)));
+    const joiningMonth = toDateKey(profile?.contractJoiningDate).slice(0, 7);
+    const salaryDay =
+        joiningMonth && joiningMonth === verpStartYm
+            ? '1'
+            : String(Math.min(28, Math.max(1, Number(verpStartDate.slice(8, 10)) || 1)));
     let enrollment = await SalaryEnrollment.findOne({ employeeId });
     if (!enrollment) {
         const fromMonth = resolveNewSalaryEnrollmentFromMonth({ verpStartYm });

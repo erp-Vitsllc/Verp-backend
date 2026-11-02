@@ -6,6 +6,7 @@ import SalaryHistoricalProfile from '../models/SalaryHistoricalProfile.js';
 import { applySickAllowanceToLeaveRecords, latestAnnualLeaveEndFromLeaveRecords, leavePolicyEntitlements, shiftDateKey, sickDaysAfterAnnualLeave } from './employeeLeavePolicy.js';
 import { getScheduledEmailTimeZone, getCalendarPartsInTz } from './scheduleDailyAtMidnight.js';
 import {
+    joiningMonthProcessingStart,
     processingStartFromEnrollment,
     resolveSalaryProcessingStartDate,
 } from './leaveSalaryVisibility.js';
@@ -331,6 +332,7 @@ export async function loadEmployeeSalaryWorkingDays(employee, profileHint = null
               from: verpStartDate,
               to: yesterdayKey,
               staffType,
+              joiningDate,
           })
         : { workingDays: 0, overtimeDays: 0 };
     const historicalWorkingDays = Number(historical.workingDays) || 0;
@@ -342,7 +344,7 @@ export async function loadEmployeeSalaryWorkingDays(employee, profileHint = null
     };
 }
 
-async function loadLiveAttendanceEligibility({ employee, from, to, staffType }) {
+async function loadLiveAttendanceEligibility({ employee, from, to, staffType, joiningDate = '' }) {
     if (!isDateKey(from) || !employee) {
         return {
             workingDays: 0,
@@ -354,7 +356,7 @@ async function loadLiveAttendanceEligibility({ employee, from, to, staffType }) 
             to: '',
         };
     }
-    const periodStart = salaryProcessingStartDay(from) || from;
+    const periodStart = joiningMonthProcessingStart(from, joiningDate) || salaryProcessingStartDay(from) || from;
     const periodEnd = isDateKey(to) && to >= periodStart ? to : '';
     if (!periodEnd) {
         return {
@@ -487,6 +489,7 @@ export async function loadLeaveTicketEntitlement({ employee, profile, salaryDoc,
               from: verpStartDate,
               to: yesterdayKey,
               staffType: employee.staffType,
+              joiningDate,
           })
         : { workingDays: 0, leaveRecords: [], overtimeHours: 0, overtimeDays: 0, overtimeRecords: [], from: '', to: '' };
 
@@ -638,7 +641,7 @@ export async function loadCurrentLeaveCycleEligibility({
         liveOpen ? lastAnnualLeaveEndFromAttendance(attendanceRecords) : '',
     );
     const cycleStart = leaveCycleStart({ joiningDate, lastAnnualLeaveEnd });
-    const processingStart = salaryProcessingStartDay(verpStartDate) || verpStartDate;
+    const processingStart = joiningMonthProcessingStart(verpStartDate, joiningDate) || verpStartDate;
     const histWin = historicalWindowForCycle({ joiningDate, verpStartDate, cycleStart });
     const liveWin = liveWindowForCycle({
         verpStartDate: processingStart,

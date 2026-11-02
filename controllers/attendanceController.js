@@ -97,6 +97,7 @@ import {
 import {
     daysUntilProcessingStart,
     firstOfProcessingMonth,
+    joiningMonthProcessingStart,
     isSalaryMonthOpen,
     keepAttendanceForProcessingStart,
     loadEnrolledLeaveVisibilityByMongoId,
@@ -472,7 +473,7 @@ async function loadSalaryAttendanceGate(employee, { monthKey, dateKey } = {}) {
 
     const [enrollment, profile] = await Promise.all([
         SalaryEnrollment.findOne({ employeeId }).select('fromMonth salaryDate processDate').lean(),
-        SalaryHistoricalProfile.findOne({ employeeId }).select('verpStartDate').lean(),
+        SalaryHistoricalProfile.findOne({ employeeId }).select('verpStartDate contractJoiningDate').lean(),
     ]);
     if (!enrollment) return enrollRequired;
 
@@ -483,7 +484,11 @@ async function loadSalaryAttendanceGate(employee, { monthKey, dateKey } = {}) {
         }) || processingStartFromEnrollment(enrollment);
     const processingStartMonth =
         processingMonthFromStart(rawStart) || processingMonthFromStart(enrollment.fromMonth);
-    const processingStartDate = firstOfProcessingMonth(processingStartMonth);
+    const joiningDate = calendarDateKey(
+        profile?.contractJoiningDate || employee?.dateOfJoining || employee?.joiningDate || '',
+    );
+    const processingStartDate =
+        joiningMonthProcessingStart(rawStart, joiningDate) || firstOfProcessingMonth(processingStartMonth);
     const todayKey = getDubaiDateKey();
     const todayMonth = todayKey.slice(0, 7);
     const requestedMonth =

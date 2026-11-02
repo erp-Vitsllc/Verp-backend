@@ -1488,7 +1488,7 @@ export async function buildSalarySlipPayload({
                 .select('slip')
                 .lean();
             if (stored?.slip) {
-                const merged = preferLiveComputed(applySalarySlipOverride(payload, stored.slip), payload);
+                const merged = mergeStoredSalarySlip(payload, stored.slip);
                 merged.approvers = payload.approvers;
                 return presentSalarySlipPolicyExclusions({ ...merged, exclusions });
             }
@@ -1558,6 +1558,17 @@ function benefitOverrideKey(nameKey) {
     return '';
 }
 
+function storedAmountKept(storedRow, overrides) {
+    if (!storedRow || !overrides) return false;
+    const component = String(storedRow.component || storedRow.category || storedRow.type || '').trim();
+    const key = rowNameKey(storedRow);
+    const benefit = benefitOverrideKey(key);
+    if (benefit && overrides[benefit]) return true;
+    if (component && overrides[component]) return true;
+    if (key && overrides[key]) return true;
+    return false;
+}
+
 function mergeAmountRows(stored, live, { overrides = {}, caps = {} } = {}) {
     const liveRows = Array.isArray(live) ? live : [];
     const storedRows = Array.isArray(stored) ? stored : [];
@@ -1569,7 +1580,9 @@ function mergeAmountRows(stored, live, { overrides = {}, caps = {} } = {}) {
         const storedRow = storedByKey.get(key);
         if (!storedRow) return liveRow;
         const overrideKey = benefitOverrideKey(key);
-        let amount = money(liveRow.amount);
+        let amount = storedAmountKept(storedRow, overrides)
+            ? money(storedRow.amount)
+            : money(liveRow.amount);
         if (overrideKey && overrides[overrideKey]) {
             amount = money(storedRow.amount);
         }
@@ -1644,7 +1657,7 @@ function preferLiveComputed(merged, live) {
         ...merged,
         earnings,
         yearlyEarnings,
-        deductions: mergeAmountRows(merged.deductions, live.deductions),
+        deductions: mergeAmountRows(merged.deductions, live.deductions, { overrides }),
         attendance: { ...(merged.attendance || {}), ...(live.attendance || {}) },
         loanSchedule,
         fines,
@@ -1710,9 +1723,22 @@ function setDeductionAmount(rows, name, amount) {
     return list;
 }
 
+function deductionLineOverridden(overrides, name) {
+    if (!overrides || !name) return false;
+    if (overrides[name]) return true;
+    const key = deductionKey(name);
+    if (key && overrides[key]) return true;
+    return Object.keys(overrides).some((flag) => {
+        if (!overrides[flag]) return false;
+        return flag === name || deductionMatches(name, flag) || deductionMatches(flag, name);
+    });
+}
+
 function pushDetailsIntoDeductions(slip) {
     let deductions = Array.isArray(slip.deductions) ? slip.deductions.map((row) => ({ ...row })) : [];
+    const overrides = slip?.thisMonthOverrides || {};
     for (const row of slip.attendanceDeductions || []) {
+        if (deductionLineOverridden(overrides, row.category)) continue;
         deductions = setDeductionAmount(deductions, row.category, row.total);
     }
     for (const loan of slip.loanSchedule || []) {
@@ -1805,6 +1831,97 @@ export function recalcSalarySlip(slip) {
             verifiedTotal: totalDeductions,
         },
     };
+}
+
+/**
+ * Keep a saved salary-slip edit (including a cleared amount) and refresh
+ * every other line from the live month.
+ */
+export function mergeStoredSalarySlip(live, stored) {
+    if (!live) return stored || null;
+    if (!stored) return live;
+    return preferLiveComputed(applySalarySlipOverride(live, stored), live);
+}
+
+const ADDITION_EARNING = /overtime|leave salary|ticket|reward/i;
+
+function payrollFigureKey(value) {
+    return String(value || '').trim().replace(/\s+/g, '').toUpperCase();
+}
+
+/** Monthly pay, additions, deductions, and net taken from one salary slip. */
+export function salarySlipPayrollFigures(slip) {
+    const earnings = Array.isArray(slip?.earnings) ? slip.earnings : [];
+    let extra = 0;
+    let overtime = 0;
+    let structure = 0;
+    let basicSalary = 0;
+    for (const row of earnings) {
+        const name = String(row?.component || '');
+        const amount = money(row?.amount);
+        if (/basic salary/i.test(name)) basicSalary = amount;
+        if (ADDITION_EARNING.test(name)) {
+            extra = money(extra + amount);
+            if (/overtime/i.test(name)) overtime = money(overtime + amount);
+        } else {
+            structure = money(structure + amount);
+        }
+    }
+    const reconciliation = slip?.reconciliation || {};
+    const deduction = money(slip?.totalDeductions);
+    const netSalary = money(slip?.netSalary);
+    return {
+        monthKey: monthKeyOf(slip?.monthKey),
+        monthlySalary: structure || money(slip?.summary?.monthlySalary),
+        basicSalary,
+        extra,
+        ot: overtime,
+        deduction,
+        actualSalary: netSalary,
+        netSalary,
+        grossEarnings: money(slip?.grossEarnings),
+        attendance: money(reconciliation.attendance),
+        salaryAdvance: money(reconciliation.salaryAdvance),
+        loan: money(reconciliation.loan),
+        fine: money(reconciliation.fine),
+        utilityExcess: money(reconciliation.utilityExcess),
+        deductions: (Array.isArray(slip?.deductions) ? slip.deductions : []).map((row) => ({
+            component: String(row?.component || '').trim(),
+            basis: String(row?.basis || '').trim(),
+            amount: money(row?.amount),
+        })),
+    };
+}
+
+export async function collectSalarySlipPayrollFigures(employeeIds, monthKey, { concurrency = 5 } = {}) {
+    const ids = [];
+    const seen = new Set();
+    for (const id of employeeIds || []) {
+        const key = payrollFigureKey(id);
+        if (!key || seen.has(key)) continue;
+        seen.add(key);
+        ids.push(String(id).trim());
+    }
+    const map = new Map();
+    if (!ids.length || !monthKeyOf(monthKey)) return map;
+    let cursor = 0;
+    const workers = Math.min(Math.max(1, concurrency), ids.length);
+    async function worker() {
+        while (cursor < ids.length) {
+            const code = ids[cursor];
+            cursor += 1;
+            try {
+                const slip = await buildSalarySlipPayload({ employeeId: code, monthKey });
+                const figures = salarySlipPayrollFigures(slip);
+                const key = payrollFigureKey(code);
+                if (key) map.set(key, figures);
+            } catch (error) {
+                console.error('[salarySlipPayrollFigures]', code, monthKey, error?.message || error);
+            }
+        }
+    }
+    await Promise.all(Array.from({ length: workers }, () => worker()));
+    return map;
 }
 
 export function applySalarySlipOverride(live, stored) {

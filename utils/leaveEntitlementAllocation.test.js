@@ -211,6 +211,29 @@ describe('leave entitlement allocation', () => {
         assert.equal(result.totalLeaveTaken, 10);
     });
 
+    it('recalculates allocation when a leave length is overridden', () => {
+        const result = buildLeaveEntitlementCalculation({
+            joiningDate: '2024-10-11',
+            asOf: '2026-11-02',
+            leaveRecords: [
+                annual('2025-03-24', '2025-04-26', { id: 'leave-1' }),
+                annual('2026-07-13', '2026-09-11', { id: 'leave-2' }),
+            ],
+            dayOverrides: { 'leave-1': 40 },
+        });
+
+        assert.equal(result.leaves[0].days, 40);
+        assert.deepEqual(result.leaves[0].allocations, [30, 10, 0]);
+        assert.equal(result.leaves[0].excess, 0);
+        assert.equal(result.leaves[1].days, 61);
+        assert.deepEqual(result.leaves[1].allocations, [0, 20, 30]);
+        assert.equal(result.leaves[1].excess, 11);
+        assert.equal(result.totalLeaveTaken, 101);
+        assert.equal(result.totalEntitlement, 90);
+        assert.equal(result.excessLeave, 11);
+        assert.deepEqual(result.cycles.map((cycle) => cycle.remaining), [0, 0, 0]);
+    });
+
     it('returns an empty calculation when the joining date is missing', () => {
         const result = buildLeaveEntitlementCalculation({
             asOf: '2026-11-02',

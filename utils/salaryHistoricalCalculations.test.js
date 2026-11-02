@@ -738,12 +738,15 @@ describe('salary historical calculations', () => {
     });
 
     it('validates VERP start after joining and historical period end = start − 1', () => {
-        assert.equal(validateVerpStart('2023-01-15', '2023-01-15'), MESSAGES.verpAfterJoining);
+        assert.equal(validateVerpStart('2023-01-15', '2023-01-15'), '');
         assert.equal(validateVerpStart('2023-01-15', '2023-01-14'), MESSAGES.verpAfterJoining);
         assert.equal(validateVerpStart('2023-01-15', '2026-08-01'), '');
         const period = historicalPeriod('2023-01-15', '2026-08-01');
         assert.equal(period.end, '2026-07-31');
         assert.equal(addDays('2026-08-01', -1), '2026-07-31');
+        const sameMonth = historicalPeriod('2026-11-01', '2026-11-02');
+        assert.equal(sameMonth.end, '');
+        assert.equal(sameMonth.calendarDays, 0);
     });
 
     it('rejects overlapping leave and dates outside the historical period', () => {
