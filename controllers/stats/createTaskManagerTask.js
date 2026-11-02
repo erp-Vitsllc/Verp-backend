@@ -6,6 +6,7 @@ import { canonicalTaskType, sendTaskActivityEmail, syncManualTaskNotification, t
 import { emailFrontendUrl } from "../../utils/resolveFrontendBaseUrl.js";
 import { resolveEmployeeEmailWithReporteeLoaded } from "../../utils/resolveEmployeeEmail.js";
 import { viewerMaySeeAllNotifications } from "./getTaskManagerNotifications.js";
+import { claimTaskNumber } from "../../utils/taskNumberStore.js";
 
 const PRIORITIES = new Set(["High", "Medium", "Low"]);
 const MAX_ATTACHMENTS = 5;
@@ -183,6 +184,17 @@ export const createTaskManagerTask = async (req, res) => {
                 },
             ],
         });
+        let taskNumber = "";
+        try {
+            taskNumber = await claimTaskNumber({
+                kind: "manual",
+                id: created._id,
+                requestDate: created.createdAt,
+            });
+            if (taskNumber) created.taskNumber = taskNumber;
+        } catch (numberError) {
+            console.error("Task number save failed:", numberError);
+        }
         try {
             await syncManualTaskNotification(created);
         } catch (syncError) {
@@ -199,7 +211,7 @@ export const createTaskManagerTask = async (req, res) => {
                         taskName: created.taskName,
                         description,
                         completionDate,
-                        link: `${emailFrontendUrl()}${taskOpenPath(`manual-${created._id}`)}`,
+                        link: `${emailFrontendUrl()}${taskOpenPath(`manual-${created._id}`)}${taskNumber ? `?no=${encodeURIComponent(taskNumber)}` : ""}`,
                     }),
                     recordId: String(created._id),
                     emailType: "Task created",
@@ -219,6 +231,7 @@ export const createTaskManagerTask = async (req, res) => {
             message: "Task created",
             task: {
                 id: String(created._id),
+                taskNumber,
                 taskType: created.taskType,
                 priority: created.priority,
                 taskName: created.taskName,

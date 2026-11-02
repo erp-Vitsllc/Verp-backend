@@ -54,7 +54,7 @@ describe('annual leave windows', () => {
         assert.equal(result.windows[1].status, 'Inactive');
     });
 
-    it('counts the salary-policy deduction days when they are higher than the calendar dates', () => {
+    it('counts one day for each calendar date, not a larger saved total', () => {
         const dates = [];
         for (let day = 0; day < 37; day += 1) {
             const date = new Date('2023-09-01T00:00:00');
@@ -71,7 +71,7 @@ describe('annual leave windows', () => {
             cycleDays: 300,
             today: '2026-10-26',
         });
-        assert.equal(result.windows[0].takenDays, 52);
+        assert.equal(result.windows[0].takenDays, 37);
         assert.equal(result.windows[0].balance, 0);
         assert.equal(result.windows[1].takenDays, 0);
     });
@@ -124,15 +124,15 @@ describe('annual leave windows', () => {
         assert.equal(result.windows[0].balance, 0);
         assert.equal(result.windows[1].startDate, '2024-08-24');
         assert.equal(result.windows[1].takeUntil, '2026-08-23');
-        assert.equal(result.windows[1].takenDays, 22);
-        assert.equal(result.windows[1].balance, 8);
+        assert.equal(result.windows[1].takenDays, 7);
+        assert.equal(result.windows[1].balance, 23);
         const firstPart = result.windows[0].entries.find((row) => row.id === 'jan');
         const secondPart = result.windows[1].entries.find((row) => row.id === 'jan');
         assert.equal(firstPart.actualDays, 15);
         assert.equal(firstPart.fromDate, '2025-01-06');
-        assert.equal(firstPart.toDate, '2025-01-21');
-        assert.equal(secondPart.actualDays, 16);
-        assert.equal(secondPart.fromDate, '2025-01-06');
+        assert.equal(firstPart.toDate, '2025-01-20');
+        assert.equal(secondPart.actualDays, 1);
+        assert.equal(secondPart.fromDate, '2025-01-21');
         assert.equal(secondPart.toDate, '2025-01-21');
         assert.equal(firstPart.split, true);
         assert.equal(secondPart.split, true);

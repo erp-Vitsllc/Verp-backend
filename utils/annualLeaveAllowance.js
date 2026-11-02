@@ -85,12 +85,15 @@ function collectHistorical(profile) {
 }
 
 function deductionDayCount(row, dates) {
-    const stored = Number(row?.deductionDays ?? row?.deduction);
-    if (Number.isFinite(stored) && stored > 0) return stored;
-    const eligible = Math.max(0, Number(row?.eligibleWorkingDays ?? row?.actualDays ?? row?.days) || 0);
-    const multiplier = Math.max(0, Number(row?.multiplier ?? row?.rule) || 1) || 1;
     const span = Array.isArray(dates) ? dates.length : 0;
-    return (eligible || span) * multiplier;
+    const stored = Number(row?.deductionDays ?? row?.deduction);
+    const eligible = Math.max(0, Number(row?.eligibleWorkingDays ?? row?.actualDays ?? row?.days) || 0);
+    const explicit = Number.isFinite(stored) && stored > 0 ? stored : eligible;
+    // One calendar date is at most one annual leave day. A saved total can
+    // be lower than the period, and it cannot be higher.
+    if (span > 0) return explicit > 0 && explicit < span ? explicit : span;
+    const multiplier = Math.max(0, Number(row?.multiplier ?? row?.rule) || 1) || 1;
+    return explicit > 0 ? explicit : eligible * multiplier;
 }
 
 /**
@@ -123,7 +126,6 @@ function allocateAnnualLeave(periods, leaves, allowed) {
         if (!dayCount || !periods.length) continue;
         const anchor = isDateKey(leave?.startDate) ? leave.startDate : dates[0] || '';
         const endAnchor = isDateKey(leave?.endDate) ? leave.endDate : dates[dates.length - 1] || anchor;
-        // Deduction days stay as one total. They are not divided back onto the dates.
         const pooled = Boolean(dates.length) && dayCount !== dates.length;
         const units = pooled
             ? []

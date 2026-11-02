@@ -1,4 +1,5 @@
 import mongoose from "mongoose";
+import { guardStoredTaskNumber } from "../utils/taskNumber.js";
 
 const attachmentSchema = new mongoose.Schema(
     {
@@ -31,6 +32,7 @@ const taskManagerTaskSchema = new mongoose.Schema(
         requestedByName: { type: String, default: "" },
         requestedByUserId: { type: mongoose.Schema.Types.ObjectId, ref: "User" },
         sourceDashboardActionId: { type: mongoose.Schema.Types.ObjectId, default: null },
+        taskNumber: { type: String },
         status: {
             type: String,
             enum: ["Pending", "In Progress", "Completed", "Cancelled", "Rejected"],
@@ -148,5 +150,7 @@ const taskManagerTaskSchema = new mongoose.Schema(
 taskManagerTaskSchema.index({ priority: 1, createdAt: -1 });
 taskManagerTaskSchema.index({ assignee: 1, status: 1 });
 taskManagerTaskSchema.index({ sourceDashboardActionId: 1 });
+taskManagerTaskSchema.index({ taskNumber: 1 });
+guardStoredTaskNumber(taskManagerTaskSchema);
 
 export default mongoose.model("TaskManagerTask", taskManagerTaskSchema);

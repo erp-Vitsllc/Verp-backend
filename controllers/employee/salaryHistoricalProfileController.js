@@ -509,8 +509,11 @@ function toAnnualRows(value) {
     return rows.slice(0, 80).map((row) => {
         const startDate = toDateKey(row?.fromDate) || toDateKey(row?.startDate);
         const endDate = toDateKey(row?.toDate) || toDateKey(row?.endDate);
-        const eligible = Math.max(0, Number(row?.eligibleWorkingDays ?? row?.actualDays) || 0);
-        const calendarDays = Number(row?.calendarDays) || inclusiveCalendarDays(startDate, endDate);
+        const stored = Math.max(0, Number(row?.eligibleWorkingDays ?? row?.actualDays) || 0);
+        const calendarDays = isDateKey(startDate) && isDateKey(endDate)
+            ? inclusiveCalendarDays(startDate, endDate)
+            : Number(row?.calendarDays) || 0;
+        const eligible = calendarDays > 0 ? (stored > 0 ? Math.min(stored, calendarDays) : calendarDays) : stored;
         return {
             id: String(row?._id || row?.id || ''),
             leaveType: 'annual',
@@ -519,7 +522,7 @@ function toAnnualRows(value) {
             fromDate: startDate,
             toDate: endDate,
             returnToWorkDate: endDate ? addDays(endDate, 1) : toDateKey(row?.returnToWorkDate),
-            calendarDays,
+            calendarDays: calendarDays || stored,
             eligibleWorkingDays: eligible,
             actualDays: eligible,
             multiplier: 1,
@@ -750,12 +753,8 @@ async function enrichAnnualWorkingDays(rows, staffType, periodStart, periodEnd) 
         }
         const hasDates = isDateKey(row.startDate) && isDateKey(row.endDate);
         const provided = Math.max(0, Number(row.eligibleWorkingDays ?? row.actualDays) || 0);
-        let eligible = provided;
-        if (hasDates && provided <= 0) {
-            const stats = await calcWorkingDays({ from: row.startDate, to: row.endDate, staffType });
-            eligible = stats.workingDays;
-        }
-        const calendarDays = hasDates ? inclusiveCalendarDays(row.startDate, row.endDate) : provided;
+        const calendarDays = hasDates ? inclusiveCalendarDays(row.startDate, row.endDate) : 0;
+        const eligible = calendarDays > 0 ? (provided > 0 ? Math.min(provided, calendarDays) : calendarDays) : provided;
         out.push({
             ...row,
             calendarDays: calendarDays || provided,

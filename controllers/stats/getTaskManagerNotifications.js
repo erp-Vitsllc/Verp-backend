@@ -26,7 +26,8 @@ import {
 } from "../../utils/taskManagerModule.js";
 import { viewerMayDeleteTask } from "../../utils/taskDeleteAccess.js";
 import { listDeletedNoticeKeys, noticeKeysForRecord } from "../../utils/deletedTaskNotice.js";
-import { assignTaskNumbers } from "../../utils/taskNumber.js";
+import { assignTaskNumbers, earlierTaskNumber, firstStoredTaskNumber } from "../../utils/taskNumber.js";
+import { claimTaskNumber, saveListedTaskNumbers } from "../../utils/taskNumberStore.js";
 import { alignDecidedGeneralHubTasks } from "../../utils/alignDecidedGeneralHubTasks.js";
 import { completeFinishedSystemWorkflowTasks } from "../../utils/completeFinishedSystemWorkflowTasks.js";
 import { activityTaskKey, duplicateOverlayShouldClose, keepActivityCopy, taskMatchHints } from "../../utils/taskDuplicateKey.js";
@@ -951,6 +952,42 @@ function actionDuplicateKey(action) {
     });
 }
 
+function rememberActivityNumber(savedByActivity, action, number) {
+    const saved = firstStoredTaskNumber(number);
+    if (!saved) return;
+    const key = actionDuplicateKey(action);
+    if (!key) return;
+    savedByActivity.set(key, earlierTaskNumber(savedByActivity.get(key), saved));
+}
+
+function actionNumberState(action, savedByActivity) {
+    const own = firstStoredTaskNumber(action?.taskNumber);
+    const inherited = own ? "" : firstStoredTaskNumber(savedByActivity.get(actionDuplicateKey(action)));
+    return {
+        taskNumber: own || inherited,
+        numberSaved: Boolean(own),
+        numberOwner: { kind: "action", id: String(action?._id || "") },
+    };
+}
+
+function manualNumberState(row, actionById, savedByActivity) {
+    const sourceId = String(row?.sourceDashboardActionId || "");
+    const source = sourceId ? actionById.get(sourceId) : null;
+    if (source) {
+        const state = actionNumberState(source, savedByActivity);
+        if (state.taskNumber) return state;
+        const own = firstStoredTaskNumber(row?.taskNumber);
+        if (!own) return state;
+        return { ...state, taskNumber: own, numberSaved: false };
+    }
+    const own = firstStoredTaskNumber(row?.taskNumber);
+    return {
+        taskNumber: own,
+        numberSaved: Boolean(own),
+        numberOwner: { kind: "manual", id: String(row?._id || "") },
+    };
+}
+
 function stageRank(status) {
     if (status === "Pending") return 0;
     if (status === "On Hold") return 1;
@@ -1210,7 +1247,7 @@ export const getTaskManagerNotifications = async (req, res) => {
         const [actions, people] = await Promise.all([
             DashboardAction.find({})
                 .select(
-                    "assignedTo assignedToEmpId requestId requestType status subjectEmployeeId subjectName requestedDate requestedByName actionedDate extra1 extra2 extra3 createdAt",
+                    "assignedTo assignedToEmpId requestId requestType status subjectEmployeeId subjectName requestedDate requestedByName actionedDate extra1 extra2 extra3 createdAt taskNumber",
                 )
                 .lean()
                 .maxTimeMS(20000),
@@ -1279,7 +1316,7 @@ export const getTaskManagerNotifications = async (req, res) => {
 
         const manualRows = await TaskManagerTask.find({})
             .select(
-                "taskType priority taskName description assignee assigneeEmpId assigneeName completionDate requestedByName requestedByUserId status createdAt updatedAt sourceDashboardActionId closeRequest history",
+                "taskType priority taskName description assignee assigneeEmpId assigneeName completionDate requestedByName requestedByUserId status createdAt updatedAt sourceDashboardActionId closeRequest history taskNumber",
             )
             .lean()
             .maxTimeMS(10000);
@@ -1387,6 +1424,12 @@ export const getTaskManagerNotifications = async (req, res) => {
                 { $set: { status: "Dismissed", actionedDate: now } },
             );
         }
+        const savedByActivity = new Map();
+        for (const action of actions || []) rememberActivityNumber(savedByActivity, action, action?.taskNumber);
+        for (const row of manualRows) {
+            const source = actionById.get(String(row?.sourceDashboardActionId || ""));
+            if (source) rememberActivityNumber(savedByActivity, source, row?.taskNumber);
+        }
         const tasks = collapseUtilityBillReminderActions(uniqueActions).map((action) => {
             const duplicateKey = actionDuplicateKey(action);
             if (duplicateKey) listedTaskKeys.add(duplicateKey);
@@ -1489,7 +1532,7 @@ export const getTaskManagerNotifications = async (req, res) => {
                         requestedByUserId: overlay?.requestedByUserId,
                         status,
                     }),
-                taskNumber: "",
+                ...actionNumberState(action, savedByActivity),
                 requestDate: requestedAt,
                 reassignedAt: latestReassignedAt(overlay),
                 completionDate: overlay?.completionDate || action.actionedDate || null,
@@ -1650,7 +1693,7 @@ export const getTaskManagerNotifications = async (req, res) => {
                         requestedByUserId: row.requestedByUserId,
                         status,
                     }),
-                taskNumber: "",
+                ...manualNumberState(row, actionById, savedByActivity),
                 requestDate: requestedAt,
                 reassignedAt: latestReassignedAt(row),
                 completionDate: row.completionDate || null,
@@ -1704,11 +1747,19 @@ export const getTaskManagerNotifications = async (req, res) => {
             });
         }
 
-        assignTaskNumbers(tasks);
+        try {
+            await saveListedTaskNumbers(tasks);
+        } catch (numberError) {
+            console.error("Save task numbers failed:", numberError);
+        }
         try {
             await attachHoldSteps(tasks);
         } catch (holdError) {
             console.error("Task waiting steps failed:", holdError);
+        }
+        for (const task of tasks) {
+            delete task.numberOwner;
+            delete task.numberSaved;
         }
 
         const statusRank = {
@@ -2235,20 +2286,109 @@ export async function listProfileEmployeeTasks({ employeeId, employeeCode, emplo
     }
 }
 
+function rememberRequestNumber(map, requestWinners, requestId, number, isWinner) {
+    const saved = firstStoredTaskNumber(number);
+    const id = String(requestId || "").trim();
+    if (!saved || !id) return;
+    const previous = requestWinners.get(id);
+    if (!previous) {
+        requestWinners.set(id, { winner: Boolean(isWinner) });
+        map.set(id, saved);
+        return;
+    }
+    if (previous.winner && !isWinner) return;
+    if (!previous.winner && isWinner) {
+        requestWinners.set(id, { winner: true });
+        map.set(id, saved);
+        return;
+    }
+    map.set(id, earlierTaskNumber(map.get(id), saved));
+}
+
+async function storedTaskNumberMap(wanted, actions, manualRows, unique) {
+    const map = new Map();
+    const activityNumber = new Map();
+    const requestWinners = new Map();
+    const winnerIds = new Set((unique || []).map((action) => String(action._id)));
+    const actionById = new Map((actions || []).map((action) => [String(action._id), action]));
+    const manualById = new Map((manualRows || []).map((row) => [String(row._id), row]));
+
+    for (const action of actions || []) {
+        const number = firstStoredTaskNumber(action?.taskNumber);
+        if (!number) continue;
+        map.set(String(action._id), number);
+        rememberActivityNumber(activityNumber, action, number);
+        rememberRequestNumber(map, requestWinners, action.requestId, number, winnerIds.has(String(action._id)));
+    }
+    for (const action of actions || []) {
+        const id = String(action._id);
+        if (map.has(id)) continue;
+        const number = firstStoredTaskNumber(activityNumber.get(actionDuplicateKey(action)));
+        if (!number) continue;
+        map.set(id, number);
+        rememberRequestNumber(map, requestWinners, action.requestId, number, winnerIds.has(id));
+    }
+    for (const row of manualRows || []) {
+        const id = String(row?._id || "");
+        if (!id) continue;
+        const sourceId = String(row.sourceDashboardActionId || "");
+        const number = firstStoredTaskNumber(row.taskNumber) || (sourceId ? firstStoredTaskNumber(map.get(sourceId)) : "");
+        if (!number) continue;
+        map.set(id, number);
+        map.set(`manual-${id}`, number);
+        if (sourceId && !firstStoredTaskNumber(map.get(sourceId))) map.set(sourceId, number);
+    }
+
+    for (const id of wanted) {
+        if (firstStoredTaskNumber(map.get(id))) continue;
+        const action = actionById.get(id);
+        if (action) {
+            const number = await claimTaskNumber({
+                kind: "action",
+                id: action._id,
+                requestDate: action.requestedDate || action.createdAt,
+            });
+            if (!number) continue;
+            map.set(String(action._id), number);
+            rememberRequestNumber(map, requestWinners, action.requestId, number, winnerIds.has(String(action._id)));
+            continue;
+        }
+        const manualId = id.startsWith("manual-") ? id.slice("manual-".length) : id;
+        const manual = manualById.get(manualId);
+        if (!manual || manual.sourceDashboardActionId) continue;
+        const number = await claimTaskNumber({
+            kind: "manual",
+            id: manual._id,
+            requestDate: manual.createdAt,
+        });
+        if (!number) continue;
+        map.set(String(manual._id), number);
+        map.set(`manual-${manual._id}`, number);
+    }
+
+    const found = new Map();
+    for (const id of wanted) {
+        const number = firstStoredTaskNumber(map.get(id));
+        if (number) found.set(id, number);
+    }
+    return found;
+}
+
 /**
- * The same TSK-26-count shown in Task Manager, keyed by the request id and the action id.
+ * The saved TSK number for a task, keyed by the request id and the action id.
+ * storedOnly skips the old calculated number, so a task page does not invent a second one.
  */
-export async function taskNumbersByRecordId(recordIds) {
+export async function taskNumbersByRecordId(recordIds, { storedOnly = false } = {}) {
     const wanted = [...new Set((recordIds || []).map((id) => String(id || "").trim()).filter(Boolean))];
     if (!wanted.length) return new Map();
 
     const [actions, manualRows] = await Promise.all([
         DashboardAction.find({})
-            .select("requestId requestType status subjectName requestedByName assignedTo assignedToEmpId extra1 requestedDate createdAt")
+            .select("requestId requestType status subjectName requestedByName assignedTo assignedToEmpId subjectEmployeeId extra1 extra3 requestedDate createdAt taskNumber")
             .lean()
             .maxTimeMS(12000),
         TaskManagerTask.find({})
-            .select("sourceDashboardActionId createdAt")
+            .select("sourceDashboardActionId createdAt taskNumber")
             .lean()
             .maxTimeMS(8000),
     ]);
@@ -2256,6 +2396,10 @@ export async function taskNumbersByRecordId(recordIds) {
     const preparedNumbers = await collapsePendingFineDashboardRows(actions || []);
     const collapsedNumbers = await collapseDuplicateDashboardTasks(preparedNumbers.rows);
     const unique = dedupeOpenActions(collapsedNumbers.rows);
+    const backfilled = [...(actions || []), ...(manualRows || [])].some((row) => firstStoredTaskNumber(row?.taskNumber));
+    if (backfilled) return storedTaskNumberMap(wanted, actions, manualRows, unique);
+    if (storedOnly) return new Map();
+
     const stubs = unique.map((action) => ({
         actionId: String(action._id),
         requestDate: action.requestedDate || action.createdAt || null,

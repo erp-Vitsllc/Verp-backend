@@ -16,6 +16,7 @@ import Reward from "../../models/Reward.js";
 import TaskManagerTask from "../../models/TaskManagerTask.js";
 import { deleteDashboardActionsForVehicleService } from "../../utils/cleanupAssetDashboardActions.js";
 import { evaluateSourceTaskCompletion } from "../../utils/sourceTaskCompletion.js";
+import { firstStoredTaskNumber } from "../../utils/taskNumber.js";
 import { releaseCompletedTaskFromNotificationBars } from "../../utils/completeFinishedSystemWorkflowTasks.js";
 import { alignDecidedGeneralHubTasks, applyHubDecisionToTask } from "../../utils/alignDecidedGeneralHubTasks.js";
 import { withdrawPendingSalaryEnrollment } from "../../utils/salaryEnrollmentApprovalNotify.js";
@@ -1419,12 +1420,18 @@ async function buildDetail(target, viewer) {
         action?._id ? String(action._id) : "",
         action?.requestId ? String(action.requestId) : "",
     ].filter(Boolean);
-    let taskNumber = "";
-    try {
-        const numberMap = await taskNumbersByRecordId(numberKeys);
-        taskNumber = numberKeys.map((id) => numberMap.get(String(id))).find(Boolean) || "";
-    } catch (numberError) {
-        console.error("Task number lookup failed:", numberError);
+    let taskNumber = firstStoredTaskNumber(
+        manual ? task?.taskNumber : action?.taskNumber,
+        task?.taskNumber,
+        action?.taskNumber,
+    );
+    if (!taskNumber) {
+        try {
+            const numberMap = await taskNumbersByRecordId(numberKeys, { storedOnly: true });
+            taskNumber = numberKeys.map((id) => firstStoredTaskNumber(numberMap.get(String(id)))).find(Boolean) || "";
+        } catch (numberError) {
+            console.error("Task number lookup failed:", numberError);
+        }
     }
 
     const savedClose = task?.closeRequest || {};

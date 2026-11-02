@@ -1,4 +1,5 @@
 import mongoose from "mongoose";
+import { guardStoredTaskNumber } from "../utils/taskNumber.js";
 
 const dashboardActionSchema = new mongoose.Schema({
     assignedTo: { type: mongoose.Schema.Types.ObjectId, ref: 'EmployeeBasic', required: true },
@@ -26,7 +27,8 @@ const dashboardActionSchema = new mongoose.Schema({
     extra2: { type: String },
     extra3: { type: String }, // For bulk transfer info (JSON string)
     lastResentAt: { type: Date, default: null },
-    isGlobal: { type: Boolean, default: false }
+    isGlobal: { type: Boolean, default: false },
+    taskNumber: { type: String },
 }, { timestamps: true });
 
 // Index for fast dashboard fetching
@@ -36,5 +38,7 @@ dashboardActionSchema.index({ requestId: 1 });
 dashboardActionSchema.index({ status: 1, requestType: 1, assignedTo: 1, requestedDate: -1 });
 dashboardActionSchema.index({ status: 1, requestType: 1, assignedToEmpId: 1, requestedDate: -1 });
 dashboardActionSchema.index({ status: 1, requestType: 1, requestedDate: -1 });
+dashboardActionSchema.index({ taskNumber: 1 });
+guardStoredTaskNumber(dashboardActionSchema);
 
 export default mongoose.model("DashboardAction", dashboardActionSchema);

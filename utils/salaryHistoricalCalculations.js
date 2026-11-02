@@ -239,6 +239,18 @@ export function isActiveLeave(row) {
 export function leaveDeductionDays(row, policyMultipliers) {
     if (!isActiveLeave(row)) return 0;
     const type = String(row?.leaveType || '').toLowerCase();
+    const from = String(row?.fromDate || row?.startDate || '').slice(0, 10);
+    const to = String(row?.toDate || row?.endDate || from).slice(0, 10);
+    const span = inclusiveCalendarDays(from, to);
+    if (type === 'annual' && span > 0) {
+        const multiplier = leaveMultiplier(type, row?.multiplier ?? row?.rule, policyMultipliers);
+        const storedEligible = Math.max(0, Number(row?.eligibleWorkingDays ?? row?.actualDays) || 0);
+        const days = storedEligible > 0 ? Math.min(storedEligible, span) : span;
+        const computed = days * multiplier;
+        const storedDeduction = Number(row?.deductionDays ?? row?.deduction);
+        if (Number.isFinite(storedDeduction) && storedDeduction > 0) return Math.min(storedDeduction, computed);
+        return computed;
+    }
     const eligible = Math.max(0, Number(row?.eligibleWorkingDays ?? row?.actualDays) || 0);
     if (type === 'holiday') {
         return eligible > 0 ? eligible : 1;
