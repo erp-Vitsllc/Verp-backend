@@ -555,7 +555,6 @@ async function buildGroupPendingRequests(people, monthKey) {
                   ...(monthWindow ? { $and: [monthWindow] } : {}),
                   $or: [
                       { leaveRequestStatus: 'pending' },
-                      { approvalStatus: 'pending' },
                       { hourAdjustStatus: 'pending' },
                       { flexibleOtStatus: 'pending' },
                   ],
@@ -788,32 +787,6 @@ async function buildGroupPendingRequests(people, monthKey) {
                 responsibleId,
                 responsibleName,
                 responsibleRole,
-            });
-        }
-
-        for (const row of empRows) {
-            if (String(row.approvalStatus || '') !== 'pending') continue;
-            const date = String(row.date || '').slice(0, 10);
-            if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) continue;
-            if (range && (date < range.from || date > range.to)) continue;
-            const covered = prep.some((item) => {
-                const from = String(item.fromDate || '');
-                const to = String(item.toDate || from);
-                return from && date >= from && date <= to;
-            });
-            if (covered) continue;
-            const params = new URLSearchParams({ date, staffType: normalizeStaffTypeKey(emp.staffType) || 'office' });
-            params.set('blinkEmployee', String(emp._id));
-            pushItem(emp, {
-                id: `att-approval-${row._id}`,
-                requestId: String(row._id),
-                category: 'attendance',
-                title: 'Attendance approval',
-                detail: date,
-                dateKey: date,
-                path: `/HRM/Attendance/mark?${params.toString()}`,
-                notifiedAt: row.createdAt || date,
-                responsibleRole: 'HR',
             });
         }
     }
