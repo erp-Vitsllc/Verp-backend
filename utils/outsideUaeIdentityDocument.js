@@ -10,14 +10,7 @@ export function hasCompleteOutsideUaeIdentityDocument(employee) {
     return (employee?.documents || []).some(isCompleteOutsideUaeIdentityDocument);
 }
 
-function passportNumberPresent(passport) {
-    const number = passport?.number;
-    if (number == null) return false;
-    const text = String(number).trim();
-    return text !== "" && text !== "—";
-}
-
-/** Outside UAE activation identity: a saved passport or a complete identity document. */
-export function outsideUaeProfileIdentitySatisfied(employee, passport = employee?.passportDetails) {
-    return hasCompleteOutsideUaeIdentityDocument(employee) || passportNumberPresent(passport);
+/** Profile progress counts only the document saved from Basic Details. */
+export function outsideUaeProfileIdentitySatisfied(employee) {
+    return hasCompleteOutsideUaeIdentityDocument(employee);
 }

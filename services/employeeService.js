@@ -318,6 +318,8 @@ export const getCompleteEmployee = async (id) => {
                 description: doc.description,
                 issueDate: doc.issueDate,
                 expiryDate: doc.expiryDate,
+                countryIssued: doc.countryIssued || "",
+                outsideUaeIdentity: doc.outsideUaeIdentity === true,
                 cost: doc.cost,
                 basicSalary: doc.basicSalary,
                 houseRentAllowance: doc.houseRentAllowance,

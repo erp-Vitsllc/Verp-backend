@@ -319,7 +319,15 @@ export const getEmployees = async (req, res) => {
                                 as: "doc",
                                 in: {
                                     expiryDate: "$$doc.expiryDate",
-                                    type: "$$doc.type"
+                                    issueDate: "$$doc.issueDate",
+                                    type: "$$doc.type",
+                                    documentName: "$$doc.documentName",
+                                    countryIssued: "$$doc.countryIssued",
+                                    outsideUaeIdentity: "$$doc.outsideUaeIdentity",
+                                    document: {
+                                        name: "$$doc.document.name",
+                                        url: "$$doc.document.url",
+                                    }
                                 }
                             }
                         },

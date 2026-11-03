@@ -82,6 +82,23 @@ function shapeForCompletion(emp, bags) {
         status: emp.status,
         probationPeriod: emp.probationPeriod,
         profilePicture: emp.profilePicture,
+        workLocation: emp.workLocation,
+        documents: Array.isArray(emp.documents)
+            ? emp.documents
+                  .filter((doc) => doc?.outsideUaeIdentity === true)
+                  .map((doc) => ({
+                      outsideUaeIdentity: true,
+                      type: doc.type,
+                      documentName: doc.documentName,
+                      issueDate: doc.issueDate,
+                      expiryDate: doc.expiryDate,
+                      countryIssued: doc.countryIssued,
+                      document:
+                          doc.document?.url || doc.document?.name
+                              ? { url: doc.document?.url, name: doc.document?.name }
+                              : undefined,
+                  }))
+            : [],
         profileStatus: emp.profileStatus,
         profileApprovalStatus: emp.profileApprovalStatus,
         company: emp.company,
@@ -163,6 +180,15 @@ async function loadIncompleteProfiles() {
             status: 1,
             probationPeriod: 1,
             profilePicture: 1,
+            workLocation: 1,
+            "documents.outsideUaeIdentity": 1,
+            "documents.type": 1,
+            "documents.documentName": 1,
+            "documents.issueDate": 1,
+            "documents.expiryDate": 1,
+            "documents.countryIssued": 1,
+            "documents.document.url": 1,
+            "documents.document.name": 1,
             profileStatus: 1,
             profileApprovalStatus: 1,
             company: 1,
