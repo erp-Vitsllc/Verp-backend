@@ -1,3 +1,4 @@
+import { processingStartFromEnrollment } from './leaveSalaryVisibility.js';
 import { getScheduledEmailTimeZone, getZonedParts } from './scheduleDailyAtMidnight.js';
 
 const YEAR_MONTH = /^\d{4}-\d{2}$/;
@@ -122,6 +123,21 @@ export function salarySlipMonthRange({
     const fromYm = laterSalaryMonth(employeeStartYm, salaryYearMonth(policyStartYm)) || employeeStartYm;
     if (!fromYm || !lastOpenYm || fromYm > lastOpenYm) return [];
     return listSalaryMonthsInclusive(fromYm, lastOpenYm);
+}
+
+/**
+ * This salary month includes the employee only after enrollment and the
+ * processing start month. A later start stays off earlier payroll months.
+ */
+export function enrollmentCoversSalaryMonth(enrollment, monthKey) {
+    const month = salaryYearMonth(monthKey);
+    if (!month || !enrollment) return false;
+    const from = salaryYearMonth(enrollment.fromMonth);
+    const start = salaryYearMonth(processingStartFromEnrollment(enrollment)) || from;
+    if (!from && !start) return false;
+    if (from && month < from) return false;
+    if (start && month < start) return false;
+    return true;
 }
 
 export function salarySlipMonthAllowed(monthKey, { enrolled, fromMonth = '', now = new Date() } = {}) {

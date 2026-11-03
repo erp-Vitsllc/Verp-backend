@@ -146,7 +146,7 @@ export async function waiveAttendanceDeduction(req, res) {
             )
             : 0;
         return res.status(200).json({
-            message: 'Deduction waived. The status is unchanged.',
+            message: 'Deduction waived. The employee is paid for this day and it shows as present.',
             year,
             count,
             record,

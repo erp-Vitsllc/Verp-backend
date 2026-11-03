@@ -57,9 +57,10 @@ import {
     missedPunchDeduction,
 } from '../../utils/lateDeductionPolicy.js';
 import { partialLeavePortion } from '../../utils/partialLeaveWindow.js';
-import { isDeductionWaived, isHourLossWaived } from '../../utils/deductionWaive.js';
+import { explicitAuthorizedHourShare, isDeductionWaived, isHourLossWaived } from '../../utils/deductionWaive.js';
 import {
     keepAttendanceForProcessingStart,
+    processingStartFromEnrollment,
     resolveSalaryProcessingStartDate,
 } from '../../utils/leaveSalaryVisibility.js';
 import { resolveEmployeeFinePayableAmount } from '../../utils/finePayableAmount.js';
@@ -70,6 +71,7 @@ import {
     getZonedParts,
 } from '../../utils/scheduleDailyAtMidnight.js';
 import {
+    enrollmentCoversSalaryMonth,
     lastOpenSalaryProcessMonth,
     salaryRegisterPayrollOpenMonth,
 } from '../../utils/salaryEnrollmentStartMonth.js';
@@ -1003,6 +1005,7 @@ async function buildEnrollmentOverview(enrollments, monthKey) {
             .maxTimeMS(12000),
         listActiveWorkLocations().catch(() => []),
     ]);
+    const storedByKey = normalizeEnrollmentRows(storedEnrollments || []);
     const enrollmentByKey = normalizeEnrollmentRows([
         ...(storedEnrollments || []),
         ...(enrollments || []),
@@ -1098,7 +1101,11 @@ async function buildEnrollmentOverview(enrollments, monthKey) {
     for (const emp of people) {
         const code = String(emp.employeeId).trim();
         const enrollment = enrollmentByKey.get(employeeCodeKey(code));
+        const storedEnrollment = storedByKey.get(employeeCodeKey(code));
         const isEnrolled = Boolean(enrollment);
+        const enrolledForMonth = Boolean(
+            storedEnrollment && enrollmentCoversSalaryMonth(storedEnrollment, salaryYm),
+        );
         const monthlySalary = roundMoney(
             salaryAmountForMonth(getByEmployeeCode(salaryByCode, code), salaryYm),
         );
@@ -1156,12 +1163,14 @@ async function buildEnrollmentOverview(enrollments, monthKey) {
             companyId,
             companyName,
             enrolled: isEnrolled,
+            enrolledForMonth,
             monthlySalary,
             companyMolCode,
             isWps,
             paymentType: isEnrolled ? paymentTypeFromMol(companyMolCode) : '',
-            fromMonth: String(enrollment?.fromMonth || '').trim(),
-            salaryDate: toMonthDay(enrollment?.salaryDate),
+            fromMonth: String(storedEnrollment?.fromMonth || '').trim(),
+            processingStart: processingStartFromEnrollment(storedEnrollment) || '',
+            salaryDate: toMonthDay(storedEnrollment?.salaryDate),
         });
     }
 
@@ -1543,6 +1552,7 @@ export const getSalaryRegister = async (req, res) => {
                 .maxTimeMS(8000),
         ]);
 
+        const storedEnrollmentByKey = normalizeEnrollmentRows(enrollmentDocs || []);
         const enrollmentByKey = normalizeEnrollmentRows([
             ...(enrollmentDocs || []),
             ...(lockedProfiles || []).map((row) => ({
@@ -1761,7 +1771,7 @@ export const getSalaryRegister = async (req, res) => {
                 date: { $gte: from, $lte: to },
                 statusKey: { $in: ['authorized_leave', 'unauthorized_leave'] },
             })
-                .select('employeeMongoId date statusKey reason timeIn timeOut leaveRequestDayPart leaveDayFraction leaveDeductionTimes deductionWaived')
+                .select('employeeMongoId date statusKey reason timeIn timeOut leaveRequestDayPart leaveDayFraction leaveDeductionTimes deductionWaived hourAdjustMode hourAdjustStatus hoursApproved hoursTaken')
                 .lean()
                 .maxTimeMS(15000)
             : [];
@@ -1806,6 +1816,11 @@ export const getSalaryRegister = async (req, res) => {
             const code = String(emp.employeeId || '').trim();
             const monthly = salaryAmountForMonth(getByEmployeeCode(salaryByCode, code), ym);
             const daily = daySalaryForMonth(monthly, ym);
+            const chosenShare = key === 'authorized_leave' ? explicitAuthorizedHourShare(row) : null;
+            if (chosenShare != null) {
+                addDeduction(code, ym, daily * chosenShare * fraction);
+                continue;
+            }
             const policy = policyForEmployee(emp);
             let times = 0;
             if (key === 'authorized_leave') {
@@ -1986,7 +2001,8 @@ export const getSalaryRegister = async (req, res) => {
             for (const row of enrollments) {
                 const key = employeeCodeKey(row.employeeId);
                 if (!key || seen.has(key)) continue;
-                if (row.fromMonth && row.fromMonth > ym) continue;
+                const stored = storedEnrollmentByKey.get(key);
+                if (!stored || !enrollmentCoversSalaryMonth(stored, ym)) continue;
                 if (!ym || ym > lastOpenYm || ym >= currentYm) continue;
                 const emp = empByCode.get(key);
                 if (!emp || !employeeWorkedInMonth(emp, ym)) continue;
@@ -2027,6 +2043,7 @@ export const getSalaryRegister = async (req, res) => {
                 ot += empOt;
                 deduction += empDeduction;
                 if (detailYm && ym === detailYm) {
+                    const enrollmentRow = storedEnrollmentByKey.get(employeeCodeKey(code));
                     employeesForMonth.push({
                         slNo: employeesForMonth.length + 1,
                         employeeId: code,
@@ -2042,6 +2059,10 @@ export const getSalaryRegister = async (req, res) => {
                         extra: roundMoney(empOt),
                         deduction: roundMoney(empDeduction),
                         paymentType: paymentTypeFromMol(getByEmployeeCode(molByCode, code)),
+                        enrolled: true,
+                        enrolledForMonth: true,
+                        fromMonth: String(enrollmentRow?.fromMonth || '').trim(),
+                        processingStart: processingStartFromEnrollment(enrollmentRow) || '',
                         status: processedEmployeeIds.has(employeeCodeKey(code))
                             ? 'Processed'
                             : pendingEmployeeIds.has(employeeCodeKey(code))
@@ -2119,8 +2140,8 @@ export const getSalaryRegister = async (req, res) => {
                 .lean(),
             visibleMonthKeys.length
                 ? SalaryMonthPayment.find({ monthKey: { $in: visibleMonthKeys } })
-                      .select('monthKey status employeeIds')
-                      .lean()
+                    .select('monthKey status employeeIds')
+                    .lean()
                 : [],
         ]);
         const dmfByMonth = new Map(
@@ -2607,11 +2628,14 @@ async function prepareSlotSelection({ monthKey, requested, companyName, ignorePa
         employeeId: { $in: requested },
         fromMonth: { $lte: monthKey },
     })
-        .select('employeeId')
+        .select('employeeId fromMonth salaryDate processDate')
         .lean()
         .maxTimeMS(8000);
     const enrolledKeys = new Set(
-        (enrolled || []).map((row) => employeeCodeKey(row.employeeId)).filter(Boolean),
+        (enrolled || [])
+            .filter((row) => enrollmentCoversSalaryMonth(row, monthKey))
+            .map((row) => employeeCodeKey(row.employeeId))
+            .filter(Boolean),
     );
     if (requested.some((id) => !enrolledKeys.has(employeeCodeKey(id)))) {
         const error = new Error('Only enrolled employees can be added to a slot.');
@@ -2678,15 +2702,15 @@ async function mailSlotAccountsNext(req, monthKey, slotNo, paymentMethod) {
         monthKey,
         lines: wps
             ? [
-                  `HR approved slot ${slotNo}.`,
-                  'Check the WPS send. The Excel form will be added to this email later.',
-                  'Then open the payroll and mark WPS updated.',
-              ]
+                `HR approved slot ${slotNo}.`,
+                'Check the WPS send. The Excel form will be added to this email later.',
+                'Then open the payroll and mark WPS updated.',
+            ]
             : [
-                  `HR approved slot ${slotNo}.`,
-                  'This is a cash slot, so there is no WPS step.',
-                  'Open the payroll and set the slot as updated.',
-              ],
+                `HR approved slot ${slotNo}.`,
+                'This is a cash slot, so there is no WPS step.',
+                'Open the payroll and set the slot as updated.',
+            ],
     });
 }
 

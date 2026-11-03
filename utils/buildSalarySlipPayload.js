@@ -35,7 +35,7 @@ import {
     keepAttendanceForProcessingStart,
     resolveSalaryProcessingStartDate,
 } from './leaveSalaryVisibility.js';
-import { isDeductionWaived, isHourLossWaived } from './deductionWaive.js';
+import { explicitAuthorizedHourShare, isDeductionWaived, isHourLossWaived } from './deductionWaive.js';
 import {
     applySalarySlipCountExclusions,
     salarySlipPolicyExclusions,
@@ -69,15 +69,16 @@ function pad2(n) {
     return String(n).padStart(2, '0');
 }
 
-function leaveChargeWeight(row, authorized) {
+function leavePortion(row) {
     const part = String(row?.leaveRequestDayPart || '');
-    const fraction = part === 'half' || part === 'quarter'
-        ? partialLeavePortion(part)
-        : Number(row?.leaveDayFraction) > 0 && Number(row.leaveDayFraction) < 1
-          ? Number(row.leaveDayFraction)
-          : 1;
+    if (part === 'half' || part === 'quarter') return partialLeavePortion(part);
+    if (Number(row?.leaveDayFraction) > 0 && Number(row.leaveDayFraction) < 1) return Number(row.leaveDayFraction);
+    return 1;
+}
+
+function leaveChargeWeight(row, authorized) {
     const doubled = authorized && Number(row?.leaveDeductionTimes) === 2 ? 2 : 1;
-    return fraction * doubled;
+    return leavePortion(row) * doubled;
 }
 
 function money(value) {
@@ -728,7 +729,7 @@ export async function buildSalarySlipPayload({
                 $or: [{ employeeMongoId: mongoId }, { employeeId: idPattern }],
                 date: { $gte: from, $lte: to },
             })
-                .select('date statusKey reason leavePayType timeIn timeOut timeOutDate punchSessions flexibleWorkedHours hourAdjustStatus hoursApproved flexibleOtStatus flexibleOtApprovedHours flexibleOtNextDayDate')
+                .select('date statusKey reason leavePayType timeIn timeOut timeOutDate punchSessions flexibleWorkedHours hourAdjustStatus hourAdjustMode hoursApproved hoursTaken flexibleOtStatus flexibleOtApprovedHours flexibleOtNextDayDate')
                 .lean(),
             Holiday.find({ date: { $gte: from, $lte: to } }).select('date appliesTo').lean(),
             Loan.find({
@@ -823,6 +824,7 @@ export async function buildSalarySlipPayload({
     let presentDays = 0;
     let workingDayLeaves = 0;
     let authorizedDays = 0;
+    let explicitAuthorizedShares = 0;
     let unauthorizedDays = 0;
     let sickDays = 0;
     let unpaidSickDays = 0;
@@ -857,7 +859,11 @@ export async function buildSalarySlipPayload({
         if (PRESENT_KEYS.has(key)) presentDays += 1;
         if (LEAVE_KEYS.has(key)) workingDayLeaves += 1;
         const waived = isDeductionWaived(row);
-        if (!waived && key === 'authorized_leave') authorizedDays += leaveChargeWeight(row, true);
+        if (!waived && key === 'authorized_leave') {
+            const share = explicitAuthorizedHourShare(row);
+            if (share != null) explicitAuthorizedShares += share * leavePortion(row);
+            else authorizedDays += leaveChargeWeight(row, true);
+        }
         if (!waived && key === 'unauthorized_leave') unauthorizedDays += leaveChargeWeight(row, false);
         if (key === 'sick_leave') {
             sickDays += 1;
@@ -926,7 +932,7 @@ export async function buildSalarySlipPayload({
     const authorizedDeductionDays = authorizedDays;
     const otHoursAmount = money((daily / 10) * otHours);
     const otDaysAmount = money(daily * otDays);
-    const authorizedAmount = money(daily * authTimes * authorizedDeductionDays);
+    const authorizedAmount = money(daily * authTimes * authorizedDeductionDays + daily * explicitAuthorizedShares);
     const unauthorizedAmount = money(daily * unauthTimes * unauthorizedDays);
     const sickAmount = money(daily * unpaidSickDays);
     const annualAmount = 0;

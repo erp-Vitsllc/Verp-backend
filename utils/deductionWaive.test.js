@@ -24,4 +24,11 @@ test('approved zero hours waive the loss, and a positive approval does not', () 
         hourAdjustStatus: 'approved',
         hoursApproved: 0,
     }), false);
+    assert.equal(isHourLossWaived({
+        statusKey: 'authorized_leave',
+        hourAdjustMode: 'custom',
+        hourAdjustStatus: 'approved',
+        hoursApproved: 0,
+        hoursTaken: 8,
+    }), true);
 });

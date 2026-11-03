@@ -1295,6 +1295,27 @@ function previousAttendanceSnapshot(existing) {
     };
 }
 
+function roundMarkHours(value) {
+    const hours = Number(value);
+    if (!Number.isFinite(hours) || hours < 0) return 0;
+    return Math.round(hours * 1e6) / 1e6;
+}
+
+function scheduledDayHoursFrom(schedule) {
+    if (!schedule || schedule.isOffDay) return 8;
+    if (schedule.flexible && Number(schedule.scheduledMinutes) > 0) {
+        return roundMarkHours(Number(schedule.scheduledMinutes) / 60);
+    }
+    if (
+        schedule.startMinutes != null &&
+        schedule.endMinutes != null &&
+        schedule.endMinutes > schedule.startMinutes
+    ) {
+        return roundMarkHours((schedule.endMinutes - schedule.startMinutes) / 60);
+    }
+    return 8;
+}
+
 async function resolveManualMarkPayload({
     employee,
     employeeMongoId,
@@ -1307,16 +1328,20 @@ async function resolveManualMarkPayload({
     attachmentName,
     attachmentKey = '',
     attachmentMime = '',
+    hourAdjustMode = '',
+    hoursApproved = null,
 }) {
     let finalStatusKey = statusKey;
     let finalStatusLabel =
         statusKey === 'authorized_leave' ? authorizedLeaveLabel() : statusLabel;
     let finalReason = String(reason || '').trim();
+    let dayHours = 8;
     try {
         const staffType = normalizeStaffType(employee?.staffType);
         const workingTime = await loadWorkingTimeDoc();
         const week = getWeekForStaffType(workingTime, staffType);
         const schedule = getScheduledPunchMinutes(week, date);
+        dayHours = scheduledDayHoursFrom(schedule) || 8;
         const resolved = resolveStatusFromPunches({
             timeIn,
             timeOut,
@@ -1353,7 +1378,7 @@ async function resolveManualMarkPayload({
         finalStatusLabel = authorizedLeaveLabel();
     }
 
-    return {
+    const payload = {
         statusKey: finalStatusKey,
         statusLabel: finalStatusLabel,
         leavePayType: leavePayTypeForStatus(finalStatusKey),
@@ -1364,6 +1389,19 @@ async function resolveManualMarkPayload({
         attachmentKey: String(attachmentKey || '').trim(),
         attachmentMime: String(attachmentMime || '').trim(),
     };
+    const mode = String(hourAdjustMode || '').trim();
+    if (finalStatusKey === 'authorized_leave' && (mode === 'authorized' || mode === 'custom')) {
+        const scheduled = dayHours > 0 ? dayHours : 8;
+        const max = roundMarkHours(scheduled * 2);
+        const hours = mode === 'authorized' ? scheduled : Math.min(max, roundMarkHours(hoursApproved));
+        payload.hourAdjustMode = mode;
+        payload.hoursApproved = hours;
+        payload.hoursTaken = scheduled;
+        payload.hoursMax = max;
+        payload.hourAdjustKind = 'authorized_leave';
+        payload.hourAdjustStatus = 'approved';
+    }
+    return payload;
 }
 
 async function storeLeaveAttachment(data, name) {
@@ -1505,6 +1543,17 @@ async function commitManualAttendanceMark({
                 attachmentName: payload.attachmentName,
                 attachmentKey: payload.attachmentKey || '',
                 attachmentMime: payload.attachmentMime || '',
+                ...(payload.hourAdjustMode
+                    ? {
+                        hourAdjustMode: payload.hourAdjustMode,
+                        hoursApproved: payload.hoursApproved,
+                        hoursTaken: payload.hoursTaken,
+                        hoursMax: payload.hoursMax,
+                        hourAdjustKind: payload.hourAdjustKind || 'authorized_leave',
+                        hourAdjustStatus: 'approved',
+                        hourAdjustReason: payload.reason || '',
+                    }
+                    : {}),
                 approvalStatus: approvalStatusForMark(payload.statusKey),
                 punchSource: 'manual',
                 checkOutSource: payload.timeOut ? 'manual' : '',
@@ -1639,6 +1688,8 @@ async function queueOrApplyManualMark(ctx, {
     attachmentName,
     attachmentKey = '',
     attachmentMime = '',
+    hourAdjustMode = '',
+    hoursApproved = null,
     markedBy,
     employeeId = '',
     employeeName = '',
@@ -1656,6 +1707,8 @@ async function queueOrApplyManualMark(ctx, {
         attachmentName,
         attachmentKey,
         attachmentMime,
+        hourAdjustMode,
+        hoursApproved,
     });
     const existing = id ? await Attendance.findOne({ date, employeeMongoId: id }).lean() : null;
 
@@ -1883,6 +1936,8 @@ export async function markAttendance(req, res) {
                 attachmentName: storedFile?.attachmentName || String(raw?.attachmentName || '').trim(),
                 attachmentKey: storedFile?.attachmentKey || '',
                 attachmentMime: storedFile?.attachmentMime || '',
+                hourAdjustMode: raw?.hourAdjustMode,
+                hoursApproved: raw?.hoursApproved,
                 markedBy,
                 employeeId: String(raw?.employeeId || raw?.empNo || markEmployee?.employeeId || '').trim(),
                 employeeName: String(raw?.employeeName || raw?.name || '').trim(),
@@ -4345,6 +4400,12 @@ export async function decideAttendanceChangeRequest(req, res) {
             attachmentName: request.proposed?.attachmentName || '',
             attachmentKey: request.proposed?.attachmentKey || '',
             attachmentMime: request.proposed?.attachmentMime || '',
+            hourAdjustMode: request.proposed?.hourAdjustMode || '',
+            hoursApproved: request.proposed?.hoursApproved,
+            hoursTaken: request.proposed?.hoursTaken,
+            hoursMax: request.proposed?.hoursMax,
+            hourAdjustKind: request.proposed?.hourAdjustKind || '',
+            hourAdjustStatus: request.proposed?.hourAdjustStatus || '',
         };
         const approvedStatusKey = String(req.body?.approvedStatusKey || '').trim();
         if (

@@ -22,6 +22,26 @@ describe('day deduction fraction', () => {
         assert.equal(dayDeductionFraction(row, [row], { authorizedLeaveDeductionDays: null }, week), 0);
     });
 
+    it('follows the chosen authorized hours, including zero', () => {
+        const cleared = {
+            date: '2026-10-05',
+            statusKey: 'authorized_leave',
+            hourAdjustMode: 'custom',
+            hourAdjustStatus: 'approved',
+            hoursApproved: 0,
+            hoursTaken: 8,
+        };
+        const full = {
+            ...cleared,
+            hourAdjustMode: 'authorized',
+            hoursApproved: 8,
+        };
+        const halfHours = { ...cleared, hoursApproved: 4 };
+        assert.equal(dayDeductionFraction(cleared, [cleared], { authorizedLeaveDeductionDays: 1 }, week), 0);
+        assert.equal(dayDeductionFraction(full, [full], { authorizedLeaveDeductionDays: 0 }, week), 1);
+        assert.equal(dayDeductionFraction(halfHours, [halfHours], { authorizedLeaveDeductionDays: 1 }, week), 0.5);
+    });
+
     it('uses the leave multiplier when that day deducts', () => {
         const full = { date: '2026-10-05', statusKey: 'unauthorized_leave' };
         const half = { date: '2026-10-06', statusKey: 'authorized_leave', leaveRequestDayPart: 'half' };

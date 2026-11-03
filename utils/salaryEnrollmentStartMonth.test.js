@@ -7,6 +7,7 @@ import {
     resolveNewSalaryEnrollmentFromMonth,
     salaryRegisterMonthRange,
     salaryRegisterPayrollOpenMonth,
+    enrollmentCoversSalaryMonth,
     salarySlipMonthAllowed,
     salarySlipMonthRange,
 } from './salaryEnrollmentStartMonth.js';
@@ -139,5 +140,16 @@ describe('salaryEnrollmentStartMonth', () => {
             }),
             true,
         );
+    });
+
+    it('keeps a salary month only after enrollment processing has started', () => {
+        assert.equal(enrollmentCoversSalaryMonth(null, '2026-09'), false);
+        assert.equal(enrollmentCoversSalaryMonth({ fromMonth: '2026-12' }, '2026-09'), false);
+        assert.equal(enrollmentCoversSalaryMonth({ fromMonth: '2026-09', salaryDate: '1' }, '2026-09'), true);
+        assert.equal(
+            enrollmentCoversSalaryMonth({ fromMonth: '2026-08', salaryDate: '2026-11-01' }, '2026-09'),
+            false,
+        );
+        assert.equal(enrollmentCoversSalaryMonth({ fromMonth: '2026-08', processDate: '28' }, '2026-09'), true);
     });
 });

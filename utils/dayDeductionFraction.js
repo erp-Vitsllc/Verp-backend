@@ -1,4 +1,4 @@
-import { isDeductionWaived, isHourLossWaived } from './deductionWaive.js';
+import { explicitAuthorizedHourShare, isDeductionWaived, isHourLossWaived } from './deductionWaive.js';
 import { lateInOutSummary, missedPunchDeduction } from './lateDeductionPolicy.js';
 import { partialLeavePortion, punchAttendanceKind } from './partialLeaveWindow.js';
 
@@ -21,15 +21,16 @@ function salaryKind(row) {
     return punchAttendanceKind(row) || String(row?.statusKey || '').trim();
 }
 
-function leaveChargeWeight(row, authorized) {
+function leavePortion(row) {
     const part = String(row?.leaveRequestDayPart || '');
-    const fraction = part === 'half' || part === 'quarter'
-        ? partialLeavePortion(part)
-        : Number(row?.leaveDayFraction) > 0 && Number(row.leaveDayFraction) < 1
-            ? Number(row.leaveDayFraction)
-            : 1;
+    if (part === 'half' || part === 'quarter') return partialLeavePortion(part);
+    if (Number(row?.leaveDayFraction) > 0 && Number(row.leaveDayFraction) < 1) return Number(row.leaveDayFraction);
+    return 1;
+}
+
+function leaveChargeWeight(row, authorized) {
     const doubled = authorized && Number(row?.leaveDeductionTimes) === 2 ? 2 : 1;
-    return fraction * doubled;
+    return leavePortion(row) * doubled;
 }
 
 function rowsWithTarget(monthRows, target) {
@@ -52,6 +53,8 @@ export function dayDeductionFraction(target, monthRows = [], policy = {}, week =
     if (!target || isDeductionWaived(target)) return 0;
     const kind = salaryKind(target);
     if (kind === 'authorized_leave') {
+        const share = explicitAuthorizedHourShare(target);
+        if (share != null) return roundFraction(share * leavePortion(target));
         return roundFraction(policyTimes(policy?.authorizedLeaveDeductionDays, 1) * leaveChargeWeight(target, true));
     }
     if (kind === 'unauthorized_leave') {

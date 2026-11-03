@@ -223,7 +223,7 @@ const attendanceSchema = new mongoose.Schema(
             type: Number,
             default: null,
         },
-        /** HR waived the salary deduction. Status, punches, and the rest of the day stay as they are. */
+        /** HR waived the salary deduction and the lost time. The stored status stays; the day is paid and shown as present. */
         deductionWaived: {
             type: Boolean,
             default: false,

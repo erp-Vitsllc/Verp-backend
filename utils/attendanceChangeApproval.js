@@ -75,7 +75,10 @@ export function attendanceMarksMatch(existing, proposed) {
         same(existing.timeIn, proposed.timeIn) &&
         same(existing.timeOut, proposed.timeOut) &&
         same(existing.reason, proposed.reason) &&
-        same(existing.attachmentName, proposed.attachmentName)
+        same(existing.attachmentName, proposed.attachmentName) &&
+        (!proposed.hourAdjustMode ||
+            (same(existing.hourAdjustMode, proposed.hourAdjustMode) &&
+                Number(existing.hoursApproved) === Number(proposed.hoursApproved)))
     );
 }
 
