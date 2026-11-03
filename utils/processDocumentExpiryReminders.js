@@ -42,7 +42,6 @@ import {
 } from "./vehicleExpiryScanUtils.js";
 import {
     buildCompanyExpiryEmailLocation,
-    buildEmployeeExpiryEmailLocation,
     buildVehicleExpiryEmailLocation,
     escapeExpiryEmailHtml,
     renderExpiryEmailLocationBlock,
@@ -332,7 +331,7 @@ const getFlowchartRecipientBundle = async () => {
     return { admin, hr, emails };
 };
 
-/** Employee document expiry routing: Admin + HR + employee HOD (primary reportee). */
+/** Employee document expiry routing: flowchart HR and that employee's primary reportee. */
 let employeeStaticRecipientsCache = null;
 const getEmployeeStaticRecipientBundle = async () => {
     if (employeeStaticRecipientsCache) return employeeStaticRecipientsCache;
@@ -395,6 +394,19 @@ const getEmployeeRecipientBundle = async (employee) => {
         pickCompanyAddress(hod || {}),
     ]);
     return { admins, hr, hod, emails };
+};
+
+/** Document expiry mail goes to the appointed people, never to the employee whose document it is. */
+const employeeAssigneeEmails = (employee, recipients) => {
+    const own = new Set(
+        [employee?.companyEmail, employee?.workEmail]
+            .map((value) => String(value || "").trim().toLowerCase())
+            .filter(Boolean),
+    );
+    return dedupeEmails([
+        pickCompanyAddress(recipients?.hr || {}),
+        pickCompanyAddress(recipients?.hod || {}),
+    ]).filter((mail) => !own.has(String(mail || "").trim().toLowerCase()));
 };
 
 const buildCompanyDocuments = (company) => collectCompanyExpiryDocuments(company);
@@ -916,7 +928,9 @@ const processEmployeeReminders = async () => {
             if (alreadySent) continue;
 
             const stageLabel = getReminderStageLabel(emailStage);
-            const location = buildEmployeeExpiryEmailLocation({ employee, doc });
+            const assigneeEmails = employeeAssigneeEmails(employee, recipients);
+            if (!assigneeEmails.length) continue;
+
             const subject = `Employee document expiry ${stageLabel}: ${subjectName}`;
             const html = `
                 <div style="font-family: Arial, sans-serif; line-height: 1.6; color:#0f172a;">
@@ -925,27 +939,23 @@ const processEmployeeReminders = async () => {
                     <p style="margin:0 0 8px;"><strong>Document:</strong> ${escapeExpiryEmailHtml(doc.label)}</p>
                     <p style="margin:0 0 8px;"><strong>Expiry Date:</strong> ${escapeExpiryEmailHtml(new Date(doc.expiryDate).toLocaleDateString("en-GB"))}</p>
                     <p style="margin:0 0 8px;"><strong>Current lead time:</strong> ${escapeExpiryEmailHtml(days)} day(s) before expiry.</p>
-                    ${renderExpiryEmailLocationBlock(location)}
-                    <p style="margin-top:12px;color:#555;font-size:13px;"><em>This email is sent to <strong>Admin</strong>, designated <strong>HR</strong> on the organizational flowchart, and the employee&rsquo;s <strong>primary reportee</strong>. Follow-up tasks are assigned only to designated HR.</em></p>
+                    <p style="margin-top:12px;color:#555;font-size:13px;"><em>Sent to the flowchart HR assignee and this employee&rsquo;s primary reportee. The employee does not receive this reminder.</em></p>
                 </div>
             `;
 
-            const companyEmail = String(employee.companyEmail || "").trim();
-            if (companyEmail) {
-                await sendExpiryReminderEmail({
-                    to: [companyEmail],
-                    subject,
-                    html,
-                    eventKey: "hrm.employees.document_expiry",
-                    emailType: "EmployeeDocumentExpiry",
-                    recordId: `${employee._id}:${docKey}:${emailStage}`,
-                    taskRecordId: await pendingExpiryActionId({
-                        requestId: employee._id,
-                        requestType: "Employee Document Expiry Reminder",
-                        extra1,
-                    }),
-                });
-            }
+            await sendExpiryReminderEmail({
+                to: assigneeEmails,
+                subject,
+                html,
+                eventKey: "hrm.employees.document_expiry",
+                emailType: "EmployeeDocumentExpiry",
+                recordId: `${employee._id}:${docKey}:${emailStage}`,
+                taskRecordId: await pendingExpiryActionId({
+                    requestId: employee._id,
+                    requestType: "Employee Document Expiry Reminder",
+                    extra1,
+                }),
+            });
 
             await markReminderSent({
                 targetType: "employee",
@@ -956,7 +966,7 @@ const processEmployeeReminders = async () => {
                 metadata: {
                     employeeId: employee.employeeId,
                     docLabel: doc.label,
-                    detailUrl: location.detailUrl,
+                    to: assigneeEmails,
                 },
             });
         }

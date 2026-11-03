@@ -83,7 +83,7 @@ export const NOTIFICATION_EMAIL_CATALOG = [
                         hint: 'Passport, visa, Emirates ID, labour card, insurance, licence, contract.',
                         detail: detail(
                             'Employee Document Expiry Reminder',
-                            'HR follow-up stays in the inbox. Paid message: one email to the employee company email, or one WhatsApp if none.',
+                            'HR follow-up stays in the inbox. The email goes to flowchart HR and the employee’s primary reportee, not to the employee.',
                         ),
                         types: ['Employee Document Expiry Reminder'],
                         emailTypes: ['EmployeeDocumentExpiry'],
