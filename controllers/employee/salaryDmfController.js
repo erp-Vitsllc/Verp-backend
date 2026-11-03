@@ -11,9 +11,14 @@ import {
     resolveDmfAssignees,
     serializeDmf,
     viewerCanActOnDmf,
-    viewerCanStartDmf,
+    viewerCanSubmitMonthPayroll,
 } from '../../utils/salaryDmfApproval.js';
-import { closeSalaryDmfInbox, notifySalaryDmfStep } from '../../utils/salaryDmfNotify.js';
+import {
+    closeSalaryDmfInbox,
+    notifySalaryDmfStep,
+    notifySalaryMonthRejected,
+    notifySalaryMonthSlotReady,
+} from '../../utils/salaryDmfNotify.js';
 import { syncSalaryDmfToZoho } from '../../utils/syncSalaryDmfToZoho.js';
 import { notifySalaryMonthApprovedEmployees } from '../../utils/notifySalaryMonthApprovedEmployees.js';
 import { monthPayrollIsClear } from './getSalaryRegister.js';
@@ -85,6 +90,9 @@ async function persistAndNotify({
         if (kind === 'month' && monthKey) {
             void notifySalaryMonthApprovedEmployees({ monthKey }).catch((err) => {
                 console.error('[notifySalaryMonthApprovedEmployees]', err?.message || err);
+            });
+            void notifySalaryMonthSlotReady({ req, dmf, monthKey }).catch((err) => {
+                console.error('[notifySalaryMonthSlotReady]', err?.message || err);
             });
         }
         return;
@@ -160,7 +168,7 @@ async function monthPayrollAmount(monthKey) {
 
 async function serializeMonthDmfRow(req, doc, monthKey) {
     const ctx = await buildDmfViewerContext(req, doc?.dmfApproval);
-    return serializeDmf(doc?.dmfApproval, { ready: true, ctx: { ...ctx, monthKey } });
+    return serializeDmf(doc?.dmfApproval, { ready: true, ctx: { ...ctx, monthKey }, flow: 'month' });
 }
 
 export async function getMonthSalaryDmf(req, res) {
@@ -185,7 +193,7 @@ export async function startMonthSalaryDmf(req, res) {
         if (!(await monthPayrollIsClear(monthKey))) {
             return res.status(400).json({
                 message:
-                    'Complete all payroll tasks (100% readiness) before processing salary.',
+                    'Submit is available only when readiness is 100% and every employee is Ready.',
             });
         }
 
@@ -194,11 +202,15 @@ export async function startMonthSalaryDmf(req, res) {
             doc = new SalaryMonthDmf({ monthKey });
         }
         const startCtx = await buildDmfViewerContext(req, doc.dmfApproval);
-        if (!viewerCanStartDmf(doc.dmfApproval, startCtx)) {
+        if (!viewerCanSubmitMonthPayroll(doc.dmfApproval, startCtx)) {
+            const status = String(doc.dmfApproval?.status || '');
             return res.status(403).json({
-                message: String(doc.dmfApproval?.status || '') === 'pending'
-                    ? 'A DMF approval is already in progress. Only the current approver can act.'
-                    : 'Only a payroll approver can process salary.',
+                message:
+                    status === 'pending'
+                        ? 'This payroll is already with an approver.'
+                        : status === 'approved'
+                          ? 'This payroll is already approved.'
+                          : 'Only the flowchart Accounts assignee can submit this payroll.',
             });
         }
         assertCanStart(doc.dmfApproval);
@@ -212,6 +224,10 @@ export async function startMonthSalaryDmf(req, res) {
             billLabel: `Salary ${monthKey}`,
             actor: who,
             stepDefs: MONTH_SALARY_DMF_STEP_DEFS,
+        });
+        approveCurrentDmfStep(doc.dmfApproval, {
+            actor: who,
+            comment: 'Submitted',
         });
         doc.markModified('dmfApproval');
         await doc.save();
@@ -315,6 +331,13 @@ export async function rejectMonthSalaryDmf(req, res) {
             status: 'Rejected',
             actionedBy: who.id,
             comment: doc.dmfApproval.rejectReason,
+        });
+        await notifySalaryMonthRejected({
+            req,
+            dmf: doc.dmfApproval,
+            monthKey,
+            rejectedByName: who.name,
+            reason: doc.dmfApproval.rejectReason,
         });
 
         return res.status(200).json({ monthKey, dmf: await serializeMonthDmfRow(req, doc, monthKey) });

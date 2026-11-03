@@ -22,8 +22,6 @@ export const PAYROLL_FINE_QUERY_STATUSES = [
     'Active',
 ];
 
-const ASSET_RETURN_ACTIONS = new Set(['Return Asset', 'Asset Transfer']);
-
 /**
  * A loan or advance blocks Ready while approval is open, or while Accounts still
  * has to disburse it (Zoho or employee pay). Salary repayment of money already
@@ -115,41 +113,18 @@ function refId(value) {
 }
 
 /**
- * Assignment still waiting to be accepted, or a return / transfer still open.
- * `employeeMongoId` is either the person it is pending on, or the person who sent it.
+ * Payroll blocks while an assignment to this employee is still unaccepted,
+ * or while a return of their asset is still pending.
+ * Transfers and other asset requests do not block.
  */
 export function assetPayrollInvolvement(asset, employeeMongoId) {
     const emp = String(employeeMongoId || '').trim();
     if (!asset || !emp) return null;
     const assignedTo = refId(asset.assignedTo);
-    const assignedBy = refId(asset.assignedBy);
     const actionBy = refId(asset.actionRequiredBy);
     const requestedBy = refId(asset.pendingActionDetails?.requestedBy);
-    const accepting = String(asset.acceptanceStatus || '') === 'Pending' && Boolean(assignedTo);
-    const action = String(asset.pendingAction || '').trim();
-    const returning = ASSET_RETURN_ACTIONS.has(action);
-    const onHim = emp === assignedTo || (Boolean(actionBy) && emp === actionBy);
-    const sentByHim = emp === assignedBy || emp === requestedBy;
-    if (!accepting && !returning) return null;
-    if (!onHim && !sentByHim) return null;
-
-    if (returning && onHim) {
-        return {
-            title: action === 'Asset Transfer' ? 'Asset transfer pending' : 'Asset return pending',
-            assigneeMongoId: actionBy || emp,
-            responsibleRole: !actionBy || actionBy === emp ? 'Employee' : 'Approver',
-            onSubject: !actionBy || actionBy === emp,
-        };
-    }
-    if (returning && sentByHim) {
-        return {
-            title: action === 'Asset Transfer' ? 'Asset transfer sent' : 'Asset return sent',
-            assigneeMongoId: actionBy || assignedTo,
-            responsibleRole: 'Approver',
-            onSubject: false,
-        };
-    }
-    if (accepting && emp === assignedTo) {
+    const accepting = String(asset.acceptanceStatus || '') === 'Pending' && emp === assignedTo;
+    if (accepting) {
         return {
             title: 'Asset assignment pending',
             assigneeMongoId: emp,
@@ -157,15 +132,25 @@ export function assetPayrollInvolvement(asset, employeeMongoId) {
             onSubject: true,
         };
     }
-    if (accepting && sentByHim) {
+
+    if (String(asset.pendingAction || '').trim() !== 'Return Asset') return null;
+    const onHim = emp === assignedTo || (Boolean(actionBy) && emp === actionBy);
+    const sentByHim = emp === requestedBy;
+    if (!onHim && !sentByHim) return null;
+    if (onHim) {
         return {
-            title: 'Asset assignment sent',
-            assigneeMongoId: actionBy || assignedTo,
-            responsibleRole: 'Employee',
-            onSubject: false,
+            title: 'Asset return pending',
+            assigneeMongoId: actionBy || emp,
+            responsibleRole: !actionBy || actionBy === emp ? 'Employee' : 'Approver',
+            onSubject: !actionBy || actionBy === emp,
         };
     }
-    return null;
+    return {
+        title: 'Asset return sent',
+        assigneeMongoId: actionBy || assignedTo,
+        responsibleRole: 'Approver',
+        onSubject: false,
+    };
 }
 
 export function assetTaskPath(asset) {

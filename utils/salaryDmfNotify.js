@@ -1,11 +1,20 @@
 import { syncDashboardAction } from './syncDashboard.js';
 import { resolveFrontendBaseUrl } from './resolveFrontendBaseUrl.js';
 import { sendMailLater } from './salaryEnrollmentApprovalNotify.js';
+import { getDepartmentHOD } from './getDepartmentHOD.js';
 import {
     SALARY_DMF_REQUEST_TYPE,
     currentDmfStep,
     personDisplayName,
 } from './salaryDmfApproval.js';
+
+function escapeHtml(value) {
+    return String(value || '')
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;');
+}
 
 function extraPayload({ kind, employeeId, monthKey, href }) {
     return JSON.stringify({
@@ -67,14 +76,129 @@ export async function notifySalaryDmfStep({
     const baseUrl = resolveFrontendBaseUrl(req);
     const payrollTitle =
         kind === 'month' ? `${monthKey} payroll` : `${subjectName} payroll`;
+    const openLabel = kind === 'month' ? 'Open the payroll' : 'Open in VERP';
+    const decisionLine =
+        kind === 'month'
+            ? `<p>Approve or reject it on that page.</p>`
+            : '';
     sendMailLater({
         to,
         subject: `${payrollTitle} waiting for ${step.label}`,
         html: `
-            <p>Hello ${assigneeName},</p>
-            <p><strong>${payrollTitle}</strong> is waiting for ${step.label} approval.</p>
-            <p><a href="${baseUrl}${href}">Open in VERP</a></p>
+            <p>Hello ${escapeHtml(assigneeName)},</p>
+            <p><strong>${escapeHtml(payrollTitle)}</strong> is waiting for ${escapeHtml(step.label)} approval.</p>
+            <p><a href="${baseUrl}${href}">${openLabel}</a></p>
+            ${decisionLine}
         `,
+    });
+}
+
+export async function notifySalaryMonthRejected({ req, dmf, monthKey, rejectedByName, reason }) {
+    const accountsStep = (Array.isArray(dmf?.steps) ? dmf.steps : []).find((step) => step.key === 'accounts');
+    const to = String(accountsStep?.assignedTo?.companyEmail || '').trim();
+    const name = accountsStep?.assignedTo?.name || 'Accounts';
+    if (!to || !monthKey) {
+        console.warn('[notifySalaryMonthRejected] Accounts has no company email for', monthKey || '');
+        return;
+    }
+    const href = inboxHref({ kind: 'month', monthKey });
+    const baseUrl = resolveFrontendBaseUrl(req);
+    const who = String(rejectedByName || 'an approver').trim() || 'an approver';
+    const why = String(reason || '').trim();
+    sendMailLater({
+        to,
+        subject: `${monthKey} payroll was rejected`,
+        html: `
+            <p>Hello ${escapeHtml(name)},</p>
+            <p><strong>${escapeHtml(monthKey)} payroll</strong> was rejected by ${escapeHtml(who)}.</p>
+            ${why ? `<p>Reason: ${escapeHtml(why)}</p>` : ''}
+            <p>Submit is available again on the payroll page.</p>
+            <p><a href="${baseUrl}${href}">Open the payroll</a></p>
+        `,
+    });
+}
+
+export async function notifySalaryMonthSlotReady({ req, dmf, monthKey }) {
+    const accountsStep = (Array.isArray(dmf?.steps) ? dmf.steps : []).find((step) => step.key === 'accounts');
+    const to = String(accountsStep?.assignedTo?.companyEmail || '').trim();
+    const name = accountsStep?.assignedTo?.name || 'Accounts';
+    if (!to || !monthKey) return;
+    const href = inboxHref({ kind: 'month', monthKey });
+    const baseUrl = resolveFrontendBaseUrl(req);
+    sendMailLater({
+        to,
+        subject: `${monthKey} payroll approved — create slot`,
+        html: `
+            <p>Hello ${escapeHtml(name)},</p>
+            <p>Management approved <strong>${escapeHtml(monthKey)} payroll</strong>.</p>
+            <p>Create slot is now on the payroll page.</p>
+            <p><a href="${baseUrl}${href}">Open the payroll</a></p>
+        `,
+    });
+}
+
+export function sendSalarySlotMail({ req, to, name, subject, monthKey, lines }) {
+    const address = String(to || '').trim();
+    if (!address || !monthKey) return;
+    const href = inboxHref({ kind: 'month', monthKey });
+    const baseUrl = resolveFrontendBaseUrl(req);
+    const body = (Array.isArray(lines) ? lines : [])
+        .map((line) => String(line || '').trim())
+        .filter(Boolean)
+        .map((line) => `<p>${escapeHtml(line)}</p>`)
+        .join('');
+    sendMailLater({
+        to: address,
+        subject,
+        html: `
+            <p>Hello ${escapeHtml(name || '')},</p>
+            ${body}
+            <p><a href="${baseUrl}${href}">Open the payroll</a></p>
+        `,
+    });
+}
+
+export async function notifyAccountsSalarySlot({ payment, monthKey, phase }) {
+    const accounts = await getDepartmentHOD('accounts');
+    const assignedTo = accounts?._id;
+    if (!payment?._id || !assignedTo || !monthKey) return;
+    const slotNo = Number(payment.paymentNo) || 0;
+    const cash = String(payment.paymentMethod || '').trim().toUpperCase() === 'CASH';
+    const readyToUpdate = phase === 'update' || cash;
+    const href = inboxHref({ kind: 'month', monthKey });
+    await syncDashboardAction({
+        requestId: payment._id,
+        requestType: SALARY_DMF_REQUEST_TYPE,
+        assignedTo: String(assignedTo),
+        status: 'Pending',
+        subjectEmployee: {
+            employeeId: monthKey,
+            firstName: slotNo ? `Slot ${slotNo}` : 'Salary slot',
+            lastName: '',
+        },
+        requestedByName: 'HR',
+        extra1: readyToUpdate
+            ? `${monthKey} slot ${slotNo} is ready to update salary.`
+            : `${monthKey} slot ${slotNo} — check the WPS send.`,
+        extra2: 'Salary slot',
+        extra3: JSON.stringify({
+            kind: 'salary-slot',
+            monthKey,
+            href,
+            paymentId: String(payment._id),
+            slotNo,
+        }),
+    });
+}
+
+export async function closeAccountsSalarySlotInbox(paymentId) {
+    if (!paymentId) return;
+    await syncDashboardAction({
+        requestId: paymentId,
+        requestType: SALARY_DMF_REQUEST_TYPE,
+        status: 'Dismissed',
+        comment: 'Salary slot finished',
+        subjectEmployee: { employeeId: '', firstName: '', lastName: '' },
     });
 }
 

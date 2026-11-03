@@ -159,7 +159,16 @@ export async function compOffMonthLocked(employeeCode, monthKey) {
     if (!code || !MONTH_KEY.test(month)) return false;
     const [slip, payment] = await Promise.all([
         SalarySlipMonth.findOne({ employeeId: code, monthKey: month }).select('_id').lean(),
-        SalaryMonthPayment.findOne({ monthKey: month, employeeIds: code }).select('_id').lean(),
+        SalaryMonthPayment.findOne({
+            monthKey: month,
+            employeeIds: code,
+            $or: [
+                { status: 'approved' },
+                { status: { $exists: false } },
+                { status: null },
+                { status: '' },
+            ],
+        }).select('_id').lean(),
     ]);
     if (slip) return 'The salary slip for this month is already entered.';
     if (payment) return 'Salary payment for this month is already entered.';

@@ -273,11 +273,13 @@ async function salaryClearance(employee) {
     const payments = await SalaryMonthPayment.find({
         monthKey: { $gte: fromMonth, $lt: currentYm },
     })
-        .select("monthKey employeeIds")
+        .select("monthKey employeeIds status")
         .lean();
 
     const paid = new Set();
     for (const row of payments || []) {
+        const status = String(row.status || "approved").trim().toLowerCase();
+        if (status && status !== "approved") continue;
         const month = String(row.monthKey || "").trim();
         const included = (row.employeeIds || []).some((id) => codeKey(id) === key);
         if (month && included) paid.add(month);

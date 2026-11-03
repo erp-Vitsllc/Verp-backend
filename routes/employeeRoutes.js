@@ -199,7 +199,7 @@ import {
     updateTaskManagerTaskStatus,
 } from "../controllers/stats/taskManagerTaskActions.js";
 import { getPayrollDashboard } from "../controllers/employee/getPayrollDashboard.js";
-import { getSalaryRegister, deleteSalaryRegisterMonth, restoreSalaryRegisterMonths, sendPayrollBlockerReminders, createSalaryMonthPayment } from "../controllers/employee/getSalaryRegister.js";
+import { getSalaryRegister, deleteSalaryRegisterMonth, restoreSalaryRegisterMonths, sendPayrollBlockerReminders, createSalaryMonthPayment, updateSalaryMonthPayment } from "../controllers/employee/getSalaryRegister.js";
 import { getPayrollSettings, savePayrollSettings, getGroupPayrollSettings, saveGroupPayrollSettings, copyMainPayrollSettingsToGroup } from "../controllers/employee/payrollSettingsController.js";
 import {
     getSalaryEnrollOptions,
@@ -305,6 +305,16 @@ router.post(
         ['hrm_employees_view_salary', 'view'],
     ]),
     createSalaryMonthPayment,
+);
+router.post(
+    "/salary-register/:monthKey/payments/:paymentId",
+    checkAnyModulePermission([
+        ['hrm_salary', 'edit'],
+        ['hrm_salary', 'view'],
+        ['hrm_employees_view_salary', 'edit'],
+        ['hrm_employees_view_salary', 'view'],
+    ]),
+    updateSalaryMonthPayment,
 );
 router.get(
     "/salary-register/:monthKey/dmf",

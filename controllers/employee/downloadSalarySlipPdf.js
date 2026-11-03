@@ -143,8 +143,16 @@ export async function listEmployeeSalarySlipMonths(req, res) {
         const [enrollment, profile, payments, payrollDoc] = await Promise.all([
             SalaryEnrollment.findOne({ employeeId: idPattern }).select('fromMonth').lean(),
             SalaryHistoricalProfile.findOne({ employeeId: idPattern }).select('verpStartDate').lean(),
-            SalaryMonthPayment.find({ employeeIds: idPattern })
-                .select('monthKey paymentNo createdAt')
+            SalaryMonthPayment.find({
+                employeeIds: idPattern,
+                $or: [
+                    { status: 'approved' },
+                    { status: { $exists: false } },
+                    { status: null },
+                    { status: '' },
+                ],
+            })
+                .select('monthKey paymentNo createdAt status')
                 .sort({ monthKey: -1, paymentNo: -1 })
                 .lean(),
             PayrollSettings.findOne({ key: 'default' }).select('salaryProcessStartMonth').lean(),

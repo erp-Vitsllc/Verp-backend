@@ -73,7 +73,7 @@ describe('utility payroll readiness', () => {
 });
 
 describe('asset payroll readiness', () => {
-    it('blocks an assignment pending on him and a return he sent', () => {
+    it('blocks a pending assignment to the employee and a pending return', () => {
         const assigned = {
             _id: 'a1',
             acceptanceStatus: 'Pending',
@@ -82,7 +82,7 @@ describe('asset payroll readiness', () => {
             pendingAction: null,
         };
         assert.equal(assetPayrollInvolvement(assigned, 'emp-1')?.title, 'Asset assignment pending');
-        assert.equal(assetPayrollInvolvement(assigned, 'emp-2')?.title, 'Asset assignment sent');
+        assert.equal(assetPayrollInvolvement(assigned, 'emp-2'), null);
         assert.equal(assetPayrollInvolvement({ ...assigned, acceptanceStatus: 'Accepted' }, 'emp-1'), null);
 
         const returning = {
@@ -94,6 +94,10 @@ describe('asset payroll readiness', () => {
             actionRequiredBy: 'emp-3',
         };
         assert.equal(assetPayrollInvolvement(returning, 'emp-1')?.title, 'Asset return pending');
-        assert.equal(assetPayrollInvolvement(returning, 'emp-9'), null);
+        assert.equal(assetPayrollInvolvement(returning, 'emp-3')?.title, 'Asset return pending');
+        assert.equal(
+            assetPayrollInvolvement({ ...returning, pendingAction: 'Asset Transfer' }, 'emp-1'),
+            null,
+        );
     });
 });

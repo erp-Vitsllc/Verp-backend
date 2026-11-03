@@ -273,10 +273,11 @@ export function dmfPendingForWho(dmf) {
     return '';
 }
 
-/** User-facing payroll status: Pending → Pending for Accounts → Pending for HR → Pending for Management → Approved. */
+/** User-facing payroll status: Pending → Pending for HR → Pending for Management → Approved, or Rejected. */
 export function payrollApprovalStatusLabel(dmf) {
     const status = String(dmf?.status || 'idle').toLowerCase();
     if (status === 'approved') return 'Approved';
+    if (status === 'rejected') return 'Rejected';
     if (status === 'pending') {
         const who = dmfPendingForWho(dmf);
         return who ? `Pending for ${who}` : 'Pending';
@@ -388,10 +389,23 @@ export function viewerCanStartDmf(dmf, ctx) {
     return Boolean(ctx.isApprover || ctx.isHr);
 }
 
-export function serializeDmf(dmf, { ready = false, ctx = null } = {}) {
+/** Month payroll submit is the flowchart Accounts assignee, including after a rejection. */
+export function viewerCanSubmitMonthPayroll(dmf, ctx) {
+    const status = String(dmf?.status || 'idle') || 'idle';
+    if (status === 'pending' || status === 'approved') return false;
+    return Boolean(ctx?.isAccounts);
+}
+
+/** Create slot opens only after Management approves, and only for flowchart Accounts. */
+export function viewerCanCreateSalarySlot(dmf, ctx) {
+    return String(dmf?.status || '') === 'approved' && Boolean(ctx?.isAccounts);
+}
+
+export function serializeDmf(dmf, { ready = false, ctx = null, flow = '' } = {}) {
     const row = toPlainDmf(dmf);
     dropLegacyUser2Step(row);
     const status = String(row.status || 'idle') || 'idle';
+    const monthFlow = flow === 'month';
     const steps = (Array.isArray(row.steps) ? row.steps : [])
         .filter((step) => step.key !== 'user2')
         .map((step) => ({
@@ -407,6 +421,9 @@ export function serializeDmf(dmf, { ready = false, ctx = null } = {}) {
     }));
     const canAct = viewerCanActOnDmf(row, ctx);
     const pendingFor = dmfPendingForWho(row);
+    const canStart = monthFlow
+        ? Boolean(ready) && viewerCanSubmitMonthPayroll(row, ctx)
+        : Boolean(ready) && viewerCanStartDmf(row, ctx);
     return {
         status,
         statusLabel: payrollApprovalStatusLabel(row),
@@ -427,9 +444,10 @@ export function serializeDmf(dmf, { ready = false, ctx = null } = {}) {
         zohoSyncError: row.zohoSyncError || '',
         zohoSkipped: Boolean(row.zohoSkipped),
         ready: Boolean(ready),
-        canStart: Boolean(ready) && viewerCanStartDmf(row, ctx),
+        canStart,
         canAct,
         canReject: canAct,
+        canCreateSlot: monthFlow && viewerCanCreateSalarySlot(row, ctx),
     };
 }
 

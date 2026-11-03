@@ -3,6 +3,7 @@ import EmployeeBasic from '../../models/EmployeeBasic.js';
 import SalaryEnrollment from '../../models/SalaryEnrollment.js';
 import SalaryHistoricalProfile from '../../models/SalaryHistoricalProfile.js';
 import SalaryMonthDmf from '../../models/SalaryMonthDmf.js';
+import SalaryMonthPayment from '../../models/SalaryMonthPayment.js';
 import { purgeOrphanDashboardActionRows } from '../../utils/clearDashboardActionsForRequest.js';
 import {
     isCompanyShellEmployee,
@@ -26,6 +27,10 @@ import { isPendingEnrollmentReminder, syncPendingSalaryEnrollmentTasks } from '.
 import { omitEnrollmentTaskDuplicates } from '../../utils/pendingEnrollmentReminder.js';
 import { listDeletedNoticeKeys, noticeKeysForRecord, salaryEnrollmentEmployeeKey } from '../../utils/deletedTaskNotice.js';
 import { viewerIsSalaryFlowchartHr } from '../../utils/viewerIsSalaryFlowchartHr.js';
+
+function isSalarySlotNotice(row) {
+    return parseExtra3(row?.extra3).kind === 'salary-slot';
+}
 
 function parseExtra3(value) {
     if (!value) return {};
@@ -252,13 +257,23 @@ export const getPendingSalaryDashboardInbox = async (req, res) => {
             const monthDmfById = Object.fromEntries(monthDmfs.map((row) => [String(row._id), row]));
             const liveById = { ...profileById, ...monthDmfById };
             const reminderRows = [];
+            const slotRows = [];
             const linkedRows = [];
             for (const da of rows) {
                 if (isPendingEnrollmentReminder(da)) reminderRows.push(da);
+                else if (isSalarySlotNotice(da)) slotRows.push(da);
                 else linkedRows.push(da);
             }
+            const slotIds = slotRows.map((row) => String(row.requestId || '')).filter(Boolean);
+            const slotPayments = slotIds.length
+                ? await SalaryMonthPayment.find({ _id: { $in: slotIds } })
+                      .select('_id status')
+                      .lean()
+                : [];
+            const slotById = Object.fromEntries(slotPayments.map((row) => [String(row._id), row]));
             const liveRows = [
                 ...reminderRows,
+                ...slotRows,
                 ...(await purgeOrphanDashboardActionRows(linkedRows, liveById)),
             ];
 
@@ -277,6 +292,15 @@ export const getPendingSalaryDashboardInbox = async (req, res) => {
                     }
                 }
                 if (isPendingEnrollmentReminder(da)) {
+                    actionableRows.push(da);
+                    continue;
+                }
+                if (type === SALARY_DMF_REQUEST_TYPE && isSalarySlotNotice(da)) {
+                    const slotStatus = String(slotById[String(da.requestId)]?.status || '').toLowerCase();
+                    if (slotStatus !== 'pending_wps' && slotStatus !== 'pending_update') {
+                        if (da._id) idsToDismiss.push(da._id);
+                        continue;
+                    }
                     actionableRows.push(da);
                     continue;
                 }

@@ -73,12 +73,19 @@ import {
     lastOpenSalaryProcessMonth,
     salaryRegisterPayrollOpenMonth,
 } from '../../utils/salaryEnrollmentStartMonth.js';
-import { viewerIsSalaryFlowchartHr } from '../../utils/viewerIsSalaryFlowchartHr.js';
+import { viewerIsFlowchartHrAssignee, viewerIsSalaryFlowchartHr } from '../../utils/viewerIsSalaryFlowchartHr.js';
 import {
     buildDmfViewerContext,
     monthPayrollProcessStatusLabel,
     serializeDmf,
 } from '../../utils/salaryDmfApproval.js';
+import { resolveFlowchartHrEmployee } from '../../utils/resolveFlowchartHrEmployee.js';
+import { salaryMonthPaymentLabel, slotHoldsEmployees, slotStatusOf, singleSlotPayType } from '../../utils/salarySlotRules.js';
+import {
+    closeAccountsSalarySlotInbox,
+    notifyAccountsSalarySlot,
+    sendSalarySlotMail,
+} from '../../utils/salaryDmfNotify.js';
 import { sendMailLater } from '../../utils/salaryEnrollmentApprovalNotify.js';
 import { withFrontendPath } from '../../utils/resolveFrontendBaseUrl.js';
 import {
@@ -350,21 +357,21 @@ async function loadAssigneePeople({ empIds = [], mongoIds = [] }) {
     const [empsByCode, empsByMongo, users] = await Promise.all([
         codes.length
             ? EmployeeBasic.find({ employeeId: { $in: codes } })
-                  .select('employeeId firstName lastName email companyEmail')
-                  .lean()
-                  .maxTimeMS(8000)
+                .select('employeeId firstName lastName email companyEmail')
+                .lean()
+                .maxTimeMS(8000)
             : [],
         objectIds.length
             ? EmployeeBasic.find({ _id: { $in: objectIds } })
-                  .select('employeeId firstName lastName email companyEmail')
-                  .lean()
-                  .maxTimeMS(8000)
+                .select('employeeId firstName lastName email companyEmail')
+                .lean()
+                .maxTimeMS(8000)
             : [],
         objectIds.length
             ? User.find({ _id: { $in: objectIds } })
-                  .select('employeeId name email')
-                  .lean()
-                  .maxTimeMS(8000)
+                .select('employeeId name email')
+                .lean()
+                .maxTimeMS(8000)
             : [],
     ]);
     const byEmpId = new Map();
@@ -377,9 +384,9 @@ async function loadAssigneePeople({ empIds = [], mongoIds = [] }) {
     const userEmpCodes = [...new Set((users || []).map((row) => String(row.employeeId || '').trim()).filter(Boolean))];
     const extra = userEmpCodes.length
         ? await EmployeeBasic.find({ employeeId: { $in: userEmpCodes } })
-              .select('employeeId firstName lastName email companyEmail')
-              .lean()
-              .maxTimeMS(8000)
+            .select('employeeId firstName lastName email companyEmail')
+            .lean()
+            .maxTimeMS(8000)
         : [];
     for (const emp of extra || []) {
         const code = String(emp.employeeId || '').trim();
@@ -423,12 +430,12 @@ async function attachPayrollBlockerAssignees(items) {
         const requestIds = toObjectIdList(rows.map((item) => item.requestId));
         const actions = requestIds.length
             ? await DashboardAction.find({
-                  status: 'Pending',
-                  requestId: { $in: requestIds },
-              })
-                  .select('requestId assignedTo assignedToEmpId requestedDate createdAt updatedAt')
-                  .lean()
-                  .maxTimeMS(8000)
+                status: 'Pending',
+                requestId: { $in: requestIds },
+            })
+                .select('requestId assignedTo assignedToEmpId requestedDate createdAt updatedAt')
+                .lean()
+                .maxTimeMS(8000)
             : [];
 
         const actionByRequest = new Map();
@@ -538,139 +545,134 @@ async function buildGroupPendingRequests(people, monthKey) {
 
     const monthWindow = range
         ? {
-              $or: [
-                  { date: { $gte: range.from, $lte: range.to } },
-                  { leaveRequestFromDate: { $gte: range.from, $lte: range.to } },
-                  { leaveRequestToDate: { $gte: range.from, $lte: range.to } },
-                  { leaveRequestFromDate: { $lte: range.from }, leaveRequestToDate: { $gte: range.to } },
-              ],
-          }
+            $or: [
+                { date: { $gte: range.from, $lte: range.to } },
+                { leaveRequestFromDate: { $gte: range.from, $lte: range.to } },
+                { leaveRequestToDate: { $gte: range.from, $lte: range.to } },
+                { leaveRequestFromDate: { $lte: range.from }, leaveRequestToDate: { $gte: range.to } },
+            ],
+        }
         : null;
 
     const [attendanceRows, changeRows, loans, fines, hubRows, assets, utilityBills, utilityEntries, utilityBalances] =
         await Promise.all([
-        mongoIds.length
-            ? Attendance.find({
-                  employeeMongoId: { $in: mongoIds },
-                  ...(monthWindow ? { $and: [monthWindow] } : {}),
-                  $or: [
-                      { leaveRequestStatus: 'pending' },
-                      { hourAdjustStatus: 'pending' },
-                      { flexibleOtStatus: 'pending' },
-                  ],
-              })
-                  .select(
-                      '_id employeeMongoId employeeId employeeName date leaveRequestKind requestedStatusKey requestedStatusLabel leaveRequestGroupId leaveRequestFromDate leaveRequestToDate leaveRequestedAt leaveApprovalStage approvalStatus hourAdjustStatus hoursApproved flexibleOtStatus flexibleOtApprovedHours createdAt',
-                  )
-                  .lean()
-                  .maxTimeMS(12000)
-            : [],
-        mongoIds.length
-            ? AttendanceChangeRequest.find({
-                  employeeMongoId: { $in: mongoIds },
-                  stage: { $in: ATTENDANCE_CHANGE_OPEN_STAGES },
-                  ...(range ? { date: { $gte: range.from, $lte: range.to } } : {}),
-              })
-                  .select(
-                      'date employeeMongoId stage action proposed previous requestedByName reporteeId reporteeName hrId hrName staffType createdAt',
-                  )
-                  .lean()
-                  .maxTimeMS(8000)
-            : [],
-        codes.length
-            ? Loan.find({
-                  employeeId: { $in: codes },
-                  $or: [
-                      { status: { $in: PAYROLL_LOAN_QUERY_STATUSES } },
-                      { approvalStatus: { $in: PAYROLL_LOAN_QUERY_STATUSES } },
-                  ],
-              })
-                  .select('_id employeeId type status approvalStatus amount paidAmount workflow submittedTo createdAt updatedAt')
-                  .lean()
-                  .maxTimeMS(8000)
-            : [],
-        codes.length
-            ? Fine.find({
-                  fineStatus: { $in: PAYROLL_FINE_QUERY_STATUSES },
-                  'assignedEmployees.employeeId': { $in: codes },
-              })
-                  .select(
-                      '_id fineId fineStatus fineType assignedEmployees workflow accountsPaymentPath zohoBillId zohoBillNumber zohoJournalId zohoJournalNumber vendorBillStatus createdAt updatedAt',
-                  )
-                  .lean()
-                  .maxTimeMS(8000)
-            : [],
-        objectIds.length
-            ? EmployeeHubRequest.find({
-                  status: 'Pending',
-                  $or: [{ requester: { $in: objectIds } }, { requesterEmpId: { $in: codes } }],
-              })
-                  .select('_id kind requester requesterEmpId requesterName assignedTo assignedToEmpId createdAt')
-                  .lean()
-                  .maxTimeMS(8000)
-                  .catch(() => [])
-            : [],
-        objectIds.length
-            ? AssetItem.find({
-                  $or: [
-                      { assignedTo: { $in: objectIds }, acceptanceStatus: 'Pending' },
-                      {
-                          assignedBy: { $in: objectIds },
-                          acceptanceStatus: 'Pending',
-                          assignedTo: { $ne: null },
-                      },
-                      {
-                          pendingAction: { $in: ['Return Asset', 'Asset Transfer'] },
-                          $or: [
-                              { assignedTo: { $in: objectIds } },
-                              { actionRequiredBy: { $in: objectIds } },
-                              { 'pendingActionDetails.requestedBy': { $in: [...objectIds, ...mongoIds] } },
-                          ],
-                      },
-                  ],
-              })
-                  .select(
-                      '_id assetId name plateNumber vehicleCode pendingAction acceptanceStatus assignedTo assignedBy actionRequiredBy pendingActionDetails',
-                  )
-                  .lean()
-                  .maxTimeMS(8000)
-            : [],
-        codes.length
-            ? UtilityBillPayment.find({
-                  status: { $in: ['Pending Accounts', 'Pending HR', 'Approved', 'Paid'] },
-                  $or: [
-                      { payByEmployeeId: { $in: codes } },
-                      { 'zohoLineItems.payByEmployeeId': { $in: codes } },
-                  ],
-              })
-                  .select(
-                      '_id entryId utilityType billMonth status paymentBy payByEmployeeId pendingWithName pendingWithRole employeeDiffAmount zohoLineItems createdAt updatedAt',
-                  )
-                  .lean()
-                  .maxTimeMS(8000)
-            : [],
-        codes.length
-            ? UtilityEntry.find({
-                  assignedToType: 'Employee',
-                  assignedToId: { $in: codes },
-                  pendingStatusChange: { $ne: null },
-              })
-                  .select('_id type assignedToId pendingStatusChange updatedAt createdAt')
-                  .lean()
-                  .maxTimeMS(8000)
-            : [],
-        codes.length
-            ? PartyExpense.find({
-                  partyType: 'employee',
-                  kind: 'balance',
-                  employeeId: { $in: codes },
-                  status: 'Not Paid',
-              })
-                  .select('employeeId status kind amount billMonth installments utilityBillId utilityType accountNo')
-                  .lean()
-                  .maxTimeMS(8000)
-            : [],
-    ]);
+            mongoIds.length
+                ? Attendance.find({
+                    employeeMongoId: { $in: mongoIds },
+                    ...(monthWindow ? { $and: [monthWindow] } : {}),
+                    $or: [
+                        { leaveRequestStatus: 'pending' },
+                        { hourAdjustStatus: 'pending' },
+                        { flexibleOtStatus: 'pending' },
+                    ],
+                })
+                    .select(
+                        '_id employeeMongoId employeeId employeeName date leaveRequestKind requestedStatusKey requestedStatusLabel leaveRequestGroupId leaveRequestFromDate leaveRequestToDate leaveRequestedAt leaveApprovalStage approvalStatus hourAdjustStatus hoursApproved flexibleOtStatus flexibleOtApprovedHours createdAt',
+                    )
+                    .lean()
+                    .maxTimeMS(12000)
+                : [],
+            mongoIds.length
+                ? AttendanceChangeRequest.find({
+                    employeeMongoId: { $in: mongoIds },
+                    stage: { $in: ATTENDANCE_CHANGE_OPEN_STAGES },
+                    ...(range ? { date: { $gte: range.from, $lte: range.to } } : {}),
+                })
+                    .select(
+                        'date employeeMongoId stage action proposed previous requestedByName reporteeId reporteeName hrId hrName staffType createdAt',
+                    )
+                    .lean()
+                    .maxTimeMS(8000)
+                : [],
+            codes.length
+                ? Loan.find({
+                    employeeId: { $in: codes },
+                    $or: [
+                        { status: { $in: PAYROLL_LOAN_QUERY_STATUSES } },
+                        { approvalStatus: { $in: PAYROLL_LOAN_QUERY_STATUSES } },
+                    ],
+                })
+                    .select('_id employeeId type status approvalStatus amount paidAmount workflow submittedTo createdAt updatedAt')
+                    .lean()
+                    .maxTimeMS(8000)
+                : [],
+            codes.length
+                ? Fine.find({
+                    fineStatus: { $in: PAYROLL_FINE_QUERY_STATUSES },
+                    'assignedEmployees.employeeId': { $in: codes },
+                })
+                    .select(
+                        '_id fineId fineStatus fineType assignedEmployees workflow accountsPaymentPath zohoBillId zohoBillNumber zohoJournalId zohoJournalNumber vendorBillStatus createdAt updatedAt',
+                    )
+                    .lean()
+                    .maxTimeMS(8000)
+                : [],
+            objectIds.length
+                ? EmployeeHubRequest.find({
+                    status: 'Pending',
+                    $or: [{ requester: { $in: objectIds } }, { requesterEmpId: { $in: codes } }],
+                })
+                    .select('_id kind requester requesterEmpId requesterName assignedTo assignedToEmpId createdAt')
+                    .lean()
+                    .maxTimeMS(8000)
+                    .catch(() => [])
+                : [],
+            objectIds.length
+                ? AssetItem.find({
+                    $or: [
+                        { assignedTo: { $in: objectIds }, acceptanceStatus: 'Pending' },
+                        {
+                            pendingAction: 'Return Asset',
+                            $or: [
+                                { assignedTo: { $in: objectIds } },
+                                { actionRequiredBy: { $in: objectIds } },
+                                { 'pendingActionDetails.requestedBy': { $in: [...objectIds, ...mongoIds] } },
+                            ],
+                        },
+                    ],
+                })
+                    .select(
+                        '_id assetId name plateNumber vehicleCode pendingAction acceptanceStatus assignedTo assignedBy actionRequiredBy pendingActionDetails',
+                    )
+                    .lean()
+                    .maxTimeMS(8000)
+                : [],
+            codes.length
+                ? UtilityBillPayment.find({
+                    status: { $in: ['Pending Accounts', 'Pending HR', 'Approved', 'Paid'] },
+                    $or: [
+                        { payByEmployeeId: { $in: codes } },
+                        { 'zohoLineItems.payByEmployeeId': { $in: codes } },
+                    ],
+                })
+                    .select(
+                        '_id entryId utilityType billMonth status paymentBy payByEmployeeId pendingWithName pendingWithRole employeeDiffAmount zohoLineItems createdAt updatedAt',
+                    )
+                    .lean()
+                    .maxTimeMS(8000)
+                : [],
+            codes.length
+                ? UtilityEntry.find({
+                    assignedToType: 'Employee',
+                    assignedToId: { $in: codes },
+                    pendingStatusChange: { $ne: null },
+                })
+                    .select('_id type assignedToId pendingStatusChange updatedAt createdAt')
+                    .lean()
+                    .maxTimeMS(8000)
+                : [],
+            codes.length
+                ? PartyExpense.find({
+                    partyType: 'employee',
+                    kind: 'balance',
+                    employeeId: { $in: codes },
+                    status: 'Not Paid',
+                })
+                    .select('employeeId status kind amount billMonth installments utilityBillId utilityType accountNo')
+                    .lean()
+                    .maxTimeMS(8000)
+                : [],
+        ]);
 
     const items = [];
     const seenUtilityBills = new Set();
@@ -936,6 +938,7 @@ async function buildGroupPendingRequests(people, monthKey) {
             empByMongo.get(String(hub.requester || '')) ||
             getByEmployeeCode(empByCode, hub.requesterEmpId);
         const kind = String(hub.kind || '').trim().toLowerCase();
+        if (kind === 'assets') continue;
         let category = 'finance';
         let title = 'Request pending';
         if (kind === 'leave') {
@@ -949,9 +952,6 @@ async function buildGroupPendingRequests(people, monthKey) {
             title = 'Utility bill request';
         } else if (kind === 'fine') {
             title = 'Fine request';
-        } else if (kind === 'assets') {
-            category = 'asset';
-            title = 'Asset request';
         } else if (kind === 'salary') {
             title = 'Early salary request';
         }
@@ -1444,12 +1444,17 @@ function emptyRegisterPayload() {
 
 function serializeMonthPayment(doc) {
     if (!doc) return null;
+    const status = slotStatusOf(doc);
     return {
         id: String(doc._id),
         monthKey: String(doc.monthKey || ''),
         paymentNo: Number(doc.paymentNo) || 0,
         selectedIds: (doc.employeeIds || []).map((id) => String(id || '').trim()).filter(Boolean),
-        processed: true,
+        companyName: String(doc.companyName || '').trim(),
+        paymentMethod: String(doc.paymentMethod || '').trim(),
+        status,
+        rejectReason: String(doc.rejectReason || '').trim(),
+        processed: status === 'approved',
         createdAt: doc.createdAt || null,
     };
 }
@@ -1460,7 +1465,9 @@ async function listMonthPayments(monthKey) {
         .sort({ paymentNo: 1 })
         .lean()
         .maxTimeMS(8000);
-    return (rows || []).map(serializeMonthPayment).filter(Boolean);
+    return (rows || [])
+        .map(serializeMonthPayment)
+        .filter((row) => row && row.status !== 'cancelled');
 }
 
 function enrollmentFromMonth(row) {
@@ -1507,12 +1514,13 @@ export const getSalaryRegister = async (req, res) => {
             return res.status(503).json({ message: 'Database not connected.' });
         }
 
-        const [payrollDoc, viewerIsSalaryHr] = await Promise.all([
+        const [payrollDoc, viewerIsSalaryHr, viewerIsSlotHr] = await Promise.all([
             PayrollSettings.findOne({ key: 'default' })
                 .select('hiddenSalaryMonths salaryProcessingDate salaryProcessStartMonth')
                 .lean()
                 .maxTimeMS(5000),
             viewerIsSalaryFlowchartHr(req).catch(() => false),
+            viewerIsFlowchartHrAssignee(req).catch(() => false),
         ]);
         const hiddenMonths = new Set(
             (payrollDoc?.hiddenSalaryMonths || []).map((ym) => String(ym || '').trim()).filter(Boolean),
@@ -1576,6 +1584,7 @@ export const getSalaryRegister = async (req, res) => {
             nextOpenMonthKey: nextOpenMonthKey || '',
             hiddenMonthCount: hiddenMonths.size,
             viewerIsSalaryHr: Boolean(viewerIsSalaryHr),
+            viewerIsSlotHr: Boolean(viewerIsSlotHr),
             years: listYearsInclusive(startYm || currentYm, lastOpenYm || currentYm),
         };
 
@@ -1791,8 +1800,8 @@ export const getSalaryRegister = async (req, res) => {
             const fraction = part === 'half' || part === 'quarter'
                 ? partialLeavePortion(part)
                 : Number(row.leaveDayFraction) > 0 && Number(row.leaveDayFraction) < 1
-                  ? Number(row.leaveDayFraction)
-                  : 1;
+                    ? Number(row.leaveDayFraction)
+                    : 1;
             const doubled = key === 'authorized_leave' && Number(row.leaveDeductionTimes) === 2 ? 2 : 1;
             const code = String(emp.employeeId || '').trim();
             const monthly = salaryAmountForMonth(getByEmployeeCode(salaryByCode, code), ym);
@@ -1990,15 +1999,18 @@ export const getSalaryRegister = async (req, res) => {
         }
 
         const employeesForMonth = [];
+        const enrolledIdsByMonth = new Map();
         const monthPayments = detailYm ? await listMonthPayments(detailYm) : [];
         const processedEmployeeIds = new Set(
             monthPayments
+                .filter((row) => row.processed)
                 .flatMap((row) => row.selectedIds || [])
                 .map((id) => employeeCodeKey(id))
                 .filter(Boolean),
         );
         const months = [...monthKeys].reverse().map((ym, index) => {
             const monthCodes = codesEnrolledInMonth(ym);
+            enrolledIdsByMonth.set(ym, monthCodes);
             let monthlySalary = 0;
             let basicSalary = 0;
             let ot = 0;
@@ -2033,8 +2045,8 @@ export const getSalaryRegister = async (req, res) => {
                         status: processedEmployeeIds.has(employeeCodeKey(code))
                             ? 'Processed'
                             : pendingEmployeeIds.has(employeeCodeKey(code))
-                              ? 'Pending'
-                              : 'Ready',
+                                ? 'Pending'
+                                : 'Ready',
                     });
                 }
             }
@@ -2098,21 +2110,39 @@ export const getSalaryRegister = async (req, res) => {
             visibleMonths = visibleMonths.filter((row) => Number(row.enrollUser) > 0);
         }
         visibleMonths = visibleMonths.map((row, index) => ({ ...row, slNo: index + 1 }));
-        const dmfRows = await SalaryMonthDmf.find({
-            monthKey: { $in: visibleMonths.map((row) => row.monthKey).filter(Boolean) },
-        })
-            .select('monthKey dmfApproval')
-            .lean();
+        const visibleMonthKeys = visibleMonths.map((row) => row.monthKey).filter(Boolean);
+        const [dmfRows, slotRows] = await Promise.all([
+            SalaryMonthDmf.find({
+                monthKey: { $in: visibleMonthKeys },
+            })
+                .select('monthKey dmfApproval')
+                .lean(),
+            visibleMonthKeys.length
+                ? SalaryMonthPayment.find({ monthKey: { $in: visibleMonthKeys } })
+                      .select('monthKey status employeeIds')
+                      .lean()
+                : [],
+        ]);
         const dmfByMonth = new Map(
             (dmfRows || []).map((row) => [String(row.monthKey), row.dmfApproval]),
         );
+        const slotsByMonth = new Map();
+        for (const slot of slotRows || []) {
+            const key = String(slot.monthKey || '');
+            if (!slotsByMonth.has(key)) slotsByMonth.set(key, []);
+            slotsByMonth.get(key).push(slot);
+        }
         const dmfCtx = await buildDmfViewerContext(req);
         visibleMonths = visibleMonths.map((row) => {
             const dmf = dmfByMonth.get(String(row.monthKey));
-            const serialized = serializeDmf(dmf, { ready: true, ctx: dmfCtx });
+            const serialized = serializeDmf(dmf, { ready: true, ctx: dmfCtx, flow: 'month' });
             return {
                 ...row,
                 processStatus: monthPayrollProcessStatusLabel(dmf),
+                paymentStatus: salaryMonthPaymentLabel({
+                    enrolledIds: enrolledIdsByMonth.get(row.monthKey) || [],
+                    slots: slotsByMonth.get(String(row.monthKey)) || [],
+                }),
                 canAct: Boolean(serialized.canAct),
                 dmfStatus: serialized.status,
                 currentStepKey: serialized.currentStepKey,
@@ -2137,7 +2167,7 @@ export const getSalaryRegister = async (req, res) => {
             employees: detailYm ? employeesForMonth : undefined,
             payments: detailYm ? monthPayments : undefined,
             dmf: detailYm
-                ? serializeDmf(dmfByMonth.get(String(detailYm)), { ready: true, ctx: dmfCtx })
+                ? serializeDmf(dmfByMonth.get(String(detailYm)), { ready: true, ctx: dmfCtx, flow: 'month' })
                 : undefined,
             ...registerMeta,
             waitingForProcessingDate: Boolean(processDay && todayDay < processDay && endYm < currentYm),
@@ -2478,9 +2508,8 @@ export const sendPayrollBlockerReminders = async (req, res) => {
                     const category = BLOCKER_CATEGORY_LABEL[task.category] || '';
                     const subject = `${task.name || task.employeeId} (${task.employeeId})`;
                     const due = String(task.waitingLabel || '').trim();
-                    const labelText = `${category ? `${category}: ` : ''}${task.title || 'Pending task'}${
-                        extra ? ` — ${extra}` : ''
-                    }${due && due !== '—' ? ` · due ${due}` : ''}`;
+                    const labelText = `${category ? `${category}: ` : ''}${task.title || 'Pending task'}${extra ? ` — ${extra}` : ''
+                        }${due && due !== '—' ? ` · due ${due}` : ''}`;
                     return `<li style="margin:0 0 10px"><span><strong>${escapeHtml(subject)}</strong> — ${escapeHtml(labelText)}</span><br/><a href="${escapeHtml(href)}">${escapeHtml(href)}</a></li>`;
                 })
                 .join('');
@@ -2489,8 +2518,7 @@ export const sendPayrollBlockerReminders = async (req, res) => {
                 subject: `Payroll actions waiting — ${label}`,
                 html: `
                     <p>Hello ${escapeHtml(row.name)},</p>
-                    <p>These payroll items are waiting on you${
-                        row.role ? ` (${escapeHtml(row.role)})` : ''
+                    <p>These payroll items are waiting on you${row.role ? ` (${escapeHtml(row.role)})` : ''
                     } for <strong>${escapeHtml(label)}</strong>. One reminder is sent with every task you need to complete.</p>
                     <ol style="padding-left:20px">${taskLines}</ol>
                     <p>Open each link to complete the task.</p>
@@ -2512,113 +2540,368 @@ export const sendPayrollBlockerReminders = async (req, res) => {
     }
 };
 
+function slotPersonName(emp) {
+    return `${emp?.firstName || ''} ${emp?.lastName || ''}`.trim() || emp?.employeeId || '';
+}
+
+function slotRequestIds(body) {
+    const rawIds = Array.isArray(body?.employeeIds)
+        ? body.employeeIds
+        : Array.isArray(body?.selectedIds)
+            ? body.selectedIds
+            : [];
+    return [...new Set(rawIds.map((id) => String(id || '').trim()).filter(Boolean))];
+}
+
+async function assertMonthReadyForSlots(monthKey) {
+    const monthDmf = await SalaryMonthDmf.findOne({ monthKey }).select('dmfApproval.status').lean();
+    if (String(monthDmf?.dmfApproval?.status || '') !== 'approved') {
+        const error = new Error('Create slot opens after Management approves the payroll.');
+        error.statusCode = 400;
+        throw error;
+    }
+}
+
+async function prepareSlotSelection({ monthKey, requested, companyName, ignorePaymentId }) {
+    const company = String(companyName || '').trim();
+    if (!company) {
+        const error = new Error('Select a company.');
+        error.statusCode = 400;
+        throw error;
+    }
+    if (!requested.length) {
+        const error = new Error('Select at least one employee.');
+        error.statusCode = 400;
+        throw error;
+    }
+
+    const existing = await SalaryMonthPayment.find({ monthKey })
+        .select('employeeIds paymentNo status')
+        .lean()
+        .maxTimeMS(8000);
+    const claimed = new Set();
+    let lastNo = 0;
+    for (const row of existing || []) {
+        lastNo = Math.max(lastNo, Number(row.paymentNo) || 0);
+        if (ignorePaymentId && String(row._id) === String(ignorePaymentId)) continue;
+        if (!slotHoldsEmployees(row)) continue;
+        for (const id of row.employeeIds || []) {
+            const key = employeeCodeKey(id);
+            if (key) claimed.add(key);
+        }
+    }
+    if (requested.some((id) => claimed.has(employeeCodeKey(id)))) {
+        const error = new Error('One or more employees are already in a slot for this month.');
+        error.statusCode = 409;
+        throw error;
+    }
+
+    const compOffBlock = await unsettledCompOffMessage(requested, monthKey);
+    if (compOffBlock) {
+        const error = new Error(compOffBlock);
+        error.statusCode = 400;
+        throw error;
+    }
+
+    const enrolled = await SalaryEnrollment.find({
+        employeeId: { $in: requested },
+        fromMonth: { $lte: monthKey },
+    })
+        .select('employeeId')
+        .lean()
+        .maxTimeMS(8000);
+    const enrolledKeys = new Set(
+        (enrolled || []).map((row) => employeeCodeKey(row.employeeId)).filter(Boolean),
+    );
+    if (requested.some((id) => !enrolledKeys.has(employeeCodeKey(id)))) {
+        const error = new Error('Only enrolled employees can be added to a slot.');
+        error.statusCode = 400;
+        throw error;
+    }
+
+    const people = await EmployeeBasic.find({ employeeId: { $in: requested } })
+        .select('employeeId company')
+        .populate('company', 'nickName name')
+        .lean();
+    const byCode = new Map((people || []).map((person) => [employeeCodeKey(person.employeeId), person]));
+    const mol = await companyMolByEmployeeId(requested);
+    const types = [];
+    for (const id of requested) {
+        const label = employeeCompanyLabel(byCode.get(employeeCodeKey(id)));
+        if (label.toLowerCase() !== company.toLowerCase()) {
+            const error = new Error('Every employee in the slot must belong to the selected company.');
+            error.statusCode = 400;
+            throw error;
+        }
+        types.push(paymentTypeFromMol(getByEmployeeCode(mol, id)));
+    }
+    const typed = singleSlotPayType(types);
+    if (!typed.ok || !typed.method) {
+        const error = new Error(typed.message || 'A slot can include only WPS or only Cash employees.');
+        error.statusCode = 400;
+        throw error;
+    }
+    return { employeeIds: requested, companyName: company, paymentMethod: typed.method, lastNo };
+}
+
+async function mailSlotHr(req, monthKey, slotNo) {
+    const hr = await resolveFlowchartHrEmployee();
+    if (hr?.error || !hr?.email) {
+        console.warn('[salary slot] HR email missing', hr?.message || '');
+        return;
+    }
+    sendSalarySlotMail({
+        req,
+        to: hr.email,
+        name: slotPersonName(hr.employee) || 'HR',
+        subject: `${monthKey} salary slot ${slotNo} is pending with HR`,
+        monthKey,
+        lines: [
+            `Slot ${slotNo} for ${monthKey} payroll is pending with HR.`,
+            'Open the payroll and use Approve or Reject on that slot.',
+        ],
+    });
+}
+
+async function mailSlotAccountsNext(req, monthKey, slotNo, paymentMethod) {
+    const accounts = await getDepartmentHOD('accounts');
+    const to = String(accounts?.companyEmail || accounts?.email || '').trim();
+    if (!to) return;
+    const wps = String(paymentMethod || '').trim().toUpperCase() === 'WPS';
+    sendSalarySlotMail({
+        req,
+        to,
+        name: slotPersonName(accounts) || 'Accounts',
+        subject: wps
+            ? `${monthKey} salary slot ${slotNo} — check the WPS send`
+            : `${monthKey} salary slot ${slotNo} is ready to update`,
+        monthKey,
+        lines: wps
+            ? [
+                  `HR approved slot ${slotNo}.`,
+                  'Check the WPS send. The Excel form will be added to this email later.',
+                  'Then open the payroll and mark WPS updated.',
+              ]
+            : [
+                  `HR approved slot ${slotNo}.`,
+                  'This is a cash slot, so there is no WPS step.',
+                  'Open the payroll and set the slot as updated.',
+              ],
+    });
+}
+
+async function mailSlotAccounts(req, monthKey, slotNo, reason) {
+    const accounts = await getDepartmentHOD('accounts');
+    const to = String(accounts?.companyEmail || accounts?.email || '').trim();
+    if (!to) return;
+    sendSalarySlotMail({
+        req,
+        to,
+        name: slotPersonName(accounts) || 'Accounts',
+        subject: `${monthKey} salary slot ${slotNo} was rejected`,
+        monthKey,
+        lines: [
+            `HR rejected slot ${slotNo}.`,
+            reason ? `Reason: ${reason}` : 'The slot is back with Accounts.',
+        ],
+    });
+}
+
+async function applyApprovedSlotSideEffects(employeeIds, monthKey) {
+    const { applySalarySlipLeaveTicketPaymentsForEmployee } = await import(
+        '../../utils/applySalarySlipLeaveTicketPayments.js'
+    );
+    for (const id of employeeIds) {
+        try {
+            await applySalarySlipLeaveTicketPaymentsForEmployee(id, monthKey);
+        } catch (error) {
+            console.error('[salary slot] leave ticket', id, error?.message || error);
+        }
+    }
+}
+
+function slotErrorResponse(res, error, logLabel) {
+    if (error?.code === 11000) {
+        return res.status(409).json({ message: 'Slot number already used. Try again.' });
+    }
+    console.error(logLabel, error);
+    return res.status(error.statusCode || 500).json({
+        message: error.message || 'Failed to save the salary slot.',
+    });
+}
+
 /**
  * POST /api/Employee/salary-register/:monthKey/payments
- * Persist a processed payment card for this salary month.
+ * Accounts saves a draft slot or applies it to HR. One company, one pay type.
  */
 export const createSalaryMonthPayment = async (req, res) => {
     try {
         const monthKey = toYearMonth(req.params.monthKey || req.body?.monthKey);
-        if (!monthKey) {
-            return res.status(400).json({ message: 'Invalid salary month.' });
+        if (!monthKey) return res.status(400).json({ message: 'Invalid salary month.' });
+        const action = String(req.body?.action || '').trim().toLowerCase();
+        if (action !== 'draft' && action !== 'apply') {
+            return res.status(400).json({ message: 'Choose draft or apply.' });
         }
 
-        const rawIds = Array.isArray(req.body?.employeeIds)
-            ? req.body.employeeIds
-            : Array.isArray(req.body?.selectedIds)
-              ? req.body.selectedIds
-              : [];
-        const requested = [
-            ...new Set(rawIds.map((id) => String(id || '').trim()).filter(Boolean)),
-        ];
-        if (!requested.length) {
-            return res.status(400).json({ message: 'Select at least one employee.' });
-        }
-
-        const monthDmf = await SalaryMonthDmf.findOne({ monthKey }).select('dmfApproval.status').lean();
-        if (String(monthDmf?.dmfApproval?.status || '') !== 'approved') {
-            return res.status(400).json({
-                message: 'Salary slots open after Process salary is approved (Accounts → HR → Management).',
+        await assertMonthReadyForSlots(monthKey);
+        const slotCtx = await buildDmfViewerContext(req);
+        if (!slotCtx?.isAccounts) {
+            return res.status(403).json({
+                message: 'Only the flowchart Accounts assignee can create a salary slot.',
             });
         }
 
-        const existing = await SalaryMonthPayment.find({ monthKey })
-            .select('employeeIds paymentNo')
-            .lean()
-            .maxTimeMS(8000);
-        const claimed = new Set();
-        let lastNo = 0;
-        for (const row of existing || []) {
-            lastNo = Math.max(lastNo, Number(row.paymentNo) || 0);
-            for (const id of row.employeeIds || []) {
-                const code = String(id || '').trim();
-                if (code) claimed.add(code);
-            }
-        }
-
-        const alreadyClaimed = requested.filter((id) => claimed.has(id));
-        if (alreadyClaimed.length) {
-            return res.status(409).json({
-                message: 'One or more employees are already in another payment for this month.',
-                employeeIds: alreadyClaimed,
-            });
-        }
-
-        const compOffBlock = await unsettledCompOffMessage(requested, monthKey);
-        if (compOffBlock) {
-            return res.status(400).json({ message: compOffBlock });
-        }
-
-        const enrolled = await SalaryEnrollment.find({
-            employeeId: { $in: requested },
-            fromMonth: { $lte: monthKey },
-        })
-            .select('employeeId')
-            .lean()
-            .maxTimeMS(8000);
-        const enrolledIds = new Set(
-            (enrolled || []).map((row) => String(row.employeeId || '').trim()).filter(Boolean),
-        );
-        const employeeIds = requested.filter((id) => enrolledIds.has(id));
-        if (!employeeIds.length) {
-            return res.status(400).json({ message: 'Only enrolled employees can be added to a payment.' });
-        }
-
+        const prepared = await prepareSlotSelection({
+            monthKey,
+            requested: slotRequestIds(req.body),
+            companyName: req.body?.companyName,
+        });
         const createdByRaw = req.user?.id || req.user?._id;
         const createdBy =
             createdByRaw && mongoose.Types.ObjectId.isValid(createdByRaw) ? createdByRaw : null;
-
         const doc = await SalaryMonthPayment.create({
             monthKey,
-            paymentNo: lastNo + 1,
-            employeeIds,
+            paymentNo: prepared.lastNo + 1,
+            employeeIds: prepared.employeeIds,
+            companyName: prepared.companyName,
+            paymentMethod: prepared.paymentMethod,
+            status: action === 'apply' ? 'pending_hr' : 'draft',
+            rejectReason: '',
             createdBy,
         });
-
-        const { applySalarySlipLeaveTicketPaymentsForEmployee } = await import(
-            '../../utils/applySalarySlipLeaveTicketPayments.js'
-        );
-        for (const id of employeeIds) {
-            try {
-                await applySalarySlipLeaveTicketPaymentsForEmployee(id, monthKey);
-            } catch (error) {
-                console.error(
-                    '[createSalaryMonthPayment] leave ticket',
-                    id,
-                    error?.message || error,
-                );
-            }
+        if (action === 'apply') {
+            await mailSlotHr(req, monthKey, doc.paymentNo);
         }
-
         return res.status(201).json({
-            message: 'Payment saved.',
+            message: action === 'apply' ? 'Slot sent to HR.' : 'Slot saved as draft.',
             payment: serializeMonthPayment(doc),
         });
     } catch (error) {
-        if (error?.code === 11000) {
-            return res.status(409).json({ message: 'Payment number already used. Try again.' });
+        return slotErrorResponse(res, error, '[createSalaryMonthPayment]');
+    }
+};
+
+/**
+ * POST /api/Employee/salary-register/:monthKey/payments/:paymentId
+ * Accounts can draft, apply, or cancel. Flowchart HR can approve or reject a pending slot.
+ */
+export const updateSalaryMonthPayment = async (req, res) => {
+    try {
+        const monthKey = toYearMonth(req.params.monthKey || req.body?.monthKey);
+        const paymentId = String(req.params.paymentId || '').trim();
+        if (!monthKey || !mongoose.Types.ObjectId.isValid(paymentId)) {
+            return res.status(400).json({ message: 'Invalid salary slot.' });
         }
-        console.error('[createSalaryMonthPayment]', error);
-        return res.status(500).json({ message: error.message || 'Failed to save payment.' });
+        const action = String(req.body?.action || '').trim().toLowerCase();
+        const doc = await SalaryMonthPayment.findOne({ _id: paymentId, monthKey });
+        if (!doc) return res.status(404).json({ message: 'Salary slot was not found.' });
+
+        const status = slotStatusOf(doc);
+        if (action === 'approve' || action === 'reject') {
+            if (status !== 'pending_hr') {
+                return res.status(400).json({ message: 'This slot is not pending with HR.' });
+            }
+            if (!(await viewerIsFlowchartHrAssignee(req))) {
+                return res.status(403).json({ message: 'Only the flowchart HR assignee can decide this slot.' });
+            }
+            if (action === 'reject') {
+                const reason = String(req.body?.reason || req.body?.comment || '').trim();
+                if (!reason) return res.status(400).json({ message: 'Enter a rejection reason.' });
+                doc.status = 'rejected';
+                doc.rejectReason = reason;
+                await doc.save();
+                await mailSlotAccounts(req, monthKey, doc.paymentNo, reason);
+                return res.status(200).json({
+                    message: 'Slot rejected.',
+                    payment: serializeMonthPayment(doc),
+                });
+            }
+            const method = String(doc.paymentMethod || '').trim().toUpperCase() === 'CASH' ? 'Cash' : 'WPS';
+            doc.status = method === 'Cash' ? 'pending_update' : 'pending_wps';
+            doc.rejectReason = '';
+            await doc.save();
+            await mailSlotAccountsNext(req, monthKey, doc.paymentNo, method);
+            await notifyAccountsSalarySlot({ payment: doc, monthKey });
+            return res.status(200).json({
+                message: method === 'Cash' ? 'Slot approved. Accounts can update it.' : 'Slot approved. Accounts can check the WPS send.',
+                payment: serializeMonthPayment(doc),
+            });
+        }
+
+        if (action === 'wps_updated' || action === 'set_updated') {
+            await assertMonthReadyForSlots(monthKey);
+            const slotCtx = await buildDmfViewerContext(req);
+            if (!slotCtx?.isAccounts) {
+                return res.status(403).json({
+                    message: 'Only the flowchart Accounts assignee can update this slot.',
+                });
+            }
+            if (action === 'wps_updated') {
+                if (status !== 'pending_wps') {
+                    return res.status(400).json({ message: 'This slot is not waiting for the WPS send.' });
+                }
+                doc.status = 'pending_update';
+                await doc.save();
+                await notifyAccountsSalarySlot({ payment: doc, monthKey, phase: 'update' });
+                return res.status(200).json({
+                    message: 'WPS updated.',
+                    payment: serializeMonthPayment(doc),
+                });
+            }
+            if (status !== 'pending_update') {
+                return res.status(400).json({ message: 'This slot is not ready to mark as updated.' });
+            }
+            doc.status = 'approved';
+            doc.rejectReason = '';
+            await doc.save();
+            await applyApprovedSlotSideEffects(doc.employeeIds || [], monthKey);
+            await closeAccountsSalarySlotInbox(doc._id);
+            return res.status(200).json({
+                message: 'Slot updated. Zoho implementation is not done yet.',
+                payment: serializeMonthPayment(doc),
+            });
+        }
+
+        if (action !== 'draft' && action !== 'apply' && action !== 'cancel') {
+            return res.status(400).json({ message: 'Choose draft, apply, or cancel.' });
+        }
+        await assertMonthReadyForSlots(monthKey);
+        const slotCtx = await buildDmfViewerContext(req);
+        if (!slotCtx?.isAccounts) {
+            return res.status(403).json({
+                message: 'Only the flowchart Accounts assignee can change this salary slot.',
+            });
+        }
+        if (status !== 'draft' && status !== 'rejected') {
+            return res.status(400).json({ message: 'This slot can no longer be changed by Accounts.' });
+        }
+        if (action === 'cancel') {
+            doc.status = 'cancelled';
+            await doc.save();
+            return res.status(200).json({
+                message: 'Slot cancelled.',
+                payment: serializeMonthPayment(doc),
+            });
+        }
+
+        const prepared = await prepareSlotSelection({
+            monthKey,
+            requested: slotRequestIds(req.body),
+            companyName: req.body?.companyName,
+            ignorePaymentId: doc._id,
+        });
+        doc.employeeIds = prepared.employeeIds;
+        doc.companyName = prepared.companyName;
+        doc.paymentMethod = prepared.paymentMethod;
+        doc.status = action === 'apply' ? 'pending_hr' : 'draft';
+        doc.rejectReason = '';
+        await doc.save();
+        if (action === 'apply') await mailSlotHr(req, monthKey, doc.paymentNo);
+        return res.status(200).json({
+            message: action === 'apply' ? 'Slot sent to HR.' : 'Slot saved as draft.',
+            payment: serializeMonthPayment(doc),
+        });
+    } catch (error) {
+        return slotErrorResponse(res, error, '[updateSalaryMonthPayment]');
     }
 };

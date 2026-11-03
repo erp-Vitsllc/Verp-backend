@@ -30,11 +30,13 @@ export async function salaryMonthProcessedForEmployee(employeeId, monthKey) {
     const code = employeeCodeKey(employeeId);
     const ym = monthKeyOf(monthKey);
     if (!code || !ym) return false;
-    const payments = await SalaryMonthPayment.find({ monthKey: ym }).select('employeeIds').lean();
+    const payments = await SalaryMonthPayment.find({ monthKey: ym }).select('employeeIds status').lean();
     const needle = code.toLowerCase();
-    return (payments || []).some((row) =>
-        (row.employeeIds || []).some((id) => String(id || '').trim().toLowerCase() === needle),
-    );
+    return (payments || []).some((row) => {
+        const status = String(row?.status || 'approved').trim().toLowerCase();
+        if (status && status !== 'approved') return false;
+        return (row.employeeIds || []).some((id) => String(id || '').trim().toLowerCase() === needle);
+    });
 }
 
 function monthLabel(ym) {
