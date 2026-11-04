@@ -8,7 +8,14 @@ const LEAVE_TAKEN_DEDUCTION_NAMES = new Set([
     'compoff leave',
 ]);
 
-const LATE_DEDUCTION_NAMES = new Set(['late arrival', 'late in', 'late out', 'missed punch']);
+const LATE_DEDUCTION_NAMES = new Set([
+    'late arrival',
+    'late in',
+    'late out',
+    'early out',
+    'early go',
+    'missed punch',
+]);
 
 function deductionNameKey(name) {
     return String(name || '')

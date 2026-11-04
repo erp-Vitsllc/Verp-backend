@@ -1466,7 +1466,8 @@ export async function buildSalarySlipPayload({
             lossOfPayDays: {
                 authorized: authorizedDeductionDays,
                 unauthorized: unauthorizedDays,
-                late: Math.round((lateInDays + lateOutDays) * 100) / 100,
+                late: lateInDays,
+                earlyOut: lateOutDays,
                 annual: annualDays,
                 compOff: compOffDays,
             },
@@ -1537,7 +1538,7 @@ function presentSalarySlipPolicyExclusions(slip) {
                 ...(hideLeaveStats
                     ? { authorized: 0, unauthorized: 0, annual: 0, compOff: 0 }
                     : {}),
-                ...(exclusions.attendance ? { late: 0 } : {}),
+                ...(exclusions.attendance ? { late: 0, earlyOut: 0 } : {}),
             },
         },
     };
