@@ -13,7 +13,7 @@ import { emailFrontendUrl } from './resolveFrontendBaseUrl.js';
 import { isValidWhatsAppPhone, normalizeWhatsAppPhone } from './normalizeWhatsAppPhone.js';
 import { sendTextMessage } from '../services/whatsappService.js';
 
-export const TOOLS_ACK_ESCALATION_DAYS = 7;
+export const TOOLS_ACK_ESCALATION_DAYS = 3;
 export const TOOLS_ACK_ESCALATION_TYPE = 'Asset Assignment Escalation';
 export const TOOLS_ACK_ESCALATION_MESSAGE =
     'This user is not responding. You can force assign him or return the assignment.';

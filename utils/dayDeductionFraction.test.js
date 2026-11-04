@@ -84,6 +84,16 @@ describe('day deduction fraction', () => {
         assert.equal(dayDeductionFraction(row, [row], { authorizedLeaveDeductionDays: 1 }, week), 0);
     });
 
+    it('is zero when unauthorized leave hours are waived to zero', () => {
+        const row = {
+            date: '2026-10-05',
+            statusKey: 'unauthorized_leave',
+            hourAdjustStatus: 'approved',
+            hoursApproved: 0,
+        };
+        assert.equal(dayDeductionFraction(row, [row], { unauthorizedLeaveDeductionDays: 2 }, week), 0);
+    });
+
     it('drops a missed punch whose loss hours were waived to zero', () => {
         const waived = {
             date: '2026-10-17',

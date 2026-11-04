@@ -138,7 +138,7 @@ export async function getLeaveGroupCalendars(req, res) {
             employeeId: { $ne: 'VEGA-HR-0000' },
             ...REAL_EMPLOYEE_MONGO_FILTER,
         })
-            .select('_id employeeId firstName lastName staffType dateOfJoining primaryReportee attendanceAccountStatus attendanceSuspension')
+            .select('_id employeeId firstName lastName staffType dateOfJoining primaryReportee attendanceAccountStatus attendanceSuspension workLocation salaryCurrency')
             .lean()
             .maxTimeMS(12000);
 
@@ -305,6 +305,8 @@ export async function getLeaveGroupCalendars(req, res) {
                     employeeId: emp.employeeId || '',
                     employeeName: employeeName(emp) || 'Employee',
                     staffType,
+                    workLocation: emp.workLocation || 'uae',
+                    salaryCurrency: emp.salaryCurrency || 'AED',
                     visibleFrom,
                     ...(detail ? {
                         monthlySalary: salaryByCode.get(String(emp.employeeId || '').trim()) || 0,

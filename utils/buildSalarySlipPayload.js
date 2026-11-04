@@ -729,7 +729,7 @@ export async function buildSalarySlipPayload({
                 $or: [{ employeeMongoId: mongoId }, { employeeId: idPattern }],
                 date: { $gte: from, $lte: to },
             })
-                .select('date statusKey reason leavePayType timeIn timeOut timeOutDate punchSessions flexibleWorkedHours hourAdjustStatus hourAdjustMode hoursApproved hoursTaken flexibleOtStatus flexibleOtApprovedHours flexibleOtNextDayDate')
+                .select('date statusKey reason leavePayType timeIn timeOut timeOutDate punchSessions flexibleWorkedHours hourAdjustStatus hourAdjustMode hoursApproved hoursTaken deductionWaived flexibleOtStatus flexibleOtApprovedHours flexibleOtNextDayDate')
                 .lean(),
             Holiday.find({ date: { $gte: from, $lte: to } }).select('date appliesTo').lean(),
             Loan.find({
@@ -858,7 +858,7 @@ export async function buildSalarySlipPayload({
         if (key === 'compoff_leave') compOffDays += 1;
         if (PRESENT_KEYS.has(key)) presentDays += 1;
         if (LEAVE_KEYS.has(key)) workingDayLeaves += 1;
-        const waived = isDeductionWaived(row);
+        const waived = isDeductionWaived(row) || isHourLossWaived(row);
         if (!waived && key === 'authorized_leave') {
             const share = explicitAuthorizedHourShare(row);
             if (share != null) explicitAuthorizedShares += share * leavePortion(row);
@@ -869,7 +869,7 @@ export async function buildSalarySlipPayload({
             sickDays += 1;
         }
         if (key === 'on_leave') annualDays += 1;
-        if (!waived && !isHourLossWaived(row) && key === 'mispunch') missedPunchDays += 1;
+        if (!waived && key === 'mispunch') missedPunchDays += 1;
 
         const isHolidayDate = holidaySet.has(date) || key === 'holiday';
         const punched = Boolean(row.timeIn && row.timeOut);

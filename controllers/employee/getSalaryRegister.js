@@ -1370,6 +1370,34 @@ function roundMoney(value) {
     return Math.round(money(value) * 100) / 100;
 }
 
+function sumSalaryLines(lines) {
+    const total = (lines || []).reduce((sum, row) => {
+        sum.monthlySalary += Number(row.monthlySalary) || 0;
+        sum.basicSalary += Number(row.basicSalary) || 0;
+        sum.ot += Number(row.ot) || 0;
+        sum.deduction += Number(row.deduction) || 0;
+        sum.actualSalary += Number(row.actualSalary) || 0;
+        return sum;
+    }, { monthlySalary: 0, basicSalary: 0, ot: 0, deduction: 0, actualSalary: 0 });
+    return {
+        monthlySalary: roundMoney(total.monthlySalary),
+        basicSalary: roundMoney(total.basicSalary),
+        ot: roundMoney(total.ot),
+        deduction: roundMoney(total.deduction),
+        actualSalary: roundMoney(total.actualSalary),
+    };
+}
+
+function applySlipFigure(row, figures) {
+    if (!row || !figures) return;
+    if (figures.monthlySalary > 0) row.monthlySalary = figures.monthlySalary;
+    if (figures.basicSalary > 0) row.basicSalary = figures.basicSalary;
+    row.deduction = figures.deduction;
+    row.extra = figures.extra;
+    row.ot = figures.ot;
+    row.actualSalary = figures.actualSalary;
+}
+
 function listMonthsInclusive(fromYm, toYm) {
     const months = [];
     let cursor = fromYm;
@@ -1799,7 +1827,7 @@ export const getSalaryRegister = async (req, res) => {
             });
 
         for (const row of leaveRows) {
-            if (isDeductionWaived(row)) continue;
+            if (isDeductionWaived(row) || isHourLossWaived(row)) continue;
             const key = String(row?.statusKey || '');
             const ym = String(row?.date || '').slice(0, 7);
             if (!/^\d{4}-\d{2}$/.test(ym)) continue;
@@ -2014,7 +2042,7 @@ export const getSalaryRegister = async (req, res) => {
             return codesForMonth;
         }
 
-        const employeesForMonth = [];
+        const linesByMonth = new Map();
         const enrolledIdsByMonth = new Map();
         const monthPayments = detailYm ? await listMonthPayments(detailYm) : [];
         const processedEmployeeIds = new Set(
@@ -2027,10 +2055,7 @@ export const getSalaryRegister = async (req, res) => {
         const months = [...monthKeys].reverse().map((ym, index) => {
             const monthCodes = codesEnrolledInMonth(ym);
             enrolledIdsByMonth.set(ym, monthCodes);
-            let monthlySalary = 0;
-            let basicSalary = 0;
-            let ot = 0;
-            let deduction = 0;
+            const lines = [];
             for (const code of monthCodes) {
                 const emp = getByEmployeeCode(empByCode, code);
                 const salaryDoc = getByEmployeeCode(salaryByCode, code);
@@ -2038,90 +2063,42 @@ export const getSalaryRegister = async (req, res) => {
                 const empBasic = basicAmountForMonth(salaryDoc, ym);
                 const empOt = otByKey.get(`${code}|${ym}`) || 0;
                 const empDeduction = deductionByKey.get(`${code}|${ym}`) || 0;
-                monthlySalary += empMonthly;
-                basicSalary += empBasic;
-                ot += empOt;
-                deduction += empDeduction;
-                if (detailYm && ym === detailYm) {
-                    const enrollmentRow = storedEnrollmentByKey.get(employeeCodeKey(code));
-                    employeesForMonth.push({
-                        slNo: employeesForMonth.length + 1,
-                        employeeId: code,
-                        name: emp
-                            ? `${emp.firstName || ''} ${emp.lastName || ''}`.trim() || code
-                            : code,
-                        companyName: companyDisplayName(emp?.company) || '—',
-                        staffType: normalizeStaffTypeKey(emp?.staffType),
-                        monthlySalary: roundMoney(empMonthly),
-                        actualSalary: roundMoney(Math.max(0, empMonthly + empOt - empDeduction)),
-                        basicSalary: roundMoney(empBasic),
-                        ot: roundMoney(empOt),
-                        extra: roundMoney(empOt),
-                        deduction: roundMoney(empDeduction),
-                        paymentType: paymentTypeFromMol(getByEmployeeCode(molByCode, code)),
-                        enrolled: true,
-                        enrolledForMonth: true,
-                        fromMonth: String(enrollmentRow?.fromMonth || '').trim(),
-                        processingStart: processingStartFromEnrollment(enrollmentRow) || '',
-                        status: processedEmployeeIds.has(employeeCodeKey(code))
-                            ? 'Processed'
-                            : pendingEmployeeIds.has(employeeCodeKey(code))
-                                ? 'Pending'
-                                : 'Ready',
-                    });
-                }
+                const enrollmentRow = storedEnrollmentByKey.get(employeeCodeKey(code));
+                lines.push({
+                    slNo: lines.length + 1,
+                    employeeId: code,
+                    name: emp
+                        ? `${emp.firstName || ''} ${emp.lastName || ''}`.trim() || code
+                        : code,
+                    companyName: companyDisplayName(emp?.company) || '—',
+                    staffType: normalizeStaffTypeKey(emp?.staffType),
+                    monthlySalary: roundMoney(empMonthly),
+                    actualSalary: roundMoney(Math.max(0, empMonthly + empOt - empDeduction)),
+                    basicSalary: roundMoney(empBasic),
+                    ot: roundMoney(empOt),
+                    extra: roundMoney(empOt),
+                    deduction: roundMoney(empDeduction),
+                    paymentType: paymentTypeFromMol(getByEmployeeCode(molByCode, code)),
+                    enrolled: true,
+                    enrolledForMonth: true,
+                    fromMonth: String(enrollmentRow?.fromMonth || '').trim(),
+                    processingStart: processingStartFromEnrollment(enrollmentRow) || '',
+                    status: processedEmployeeIds.has(employeeCodeKey(code))
+                        ? 'Processed'
+                        : pendingEmployeeIds.has(employeeCodeKey(code))
+                            ? 'Pending'
+                            : 'Ready',
+                });
             }
-            monthlySalary = roundMoney(monthlySalary);
-            basicSalary = roundMoney(basicSalary);
-            ot = roundMoney(ot);
-            deduction = roundMoney(deduction);
+            linesByMonth.set(ym, lines);
             return {
                 slNo: index + 1,
                 monthKey: ym,
                 month: monthRowLabel(ym),
-                enrollUser: monthCodes.length,
-                monthlySalary,
-                actualSalary: roundMoney(Math.max(0, monthlySalary + ot - deduction)),
-                basicSalary,
-                ot,
-                deduction,
+                enrollUser: lines.length,
+                ...sumSalaryLines(lines),
             };
         });
-
-        if (detailYm && employeesForMonth.length) {
-            const slipFigures = await collectSalarySlipPayrollFigures(
-                employeesForMonth.map((row) => row.employeeId),
-                detailYm,
-            );
-            let appliedSlipFigures = 0;
-            for (const row of employeesForMonth) {
-                const figures = slipFigures.get(employeeCodeKey(row.employeeId));
-                if (!figures) continue;
-                appliedSlipFigures += 1;
-                if (figures.monthlySalary > 0) row.monthlySalary = figures.monthlySalary;
-                if (figures.basicSalary > 0) row.basicSalary = figures.basicSalary;
-                row.deduction = figures.deduction;
-                row.extra = figures.extra;
-                row.ot = figures.ot;
-                row.actualSalary = figures.actualSalary;
-            }
-            const monthRow = months.find((row) => row.monthKey === detailYm);
-            if (monthRow && appliedSlipFigures > 0) {
-                const summed = employeesForMonth.reduce((total, row) => {
-                    total.monthlySalary += Number(row.monthlySalary) || 0;
-                    total.basicSalary += Number(row.basicSalary) || 0;
-                    total.ot += Number(row.ot) || 0;
-                    total.deduction += Number(row.deduction) || 0;
-                    total.actualSalary += Number(row.actualSalary) || 0;
-                    return total;
-                }, { monthlySalary: 0, basicSalary: 0, ot: 0, deduction: 0, actualSalary: 0 });
-                monthRow.monthlySalary = roundMoney(summed.monthlySalary);
-                monthRow.basicSalary = roundMoney(summed.basicSalary);
-                monthRow.ot = roundMoney(summed.ot);
-                monthRow.deduction = roundMoney(summed.deduction);
-                monthRow.actualSalary = roundMoney(summed.actualSalary);
-            }
-        }
 
         let visibleMonths = months.filter((row) => !hiddenMonths.has(row.monthKey));
         if (registerFilters.year) {
@@ -2130,6 +2107,24 @@ export const getSalaryRegister = async (req, res) => {
         if (registerFilters.employeeId || registerFilters.company) {
             visibleMonths = visibleMonths.filter((row) => Number(row.enrollUser) > 0);
         }
+
+        const monthsToPrice = new Set(visibleMonths.map((row) => row.monthKey).filter(Boolean));
+        if (detailYm) monthsToPrice.add(detailYm);
+        for (const ym of monthsToPrice) {
+            const lines = linesByMonth.get(ym) || [];
+            if (!lines.length) continue;
+            const slipFigures = await collectSalarySlipPayrollFigures(
+                lines.map((row) => row.employeeId),
+                ym,
+            );
+            for (const row of lines) {
+                applySlipFigure(row, slipFigures.get(employeeCodeKey(row.employeeId)));
+            }
+            const monthRow = months.find((row) => row.monthKey === ym);
+            if (monthRow) Object.assign(monthRow, sumSalaryLines(lines));
+        }
+        const employeesForMonth = detailYm ? (linesByMonth.get(detailYm) || []) : [];
+
         visibleMonths = visibleMonths.map((row, index) => ({ ...row, slNo: index + 1 }));
         const visibleMonthKeys = visibleMonths.map((row) => row.monthKey).filter(Boolean);
         const [dmfRows, slotRows] = await Promise.all([

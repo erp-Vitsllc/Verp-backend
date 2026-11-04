@@ -58,6 +58,7 @@ export function dayDeductionFraction(target, monthRows = [], policy = {}, week =
         return roundFraction(policyTimes(policy?.authorizedLeaveDeductionDays, 1) * leaveChargeWeight(target, true));
     }
     if (kind === 'unauthorized_leave') {
+        if (isHourLossWaived(target)) return 0;
         return roundFraction(policyTimes(policy?.unauthorizedLeaveDeductionDays, 2) * leaveChargeWeight(target, false));
     }
     const rows = rowsWithTarget(monthRows, target);

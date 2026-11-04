@@ -966,6 +966,9 @@ export async function getLeavePendingRequests(req, res) {
                 const pendingRank = (row) => (row.statusKey === 'pending' ? 0 : 1);
                 const rank = pendingRank(a) - pendingRank(b);
                 if (rank !== 0) return rank;
+                const decideRank = (row) => (row.canDecide ? 0 : 1);
+                const decide = decideRank(a) - decideRank(b);
+                if (decide !== 0) return decide;
                 return String(b.startDateKey || '').localeCompare(String(a.startDateKey || ''));
             });
 
