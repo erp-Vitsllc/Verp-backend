@@ -98,6 +98,8 @@ describe('salary slip edits drive pay figures', () => {
         assert.equal(figures.fine, 0);
         assert.equal(figures.loan, 0);
         assert.equal(figures.deduction, 10);
+        assert.equal(figures.lossOfPay, 10);
+        assert.equal(figures.otherDeduction, 0);
         assert.equal(figures.netSalary, 1590);
         assert.equal(figures.actualSalary, figures.netSalary);
         assert.equal(
@@ -112,6 +114,8 @@ describe('salary slip edits drive pay figures', () => {
         const figures = salarySlipPayrollFigures(mergeStoredSalarySlip(live, stored));
         assert.equal(figures.extra, 150);
         assert.equal(figures.deduction, 98);
+        assert.equal(figures.lossOfPay, 48);
+        assert.equal(figures.otherDeduction, 50);
         assert.equal(figures.netSalary, 1552);
     });
 });

@@ -1856,6 +1856,22 @@ function payrollFigureKey(value) {
     return String(value || '').trim().replace(/\s+/g, '').toUpperCase();
 }
 
+const LOSS_OF_PAY_NAME = /leave|late|early|miss(?:ed)?[\s-]*punch|comp[\s-]*off/i;
+const OTHER_DEDUCTION_NAME = /loan|fine|utility|advance/i;
+
+/** Loss of pay is leave, late in, early out, and missed punch. The rest of the slip deductions are loan, fine, utility, and salary advance. */
+function splitPayrollDeductions(rows) {
+    let lossOfPay = 0;
+    let otherDeduction = 0;
+    for (const row of rows || []) {
+        const name = String(row?.component || '');
+        const amount = money(row?.amount);
+        if (LOSS_OF_PAY_NAME.test(name)) lossOfPay = money(lossOfPay + amount);
+        else if (OTHER_DEDUCTION_NAME.test(name)) otherDeduction = money(otherDeduction + amount);
+    }
+    return { lossOfPay, otherDeduction };
+}
+
 /** Monthly pay, additions, deductions, and net taken from one salary slip. */
 export function salarySlipPayrollFigures(slip) {
     const earnings = Array.isArray(slip?.earnings) ? slip.earnings : [];
@@ -1877,6 +1893,7 @@ export function salarySlipPayrollFigures(slip) {
     const reconciliation = slip?.reconciliation || {};
     const deduction = money(slip?.totalDeductions);
     const netSalary = money(slip?.netSalary);
+    const split = splitPayrollDeductions(slip?.deductions);
     return {
         monthKey: monthKeyOf(slip?.monthKey),
         monthlySalary: structure || money(slip?.summary?.monthlySalary),
@@ -1884,6 +1901,8 @@ export function salarySlipPayrollFigures(slip) {
         extra,
         ot: overtime,
         deduction,
+        lossOfPay: split.lossOfPay,
+        otherDeduction: split.otherDeduction,
         actualSalary: netSalary,
         netSalary,
         grossEarnings: money(slip?.grossEarnings),

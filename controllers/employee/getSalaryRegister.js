@@ -1164,6 +1164,8 @@ async function buildEnrollmentOverview(enrollments, monthKey) {
             companyName,
             enrolled: isEnrolled,
             enrolledForMonth,
+            status: String(emp.status || '').trim(),
+            profileStatus: String(emp.profileStatus || '').trim(),
             monthlySalary,
             companyMolCode,
             isWps,
@@ -1225,6 +1227,12 @@ export async function monthPayrollIsClear(monthKey) {
 function currentSalaryYearMonth() {
     const dubai = getZonedParts(new Date(), getScheduledEmailTimeZone());
     return `${dubai.year}-${pad2(dubai.month)}`;
+}
+
+function activePayrollEmployee(emp) {
+    if (!emp) return false;
+    if (String(emp.status || '') === 'Left User') return false;
+    return String(emp.profileStatus || '').trim().toLowerCase() === 'active';
 }
 
 function employeeWorkedInMonth(emp, ym) {
@@ -1393,6 +1401,8 @@ function applySlipFigure(row, figures) {
     if (figures.monthlySalary > 0) row.monthlySalary = figures.monthlySalary;
     if (figures.basicSalary > 0) row.basicSalary = figures.basicSalary;
     row.deduction = figures.deduction;
+    row.lossOfPay = money(figures.lossOfPay);
+    row.otherDeduction = money(figures.otherDeduction);
     row.extra = figures.extra;
     row.ot = figures.ot;
     row.actualSalary = figures.actualSalary;
@@ -2033,7 +2043,7 @@ export const getSalaryRegister = async (req, res) => {
                 if (!stored || !enrollmentCoversSalaryMonth(stored, ym)) continue;
                 if (!ym || ym > lastOpenYm || ym >= currentYm) continue;
                 const emp = empByCode.get(key);
-                if (!emp || !employeeWorkedInMonth(emp, ym)) continue;
+                if (!emp || !employeeWorkedInMonth(emp, ym) || !activePayrollEmployee(emp)) continue;
                 const code = String(emp.employeeId || '').trim();
                 if (!employeeMatchesRegisterFilter(emp, code, registerFilters)) continue;
                 seen.add(key);
@@ -2083,6 +2093,8 @@ export const getSalaryRegister = async (req, res) => {
                     enrolledForMonth: true,
                     fromMonth: String(enrollmentRow?.fromMonth || '').trim(),
                     processingStart: processingStartFromEnrollment(enrollmentRow) || '',
+                    status: String(emp?.status || '').trim(),
+                    profileStatus: String(emp?.profileStatus || '').trim(),
                     status: processedEmployeeIds.has(employeeCodeKey(code))
                         ? 'Processed'
                         : pendingEmployeeIds.has(employeeCodeKey(code))
