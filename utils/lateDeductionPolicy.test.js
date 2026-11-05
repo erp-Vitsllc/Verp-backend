@@ -96,7 +96,7 @@ describe('late in/out combined events', () => {
         const charges = countExtraLateRules(
             [
                 { date: '2026-10-05', statusKey: 'late_arrived', timeIn: '10:40', timeOut: '18:00' },
-                { date: '2026-10-05', statusKey: 'on_office', timeIn: '13:00', timeOut: '13:00' },
+                { date: '2026-10-05', statusKey: 'late_arrived', timeIn: '13:00', timeOut: '13:00' },
             ],
             policy,
             week,
@@ -112,6 +112,38 @@ describe('late in/out combined events', () => {
         assert.equal(halfOut.count, 0);
         assert.equal(fullOut.count, 1);
         assert.equal(fullOut.dayFraction, 1);
+    });
+
+    it('does not deduct a green present day', () => {
+        const week = defaultWeek();
+        const policy = {
+            lateInRules: [{ minutes: 15, events: 0, deduct: 'full' }],
+            extraLateRules: [
+                { title: 'Late in', minutes: 30, events: 0, deduct: 'full' },
+                { title: 'Late Out', minutes: 30, events: 0, deduct: 'full' },
+            ],
+        };
+        const summary = lateInOutSummary(
+            [
+                { date: '2026-10-05', statusKey: 'on_office', timeIn: '13:00', timeOut: '13:00' },
+                { date: '2026-10-06', statusKey: 'work_from_home', timeIn: '13:00', timeOut: '13:00' },
+                { date: '2026-10-07', statusKey: 'present', timeIn: '13:00', timeOut: '13:00' },
+                {
+                    date: '2026-10-08',
+                    statusKey: 'late_arrived',
+                    timeIn: '13:00',
+                    timeOut: '13:00',
+                    deductionWaived: true,
+                },
+            ],
+            policy,
+            week,
+        );
+        assert.equal(summary.lateIn.count, 0);
+        assert.equal(summary.lateIn.dayFraction, 0);
+        assert.equal(summary.lateOut.count, 0);
+        assert.equal(summary.lateOut.dayFraction, 0);
+        assert.equal(summary.extra.every((row) => row.count === 0), true);
     });
 
     it('counts a stricter late band once and leaves shorter lates on the shared allowance', () => {

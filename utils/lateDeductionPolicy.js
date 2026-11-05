@@ -159,6 +159,10 @@ const EXTRA_LATE_SKIP = new Set([
     'authorized_leave',
     'unauthorized_leave',
     'compoff_leave',
+    // Green on the calendar. A present day is paid, even when the punches sit outside the shift.
+    'on_office',
+    'work_from_home',
+    'present',
 ]);
 
 export function extraLateRuleDirection(rule) {

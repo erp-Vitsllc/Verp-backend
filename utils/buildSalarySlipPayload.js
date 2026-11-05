@@ -53,6 +53,15 @@ const APPROVED_LOAN_STATUSES = ['Approved', 'Pending Payment to Employee', 'Paid
 const APPROVED_FINE_STATUSES = ['Approved', 'Active', 'Paid', 'Completed'];
 const APPROVED_REWARD_STATUSES = ['Approved', 'Approved (Paid)'];
 const PRESENT_KEYS = new Set(['on_office', 'work_from_home', 'late_arrived', 'early_go']);
+
+/** A payroll-sheet present day is any day with a time in, a time out, or both. */
+export function attendanceDayHasPunch(row) {
+    const times = [row?.timeIn, row?.timeOut];
+    for (const session of row?.punchSessions || []) {
+        times.push(session?.timeIn, session?.timeOut);
+    }
+    return times.some((value) => String(value || '').trim());
+}
 const LEAVE_KEYS = new Set(['authorized_leave', 'unauthorized_leave', 'sick_leave', 'on_leave']);
 const ONES = ['', 'One', 'Two', 'Three', 'Four', 'Five', 'Six', 'Seven', 'Eight', 'Nine'];
 const TEENS = ['Ten', 'Eleven', 'Twelve', 'Thirteen', 'Fourteen', 'Fifteen', 'Sixteen', 'Seventeen', 'Eighteen', 'Nineteen'];
@@ -822,6 +831,7 @@ export async function buildSalarySlipPayload({
             .filter(Boolean),
     );
     let presentDays = 0;
+    let punchedPresentDays = 0;
     let workingDayLeaves = 0;
     let authorizedDays = 0;
     let explicitAuthorizedShares = 0;
@@ -852,6 +862,7 @@ export async function buildSalarySlipPayload({
         if (!keepAttendanceForProcessingStart(row, processingStart)) continue;
         countedDates.add(date);
         countedAttendance.push(row);
+        if (attendanceDayHasPunch(row)) punchedPresentDays += 1;
         const storedKey = String(row.statusKey || '');
         const key = punchAttendanceKind(row) || storedKey;
         if (key === 'holiday') holidayMarks += 1;
@@ -1397,6 +1408,7 @@ export async function buildSalarySlipPayload({
             holidays: qtyLabel(holidays, 'day'),
             workingDayLeaves: qtyLabel(workingDayLeaves, 'day'),
             presentDays: qtyLabel(presentDays, 'day'),
+            punchedPresentDays,
             holidaysWorked: qtyLabel(holidaysWorked, 'day'),
             overtimeHours: hoursLabel(otHours),
             calendarDays: qtyLabel(daysInMonth, 'day'),
@@ -1925,6 +1937,21 @@ function namedAmount(rows, name) {
     return 0;
 }
 
+/** Loss of pay total on the salary slip card: leave, late in, early out, annual leave, and comp off. */
+export function salarySlipLossOfPay(slip) {
+    return ZOHO_LOSS_OF_PAY.reduce(
+        (sum, name) => money(sum + namedAmount(slip?.deductions, name)),
+        0,
+    );
+}
+
+function sheetPresentDaysOf(slip) {
+    const punched = slip?.attendance?.punchedPresentDays;
+    if (punched == null || punched === '') return labeledCount(slip?.attendance?.presentDays);
+    const count = Number(punched);
+    return Number.isFinite(count) ? count : 0;
+}
+
 /** Same figure as the salary slip Zoho salary card: monthly earnings + annual leave and ticket − loss of pay. */
 export function salarySlipZohoPay(slip) {
     const monthly = ZOHO_MONTHLY_EARNINGS.reduce(
@@ -1937,11 +1964,7 @@ export function salarySlipZohoPay(slip) {
     const ticket = money(slip?.summary?.airTicket?.amount)
         || namedAmount(slip?.yearlyEarnings, 'Travel Allowance')
         || namedAmount(slip?.earnings, 'Ticket');
-    const lossOfPay = ZOHO_LOSS_OF_PAY.reduce(
-        (sum, name) => money(sum + namedAmount(slip?.deductions, name)),
-        0,
-    );
-    return money(Math.max(0, monthly + leave + ticket - lossOfPay));
+    return money(Math.max(0, monthly + leave + ticket - salarySlipLossOfPay(slip)));
 }
 
 /** Monthly pay, additions, deductions, and net taken from one salary slip. */
@@ -1978,6 +2001,7 @@ export function salarySlipPayrollFigures(slip) {
         basicSalary,
         otherAllowance: money(Math.max(0, monthlySalary - basicSalary)),
         presentDays: labeledCount(slip?.attendance?.presentDays),
+        sheetPresentDays: sheetPresentDaysOf(slip),
         leaveDays: labeledCount(slip?.attendance?.workingDayLeaves),
         rewardAdditions: money(Math.max(0, extra - overtime)),
         grossSalary: money(slip?.grossEarnings) || money(monthlySalary + extra),
@@ -1989,6 +2013,7 @@ export function salarySlipPayrollFigures(slip) {
         ot: overtime,
         deduction,
         lossOfPay: split.lossOfPay,
+        sheetLossOfPay: salarySlipLossOfPay(slip),
         otherDeduction: split.otherDeduction,
         actualSalary: netSalary,
         netSalary,

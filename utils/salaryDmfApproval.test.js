@@ -46,10 +46,10 @@ describe('month payroll submit', () => {
         assert.equal(payrollApprovalStatusLabel(dmf), 'Pending for Hana User (HR)');
     });
 
-    it('lets only flowchart Accounts submit, including after a rejection', () => {
+    it('lets payroll submit while idle or rejected, including after a rejection', () => {
         const idle = { status: 'idle' };
         assert.equal(viewerCanSubmitMonthPayroll(idle, accounts), true);
-        assert.equal(viewerCanSubmitMonthPayroll(idle, hr), false);
+        assert.equal(viewerCanSubmitMonthPayroll(idle, hr), true);
         assert.equal(viewerCanSubmitMonthPayroll({ status: 'pending' }, accounts), false);
         assert.equal(viewerCanSubmitMonthPayroll({ status: 'approved' }, accounts), false);
 
@@ -59,7 +59,7 @@ describe('month payroll submit', () => {
         assert.equal(dmf.status, 'rejected');
         assert.equal(payrollApprovalStatusLabel(dmf), 'Rejected');
         assert.equal(viewerCanSubmitMonthPayroll(dmf, accounts), true);
-        assert.equal(viewerCanSubmitMonthPayroll(dmf, hr), false);
+        assert.equal(viewerCanSubmitMonthPayroll(dmf, hr), true);
     });
 
     it('opens Create slot only for Accounts after Management approval', () => {

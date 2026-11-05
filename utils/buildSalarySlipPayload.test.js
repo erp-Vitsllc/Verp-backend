@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 import {
     amountInWordsAed,
+    attendanceDayHasPunch,
     mergeStoredSalarySlip,
     monthKeyOf,
     salarySlipPayrollFigures,
@@ -138,17 +139,38 @@ describe('salary slip edits drive pay figures', () => {
         assert.equal(figures.loanAmount, 30);
         assert.equal(figures.sheetOtherDeduction, 0);
         assert.equal(figures.netSalary, 1552);
-        assert.equal(
-            Math.round(
-                (figures.grossSalary
-                    - figures.lossOfPay
-                    - figures.fineAmount
-                    - figures.advanceAmount
-                    - figures.loanAmount
-                    - figures.sheetOtherDeduction) * 100,
-            ) / 100,
-            figures.netSalary,
-        );
+        assert.equal(figures.sheetPresentDays, 22);
+        assert.equal(figures.sheetLossOfPay, 48);
+    });
+
+    it('counts a present day from a time in, a time out, or both', () => {
+        assert.equal(attendanceDayHasPunch({ statusKey: 'mispunch', timeIn: '09:12' }), true);
+        assert.equal(attendanceDayHasPunch({ statusKey: 'early_go', timeOut: '16:40' }), true);
+        assert.equal(attendanceDayHasPunch({ statusKey: 'on_office', timeIn: '09:00', timeOut: '18:00' }), true);
+        assert.equal(attendanceDayHasPunch({ statusKey: 'late_arrived', timeIn: '09:40', timeOut: '18:05' }), true);
+        assert.equal(attendanceDayHasPunch({ timeIn: '  ', timeOut: '' }), false);
+        assert.equal(attendanceDayHasPunch({ statusKey: 'on_office' }), false);
+        assert.equal(attendanceDayHasPunch({ punchSessions: [{ timeOut: '13:00' }] }), true);
+    });
+
+    it('keeps the payroll sheet loss of pay to the slip total, and gross to zoho salary', () => {
+        const figures = salarySlipPayrollFigures(sampleSlip({
+            attendance: { presentDays: '22 days', punchedPresentDays: 26 },
+            deductions: [
+                { component: 'Authorized Leave', basis: '1 day', amount: 48 },
+                { component: 'Late in', basis: '1 event', amount: 12 },
+                { component: 'Sick Leave', basis: '1 day', amount: 7 },
+                { component: 'Missed Punch', basis: '1 day', amount: 5 },
+                { component: 'Fine', basis: 'Installment', amount: 20 },
+                { component: 'Loan', basis: 'Monthly', amount: 30 },
+            ],
+        }));
+        assert.equal(figures.presentDays, 22);
+        assert.equal(figures.sheetPresentDays, 26);
+        assert.equal(figures.lossOfPay, 72);
+        assert.equal(figures.sheetLossOfPay, 60);
+        assert.equal(figures.zohoSalary, 1590);
+        assert.equal(figures.grossSalary, 1650);
     });
 });
 

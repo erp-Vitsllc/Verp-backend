@@ -1406,6 +1406,11 @@ function applySlipFigure(row, figures) {
     row.otherDeduction = money(figures.otherDeduction);
     row.otherAllowance = roundMoney(figures.otherAllowance);
     row.presentDays = Number(figures.presentDays) || 0;
+    row.sheetPresentDays = Number.isFinite(Number(figures.sheetPresentDays))
+        ? Number(figures.sheetPresentDays)
+        : row.presentDays;
+    row.sheetLossOfPay = roundMoney(figures.sheetLossOfPay);
+    row.zohoSalary = roundMoney(figures.zohoSalary);
     row.rewardAdditions = roundMoney(figures.rewardAdditions);
     row.grossSalary = roundMoney(figures.grossSalary);
     row.fineAmount = roundMoney(figures.fineAmount);

@@ -393,7 +393,9 @@ export function viewerCanStartDmf(dmf, ctx) {
 export function viewerCanSubmitMonthPayroll(dmf, ctx) {
     const status = String(dmf?.status || 'idle') || 'idle';
     if (status === 'pending' || status === 'approved') return false;
-    return Boolean(ctx?.isAccounts);
+    // Accounts-only gate commented so Submit is not limited to the flowchart Accounts assignee.
+    // return Boolean(ctx?.isAccounts);
+    return true;
 }
 
 /** Create slot opens only after Management approves, and only for flowchart Accounts. */

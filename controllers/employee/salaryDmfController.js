@@ -190,12 +190,13 @@ export async function startMonthSalaryDmf(req, res) {
         const monthKey = monthKeyOf(req.params?.monthKey);
         if (!monthKey) return res.status(400).json({ message: 'Invalid salary month.' });
 
-        if (!(await monthPayrollIsClear(monthKey))) {
-            return res.status(400).json({
-                message:
-                    'Submit is available only when readiness is 100% and every employee is Ready.',
-            });
-        }
+        // Readiness gate commented so Accounts can submit before every employee is Ready.
+        // if (!(await monthPayrollIsClear(monthKey))) {
+        //     return res.status(400).json({
+        //         message:
+        //             'Submit is available only when readiness is 100% and every employee is Ready.',
+        //     });
+        // }
 
         let doc = await SalaryMonthDmf.findOne({ monthKey });
         if (!doc) {
