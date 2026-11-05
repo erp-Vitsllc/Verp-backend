@@ -1995,6 +1995,13 @@ export function salarySlipPayrollFigures(slip) {
         0,
         deduction - split.lossOfPay - buckets.fineAmount - buckets.advanceAmount - buckets.loanAmount,
     ));
+    const zohoSalary = salarySlipZohoPay(slip);
+    // Same as the slip's Net salary payable: Zoho salary minus loan, fine, utility, and advance.
+    // Sick leave and missed punch stay out of that pair, so they must not lower the sheet net either.
+    const actualSalary = money(Math.max(
+        0,
+        zohoSalary - buckets.fineAmount - buckets.advanceAmount - buckets.loanAmount - sheetOtherDeduction,
+    ));
     return {
         monthKey: monthKeyOf(slip?.monthKey),
         monthlySalary,
@@ -2015,9 +2022,9 @@ export function salarySlipPayrollFigures(slip) {
         lossOfPay: split.lossOfPay,
         sheetLossOfPay: salarySlipLossOfPay(slip),
         otherDeduction: split.otherDeduction,
-        actualSalary: netSalary,
+        actualSalary,
         netSalary,
-        zohoSalary: salarySlipZohoPay(slip),
+        zohoSalary,
         grossEarnings: money(slip?.grossEarnings),
         attendance: money(reconciliation.attendance),
         salaryAdvance: money(reconciliation.salaryAdvance),

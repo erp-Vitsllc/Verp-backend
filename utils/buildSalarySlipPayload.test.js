@@ -170,6 +170,7 @@ describe('salary slip edits drive pay figures', () => {
         assert.equal(figures.lossOfPay, 72);
         assert.equal(figures.sheetLossOfPay, 60);
         assert.equal(figures.zohoSalary, 1590);
+        assert.equal(figures.actualSalary, 1540);
         assert.equal(figures.grossSalary, 1650);
     });
 });
