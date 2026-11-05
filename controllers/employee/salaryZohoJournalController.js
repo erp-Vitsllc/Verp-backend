@@ -256,9 +256,11 @@ export const getSalaryZohoJournal = async (req, res) => {
         if (!monthKey) return res.status(400).json({ message: 'Invalid salary month.' });
         await assertAccountsProcessedMonth(req, monthKey);
         const people = await payrollPeople(monthKey);
+        const label = monthLabel(monthKey);
         const organizations = groupSalaryZohoJournals({
             employees: people,
             organizations: configuredOrganizations(),
+            note: label ? `Salary payroll ${label}` : 'Salary payroll',
         });
         return res.status(200).json({
             monthKey,
