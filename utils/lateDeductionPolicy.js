@@ -187,6 +187,20 @@ function highestExtraMatch(minutes, indexes, rules) {
     return match == null ? null : match;
 }
 
+/** Approved hours replace the late-rule day. 16 minutes on a 9-hour day is 16/540, not a full day. */
+function approvedLossShare(row, week) {
+    if (String(row?.hourAdjustStatus || '') !== 'approved') return null;
+    const hours = Number(row?.hoursApproved);
+    if (!(hours > 0)) return null;
+    const date = String(row?.date || '').slice(0, 10);
+    const scheduled = getScheduledPunchMinutes(week, date);
+    const minutes = scheduled && !scheduled.isOffDay && scheduled.endMinutes > scheduled.startMinutes
+        ? scheduled.endMinutes - scheduled.startMinutes
+        : 0;
+    if (!(minutes > 0)) return 0;
+    return (hours * 60) / minutes;
+}
+
 function splitFraction(total, inCount, outCount) {
     const fraction = Math.max(0, Number(total) || 0);
     const weights = { in: Math.max(0, inCount), out: Math.max(0, outCount) };
@@ -250,9 +264,18 @@ export function lateInOutSummary(rows, policy, week) {
     const threshold = minutesThresholdOf(sharedLateRule(policy));
     let sharedLateIn = 0;
     let sharedLateOut = 0;
+    let approvedIn = 0;
+    let approvedOut = 0;
 
     for (const row of rows || []) {
         if (isDeductionWaived(row) || isHourLossWaived(row)) continue;
+        const approvedShare = approvedLossShare(row, week);
+        if (approvedShare != null) {
+            const key = String(row?.statusKey || '');
+            if (key === 'early_go') approvedOut += approvedShare;
+            else if (key === 'late_arrived') approvedIn += approvedShare;
+            continue;
+        }
         const statusKey = String(row?.statusKey || '');
         let extraIn = false;
         let extraOut = false;
@@ -306,12 +329,12 @@ export function lateInOutSummary(rows, policy, week) {
         lateIn: {
             count: sharedLateIn + extraIn.reduce((sum, row) => sum + row.count, 0),
             sharedCount: sharedLateIn,
-            dayFraction: roundFraction(sharedSplit.in + extraInFraction),
+            dayFraction: roundFraction(sharedSplit.in + extraInFraction + approvedIn),
         },
         lateOut: {
             count: sharedLateOut + extraOut.reduce((sum, row) => sum + row.count, 0),
             sharedCount: sharedLateOut,
-            dayFraction: roundFraction(sharedSplit.out + extraOutFraction),
+            dayFraction: roundFraction(sharedSplit.out + extraOutFraction + approvedOut),
         },
     };
 }

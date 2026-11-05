@@ -51,7 +51,7 @@ function cleanLineItems(rawLines) {
         .filter(Boolean);
 }
 
-function buildExpensePayload(body = {}) {
+export function buildExpensePayload(body = {}) {
     const date = String(body.date || '').trim();
     const paidThroughAccountId = String(
         body.paid_through_account_id || body.paidThroughAccountId || '',

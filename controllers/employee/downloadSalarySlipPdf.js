@@ -3,8 +3,10 @@ import EmployeeBasic from '../../models/EmployeeBasic.js';
 import PayrollSettings from '../../models/PayrollSettings.js';
 import SalaryEnrollment from '../../models/SalaryEnrollment.js';
 import SalaryHistoricalProfile from '../../models/SalaryHistoricalProfile.js';
+import SalaryMonthDmf from '../../models/SalaryMonthDmf.js';
 import SalaryMonthPayment from '../../models/SalaryMonthPayment.js';
 import SalarySlipMonth from '../../models/SalarySlipMonth.js';
+import { buildDmfViewerContext, viewerCanUpdateSalarySlip } from '../../utils/salaryDmfApproval.js';
 import { hasPermission, isUserAdministrator } from '../../services/permissionService.js';
 import { generateSalarySlipPdfBuffer } from '../../utils/generateSalarySlipPdf.js';
 import {
@@ -47,6 +49,20 @@ async function userCanEditSalarySetup(req) {
     );
 }
 
+async function salarySlipUpdateAccess(req, monthKey) {
+    const doc = await SalaryMonthDmf.findOne({ monthKey }).select('dmfApproval.status').lean();
+    const dmf = doc?.dmfApproval || { status: 'idle' };
+    const processed = String(dmf.status || '') === 'approved';
+    const [canEditSetup, ctx] = await Promise.all([
+        userCanEditSalarySetup(req),
+        processed ? buildDmfViewerContext(req) : Promise.resolve(null),
+    ]);
+    return {
+        monthProcessed: processed,
+        canUpdate: viewerCanUpdateSalarySlip(dmf, ctx, { canEditSetup }),
+    };
+}
+
 /**
  * GET /api/Employee/salary-enroll/:employeeId/historical/salary-slip
  * Opens this employee's monthly salary slip PDF (preview on enroll, email when Salary slip is checked).
@@ -67,8 +83,15 @@ export async function downloadSalarySlipPdf(req, res) {
             return res.status(400).json({ message: slipMonthDeniedMessage(gate.enrolled, gate.fromMonth) });
         }
         if (String(req.query.format || '').toLowerCase() === 'json') {
-            const slip = await buildSalarySlipPayload({ employeeId, monthKey });
-            return res.json({ slip: serializeSalarySlipForClient(slip) });
+            const [slip, access] = await Promise.all([
+                buildSalarySlipPayload({ employeeId, monthKey }),
+                salarySlipUpdateAccess(req, monthKey),
+            ]);
+            return res.json({
+                slip: serializeSalarySlipForClient(slip),
+                canUpdate: access.canUpdate,
+                monthProcessed: access.monthProcessed,
+            });
         }
 
         const { buffer, slip } = await generateSalarySlipPdfBuffer({ employeeId, monthKey });
@@ -251,13 +274,17 @@ export async function saveSalarySlipMonth(req, res) {
         if (!employeeId) {
             return res.status(400).json({ message: 'Employee is required.' });
         }
-        if (!(await userCanEditSalarySetup(req))) {
-            return res.status(403).json({ message: 'You do not have permission to update this salary slip.' });
-        }
-
         const monthKey = monthKeyOf(req.body?.monthKey || req.body?.month || req.query.month);
         if (!monthKey) {
             return res.status(400).json({ message: 'Salary month is required.' });
+        }
+        const access = await salarySlipUpdateAccess(req, monthKey);
+        if (!access.canUpdate) {
+            return res.status(403).json({
+                message: access.monthProcessed
+                    ? 'Only Management can update a salary slip after this month is processed.'
+                    : 'You do not have permission to update this salary slip.',
+            });
         }
 
         const emp = await EmployeeBasic.findOne({ employeeId }).select('employeeId').lean();

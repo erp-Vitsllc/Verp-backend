@@ -70,7 +70,7 @@ export const getCompleteEmployee = async (id) => {
                 .populate('reportingAuthority', 'firstName lastName employeeId email workEmail companyEmail designation department role')
                 .populate('primaryReportee', 'firstName lastName employeeId email workEmail companyEmail designation department role')
                 .populate('secondaryReportee', 'firstName lastName employeeId email workEmail companyEmail designation department role')
-                .populate('company', 'name companyId logo')
+                .populate('company', 'name companyId logo zohoOrganizationId zohoOrganizationLabel')
                 .lean();
         } else {
             // It's an employeeId (string)
@@ -80,7 +80,7 @@ export const getCompleteEmployee = async (id) => {
                 .populate('reportingAuthority', 'firstName lastName employeeId email workEmail companyEmail designation department role')
                 .populate('primaryReportee', 'firstName lastName employeeId email workEmail companyEmail designation department role')
                 .populate('secondaryReportee', 'firstName lastName employeeId email workEmail companyEmail designation department role')
-                .populate('company', 'name companyId logo')
+                .populate('company', 'name companyId logo zohoOrganizationId zohoOrganizationLabel')
                 .lean();
 
             // If not found, try case-insensitive match
@@ -94,7 +94,7 @@ export const getCompleteEmployee = async (id) => {
                     .populate('reportingAuthority', 'firstName lastName employeeId email workEmail companyEmail designation department role')
                     .populate('primaryReportee', 'firstName lastName employeeId email workEmail companyEmail designation department role')
                     .populate('secondaryReportee', 'firstName lastName employeeId email workEmail companyEmail designation department role')
-                    .populate('company', 'name companyId logo')
+                    .populate('company', 'name companyId logo zohoOrganizationId zohoOrganizationLabel')
                     .lean();
             }
 
@@ -107,7 +107,7 @@ export const getCompleteEmployee = async (id) => {
                     .populate('reportingAuthority', 'firstName lastName employeeId email workEmail companyEmail designation department role')
                     .populate('primaryReportee', 'firstName lastName employeeId email workEmail companyEmail designation department role')
                     .populate('secondaryReportee', 'firstName lastName employeeId email workEmail companyEmail designation department role')
-                    .populate('company', 'name companyId logo')
+                    .populate('company', 'name companyId logo zohoOrganizationId zohoOrganizationLabel')
                     .lean();
             }
         }
@@ -519,6 +519,8 @@ export const getCompleteEmployee = async (id) => {
                 otherAllowance: salary.otherAllowance || 0,
                 otherAllowancePercentage: salary.otherAllowancePercentage || 20,
                 additionalAllowances: salary.additionalAllowances || [],
+                zohoAccountId: salary.zohoAccountId || '',
+                zohoAccountName: salary.zohoAccountName || '',
                 // Exclude large attachment/offerLetter.data from salary history (but include URLs)
                 // NOTE: EmployeeSalary schema doesn't have publicId field, only url/data/name/mimeType
                 salaryHistory: salary.salaryHistory ? salary.salaryHistory.map(entry => ({
@@ -922,7 +924,8 @@ export const saveEmployeeData = async (employeeId, updatePayload) => {
         const salaryFields = [
             'monthlySalary', 'basic', 'basicPercentage', 'houseRentAllowance',
             'houseRentPercentage', 'otherAllowance', 'otherAllowancePercentage',
-            'additionalAllowances', 'salaryHistory', 'offerLetter'
+            'additionalAllowances', 'salaryHistory', 'offerLetter',
+            'zohoAccountId', 'zohoAccountName',
         ];
 
         const bankFields = [
@@ -1036,9 +1039,17 @@ export const saveEmployeeData = async (employeeId, updatePayload) => {
                         houseRentAllowance: houseRentAllowance,
                         vehicleAllowance: vehicleAllowance,
                         fuelAllowance: fuelAllowance,
+                        zohoAccountId: String(entry.zohoAccountId || '').trim(),
+                        zohoAccountName: String(entry.zohoAccountName || '').trim(),
                         additionalAllowances: entry.additionalAllowances || []
                     };
                 });
+                const openEntry = salaryUpdate.salaryHistory.find((entry) => !entry?.toDate)
+                    || salaryUpdate.salaryHistory[0];
+                if (openEntry) {
+                    salaryUpdate.zohoAccountId = String(openEntry.zohoAccountId || '').trim();
+                    salaryUpdate.zohoAccountName = String(openEntry.zohoAccountName || '').trim();
+                }
             }
 
             // Also calculate total for current salary if basic/otherAllowance/houseRentAllowance are being updated

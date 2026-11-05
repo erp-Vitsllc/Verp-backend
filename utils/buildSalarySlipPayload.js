@@ -1872,6 +1872,78 @@ function splitPayrollDeductions(rows) {
     return { lossOfPay, otherDeduction };
 }
 
+function labeledCount(value) {
+    const match = String(value ?? '').match(/-?\d+(?:\.\d+)?/);
+    if (!match) return 0;
+    const count = Number(match[0]);
+    return Number.isFinite(count) ? count : 0;
+}
+
+/** Payroll sheet columns: fine, advance, and loan stay separate. Anything else except loss of pay is other. */
+function splitSheetDeductions(rows) {
+    let fineAmount = 0;
+    let advanceAmount = 0;
+    let loanAmount = 0;
+    for (const row of rows || []) {
+        const name = String(row?.component || '');
+        const amount = money(row?.amount);
+        if (!amount || LOSS_OF_PAY_NAME.test(name)) continue;
+        if (/advance/i.test(name)) advanceAmount = money(advanceAmount + amount);
+        else if (/loan/i.test(name)) loanAmount = money(loanAmount + amount);
+        else if (/fine/i.test(name)) fineAmount = money(fineAmount + amount);
+    }
+    return { fineAmount, advanceAmount, loanAmount };
+}
+
+const ZOHO_MONTHLY_EARNINGS = [
+    'Basic Salary',
+    'Other Allowance',
+    'House Rental Allowance',
+    'Vehicle Allowance',
+    'Fuel Allowance',
+    'Phone Allowance',
+    'Overtime Hours',
+    'Overtime Days',
+    'Reward',
+];
+
+const ZOHO_LOSS_OF_PAY = [
+    'Authorized Leave',
+    'Unauthorized Leave',
+    'Late in',
+    'Late out',
+    'Annual Leave',
+    'Comp off leave',
+];
+
+function namedAmount(rows, name) {
+    const want = String(name || '').trim().toLowerCase();
+    if (!want) return 0;
+    for (const row of rows || []) {
+        if (String(row?.component || '').trim().toLowerCase() === want) return money(row?.amount);
+    }
+    return 0;
+}
+
+/** Same figure as the salary slip Zoho salary card: monthly earnings + annual leave and ticket − loss of pay. */
+export function salarySlipZohoPay(slip) {
+    const monthly = ZOHO_MONTHLY_EARNINGS.reduce(
+        (sum, name) => money(sum + namedAmount(slip?.earnings, name)),
+        0,
+    );
+    const leave = money(slip?.summary?.leaveSalary?.amount)
+        || namedAmount(slip?.yearlyEarnings, 'Leave Salary')
+        || namedAmount(slip?.earnings, 'Leave Salary');
+    const ticket = money(slip?.summary?.airTicket?.amount)
+        || namedAmount(slip?.yearlyEarnings, 'Travel Allowance')
+        || namedAmount(slip?.earnings, 'Ticket');
+    const lossOfPay = ZOHO_LOSS_OF_PAY.reduce(
+        (sum, name) => money(sum + namedAmount(slip?.deductions, name)),
+        0,
+    );
+    return money(Math.max(0, monthly + leave + ticket - lossOfPay));
+}
+
 /** Monthly pay, additions, deductions, and net taken from one salary slip. */
 export function salarySlipPayrollFigures(slip) {
     const earnings = Array.isArray(slip?.earnings) ? slip.earnings : [];
@@ -1894,10 +1966,25 @@ export function salarySlipPayrollFigures(slip) {
     const deduction = money(slip?.totalDeductions);
     const netSalary = money(slip?.netSalary);
     const split = splitPayrollDeductions(slip?.deductions);
+    const monthlySalary = structure || money(slip?.summary?.monthlySalary);
+    const buckets = splitSheetDeductions(slip?.deductions);
+    const sheetOtherDeduction = money(Math.max(
+        0,
+        deduction - split.lossOfPay - buckets.fineAmount - buckets.advanceAmount - buckets.loanAmount,
+    ));
     return {
         monthKey: monthKeyOf(slip?.monthKey),
-        monthlySalary: structure || money(slip?.summary?.monthlySalary),
+        monthlySalary,
         basicSalary,
+        otherAllowance: money(Math.max(0, monthlySalary - basicSalary)),
+        presentDays: labeledCount(slip?.attendance?.presentDays),
+        leaveDays: labeledCount(slip?.attendance?.workingDayLeaves),
+        rewardAdditions: money(Math.max(0, extra - overtime)),
+        grossSalary: money(slip?.grossEarnings) || money(monthlySalary + extra),
+        fineAmount: buckets.fineAmount,
+        advanceAmount: buckets.advanceAmount,
+        loanAmount: buckets.loanAmount,
+        sheetOtherDeduction,
         extra,
         ot: overtime,
         deduction,
@@ -1905,6 +1992,7 @@ export function salarySlipPayrollFigures(slip) {
         otherDeduction: split.otherDeduction,
         actualSalary: netSalary,
         netSalary,
+        zohoSalary: salarySlipZohoPay(slip),
         grossEarnings: money(slip?.grossEarnings),
         attendance: money(reconciliation.attendance),
         salaryAdvance: money(reconciliation.salaryAdvance),

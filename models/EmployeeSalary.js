@@ -23,6 +23,9 @@ const salaryHistorySchema = new mongoose.Schema(
         otherAllowance: { type: Number, default: 0 },
         vehicleAllowance: { type: Number, default: 0 },
         fuelAllowance: { type: Number, default: 0 },
+        /** Zoho Chart of Accounts row used as this employee's salary account. */
+        zohoAccountId: { type: String, default: "", trim: true },
+        zohoAccountName: { type: String, default: "", trim: true },
         additionalAllowances: [additionalAllowanceSchema], // Store all additional allowances
         totalSalary: { type: Number, default: 0 },
         attachment: {
@@ -64,6 +67,9 @@ const employeeSalarySchema = new mongoose.Schema(
         houseRentPercentage: { type: Number, default: 20 },
         otherAllowance: { type: Number, default: 0 },
         otherAllowancePercentage: { type: Number, default: 20 },
+        /** Active salary period's Zoho Chart of Accounts row. */
+        zohoAccountId: { type: String, default: "", trim: true },
+        zohoAccountName: { type: String, default: "", trim: true },
         additionalAllowances: [additionalAllowanceSchema],
         offerLetter: {
             url: { type: String }, // Cloudinary URL (preferred)

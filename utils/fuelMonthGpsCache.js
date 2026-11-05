@@ -16,8 +16,13 @@ export function fuelMonthRangeIsClosed(rangeEnd, now = new Date()) {
     return Number.isFinite(end) && end <= now.getTime();
 }
 
+function storedIdleIsReport(stat) {
+    return stat?.summarySource === 'excessive-idling';
+}
+
 /** A stored month can be shown without scanning GPS history again. */
 export function fuelMonthGpsIsUsable(stat, rangeEnd, now = new Date()) {
+    if (!storedIdleIsReport(stat)) return false;
     const age = computedAgeMs(stat, now);
     if (age == null || age < 0) return false;
     if (fuelMonthRangeIsClosed(rangeEnd, now)) return true;
@@ -26,6 +31,7 @@ export function fuelMonthGpsIsUsable(stat, rangeEnd, now = new Date()) {
 
 /** Fresh rows do not need another Locator read. */
 export function fuelMonthGpsIsFresh(stat, rangeEnd, now = new Date()) {
+    if (!storedIdleIsReport(stat)) return false;
     const age = computedAgeMs(stat, now);
     if (age == null || age < 0) return false;
     const ttl = fuelMonthRangeIsClosed(rangeEnd, now)

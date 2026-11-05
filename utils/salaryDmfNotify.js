@@ -137,11 +137,22 @@ export async function notifySalaryMonthSlotReady({ req, dmf, monthKey }) {
     });
 }
 
-export function sendSalarySlotMail({ req, to, name, subject, monthKey, lines }) {
+export function sendSalarySlotMail({
+    req,
+    to,
+    name,
+    subject,
+    monthKey,
+    lines,
+    href,
+    buttonLabel,
+    attachments,
+}) {
     const address = String(to || '').trim();
     if (!address || !monthKey) return;
-    const href = inboxHref({ kind: 'month', monthKey });
+    const path = href || inboxHref({ kind: 'month', monthKey });
     const baseUrl = resolveFrontendBaseUrl(req);
+    const label = String(buttonLabel || 'Open the payroll').trim() || 'Open the payroll';
     const body = (Array.isArray(lines) ? lines : [])
         .map((line) => String(line || '').trim())
         .filter(Boolean)
@@ -153,8 +164,9 @@ export function sendSalarySlotMail({ req, to, name, subject, monthKey, lines }) 
         html: `
             <p>Hello ${escapeHtml(name || '')},</p>
             ${body}
-            <p><a href="${baseUrl}${href}">Open the payroll</a></p>
+            <p><a href="${baseUrl}${path}" style="display:inline-block;background:#2563eb;color:#ffffff;text-decoration:none;font-weight:700;padding:10px 16px;border-radius:8px;">${escapeHtml(label)}</a></p>
         `,
+        attachments,
     });
 }
 
@@ -165,7 +177,7 @@ export async function notifyAccountsSalarySlot({ payment, monthKey, phase }) {
     const slotNo = Number(payment.paymentNo) || 0;
     const cash = String(payment.paymentMethod || '').trim().toUpperCase() === 'CASH';
     const readyToUpdate = phase === 'update' || cash;
-    const href = inboxHref({ kind: 'month', monthKey });
+    const href = `${inboxHref({ kind: 'month', monthKey })}?slot=${encodeURIComponent(String(payment._id))}`;
     await syncDashboardAction({
         requestId: payment._id,
         requestType: SALARY_DMF_REQUEST_TYPE,
@@ -178,7 +190,7 @@ export async function notifyAccountsSalarySlot({ payment, monthKey, phase }) {
         },
         requestedByName: 'HR',
         extra1: readyToUpdate
-            ? `${monthKey} slot ${slotNo} is ready to update salary.`
+            ? `${monthKey} slot ${slotNo} is ready for Update payment.`
             : `${monthKey} slot ${slotNo} — check the WPS send.`,
         extra2: 'Salary slot',
         extra3: JSON.stringify({

@@ -393,7 +393,7 @@ export async function fetchVehicleWiseSummary({ vehicleIds, from, to } = {}) {
 }
 
 const EXCESSIVE_IDLING_REPORT_ID = 62;
-/** Portal Excessive Idling Report option labeled "5 Minutes". Value is seconds. */
+/** Portal dropdown "5 Minutes" on Excessive Idling Report. The value is seconds. */
 const EXCESSIVE_IDLING_MIN_SECONDS = 350;
 const excessiveIdleCache = new Map();
 let gatewaySession = null;
@@ -496,6 +496,9 @@ export async function fetchExcessiveIdlingReport({ vehicleIds, from, to } = {}) 
     }
     if (!vehIDs.length) return new Map();
 
+    // Same body the Reports screen submits for Excessive Idling Report.
+    // fromDate/toDate are the filterable dates, for example 05-11-2026 00:00:00 to 06-11-2026 00:00:00.
+    // fromTime/toTime stay 19:00 and 23:00. That is what the report form sends with those dates.
     const body = {
         reportID: EXCESSIVE_IDLING_REPORT_ID,
         vehIDs,

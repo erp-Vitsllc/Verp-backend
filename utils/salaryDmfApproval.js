@@ -401,6 +401,12 @@ export function viewerCanCreateSalarySlot(dmf, ctx) {
     return String(dmf?.status || '') === 'approved' && Boolean(ctx?.isAccounts);
 }
 
+/** After Management processes the month, only flowchart Management can change a salary slip. */
+export function viewerCanUpdateSalarySlip(dmf, ctx, { canEditSetup = false } = {}) {
+    if (String(dmf?.status || '') === 'approved') return Boolean(ctx?.isManagement);
+    return Boolean(canEditSetup);
+}
+
 export function serializeDmf(dmf, { ready = false, ctx = null, flow = '' } = {}) {
     const row = toPlainDmf(dmf);
     dropLegacyUser2Step(row);

@@ -15,6 +15,7 @@ import {
     formatLocatorIdleLabel,
 } from '../services/locatorSnapshotService.js';
 import { isLocatorConfigured } from '../services/locatorService.js';
+import { dubaiDateKey } from '../services/locatorUnits.js';
 import { getDepartmentHOD, isUserInFlowchart } from '../utils/getDepartmentHOD.js';
 import {
     resolveEmployeeEmailWithReporteeLoaded,
@@ -882,16 +883,11 @@ export async function createAccessFuelMonthlyLimits(req, res) {
     }
 }
 
-function localDayKey(date = new Date()) {
-    const d = date instanceof Date ? date : new Date(date);
-    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
-}
-
 function defaultFuelGpsRange() {
-    const now = new Date();
+    const today = dubaiDateKey();
     return {
-        from: `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-01`,
-        to: localDayKey(now),
+        from: `${today.slice(0, 7)}-01`,
+        to: today,
     };
 }
 

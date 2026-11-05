@@ -21,6 +21,9 @@ const employeeBasicSchema = new mongoose.Schema(
             lowercase: true,
         },
         company: { type: mongoose.Schema.Types.ObjectId, ref: "Company", default: null },
+        /** Zoho Chart of Accounts row for this employee's company (Work Details → Category). */
+        zohoCategoryAccountId: { type: String, default: "", trim: true },
+        zohoCategoryAccountName: { type: String, default: "", trim: true },
         status: {
             type: String,
             enum: ["Probation", "Permanent", "Temporary", "Notice", "Left User"],

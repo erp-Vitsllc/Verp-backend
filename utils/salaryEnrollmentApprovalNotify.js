@@ -61,10 +61,16 @@ function mailTransport() {
     });
 }
 
-export function sendMailLater({ to, subject, html }) {
+export function sendMailLater({ to, subject, html, attachments }) {
     const transporter = mailTransport();
     if (!transporter || !to) return;
-    void transporter.sendMail({ to, subject, html }).catch((err) => {
+    const files = Array.isArray(attachments) ? attachments.filter(Boolean) : [];
+    void transporter.sendMail({
+        to,
+        subject,
+        html,
+        attachments: files.length ? files : undefined,
+    }).catch((err) => {
         console.error('[salaryEnrollmentApproval] email failed:', err?.message || err);
     });
 }

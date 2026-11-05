@@ -118,6 +118,38 @@ describe('salary slip edits drive pay figures', () => {
         assert.equal(figures.otherDeduction, 50);
         assert.equal(figures.netSalary, 1552);
     });
+
+    it('splits payroll sheet columns from the slip', () => {
+        const slip = mergeStoredSalarySlip(
+            sampleSlip({ attendance: { presentDays: '22 days' } }),
+            sampleSlip({ attendance: { presentDays: '22 days' } }),
+        );
+        const figures = salarySlipPayrollFigures(slip);
+        assert.equal(figures.basicSalary, 750);
+        assert.equal(figures.otherAllowance, 750);
+        assert.equal(figures.monthlySalary, 1500);
+        assert.equal(figures.presentDays, 22);
+        assert.equal(figures.lossOfPay, 48);
+        assert.equal(figures.ot, 100);
+        assert.equal(figures.rewardAdditions, 50);
+        assert.equal(figures.grossSalary, 1650);
+        assert.equal(figures.fineAmount, 20);
+        assert.equal(figures.advanceAmount, 0);
+        assert.equal(figures.loanAmount, 30);
+        assert.equal(figures.sheetOtherDeduction, 0);
+        assert.equal(figures.netSalary, 1552);
+        assert.equal(
+            Math.round(
+                (figures.grossSalary
+                    - figures.lossOfPay
+                    - figures.fineAmount
+                    - figures.advanceAmount
+                    - figures.loanAmount
+                    - figures.sheetOtherDeduction) * 100,
+            ) / 100,
+            figures.netSalary,
+        );
+    });
 });
 
 describe('unpaid deduction carry-over', () => {

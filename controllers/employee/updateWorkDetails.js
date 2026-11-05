@@ -35,6 +35,8 @@ export const updateWorkDetails = async (req, res) => {
             "companyEmail",
             "enablePortalAccess",
             "staffType",
+            "zohoCategoryAccountId",
+            "zohoCategoryAccountName",
         ];
 
         const normalizeObjectIdField = (value) => {
@@ -178,6 +180,13 @@ export const updateWorkDetails = async (req, res) => {
                 .toLowerCase();
         }
 
+        if (updatePayload.zohoCategoryAccountId !== undefined) {
+            updatePayload.zohoCategoryAccountId = String(updatePayload.zohoCategoryAccountId || "").trim();
+        }
+        if (updatePayload.zohoCategoryAccountName !== undefined) {
+            updatePayload.zohoCategoryAccountName = String(updatePayload.zohoCategoryAccountName || "").trim();
+        }
+
         if (updatePayload.staffType !== undefined) {
             const nextStaffType = await resolveStoredStaffType(updatePayload.staffType);
             if (!nextStaffType) {
@@ -236,6 +245,8 @@ export const updateWorkDetails = async (req, res) => {
                 companyEmail: employee.companyEmail || "",
                 enablePortalAccess: employee.enablePortalAccess,
                 staffType: employee.staffType || "office",
+                zohoCategoryAccountId: employee.zohoCategoryAccountId || "",
+                zohoCategoryAccountName: employee.zohoCategoryAccountName || "",
                 profileStatus: employee.profileStatus,
                 profileApprovalStatus: employee.profileApprovalStatus,
             },

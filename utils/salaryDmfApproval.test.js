@@ -9,6 +9,7 @@ import {
     serializeDmf,
     viewerCanCreateSalarySlot,
     viewerCanSubmitMonthPayroll,
+    viewerCanUpdateSalarySlip,
 } from './salaryDmfApproval.js';
 
 function person(id, first, email) {
@@ -75,5 +76,22 @@ describe('month payroll submit', () => {
         assert.equal(view.canStart, false);
         assert.equal(view.canCreateSlot, true);
         assert.equal(serializeDmf(dmf, { ready: true, ctx: hr, flow: 'month' }).canCreateSlot, false);
+    });
+
+    it('lets only Management update a salary slip after the month is processed', () => {
+        const management = { isManagement: true };
+        const idle = { status: 'idle' };
+        assert.equal(viewerCanUpdateSalarySlip(idle, accounts, { canEditSetup: true }), true);
+        assert.equal(viewerCanUpdateSalarySlip(idle, management, { canEditSetup: false }), false);
+        assert.equal(viewerCanUpdateSalarySlip({ status: 'pending' }, hr, { canEditSetup: true }), true);
+
+        const dmf = monthDraft();
+        approveCurrentDmfStep(dmf, { actor: { name: 'Ada User' }, comment: 'Submitted' });
+        approveCurrentDmfStep(dmf, { actor: { name: 'Hana User' }, comment: '' });
+        approveCurrentDmfStep(dmf, { actor: { name: 'Mina User' }, comment: '' });
+        assert.equal(dmf.status, 'approved');
+        assert.equal(viewerCanUpdateSalarySlip(dmf, management, { canEditSetup: false }), true);
+        assert.equal(viewerCanUpdateSalarySlip(dmf, accounts, { canEditSetup: true }), false);
+        assert.equal(viewerCanUpdateSalarySlip(dmf, hr, { canEditSetup: true }), false);
     });
 });

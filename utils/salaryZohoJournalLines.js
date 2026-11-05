@@ -1,0 +1,140 @@
+function money(value) {
+    const n = Number(value);
+    if (!Number.isFinite(n)) return 0;
+    return Math.round(n * 100) / 100;
+}
+
+function text(value) {
+    return String(value || '').trim();
+}
+
+export function zohoOrgBrand(value) {
+    const hay = text(value).toLowerCase();
+    if (/nnit|neoron|neuron|nexus/.test(hay)) return 'NNIT';
+    if (/vega/.test(hay)) return 'VEGA';
+    return '';
+}
+
+export function zohoOrgShortLabel(org) {
+    const brand = text(org?.brand) || zohoOrgBrand(`${org?.name || ''} ${org?.label || ''}`);
+    if (brand === 'NNIT') return 'Neuron Nexus';
+    if (brand === 'VEGA') return 'Vega Digital';
+    return text(org?.name || org?.label) || 'Zoho';
+}
+
+function lineKey(prefix) {
+    return `${prefix}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+/**
+ * Debit one row per work-details category (employees in the same category are summed).
+ * Credit one row per employee, using the salary-modal Zoho account and the slip Zoho salary.
+ */
+export function buildSalaryZohoLines(employees) {
+    const people = (employees || []).filter((person) => money(person?.zohoSalary) > 0);
+    const credits = people.map((person) => ({
+        key: lineKey(`emp-${person.employeeId || 'row'}`),
+        kind: 'employee',
+        employeeId: text(person.employeeId),
+        accountId: text(person.zohoAccountId),
+        accountName: text(person.zohoAccountName),
+        description: text(person.name) || text(person.employeeId),
+        contactId: '',
+        debit: '',
+        credit: money(person.zohoSalary).toFixed(2),
+    }));
+
+    const groups = new Map();
+    for (const person of people) {
+        const accountId = text(person.zohoCategoryAccountId);
+        const accountName = text(person.zohoCategoryAccountName) || (accountId ? '' : 'No category');
+        const groupKey = accountId || `name:${accountName.toLowerCase() || 'none'}`;
+        const current = groups.get(groupKey) || {
+            accountId,
+            accountName: accountName || 'No category',
+            debit: 0,
+        };
+        if (!current.accountName && accountName) current.accountName = accountName;
+        current.debit = money(current.debit + money(person.zohoSalary));
+        groups.set(groupKey, current);
+    }
+
+    const debits = [...groups.values()]
+        .sort((a, b) => a.accountName.localeCompare(b.accountName, undefined, { sensitivity: 'base' }))
+        .map((group) => ({
+            key: lineKey(`cat-${group.accountId || group.accountName}`),
+            kind: 'category',
+            employeeId: '',
+            accountId: group.accountId,
+            accountName: group.accountName,
+            description: group.accountName,
+            contactId: '',
+            debit: group.debit.toFixed(2),
+            credit: '',
+        }));
+
+    return [...debits, ...credits];
+}
+
+function orgRecord(org) {
+    const organizationId = text(org?.organizationId);
+    if (!organizationId) return null;
+    const name = text(org?.name || org?.label);
+    const brand = text(org?.brand) || zohoOrgBrand(name);
+    return {
+        organizationId,
+        name,
+        brand,
+        label: zohoOrgShortLabel({ brand, name }),
+    };
+}
+
+export function resolveEmployeeZohoOrg(company, organizations) {
+    const orgs = (organizations || []).map(orgRecord).filter(Boolean);
+    const explicit = text(company?.zohoOrganizationId);
+    if (explicit) {
+        return orgs.find((org) => org.organizationId === explicit) || orgRecord({
+            organizationId: explicit,
+            name: company?.zohoOrganizationLabel || company?.nickName || company?.name,
+            brand: zohoOrgBrand(`${company?.zohoOrganizationLabel || ''} ${company?.nickName || ''} ${company?.name || ''}`),
+        });
+    }
+    const brand = zohoOrgBrand(`${company?.nickName || ''} ${company?.name || ''} ${company?.zohoOrganizationLabel || ''}`);
+    if (!brand) return null;
+    return orgs.find((org) => org.brand === brand) || null;
+}
+
+/**
+ * One journal per connected Zoho company. Vega Digital and Neuron Nexus stay in the list
+ * even when that company has no payroll employees this month.
+ */
+export function groupSalaryZohoJournals({ employees, organizations }) {
+    const orgs = [];
+    const seen = new Set();
+    function add(org) {
+        const row = orgRecord(org);
+        if (!row || seen.has(row.organizationId)) return;
+        seen.add(row.organizationId);
+        orgs.push(row);
+    }
+
+    for (const org of organizations || []) add(org);
+    for (const person of employees || []) add(resolveEmployeeZohoOrg(person.company, organizations));
+
+    orgs.sort((a, b) => {
+        const rank = (brand) => (brand === 'VEGA' ? 0 : brand === 'NNIT' ? 1 : 2);
+        return rank(a.brand) - rank(b.brand) || a.label.localeCompare(b.label);
+    });
+
+    return orgs.map((org) => {
+        const people = (employees || []).filter((person) => {
+            const match = resolveEmployeeZohoOrg(person.company, orgs);
+            return match?.organizationId === org.organizationId;
+        });
+        return {
+            ...org,
+            employeeCount: people.length,
+            lines: buildSalaryZohoLines(people),
+        };
+    });
+}

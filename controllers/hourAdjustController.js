@@ -158,6 +158,7 @@ function applyApproved(record, { kind, approvedHours, taken, max, reason, mode, 
     record.hoursApproved = approvedHours;
     record.hourAdjustMode = mode === 'custom' || mode === 'authorized' ? mode : '';
     if (reason != null) record.hourAdjustReason = reason;
+    const waived = !(Number(approvedHours) > 0);
     if (kind === 'mispunch') {
         const wasLate =
             record.statusKey === 'late_arrived' ||
@@ -169,7 +170,9 @@ function applyApproved(record, { kind, approvedHours, taken, max, reason, mode, 
         return;
     }
     record.statusKey = STATUS_KEY[kind];
-    record.statusLabel = APPROVED_LABEL[kind];
+    record.statusLabel = waived && (kind === 'early_go' || kind === 'late_arrived')
+        ? (kind === 'early_go' ? 'Early Go (Waived off)' : 'Late Arrival (Waived off)')
+        : APPROVED_LABEL[kind];
 }
 
 function isFlexibleHourProposal(proposed = {}) {
@@ -361,11 +364,9 @@ export async function requestHourAdjust(req, res) {
                 approvedHours: storedHours,
             });
         if (isHr) {
-            if (storedHours === 0) {
-                applyDirectZeroHour(record, { kind, reason });
-            } else {
-                applyApproved(record, { kind, approvedHours: storedHours, taken, max, reason, mode });
-            }
+            // Zero approved hours is a waive. Keep it as an approved hour decision
+            // so the doubled late or early deduction is removed and the day is paid.
+            applyApproved(record, { kind, approvedHours: storedHours, taken, max, reason, mode });
             await record.save();
             await supersedeOpenAttendanceChanges({
                 date: record.date,
@@ -373,7 +374,7 @@ export async function requestHourAdjust(req, res) {
                 actorId: actor._id,
             });
             return res.status(200).json({
-                message: storedHours === 0 ? 'Hours saved.' : 'Hours approved.',
+                message: storedHours === 0 ? 'Deduction waived. This day is paid in full.' : 'Hours approved.',
                 record,
                 applied: true,
             });

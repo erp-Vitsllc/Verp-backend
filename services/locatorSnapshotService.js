@@ -1802,9 +1802,10 @@ function emptyRangeStats(start = null, end = null) {
 }
 
 function defaultRangeDayKeys(now = new Date()) {
+    const today = dubaiDateKey(now);
     return {
-        from: localDateKey(new Date(now.getFullYear(), now.getMonth(), 1)),
-        to: localDateKey(now),
+        from: `${today.slice(0, 7)}-01`,
+        to: today,
     };
 }
 
@@ -2088,15 +2089,13 @@ async function computeFuelMonthStats(ids, monthKey) {
         }),
     ]);
 
-    let appliedIdle = false;
-    for (const id of ids) {
-        const idle = idleMap?.get?.(String(id));
-        if (!idle || !result[String(id)]) continue;
-        result[String(id)] = applyExcessiveIdle(result[String(id)], idle.idleTimeMs);
-        appliedIdle = true;
-    }
-
-    if (!appliedIdle) {
+    if (idleMap?.size) {
+        for (const id of ids) {
+            const idle = idleMap.get(String(id));
+            if (!result[String(id)]) continue;
+            result[String(id)] = applyExcessiveIdle(result[String(id)], idle ? idle.idleTimeMs : 0);
+        }
+    } else {
         try {
             const snapshotStats = await computeSnapshotMonthStats(ids, monthKey);
             for (const id of ids) {
@@ -2177,8 +2176,8 @@ export async function getLocatorMonthStatsByDevices(deviceIds = [], monthKey) {
 
 /**
  * Custom-day GPS stats for fuel: current odometer, running KM, and idle time.
- * Window is From date 12:00 AM through the end of the To date (not the next calendar day).
- * Idle includes each idling session longer than 5 minutes.
+ * Idle is the Excessive Idling Report for those filter dates, 5-minute setting.
+ * The report window is From 00:00:00 through the day after To at 00:00:00.
  */
 export async function getLocatorRangeStatsByDevices(deviceIds = [], fromKey, toKey, liveByDevice = null, options = {}) {
     const now = new Date();
@@ -2256,10 +2255,12 @@ export async function getLocatorRangeStatsByDevices(deviceIds = [], fromKey, toK
     }
 
     const excessive = await excessiveIdleMap(ids, displayFrom, displayTo);
-    for (const id of ids) {
-        const idle = excessive.get(String(id));
-        if (!idle) continue;
-        result[String(id)] = applyExcessiveIdle(result[String(id)], idle.idleTimeMs);
+    if (excessive.size) {
+        for (const id of ids) {
+            const idle = excessive.get(String(id));
+            if (!result[String(id)]) continue;
+            result[String(id)] = applyExcessiveIdle(result[String(id)], idle ? idle.idleTimeMs : 0);
+        }
     }
 
     return { from: displayFrom, to: displayTo, start, end, byDevice: result };
@@ -2339,6 +2340,7 @@ function nextCalendarKey(dateKey) {
     return date.toISOString().slice(0, 10);
 }
 
+/** Report date filter: start day 00:00:00 through the day after the end date at 00:00:00. */
 function excessiveReportBounds(fromKey, toKey) {
     return {
         from: dubaiReportStamp(fromKey, '00:00:00'),
@@ -2364,10 +2366,10 @@ async function excessiveIdleMap(deviceIds, fromKey, toKey) {
 function monthKeyEndDate(monthKey) {
     const [year, month] = String(monthKey || '').split('-').map(Number);
     if (!year || !month) return '';
-    const now = new Date();
-    const lastDay = new Date(year, month, 0).getDate();
-    const day = now.getFullYear() === year && now.getMonth() + 1 === month ? now.getDate() : lastDay;
-    return `${year}-${String(month).padStart(2, '0')}-${String(Math.min(day, lastDay)).padStart(2, '0')}`;
+    const [ty, tm, td] = dubaiDateKey().split('-').map(Number);
+    const lastDay = new Date(Date.UTC(year, month, 0)).getUTCDate();
+    const day = ty === year && tm === month ? Math.min(td, lastDay) : lastDay;
+    return `${year}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
 }
 
 async function overlayMonthExcessiveIdle(result, deviceIds, monthKey) {
@@ -2375,10 +2377,11 @@ async function overlayMonthExcessiveIdle(result, deviceIds, monthKey) {
     const toKey = monthKeyEndDate(monthKey);
     if (!ids.length || !toKey) return;
     const idleMap = await excessiveIdleMap(ids, `${String(monthKey).slice(0, 7)}-01`, toKey);
+    if (!idleMap.size) return;
     for (const id of ids) {
         const idle = idleMap.get(String(id));
-        if (!idle || !result[String(id)]) continue;
-        result[String(id)] = applyExcessiveIdle(result[String(id)], idle.idleTimeMs);
+        if (!result[String(id)]) continue;
+        result[String(id)] = applyExcessiveIdle(result[String(id)], idle ? idle.idleTimeMs : 0);
     }
 }
 
@@ -2395,16 +2398,11 @@ function applyExcessiveIdle(stats, idleTimeMs) {
 }
 
 function applyOfficialSummary(stats, summary) {
-    const idleMs = Number(summary?.idleTimeMs);
-    const hasIdle = Number.isFinite(idleMs);
     const hasDistance = summary?.distanceKm != null && Number.isFinite(Number(summary.distanceKm));
     return {
         ...stats,
         runningKm: hasDistance ? Number(summary.distanceKm) : stats.runningKm,
         kmRun: hasDistance ? Number(summary.distanceKm) : stats.kmRun,
-        idleTimeMinutes: hasIdle ? Math.round(idleMs / 60000) : stats.idleTimeMinutes,
-        idleTimeSeconds: hasIdle ? Math.round(idleMs / 1000) : stats.idleTimeSeconds,
-        idleTimeLabel: hasIdle ? formatLocatorIdleLabel(idleMs) : stats.idleTimeLabel,
         drivingTimeMs: summary?.drivingTimeMs ?? null,
         drivingTimeLabel: summary?.drivingTimeLabel || '',
         totalTrips: summary?.totalTrips ?? null,
@@ -2424,8 +2422,9 @@ function mergeSummaryBars(rows, summaryMap, field) {
         const value = field === 'idle' ? Math.round(idleMs / 60000) : Number(summary.distanceKm) || 0;
         const existing = next.get(deviceId);
         if (!existing && value <= 0) continue;
+        const named = String(summary?.name || '').trim();
         next.set(deviceId, {
-            ...(existing || { name: `Device ${deviceId}`, deviceId: Number(deviceId) }),
+            ...(existing || { name: named || `Device ${deviceId}`, deviceId: Number(deviceId) }),
             value,
             ...(field === 'idle' ? { idleTimeLabel: formatLocatorIdleLabel(idleMs) } : {}),
         });
@@ -2439,6 +2438,48 @@ function replaceSummaryBucket(bucket, key, summaryMap, field) {
     bucket.defaultKey = key;
 }
 
+function publishIdleBucket(bucket, key, idleMap, resolveLabel) {
+    if (!bucket?.byKey || !key || !idleMap?.size) return false;
+    const rows = mergeSummaryBars([], idleMap, 'idle');
+    bucket.byKey[key] = resolveLabel ? applyLocatorChartLabels(rows, resolveLabel) : rows;
+    bucket.defaultKey = key;
+    return true;
+}
+
+/**
+ * Idle on the fleet chart must be the Excessive Idling Report.
+ * Saved GPS samples miss most idling sessions, and the vehicle-wise summary is a different total.
+ */
+async function overlayExcessiveDashboardIdle(payload, positions) {
+    const ids = (positions || []).map((position) => position?.deviceId);
+    const today = dubaiDateKey();
+    const monthKey = today.slice(0, 7);
+    const yearKey = today.slice(0, 4);
+    const nameByDevice = new Map(
+        (positions || []).map((position) => [String(position?.deviceId), String(position?.deviceName || '').trim()]),
+    );
+    const [dayIdle, monthIdle, yearIdle] = await Promise.all([
+        excessiveIdleMap(ids, today, today),
+        excessiveIdleMap(ids, `${monthKey}-01`, today),
+        excessiveIdleMap(ids, `${yearKey}-01-01`, today),
+    ]);
+    const withNames = (idleMap) =>
+        new Map(
+            [...(idleMap || new Map()).entries()].map(([deviceId, row]) => [
+                deviceId,
+                { idleTimeMs: row.idleTimeMs, name: nameByDevice.get(String(deviceId)) || '' },
+            ]),
+        );
+    const resolveLabel = await createLocatorChartLabelResolver(positions);
+    const applied = [
+        publishIdleBucket(payload.idleTimeByVehicle?.day, today, withNames(dayIdle), resolveLabel),
+        publishIdleBucket(payload.idleTimeByVehicle?.month, monthKey, withNames(monthIdle), resolveLabel),
+        publishIdleBucket(payload.idleTimeByVehicle?.year, yearKey, withNames(yearIdle), resolveLabel),
+    ].some(Boolean);
+    if (applied) payload.historySource = 'excessive-idling';
+    return applied;
+}
+
 async function overlayOfficialDashboardSummaries(payload, positions) {
     const ids = (positions || []).map((position) => position?.deviceId);
     const today = dubaiDateKey();
@@ -2449,32 +2490,10 @@ async function overlayOfficialDashboardSummaries(payload, positions) {
         officialSummaryMap(ids, `${monthKey}-01`, today),
         officialSummaryMap(ids, `${yearKey}-01-01`, today),
     ]);
-    replaceSummaryBucket(payload.idleTimeByVehicle?.day, today, dayMap, 'idle');
-    replaceSummaryBucket(payload.idleTimeByVehicle?.month, monthKey, monthMap, 'idle');
-    replaceSummaryBucket(payload.idleTimeByVehicle?.year, yearKey, yearMap, 'idle');
     replaceSummaryBucket(payload.runningKmByVehicle?.day, today, dayMap, 'distance');
     replaceSummaryBucket(payload.runningKmByVehicle?.month, monthKey, monthMap, 'distance');
     replaceSummaryBucket(payload.runningKmByVehicle?.year, yearKey, yearMap, 'distance');
     payload.todayByVehicle = [...dayMap.values()];
-    if (dayMap.size || monthMap.size || yearMap.size) {
-        payload.historySource = 'locator_vehicle_wise_summary';
-    }
-
-    const [dayIdle, monthIdle, yearIdle] = await Promise.all([
-        excessiveIdleMap(ids, today, today),
-        excessiveIdleMap(ids, `${monthKey}-01`, today),
-        excessiveIdleMap(ids, `${yearKey}-01-01`, today),
-    ]);
-    const asIdleSummary = (idleMap) =>
-        new Map(
-            [...(idleMap || new Map()).entries()].map(([deviceId, row]) => [
-                deviceId,
-                { idleTimeMs: row.idleTimeMs },
-            ]),
-        );
-    replaceSummaryBucket(payload.idleTimeByVehicle?.day, today, asIdleSummary(dayIdle), 'idle');
-    replaceSummaryBucket(payload.idleTimeByVehicle?.month, monthKey, asIdleSummary(monthIdle), 'idle');
-    replaceSummaryBucket(payload.idleTimeByVehicle?.year, yearKey, asIdleSummary(yearIdle), 'idle');
 }
 
 function gpsVehicleNumberFromPosition(position, fallback = '') {
@@ -2589,11 +2608,11 @@ export async function buildFuelGpsPageStats({ fromKey, toKey, erpVehicles = [] }
     };
 }
 
-/** Current calendar month idle from Locator. Only engine-on idle longer than 5 minutes. */
+/** Current Dubai month idle from the Excessive Idling Report, 5-minute setting. */
 export async function getCurrentMonthIdleByDevices(deviceIds = []) {
-    const now = new Date();
-    const from = localDateKey(new Date(now.getFullYear(), now.getMonth(), 1));
-    const to = localDateKey(now);
+    const today = dubaiDateKey();
+    const from = `${today.slice(0, 7)}-01`;
+    const to = today;
     let liveByDevice = null;
     if (isLocatorConfigured()) {
         try {
@@ -2616,14 +2635,20 @@ function startLocatorFleetDashboardBuild(selectedYear) {
 
     fleetDashboardInFlightYear = selectedYear;
     fleetDashboardInFlight = buildLocatorFleetDashboardUncached(selectedYear)
-        .then((payload) => {
-            if (payload?.connected) {
-                fleetDashboardCache = { at: Date.now(), year: selectedYear, payload };
-                const positions = fleetDashboardPositions.get(payload) || [];
-                fleetDashboardPositions.delete(payload);
-                if (positions.length) {
-                    setImmediate(() => refreshOfficialDashboardCache(payload, positions, selectedYear));
+        .then(async (payload) => {
+            if (!payload?.connected) return payload;
+            const positions = fleetDashboardPositions.get(payload) || [];
+            fleetDashboardPositions.delete(payload);
+            if (positions.length) {
+                try {
+                    await overlayExcessiveDashboardIdle(payload, positions);
+                } catch (error) {
+                    console.warn('[LocatorFleetDashboard] Idle report failed:', error?.message || error);
                 }
+            }
+            fleetDashboardCache = { at: Date.now(), year: selectedYear, payload };
+            if (positions.length) {
+                setImmediate(() => refreshOfficialDashboardCache(payload, positions, selectedYear));
             }
             return payload;
         })
@@ -2648,9 +2673,9 @@ export async function buildLocatorFleetDashboard({ year, fresh = false } = {}) {
     const sameYear = Boolean(cached) && fleetDashboardCache.year === selectedYear;
     const freshCache = sameYear && Date.now() - fleetDashboardCache.at < FLEET_DASHBOARD_CACHE_TTL_MS;
 
-    if (freshCache && !fresh) return cached;
+    if (freshCache && !fresh && cached?.historySource === 'excessive-idling') return cached;
 
-    if (sameYear && !fresh) {
+    if (sameYear && !fresh && cached?.historySource === 'excessive-idling') {
         void startLocatorFleetDashboardBuild(selectedYear);
         return cached;
     }

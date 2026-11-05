@@ -89,6 +89,7 @@ import {
     sendSalarySlotMail,
 } from '../../utils/salaryDmfNotify.js';
 import { sendMailLater } from '../../utils/salaryEnrollmentApprovalNotify.js';
+import { buildSalarySlotFile } from '../../utils/salarySlotWorkbook.js';
 import { withFrontendPath } from '../../utils/resolveFrontendBaseUrl.js';
 import {
     clockTimeToMinutes,
@@ -1403,6 +1404,14 @@ function applySlipFigure(row, figures) {
     row.deduction = figures.deduction;
     row.lossOfPay = money(figures.lossOfPay);
     row.otherDeduction = money(figures.otherDeduction);
+    row.otherAllowance = roundMoney(figures.otherAllowance);
+    row.presentDays = Number(figures.presentDays) || 0;
+    row.rewardAdditions = roundMoney(figures.rewardAdditions);
+    row.grossSalary = roundMoney(figures.grossSalary);
+    row.fineAmount = roundMoney(figures.fineAmount);
+    row.advanceAmount = roundMoney(figures.advanceAmount);
+    row.loanAmount = roundMoney(figures.loanAmount);
+    row.sheetOtherDeduction = roundMoney(figures.sheetOtherDeduction);
     row.extra = figures.extra;
     row.ot = figures.ot;
     row.actualSalary = figures.actualSalary;
@@ -2694,29 +2703,55 @@ async function mailSlotHr(req, monthKey, slotNo) {
     });
 }
 
-async function mailSlotAccountsNext(req, monthKey, slotNo, paymentMethod) {
+function slotPageHref(monthKey, paymentId) {
+    return `/HRM/Salary/${encodeURIComponent(monthKey)}?slot=${encodeURIComponent(String(paymentId || ''))}`;
+}
+
+async function mailSlotAccountsNext(req, monthKey, doc) {
     const accounts = await getDepartmentHOD('accounts');
     const to = String(accounts?.companyEmail || accounts?.email || '').trim();
-    if (!to) return;
-    const wps = String(paymentMethod || '').trim().toUpperCase() === 'WPS';
+    if (!to || !doc) return;
+    const slotNo = Number(doc.paymentNo) || 0;
+    const wps = String(doc.paymentMethod || '').trim().toUpperCase() !== 'CASH';
+    let file = null;
+    try {
+        file = await buildSalarySlotFile(doc);
+    } catch (error) {
+        console.error('[salary slot] excel', error?.message || error);
+    }
+    const sheetList = (file?.sheetNames || []).filter(Boolean).join(', ');
     sendSalarySlotMail({
         req,
         to,
         name: slotPersonName(accounts) || 'Accounts',
         subject: wps
-            ? `${monthKey} salary slot ${slotNo} — check the WPS send`
-            : `${monthKey} salary slot ${slotNo} is ready to update`,
+            ? `${monthKey} salary slot ${slotNo} — set up WPS`
+            : `${monthKey} salary slot ${slotNo} — cash salary`,
         monthKey,
+        href: slotPageHref(monthKey, doc._id),
+        buttonLabel: 'Open the slot',
+        attachments: file
+            ? [{
+                filename: file.filename,
+                content: file.content,
+                contentType: file.contentType,
+            }]
+            : undefined,
         lines: wps
             ? [
                 `HR approved slot ${slotNo}.`,
-                'Check the WPS send. The Excel form will be added to this email later.',
-                'Then open the payroll and mark WPS updated.',
+                'Set up WPS using the Excel attached to this email.',
+                sheetList
+                    ? `The workbook sheets are ${sheetList}. Each sheet is that company's employees.`
+                    : 'The Excel could not be attached. Open the slot and use Open Excel.',
+                'After you send the payroll details, open the slot and click WPS updated.',
             ]
             : [
                 `HR approved slot ${slotNo}.`,
-                'This is a cash slot, so there is no WPS step.',
-                'Open the payroll and set the slot as updated.',
+                file
+                    ? 'The cash salary Excel is attached.'
+                    : 'The cash salary Excel could not be attached. Open the slot and use Open Excel.',
+                'Open the slot and click Update payment. That sends the expense to Zoho.',
             ],
     });
 }
@@ -2760,6 +2795,36 @@ function slotErrorResponse(res, error, logLabel) {
         message: error.message || 'Failed to save the salary slot.',
     });
 }
+
+const SLOT_EXCEL_STATUSES = new Set(['pending_wps', 'pending_update', 'approved']);
+
+/**
+ * GET /api/Employee/salary-register/:monthKey/payments/:paymentId/excel
+ * The WPS or cash workbook Accounts receives after HR approves the slot.
+ */
+export const downloadSalarySlotExcel = async (req, res) => {
+    try {
+        const monthKey = toYearMonth(req.params.monthKey);
+        const paymentId = String(req.params.paymentId || '').trim();
+        if (!monthKey || !mongoose.Types.ObjectId.isValid(paymentId)) {
+            return res.status(400).json({ message: 'Invalid salary slot.' });
+        }
+        const doc = await SalaryMonthPayment.findOne({ _id: paymentId, monthKey });
+        if (!doc || slotStatusOf(doc) === 'cancelled') {
+            return res.status(404).json({ message: 'Salary slot was not found.' });
+        }
+        if (!SLOT_EXCEL_STATUSES.has(slotStatusOf(doc))) {
+            return res.status(400).json({ message: 'The Excel is available after HR approves the slot.' });
+        }
+        const file = await buildSalarySlotFile(doc);
+        res.setHeader('Content-Type', file.contentType);
+        res.setHeader('Content-Disposition', `attachment; filename="${String(file.filename).replace(/"/g, '')}"`);
+        return res.send(file.content);
+    } catch (error) {
+        console.error('[downloadSalarySlotExcel]', error);
+        return res.status(500).json({ message: 'Could not build the salary Excel.' });
+    }
+};
 
 /**
  * POST /api/Employee/salary-register/:monthKey/payments
@@ -2851,7 +2916,7 @@ export const updateSalaryMonthPayment = async (req, res) => {
             doc.status = method === 'Cash' ? 'pending_update' : 'pending_wps';
             doc.rejectReason = '';
             await doc.save();
-            await mailSlotAccountsNext(req, monthKey, doc.paymentNo, method);
+            await mailSlotAccountsNext(req, monthKey, doc);
             await notifyAccountsSalarySlot({ payment: doc, monthKey });
             return res.status(200).json({
                 message: method === 'Cash' ? 'Slot approved. Accounts can update it.' : 'Slot approved. Accounts can check the WPS send.',

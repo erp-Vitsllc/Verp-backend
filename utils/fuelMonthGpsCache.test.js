@@ -42,4 +42,10 @@ describe('fuel month GPS cache', () => {
         assert.equal(fuelMonthGpsIsUsable({ summarySource: 'snapshots' }, end, NOW), false);
         assert.equal(fuelMonthGpsIsFresh({ computedAt: 'not-a-date' }, end, NOW), false);
     });
+
+    it('does not reuse idle that did not come from the idling report', () => {
+        const end = new Date('2026-10-01T00:00:00.000Z');
+        assert.equal(fuelMonthGpsIsUsable(stat(60 * 1000, 'snapshots'), end, NOW), false);
+        assert.equal(fuelMonthGpsIsFresh(stat(60 * 1000, 'vehicle-wise'), end, NOW), false);
+    });
 });

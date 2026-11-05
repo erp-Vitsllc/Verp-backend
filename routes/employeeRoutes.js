@@ -199,7 +199,9 @@ import {
     updateTaskManagerTaskStatus,
 } from "../controllers/stats/taskManagerTaskActions.js";
 import { getPayrollDashboard } from "../controllers/employee/getPayrollDashboard.js";
-import { getSalaryRegister, deleteSalaryRegisterMonth, restoreSalaryRegisterMonths, sendPayrollBlockerReminders, createSalaryMonthPayment, updateSalaryMonthPayment } from "../controllers/employee/getSalaryRegister.js";
+import { getSalaryRegister, deleteSalaryRegisterMonth, restoreSalaryRegisterMonths, sendPayrollBlockerReminders, createSalaryMonthPayment, updateSalaryMonthPayment, downloadSalarySlotExcel } from "../controllers/employee/getSalaryRegister.js";
+import { getSalaryZohoJournal, postSalaryZohoJournal, uploadSalaryZohoJournal } from "../controllers/employee/salaryZohoJournalController.js";
+import { getSalarySlotExpense, postSalarySlotExpense, uploadSalarySlotExpense } from "../controllers/employee/salarySlotExpenseController.js";
 import { getPayrollSettings, savePayrollSettings, getGroupPayrollSettings, saveGroupPayrollSettings, copyMainPayrollSettingsToGroup } from "../controllers/employee/payrollSettingsController.js";
 import {
     getSalaryEnrollOptions,
@@ -315,6 +317,53 @@ router.post(
         ['hrm_employees_view_salary', 'view'],
     ]),
     updateSalaryMonthPayment,
+);
+router.get(
+    "/salary-register/:monthKey/zoho-journal",
+    checkAnyModulePermission([
+        ['hrm_salary', 'view'],
+        ['hrm_employees_view_salary', 'view'],
+    ]),
+    getSalaryZohoJournal,
+);
+router.post(
+    "/salary-register/:monthKey/zoho-journal",
+    checkAnyModulePermission([
+        ['hrm_salary', 'view'],
+        ['hrm_salary', 'edit'],
+        ['hrm_employees_view_salary', 'view'],
+        ['hrm_employees_view_salary', 'edit'],
+    ]),
+    uploadSalaryZohoJournal,
+    postSalaryZohoJournal,
+);
+router.get(
+    "/salary-register/:monthKey/payments/:paymentId/expense",
+    checkAnyModulePermission([
+        ['hrm_salary', 'view'],
+        ['hrm_employees_view_salary', 'view'],
+    ]),
+    getSalarySlotExpense,
+);
+router.post(
+    "/salary-register/:monthKey/payments/:paymentId/expense",
+    checkAnyModulePermission([
+        ['hrm_salary', 'view'],
+        ['hrm_salary', 'edit'],
+        ['hrm_employees_view_salary', 'view'],
+        ['hrm_employees_view_salary', 'edit'],
+    ]),
+    uploadSalarySlotExpense,
+    postSalarySlotExpense,
+);
+router.get(
+    "/salary-register/:monthKey/payments/:paymentId/excel",
+    checkAnyModulePermission([
+        ['hrm_salary', 'view'],
+        ['hrm_employees_view_salary', 'view'],
+        ['hrm_employees_view_payroll_history', 'view'],
+    ]),
+    downloadSalarySlotExcel,
 );
 router.get(
     "/salary-register/:monthKey/dmf",
@@ -464,6 +513,8 @@ router.put(
     checkAnyModulePermission([
         ['hrm_salary', 'edit'],
         ['hrm_employees_view_salary', 'edit'],
+        ['hrm_salary', 'view'],
+        ['hrm_employees_view_salary', 'view'],
     ]),
     saveSalarySlipMonth,
 );

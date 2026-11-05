@@ -234,6 +234,39 @@ describe('late in/out combined events', () => {
         assert.equal(summary.lateIn.dayFraction, 1);
     });
 
+    it('uses approved hours instead of the full late rule', () => {
+        const summary = lateInOutSummary(
+            [
+                {
+                    date: '2026-10-05',
+                    statusKey: 'late_arrived',
+                    timeIn: '09:16',
+                    timeOut: '18:25',
+                    hourAdjustStatus: 'approved',
+                    hoursApproved: 16 / 60,
+                },
+            ],
+            {
+                lateInRules: [{ minutes: 15, events: 0, deduct: 'full' }],
+                lateOutRules: [{ minutes: 15, events: 0, deduct: 'full' }],
+            },
+            {
+                timingMode: 'fixed',
+                monday: {
+                    isOffDay: false,
+                    startHour: 9,
+                    startMinute: 0,
+                    startMeridiem: 'AM',
+                    endHour: 6,
+                    endMinute: 0,
+                    endMeridiem: 'PM',
+                },
+            },
+        );
+        assert.equal(summary.lateIn.count, 0);
+        assert.equal(summary.lateIn.dayFraction, 0.03);
+    });
+
     it('deducts only the missed hours for a flexible group', () => {
         const week = {
             timingMode: 'flexible',
