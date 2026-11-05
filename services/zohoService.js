@@ -1,3 +1,5 @@
+import fs from 'fs/promises';
+import path from 'path';
 import axios from 'axios';
 import {
     readZohoTokens,
@@ -345,9 +347,36 @@ async function getBooksRequestContext() {
     };
 }
 
+function throwZohoBooksFailure(organizationId, message, zohoCode, httpStatus) {
+    const text = String(message || 'Zoho Books request failed');
+    const code = Number(zohoCode);
+    const limited = isZohoBooksRateLimitError({ message: text, zohoCode: code }) || Number(httpStatus) === 429;
+    if (limited) noteZohoOrganizationRateLimit(organizationId, text, code || 45);
+    const error = new Error(
+        limited ? (zohoOrganizationRateLimitMessage(organizationId) || text) : text,
+    );
+    if (limited) {
+        error.zohoCode = Number.isFinite(code) ? code : 45;
+        error.code = 429;
+    } else if (Number.isFinite(code)) {
+        error.zohoCode = code;
+    }
+    throw error;
+}
+
+function assertZohoOrganizationAvailable(organizationId) {
+    const held = zohoOrganizationRateLimitMessage(organizationId);
+    if (!held) return;
+    const error = new Error(held);
+    error.zohoCode = 45;
+    error.code = 429;
+    throw error;
+}
+
 async function requestZohoBooks(pathname, { method = 'get', params = {}, data, timeout = 30000 } = {}) {
     const { organizationId, booksApiBase, accessToken, grantedScope } =
         await getBooksRequestContext();
+    assertZohoOrganizationAvailable(organizationId);
 
     const isWrite = String(method).toLowerCase() !== 'get';
     if (isWrite) {
@@ -383,7 +412,7 @@ async function requestZohoBooks(pathname, { method = 'get', params = {}, data, t
                 `HTTP ${response.status} zoho_code=${body.code}:`,
                 JSON.stringify(body),
             );
-            throw new Error(body.message || 'Zoho Books request failed');
+            throwZohoBooksFailure(organizationId, body.message, body.code, response.status);
         }
 
         if (isWrite) {
@@ -408,7 +437,12 @@ async function requestZohoBooks(pathname, { method = 'get', params = {}, data, t
                 error?.message || error,
             );
         }
-        throw new Error(zohoMessage || error?.message || 'Zoho Books request failed');
+        if (error?.code === 429 && !error?.response) throw error;
+        const message = zohoMessage || error?.message || 'Zoho Books request failed';
+        if (isZohoBooksRateLimitError({ message, zohoCode: zohoBody?.code }) || Number(zohoStatus) === 429) {
+            throwZohoBooksFailure(organizationId, message, zohoBody?.code || 45, zohoStatus || 429);
+        }
+        throw new Error(message);
     }
 }
 
@@ -1416,7 +1450,52 @@ export async function fetchBillByIdAcrossOrgs(billId, preferredOrgId = '') {
 
 export function isZohoBooksRateLimitError(err) {
     const message = String(err?.message || err || '');
-    return /exceeded the maximum|rate limit|too many requests/i.test(message);
+    const zohoCode = Number(err?.zohoCode ?? err?.response?.data?.code);
+    return (
+        /exceeded the maximum|rate limit|too many requests/i.test(message) ||
+        zohoCode === 43 ||
+        zohoCode === 44 ||
+        zohoCode === 45
+    );
+}
+
+const zohoOrgCooldown = new Map();
+
+/** Code 45 / "limit of 5,000" is the organization allowance. A short retry cannot clear it. */
+export function zohoRateLimitHoldMs(message, zohoCode) {
+    const code = Number(zohoCode);
+    if (code === 45 || /call rate limit of\s*[\d,]+|5[,.]?000/i.test(String(message || ''))) {
+        return 60 * 60 * 1000;
+    }
+    return 70 * 1000;
+}
+
+export function noteZohoOrganizationRateLimit(organizationId, message, zohoCode, now = Date.now()) {
+    const id = String(organizationId || '').trim();
+    if (!id) return '';
+    const hold = zohoRateLimitHoldMs(message, zohoCode);
+    const text = hold > 5 * 60 * 1000
+        ? 'Zoho has used this organization\'s 5,000 API calls. Chart of Accounts will load again after that allowance resets.'
+        : 'Zoho rate limit reached — wait about a minute, then retry loading Chart of Accounts.';
+    const until = now + hold;
+    const prev = zohoOrgCooldown.get(id);
+    if (!prev || until > prev.until) zohoOrgCooldown.set(id, { until, message: text });
+    return text;
+}
+
+export function zohoOrganizationRateLimitMessage(organizationId, now = Date.now()) {
+    const id = String(organizationId || '').trim();
+    const row = id ? zohoOrgCooldown.get(id) : null;
+    if (!row || row.until <= now) {
+        if (id && row) zohoOrgCooldown.delete(id);
+        return '';
+    }
+    return row.message;
+}
+
+export function clearZohoOrganizationRateLimit(organizationId) {
+    const id = String(organizationId || '').trim();
+    if (id) zohoOrgCooldown.delete(id);
 }
 
 export function isZohoBillMissingError(err) {
@@ -1858,10 +1937,53 @@ export async function fetchVendorsChunk({ startPage = 1, maxRows = 400 } = {}) {
  * @param {{ includeInactive?: boolean }} [options]
  */
 const paymentAccountsCache = new Map();
+const paymentAccountsInflight = new Map();
 const PAYMENT_ACCOUNTS_CACHE_TTL_MS = 10 * 60 * 1000;
 
 function sleep(ms) {
     return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function coaDiskPath(organizationId, includeInactive) {
+    const id = String(organizationId || 'default').replace(/[^a-zA-Z0-9_-]/g, '_') || 'default';
+    return path.join(process.cwd(), 'data', `zoho-coa-${id}-${includeInactive ? 'all' : 'active'}.json`);
+}
+
+async function readCoaDisk(organizationId, includeInactive) {
+    try {
+        const parsed = JSON.parse(await fs.readFile(coaDiskPath(organizationId, includeInactive), 'utf8'));
+        return Array.isArray(parsed?.rows) ? parsed.rows : [];
+    } catch {
+        return [];
+    }
+}
+
+async function writeCoaDisk(organizationId, includeInactive, rows) {
+    try {
+        const filePath = coaDiskPath(organizationId, includeInactive);
+        await fs.mkdir(path.dirname(filePath), { recursive: true });
+        await fs.writeFile(filePath, JSON.stringify({ at: Date.now(), rows }));
+    } catch (error) {
+        console.warn('[ZohoPaymentAccounts] Could not save Chart of Accounts cache:', error?.message || error);
+    }
+}
+
+function rememberCoa(cacheKey, rows) {
+    if (!rows?.length) return [];
+    paymentAccountsCache.set(cacheKey, { at: Date.now(), rows });
+    return rows;
+}
+
+async function savedCoaRows(cacheKey, organizationId, includeInactive, memoryRows) {
+    if (memoryRows?.length) return rememberCoa(cacheKey, memoryRows);
+    const disk = await readCoaDisk(organizationId, includeInactive);
+    if (disk.length) {
+        console.warn(
+            `[ZohoPaymentAccounts] Using saved Chart of Accounts (${disk.length} rows) org=${organizationId}`,
+        );
+        return rememberCoa(cacheKey, disk);
+    }
+    return [];
 }
 
 /**
@@ -1876,7 +1998,26 @@ export async function fetchPaymentAccounts(options = {}) {
         return cached.rows;
     }
 
-    const fetchByFilter = async (filterBy, attempt = 1) => {
+    if (zohoOrganizationRateLimitMessage(organizationId)) {
+        const saved = await savedCoaRows(cacheKey, organizationId, includeInactive, cached?.rows);
+        if (saved.length) return saved;
+        const error = new Error(zohoOrganizationRateLimitMessage(organizationId));
+        error.code = 429;
+        error.zohoCode = 45;
+        throw error;
+    }
+
+    const inflight = paymentAccountsInflight.get(cacheKey);
+    if (inflight) return inflight;
+
+    const job = loadPaymentAccounts(organizationId, includeInactive, cacheKey, cached)
+        .finally(() => paymentAccountsInflight.delete(cacheKey));
+    paymentAccountsInflight.set(cacheKey, job);
+    return job;
+}
+
+async function loadPaymentAccounts(organizationId, includeInactive, cacheKey, cached) {
+    const fetchByFilter = async (filterBy) => {
         try {
             return await fetchAllZohoBooksRows('/chartofaccounts', 'chartofaccounts', {
                 params: filterBy ? { filter_by: filterBy } : {},
@@ -1885,21 +2026,14 @@ export async function fetchPaymentAccounts(options = {}) {
             });
         } catch (err) {
             const message = String(err?.message || err);
-            const isRateLimited = /blocked|exceeded the maximum|code.?43|429/i.test(message);
-            if (isRateLimited && attempt < 3) {
-                const waitMs = attempt * 2500;
-                console.warn(
-                    `[ZohoPaymentAccounts] Rate limited (${filterBy || 'no filter'}); retry in ${waitMs}ms`,
-                );
-                await sleep(waitMs);
-                return fetchByFilter(filterBy, attempt + 1);
-            }
             console.warn(
                 `[ZohoPaymentAccounts] CoA fetch failed (${filterBy || 'no filter'}):`,
                 message,
             );
             const error = new Error(message);
             error.filterBy = filterBy || 'none';
+            error.zohoCode = err?.zohoCode;
+            error.code = err?.code;
             throw error;
         }
     };
@@ -1941,10 +2075,8 @@ export async function fetchPaymentAccounts(options = {}) {
             });
         } catch (err) {
             errors.push(err);
-            // If Zoho rate-limits mid-merge, stop hammering — use what we have / cache.
-            if (/blocked|exceeded the maximum|code.?43|429/i.test(String(err?.message || ''))) {
-                break;
-            }
+            // One blocked call is enough. Further filters and retries only spend more of the allowance.
+            if (isZohoBooksRateLimitError(err)) break;
         }
     }
 
@@ -1958,7 +2090,8 @@ export async function fetchPaymentAccounts(options = {}) {
     });
 
     if (rows.length) {
-        paymentAccountsCache.set(cacheKey, { at: Date.now(), rows });
+        rememberCoa(cacheKey, rows);
+        await writeCoaDisk(organizationId, includeInactive, rows);
         const fineHits = rows.filter((a) =>
             /fine/i.test(`${a.account_name || ''} ${a.account_code || ''}`),
         ).length;
@@ -1971,23 +2104,21 @@ export async function fetchPaymentAccounts(options = {}) {
         return rows;
     }
 
-    if (cached?.rows?.length) {
-        console.warn(
-            `[ZohoPaymentAccounts] Using stale cache (${cached.rows.length} rows) after empty fetch org=${organizationId}`,
-        );
-        return cached.rows;
-    }
+    const saved = await savedCoaRows(cacheKey, organizationId, includeInactive, cached?.rows);
+    if (saved.length) return saved;
 
     const firstError = errors[0]?.message || 'Chart of Accounts returned 0 accounts';
     console.warn(`[ZohoPaymentAccounts] Chart of Accounts returned 0 accounts org=${organizationId}:`, firstError);
+    const rateLimited = isZohoBooksRateLimitError(errors[0] || { message: firstError });
     const emptyError = new Error(
-        /blocked|exceeded the maximum|429/i.test(firstError)
-            ? 'Zoho rate limit reached — wait about a minute, then retry loading Chart of Accounts.'
+        rateLimited
+            ? (zohoOrganizationRateLimitMessage(organizationId) || firstError)
             : /invalid_code|not connected|refresh_token/i.test(firstError)
               ? `Zoho is not connected for this organization. Re-authorize via Zoho connections (${organizationId}).`
               : firstError,
     );
-    emptyError.code = /blocked|429/i.test(firstError) ? 429 : 502;
+    emptyError.code = rateLimited ? 429 : 502;
+    emptyError.zohoCode = errors[0]?.zohoCode;
     throw emptyError;
 }
 
@@ -2337,8 +2468,9 @@ export async function fetchLocations() {
 
         if (locations.length) return locations;
     } catch (error) {
-        // Locations require ZohoBooks.settings.READ. Fall back to ids seen on payments/bills.
+        // Locations require ZohoBooks.settings.READ. A rate limit must not fan out into more Zoho calls.
         console.warn('[ZohoLocations] Failed:', error?.message || error);
+        if (isZohoBooksRateLimitError(error)) return [];
     }
 
     try {
