@@ -171,10 +171,10 @@ async function emailAssetController(controller, asset, assignee) {
         assignee?.employeeId ||
         'The employee';
     const link = `${emailFrontendUrl().replace(/\/+$/, '')}/HRM/Asset/details/${asset._id}`;
-    const subject = `No response on asset assignment: ${assetName}${assetCode ? ` (${assetCode})` : ''}`;
+    const subject = `Asset assigned: ${assetName}${assetCode ? ` (${assetCode})` : ''}`;
     const html = `
-        <p>${person} has not responded for ${TOOLS_ACK_ESCALATION_DAYS} days on <strong>${assetName}</strong>${assetCode ? ` (${assetCode})` : ''}.</p>
-        <p>${TOOLS_ACK_ESCALATION_MESSAGE}</p>
+        <p>${person} has been assigned <strong>${assetName}</strong>${assetCode ? ` (${assetCode})` : ''}.</p>
+        <p>You can force assign this asset now. You do not need to wait.</p>
         <p><a href="${link}">Open the asset</a></p>
     `;
     const result = await sendErpEmail({
@@ -254,20 +254,18 @@ export async function userIsToolsAssetController(req) {
     return false;
 }
 
-async function assertEscalationReady(item) {
+function assertToolsAckPending(item) {
     if (!isToolsEmployeeAckPending(item)) {
         return { ok: false, message: 'This asset is not waiting on an employee assignment response.' };
     }
+    return { ok: true };
+}
+
+async function assertEscalationReady(item) {
+    const pending = assertToolsAckPending(item);
+    if (!pending.ok) return pending;
     const requestedAt = await resolveRequestedAt(item);
-    const elapsed = requestedAt ? wholeDaysSince(requestedAt) : -1;
-    const alreadyFlagged = item.pendingActionDetails?.toolsAssignmentAck?.escalationActive === true;
-    if (!alreadyFlagged && elapsed < TOOLS_ACK_ESCALATION_DAYS) {
-        return {
-            ok: false,
-            message: `Force assign and return are available after ${TOOLS_ACK_ESCALATION_DAYS} days without a response.`,
-        };
-    }
-    return { ok: true, requestedAt, elapsed };
+    return { ok: true, requestedAt, elapsed: requestedAt ? wholeDaysSince(requestedAt) : 0 };
 }
 
 function clearAckMeta(item) {
@@ -328,7 +326,7 @@ export async function forceAssignPendingToolsAsset({ assetId, actorEmployeeId })
         .populate('assignedTo', 'firstName lastName employeeId companyEmail');
     if (!item) return { status: 404, message: 'Asset not found' };
 
-    const gate = await assertEscalationReady(item);
+    const gate = assertToolsAckPending(item);
     if (!gate.ok) return { status: 400, message: gate.message };
 
     const assigneeId = refId(item.assignedTo);
@@ -455,6 +453,42 @@ async function ensureAckRecord(item, requestedAt) {
     item.markModified('pendingActionDetails');
 }
 
+export async function openToolsForceAssignForController(item, controller = null) {
+    if (!isToolsEmployeeAckPending(item)) return;
+    const requestedAt = (await resolveRequestedAt(item)) || new Date();
+    await ensureAckRecord(item, requestedAt);
+    const ack = item.pendingActionDetails.toolsAssignmentAck;
+    const alreadyNotified = !!ack.escalationNotifiedAt;
+    ack.escalationActive = true;
+    item.markModified('pendingActionDetails');
+    await item.save();
+
+    const assetController = controller?._id ? controller : await getResolvedAssetControllerEmployee();
+    if (!assetController?._id) {
+        console.warn('[ToolsAckEscalation] No asset controller is configured.');
+        return;
+    }
+
+    await upsertEscalationBell(assetController, item, item.assignedTo);
+    if (alreadyNotified) return;
+
+    let emailed = false;
+    try {
+        emailed = await emailAssetController(assetController, item, item.assignedTo);
+    } catch (error) {
+        console.error(
+            `[ToolsAckEscalation] Email failed for ${item.assetId || item._id}:`,
+            error?.message || error,
+        );
+    }
+    const hasCompanyEmail = !!String(assetController?.companyEmail || '').trim();
+    if (emailed || !hasCompanyEmail) {
+        ack.escalationNotifiedAt = new Date();
+        item.markModified('pendingActionDetails');
+        await item.save();
+    }
+}
+
 export async function processToolsAssignmentAckEscalation() {
     try {
         const openBells = await DashboardAction.find({
@@ -511,34 +545,7 @@ export async function processToolsAssignmentAckEscalation() {
 
         for (const item of candidates) {
             if (!isToolsEmployeeAckPending(item)) continue;
-            const requestedAt = await resolveRequestedAt(item);
-            if (!requestedAt || wholeDaysSince(requestedAt) < TOOLS_ACK_ESCALATION_DAYS) continue;
-
-            await ensureAckRecord(item, requestedAt);
-            const ack = item.pendingActionDetails.toolsAssignmentAck;
-            const alreadyNotified = !!ack.escalationNotifiedAt;
-            ack.escalationActive = true;
-            item.markModified('pendingActionDetails');
-            await item.save();
-
-            await upsertEscalationBell(controller, item, item.assignedTo);
-            if (!alreadyNotified) {
-                let emailed = false;
-                try {
-                    emailed = await emailAssetController(controller, item, item.assignedTo);
-                } catch (error) {
-                    console.error(
-                        `[ToolsAckEscalation] Email failed for ${item.assetId || item._id}:`,
-                        error?.message || error,
-                    );
-                }
-                const hasCompanyEmail = !!String(controller?.companyEmail || '').trim();
-                if (emailed || !hasCompanyEmail) {
-                    ack.escalationNotifiedAt = new Date();
-                    item.markModified('pendingActionDetails');
-                    await item.save();
-                }
-            }
+            await openToolsForceAssignForController(item, controller);
         }
     } catch (error) {
         console.error('[ToolsAckEscalation] Non-fatal error:', error?.message || error);

@@ -15,6 +15,7 @@ import {
     buildToolsAssignmentAckRecord,
     captureToolsAssignmentPrior,
     closeToolsAssignmentEscalation,
+    openToolsForceAssignForController,
 } from '../utils/toolsAssignmentAckEscalation.js';
 import {
     advanceFleetHandoverOnAccept,
@@ -7760,6 +7761,18 @@ export const assignAssetItem = async (req, res) => {
                         allowReporteeFallback: assignedToType === 'Employee',
                     });
 
+                    if (
+                        !fleetVehicle &&
+                        assignedToType === 'Employee' &&
+                        String(item.acceptanceStatus || '') === 'Pending' &&
+                        isToolsAssetItem(item)
+                    ) {
+                        const fresh = await AssetItem.findById(item._id)
+                            .populate('typeId', 'name')
+                            .populate('assignedTo', 'firstName lastName employeeId companyEmail');
+                        if (fresh) await openToolsForceAssignForController(fresh).catch(() => null);
+                    }
+
                     if (fleetVehicle && fleetHandoverHistoryId) {
                         const adminOfficer = fleetAdminOfficerEmp || (await resolveAdminOfficerEmployee().catch(() => null));
                         const adminId = adminOfficer?._id?.toString?.();
@@ -8229,6 +8242,13 @@ export const bulkAssignAssetItems = async (req, res) => {
                         pendingAssignment: true,
                         allowReporteeFallback: false,
                     });
+                    for (const row of assetsForEmail) {
+                        if (!isToolsAssetItem(row)) continue;
+                        const fresh = await AssetItem.findById(row._id)
+                            .populate('typeId', 'name')
+                            .populate('assignedTo', 'firstName lastName employeeId companyEmail');
+                        if (fresh) await openToolsForceAssignForController(fresh).catch(() => null);
+                    }
                 }
             }
         } catch (emailErr) {
