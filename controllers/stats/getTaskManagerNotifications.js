@@ -31,6 +31,7 @@ import { claimTaskNumber, saveListedTaskNumbers } from "../../utils/taskNumberSt
 import { alignDecidedGeneralHubTasks } from "../../utils/alignDecidedGeneralHubTasks.js";
 import { completeFinishedSystemWorkflowTasks } from "../../utils/completeFinishedSystemWorkflowTasks.js";
 import { activityTaskKey, duplicateOverlayShouldClose, keepActivityCopy, taskMatchHints } from "../../utils/taskDuplicateKey.js";
+import { finishedOverlayBySource, overlayForListRow } from "../../utils/finishedTaskOverlay.js";
 import { formatTaskDisplayParts, vehicleRecordId } from "../../utils/taskDisplayName.js";
 import { composeTaskDescription } from "../../utils/taskDetailDescription.js";
 import { attendanceFactsByActionId } from "../../utils/loadAttendanceTaskFacts.js";
@@ -1351,6 +1352,7 @@ export const getTaskManagerNotifications = async (req, res) => {
         }
         const overlayByAction = collapsedTasks.overlayByAction;
         const hiddenOverlayIds = collapsedTasks.hiddenOverlayIds;
+        const finishedOverlayByAction = finishedOverlayBySource(manualRows, hiddenOverlayIds);
         const actionById = new Map((actions || []).map((action) => [String(action._id), action]));
         const deletedNoticeSet = new Set(await listDeletedNoticeKeys());
         const suppressedActionIds = new Set(
@@ -1438,7 +1440,7 @@ export const getTaskManagerNotifications = async (req, res) => {
                 byId.get(String(action.assignedTo || "")) ||
                 byCode.get(String(action.assignedToEmpId || "").trim()) ||
                 null;
-            const overlay = overlayByAction.get(String(action._id));
+            const overlay = overlayForListRow(action._id, overlayByAction, finishedOverlayByAction);
             const assigneeId = String(overlay?.assignee || action.assignedTo || "");
             const assigneeEmpId = String(overlay?.assigneeEmpId || action.assignedToEmpId || "").trim();
             const assigneeRecord = byId.get(assigneeId) || byCode.get(assigneeEmpId) || assignee;
@@ -2127,10 +2129,14 @@ export async function listProfileEmployeeTasks({ employeeId, employeeCode, emplo
         await alignOpenFineDashboardRows(preparedProfile.rows, overlayByAction);
         const collapsedProfile = await collapseDuplicateDashboardTasks(preparedProfile.rows);
         const profileOverlays = collapsedProfile.overlayByAction;
+        const finishedOverlayByAction = finishedOverlayBySource(
+            [...overlayByAction.values()],
+            collapsedProfile.hiddenOverlayIds,
+        );
         const sourceRequesters = await sourceRequesterNameMap(collapsedProfile.rows);
         const rows = [];
         for (const action of dedupeOpenActions(collapsedProfile.rows)) {
-            const overlay = profileOverlays.get(String(action._id));
+            const overlay = overlayForListRow(action._id, profileOverlays, finishedOverlayByAction);
             const requestedAt = action.requestedDate || action.createdAt || null;
             const requestedKey = dubaiDateKey(requestedAt);
             let status = displayStatus(action.status, action.requestType, requestedKey, todayKey);

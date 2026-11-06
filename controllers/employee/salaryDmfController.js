@@ -11,6 +11,9 @@ import {
     resolveDmfAssignees,
     serializeDmf,
     viewerCanActOnDmf,
+    recallMonthPayroll,
+    returnMonthPayrollToHr,
+    viewerCanRecallMonthPayroll,
     viewerCanSubmitMonthPayroll,
 } from '../../utils/salaryDmfApproval.js';
 import {
@@ -305,6 +308,59 @@ export async function approveMonthSalaryDmf(req, res) {
     }
 }
 
+export async function recallMonthSalaryDmf(req, res) {
+    try {
+        const monthKey = monthKeyOf(req.params?.monthKey);
+        if (!monthKey) return res.status(400).json({ message: 'Invalid salary month.' });
+        const doc = await SalaryMonthDmf.findOne({ monthKey });
+        if (!doc?.dmfApproval) {
+            return res.status(404).json({ message: 'DMF approval was not found.' });
+        }
+        const ctx = await buildDmfViewerContext(req);
+        if (!viewerCanRecallMonthPayroll(doc.dmfApproval, ctx)) {
+            return res.status(403).json({ message: 'You cannot recall this payroll.' });
+        }
+        const result = recallMonthPayroll(doc.dmfApproval);
+        doc.markModified('dmfApproval');
+        await doc.save();
+        if (result.returnedTo === 'hr') {
+            await notifySalaryDmfStep({
+                req,
+                requestId: doc._id,
+                dmf: doc.dmfApproval,
+                subjectEmployee: {
+                    employeeId: monthKey,
+                    firstName: monthKey,
+                    lastName: 'payroll',
+                },
+                kind: 'month',
+                monthKey,
+                requestedByName: actor(req).name,
+                silent: true,
+            });
+        } else {
+            await closeSalaryDmfInbox({
+                requestId: doc._id,
+                status: 'Dismissed',
+                actionedBy: actor(req).id,
+                comment: 'Recalled to Accounts',
+            });
+        }
+        return res.status(200).json({
+            message: result.returnedTo === 'hr'
+                ? 'Payroll is back with HR.'
+                : 'Payroll is back with Accounts.',
+            monthKey,
+            dmf: await serializeMonthDmfRow(req, doc, monthKey),
+        });
+    } catch (error) {
+        console.error('[recallMonthSalaryDmf]', error);
+        return res.status(error.statusCode || 500).json({
+            message: error.message || 'Failed to recall the payroll.',
+        });
+    }
+}
+
 export async function rejectMonthSalaryDmf(req, res) {
     try {
         const monthKey = monthKeyOf(req.params?.monthKey);
@@ -321,25 +377,47 @@ export async function rejectMonthSalaryDmf(req, res) {
         }
 
         const who = actor(req);
-        rejectDmf(doc.dmfApproval, {
-            actor: who,
-            reason: String(req.body?.reason || req.body?.comment || '').trim(),
-        });
+        const reason = String(req.body?.reason || req.body?.comment || '').trim();
+        if (!reason) return res.status(400).json({ message: 'A rejection reason is required.' });
+        const returningToHr = String(doc.dmfApproval.currentStepKey || '') === 'management';
+        if (returningToHr) {
+            returnMonthPayrollToHr(doc.dmfApproval, { actor: who, reason });
+        } else {
+            rejectDmf(doc.dmfApproval, { actor: who, reason });
+        }
         doc.markModified('dmfApproval');
         await doc.save();
         await closeSalaryDmfInbox({
             requestId: doc._id,
             status: 'Rejected',
             actionedBy: who.id,
-            comment: doc.dmfApproval.rejectReason,
+            comment: reason,
         });
-        await notifySalaryMonthRejected({
-            req,
-            dmf: doc.dmfApproval,
-            monthKey,
-            rejectedByName: who.name,
-            reason: doc.dmfApproval.rejectReason,
-        });
+        if (returningToHr) {
+            await notifySalaryDmfStep({
+                req,
+                requestId: doc._id,
+                dmf: doc.dmfApproval,
+                subjectEmployee: {
+                    employeeId: monthKey,
+                    firstName: monthKey,
+                    lastName: 'payroll',
+                },
+                kind: 'month',
+                monthKey,
+                requestedByName: who.name,
+                returnReason: reason,
+                returnedByName: who.name,
+            });
+        } else {
+            await notifySalaryMonthRejected({
+                req,
+                dmf: doc.dmfApproval,
+                monthKey,
+                rejectedByName: who.name,
+                reason,
+            });
+        }
 
         return res.status(200).json({ monthKey, dmf: await serializeMonthDmfRow(req, doc, monthKey) });
     } catch (error) {

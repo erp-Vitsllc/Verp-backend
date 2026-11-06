@@ -53,6 +53,35 @@ export function fineBlocksPayrollReady(fine) {
     return fineStillNeedsInbox(fine);
 }
 
+function dubaiYearMonth(value) {
+    if (value == null || value === '') return '';
+    const raw = String(value).trim();
+    if (/^\d{4}-\d{2}$/.test(raw)) return raw;
+    const date = value instanceof Date ? value : new Date(value);
+    if (Number.isNaN(date.getTime())) return monthKeyOf(value);
+    const parts = new Intl.DateTimeFormat('en-US', {
+        timeZone: 'Asia/Dubai',
+        year: 'numeric',
+        month: '2-digit',
+    }).formatToParts(date);
+    const year = parts.find((part) => part.type === 'year')?.value || '';
+    const month = parts.find((part) => part.type === 'month')?.value || '';
+    return year && month ? `${year}-${month}` : '';
+}
+
+/** The payroll month a fine approval belongs to. Creation date wins for every fine type. */
+export function finePendingPayrollMonth(fine) {
+    return dubaiYearMonth(fine?.createdAt) || dubaiYearMonth(fine?.awardedDate);
+}
+
+/** An open fine blocks only the payroll month it was created in. */
+export function fineBlocksThisPayrollMonth(fine, payrollMonth) {
+    if (!fineBlocksPayrollReady(fine)) return false;
+    const target = monthKeyOf(payrollMonth);
+    if (!target) return false;
+    return finePendingPayrollMonth(fine) === target;
+}
+
 export function finePayrollTitle(fine) {
     return fineNeedsAccountsPaymentInbox(fine) ? 'Fine · Accounts payment' : 'Fine approval';
 }

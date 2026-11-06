@@ -2025,6 +2025,7 @@ export function salarySlipPayrollFigures(slip) {
         actualSalary,
         netSalary,
         zohoSalary,
+        overtimeHours: money(slip?.summary?.overtimeHoursCount),
         grossEarnings: money(slip?.grossEarnings),
         attendance: money(reconciliation.attendance),
         salaryAdvance: money(reconciliation.salaryAdvance),

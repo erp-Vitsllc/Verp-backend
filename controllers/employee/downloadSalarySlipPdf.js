@@ -6,7 +6,7 @@ import SalaryHistoricalProfile from '../../models/SalaryHistoricalProfile.js';
 import SalaryMonthDmf from '../../models/SalaryMonthDmf.js';
 import SalaryMonthPayment from '../../models/SalaryMonthPayment.js';
 import SalarySlipMonth from '../../models/SalarySlipMonth.js';
-import { buildDmfViewerContext, viewerCanUpdateSalarySlip } from '../../utils/salaryDmfApproval.js';
+import { buildDmfViewerContext, salarySlipEditLockMessage, viewerCanUpdateSalarySlip } from '../../utils/salaryDmfApproval.js';
 import { hasPermission, isUserAdministrator } from '../../services/permissionService.js';
 import { generateSalarySlipPdfBuffer } from '../../utils/generateSalarySlipPdf.js';
 import {
@@ -50,16 +50,20 @@ async function userCanEditSalarySetup(req) {
 }
 
 async function salarySlipUpdateAccess(req, monthKey) {
-    const doc = await SalaryMonthDmf.findOne({ monthKey }).select('dmfApproval.status').lean();
+    const doc = await SalaryMonthDmf.findOne({ monthKey }).select('dmfApproval').lean();
     const dmf = doc?.dmfApproval || { status: 'idle' };
     const processed = String(dmf.status || '') === 'approved';
     const [canEditSetup, ctx] = await Promise.all([
         userCanEditSalarySetup(req),
-        processed ? buildDmfViewerContext(req) : Promise.resolve(null),
+        buildDmfViewerContext(req),
     ]);
+    const canUpdate = viewerCanUpdateSalarySlip(dmf, ctx, { canEditSetup });
     return {
         monthProcessed: processed,
-        canUpdate: viewerCanUpdateSalarySlip(dmf, ctx, { canEditSetup }),
+        canUpdate,
+        editLock: canUpdate
+            ? ''
+            : (salarySlipEditLockMessage(dmf) || 'You do not have permission to update this salary slip.'),
     };
 }
 
@@ -91,6 +95,7 @@ export async function downloadSalarySlipPdf(req, res) {
                 slip: serializeSalarySlipForClient(slip),
                 canUpdate: access.canUpdate,
                 monthProcessed: access.monthProcessed,
+                editLock: access.editLock,
             });
         }
 
@@ -281,9 +286,7 @@ export async function saveSalarySlipMonth(req, res) {
         const access = await salarySlipUpdateAccess(req, monthKey);
         if (!access.canUpdate) {
             return res.status(403).json({
-                message: access.monthProcessed
-                    ? 'Only Management can update a salary slip after this month is processed.'
-                    : 'You do not have permission to update this salary slip.',
+                message: access.editLock || 'You do not have permission to update this salary slip.',
             });
         }
 

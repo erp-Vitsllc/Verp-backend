@@ -26,7 +26,7 @@ import {
     PAYROLL_LOAN_QUERY_STATUSES,
     assetPayrollInvolvement,
     assetTaskPath,
-    fineBlocksPayrollReady,
+    fineBlocksThisPayrollMonth,
     finePayrollRole,
     finePayrollTitle,
     loanBlocksPayrollReady,
@@ -89,6 +89,7 @@ import {
     sendSalarySlotMail,
 } from '../../utils/salaryDmfNotify.js';
 import { sendMailLater } from '../../utils/salaryEnrollmentApprovalNotify.js';
+import { buildSlotAccountsEmailHtml, buildSlotHrApprovalEmailHtml, payrollMonthLabel } from '../../utils/payrollApprovalMail.js';
 import { buildSalarySlotFile } from '../../utils/salarySlotWorkbook.js';
 import { withFrontendPath } from '../../utils/resolveFrontendBaseUrl.js';
 import {
@@ -605,7 +606,7 @@ async function buildGroupPendingRequests(people, monthKey) {
                     'assignedEmployees.employeeId': { $in: codes },
                 })
                     .select(
-                        '_id fineId fineStatus fineType assignedEmployees workflow accountsPaymentPath zohoBillId zohoBillNumber zohoJournalId zohoJournalNumber vendorBillStatus createdAt updatedAt',
+                        '_id fineId fineStatus fineType assignedEmployees workflow accountsPaymentPath zohoBillId zohoBillNumber zohoJournalId zohoJournalNumber vendorBillStatus awardedDate createdAt updatedAt',
                     )
                     .lean()
                     .maxTimeMS(8000)
@@ -815,7 +816,7 @@ async function buildGroupPendingRequests(people, monthKey) {
     }
 
     for (const fine of fines || []) {
-        if (!fineBlocksPayrollReady(fine)) continue;
+        if (!fineBlocksThisPayrollMonth(fine, monthKey)) continue;
         const assignees = Array.isArray(fine.assignedEmployees) ? fine.assignedEmployees : [];
         const matched = assignees
             .map((row) => getByEmployeeCode(empByCode, row?.employeeId))
@@ -1503,9 +1504,10 @@ function emptyRegisterPayload() {
     return { fromMonth: null, toMonth: null, months: [] };
 }
 
-function serializeMonthPayment(doc) {
+function serializeMonthPayment(doc, names = new Map()) {
     if (!doc) return null;
     const status = slotStatusOf(doc);
+    const createdBy = String(doc.createdBy || '');
     return {
         id: String(doc._id),
         monthKey: String(doc.monthKey || ''),
@@ -1517,7 +1519,25 @@ function serializeMonthPayment(doc) {
         rejectReason: String(doc.rejectReason || '').trim(),
         processed: status === 'approved',
         createdAt: doc.createdAt || null,
+        createdByName: names.get(createdBy) || String(doc.createdByName || '').trim(),
+        zohoExpenseId: String(doc.zohoExpenseId || '').trim(),
     };
+}
+
+async function paymentCreatorNames(docs) {
+    const ids = [...new Set(
+        (docs || [])
+            .map((doc) => String(doc?.createdBy || '').trim())
+            .filter((id) => mongoose.Types.ObjectId.isValid(id)),
+    )];
+    if (!ids.length) return new Map();
+    const users = await User.find({ _id: { $in: ids } }).select('name').lean();
+    return new Map((users || []).map((user) => [String(user._id), String(user.name || '').trim()]));
+}
+
+async function serializeMonthPaymentWithName(doc) {
+    const names = await paymentCreatorNames([doc]);
+    return serializeMonthPayment(doc, names);
 }
 
 async function listMonthPayments(monthKey) {
@@ -1526,8 +1546,9 @@ async function listMonthPayments(monthKey) {
         .sort({ paymentNo: 1 })
         .lean()
         .maxTimeMS(8000);
+    const names = await paymentCreatorNames(rows);
     return (rows || [])
-        .map(serializeMonthPayment)
+        .map((doc) => serializeMonthPayment(doc, names))
         .filter((row) => row && row.status !== 'cancelled');
 }
 
@@ -2689,27 +2710,17 @@ async function prepareSlotSelection({ monthKey, requested, companyName, ignorePa
     return { employeeIds: requested, companyName: company, paymentMethod: typed.method, lastNo };
 }
 
-async function mailSlotHr(req, monthKey, slotNo) {
+async function mailSlotHr(_req, monthKey, slotNo) {
     const hr = await resolveFlowchartHrEmployee();
     if (hr?.error || !hr?.email) {
         console.warn('[salary slot] HR email missing', hr?.message || '');
         return;
     }
-    sendSalarySlotMail({
-        req,
+    sendMailLater({
         to: hr.email,
-        name: slotPersonName(hr.employee) || 'HR',
-        subject: `${monthKey} salary slot ${slotNo} is pending with HR`,
-        monthKey,
-        lines: [
-            `Slot ${slotNo} for ${monthKey} payroll is pending with HR.`,
-            'Open the payroll and use Approve or Reject on that slot.',
-        ],
+        subject: 'Payroll Processing – Request for HR Approval',
+        html: buildSlotHrApprovalEmailHtml({ slotNo, monthKey }),
     });
-}
-
-function slotPageHref(monthKey, paymentId) {
-    return `/HRM/Salary/${encodeURIComponent(monthKey)}?slot=${encodeURIComponent(String(paymentId || ''))}`;
 }
 
 async function mailSlotAccountsNext(req, monthKey, doc) {
@@ -2717,47 +2728,36 @@ async function mailSlotAccountsNext(req, monthKey, doc) {
     const to = String(accounts?.companyEmail || accounts?.email || '').trim();
     if (!to || !doc) return;
     const slotNo = Number(doc.paymentNo) || 0;
-    const wps = String(doc.paymentMethod || '').trim().toUpperCase() !== 'CASH';
+    const cash = String(doc.paymentMethod || '').trim().toUpperCase() === 'CASH';
     let file = null;
     try {
         file = await buildSalarySlotFile(doc);
     } catch (error) {
         console.error('[salary slot] excel', error?.message || error);
     }
-    const sheetList = (file?.sheetNames || []).filter(Boolean).join(', ');
-    sendSalarySlotMail({
-        req,
+    const monthLabel = payrollMonthLabel(monthKey);
+    sendMailLater({
         to,
-        name: slotPersonName(accounts) || 'Accounts',
-        subject: wps
-            ? `${monthKey} salary slot ${slotNo} — set up WPS`
-            : `${monthKey} salary slot ${slotNo} — cash salary`,
-        monthKey,
-        href: slotPageHref(monthKey, doc._id),
-        buttonLabel: 'Open the slot',
-        attachments: file
+        subject: cash
+            ? `Payroll Processing – Cash Salary – Salary Slot ${slotNo}`
+            : `Payroll Processing – WPS File – Salary Slot ${slotNo}`,
+        html: buildSlotAccountsEmailHtml({
+            slotNo,
+            monthKey,
+            monthLabel,
+            method: cash ? 'CASH' : 'WPS',
+            attached: Boolean(file?.content),
+            payrollUrl: cash
+                ? ''
+                : withFrontendPath(`/HRM/Salary/${encodeURIComponent(monthKey)}`, req),
+        }),
+        attachments: file?.content
             ? [{
                 filename: file.filename,
                 content: file.content,
                 contentType: file.contentType,
             }]
             : undefined,
-        lines: wps
-            ? [
-                `HR approved slot ${slotNo}.`,
-                'Set up WPS using the Excel attached to this email.',
-                sheetList
-                    ? `The workbook sheets are ${sheetList}. Each sheet is that company's employees.`
-                    : 'The Excel could not be attached. Open the slot and use Open Excel.',
-                'After you send the payroll details, open the slot and click WPS updated.',
-            ]
-            : [
-                `HR approved slot ${slotNo}.`,
-                file
-                    ? 'The cash salary Excel is attached.'
-                    : 'The cash salary Excel could not be attached. Open the slot and use Open Excel.',
-                'Open the slot and click Update payment. That sends the expense to Zoho.',
-            ],
     });
 }
 
@@ -2875,7 +2875,7 @@ export const createSalaryMonthPayment = async (req, res) => {
         }
         return res.status(201).json({
             message: action === 'apply' ? 'Slot sent to HR.' : 'Slot saved as draft.',
-            payment: serializeMonthPayment(doc),
+            payment: await serializeMonthPaymentWithName(doc),
         });
     } catch (error) {
         return slotErrorResponse(res, error, '[createSalaryMonthPayment]');
@@ -2914,7 +2914,7 @@ export const updateSalaryMonthPayment = async (req, res) => {
                 await mailSlotAccounts(req, monthKey, doc.paymentNo, reason);
                 return res.status(200).json({
                     message: 'Slot rejected.',
-                    payment: serializeMonthPayment(doc),
+                    payment: await serializeMonthPaymentWithName(doc),
                 });
             }
             const method = String(doc.paymentMethod || '').trim().toUpperCase() === 'CASH' ? 'Cash' : 'WPS';
@@ -2925,7 +2925,7 @@ export const updateSalaryMonthPayment = async (req, res) => {
             await notifyAccountsSalarySlot({ payment: doc, monthKey });
             return res.status(200).json({
                 message: method === 'Cash' ? 'Slot approved. Accounts can update it.' : 'Slot approved. Accounts can check the WPS send.',
-                payment: serializeMonthPayment(doc),
+                payment: await serializeMonthPaymentWithName(doc),
             });
         }
 
@@ -2946,7 +2946,7 @@ export const updateSalaryMonthPayment = async (req, res) => {
                 await notifyAccountsSalarySlot({ payment: doc, monthKey, phase: 'update' });
                 return res.status(200).json({
                     message: 'WPS updated.',
-                    payment: serializeMonthPayment(doc),
+                    payment: await serializeMonthPaymentWithName(doc),
                 });
             }
             if (status !== 'pending_update') {
@@ -2959,7 +2959,7 @@ export const updateSalaryMonthPayment = async (req, res) => {
             await closeAccountsSalarySlotInbox(doc._id);
             return res.status(200).json({
                 message: 'Slot updated. Zoho implementation is not done yet.',
-                payment: serializeMonthPayment(doc),
+                payment: await serializeMonthPaymentWithName(doc),
             });
         }
 
@@ -2981,7 +2981,7 @@ export const updateSalaryMonthPayment = async (req, res) => {
             await doc.save();
             return res.status(200).json({
                 message: 'Slot cancelled.',
-                payment: serializeMonthPayment(doc),
+                payment: await serializeMonthPaymentWithName(doc),
             });
         }
 
@@ -3000,7 +3000,7 @@ export const updateSalaryMonthPayment = async (req, res) => {
         if (action === 'apply') await mailSlotHr(req, monthKey, doc.paymentNo);
         return res.status(200).json({
             message: action === 'apply' ? 'Slot sent to HR.' : 'Slot saved as draft.',
-            payment: serializeMonthPayment(doc),
+            payment: await serializeMonthPaymentWithName(doc),
         });
     } catch (error) {
         return slotErrorResponse(res, error, '[updateSalaryMonthPayment]');

@@ -3,6 +3,7 @@ import { describe, it } from 'node:test';
 import {
     assetPayrollInvolvement,
     fineBlocksPayrollReady,
+    fineBlocksThisPayrollMonth,
     loanBlocksPayrollReady,
     loanPayrollRole,
     loanPayrollTitle,
@@ -49,6 +50,28 @@ describe('fine payroll readiness', () => {
         assert.equal(fineBlocksPayrollReady({ fineStatus: 'Approved', accountsPaymentPath: 'employee' }), false);
         assert.equal(fineBlocksPayrollReady({ fineStatus: 'Paid' }), false);
         assert.equal(fineBlocksPayrollReady({ fineStatus: 'Completed' }), false);
+    });
+
+    it('shows every fine type only on the payroll month it was created', () => {
+        const createdInNovember = {
+            fineStatus: 'Pending HR',
+            fineType: 'Vehicle Fine',
+            createdAt: '2026-11-05T06:16:00.000Z',
+            monthStart: '2026-10',
+        };
+        const createdInOctober = {
+            fineStatus: 'Pending Authorization',
+            fineType: 'Other Fines',
+            createdAt: '2026-10-20T08:00:00.000Z',
+        };
+        assert.equal(fineBlocksThisPayrollMonth(createdInNovember, '2026-10'), false);
+        assert.equal(fineBlocksThisPayrollMonth(createdInNovember, '2026-11'), true);
+        assert.equal(fineBlocksThisPayrollMonth(createdInOctober, '2026-10'), true);
+        assert.equal(fineBlocksThisPayrollMonth(createdInOctober, '2026-11'), false);
+        assert.equal(
+            fineBlocksThisPayrollMonth({ fineStatus: 'Paid', fineType: 'Safety Fine', createdAt: '2026-10-02T08:00:00.000Z' }, '2026-10'),
+            false,
+        );
     });
 });
 

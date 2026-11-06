@@ -229,6 +229,7 @@ import {
     startMonthSalaryDmf,
     approveMonthSalaryDmf,
     rejectMonthSalaryDmf,
+    recallMonthSalaryDmf,
     startHistoricalSalaryDmf,
     approveHistoricalSalaryDmf,
     rejectHistoricalSalaryDmf,
@@ -403,6 +404,16 @@ router.post(
         ['hrm_employees_view_salary', 'edit'],
     ]),
     rejectMonthSalaryDmf,
+);
+router.post(
+    "/salary-register/:monthKey/dmf/recall",
+    checkAnyModulePermission([
+        ['hrm_salary', 'view'],
+        ['hrm_salary', 'edit'],
+        ['hrm_employees_view_salary', 'view'],
+        ['hrm_employees_view_salary', 'edit'],
+    ]),
+    recallMonthSalaryDmf,
 );
 router.delete(
     "/salary-register/:monthKey",

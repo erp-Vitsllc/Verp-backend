@@ -7,6 +7,15 @@ import {
     currentDmfStep,
     personDisplayName,
 } from './salaryDmfApproval.js';
+import {
+    buildAccountsPayrollApprovedEmailHtml,
+    buildPayrollApprovalEmailHtml,
+    formatPayrollApprovalWhen,
+    payrollApprovalSubject,
+    payrollMonthLabel,
+    summarizePayrollApproval,
+} from './payrollApprovalMail.js';
+import { loadPayrollApprovalRows, loadPayrollSheetEmployees } from './loadPayrollApprovalRows.js';
 
 function escapeHtml(value) {
     return String(value || '')
@@ -22,6 +31,34 @@ function extraPayload({ kind, employeeId, monthKey, href }) {
         employeeId: employeeId || '',
         monthKey: monthKey || '',
         href,
+    });
+}
+
+async function deliverPayrollApprovalEmail({
+    to,
+    stage,
+    monthKey,
+    baseUrl,
+    hrApproverName,
+    hrApprovedAt,
+    returnReason,
+}) {
+    const rows = await loadPayrollApprovalRows(monthKey);
+    const summary = summarizePayrollApproval(rows);
+    const monthLabel = payrollMonthLabel(monthKey);
+    sendMailLater({
+        to,
+        subject: payrollApprovalSubject(stage, monthLabel),
+        html: buildPayrollApprovalEmailHtml({
+            stage,
+            monthKey,
+            monthLabel,
+            summary,
+            hrApproverName,
+            hrApprovedAt: formatPayrollApprovalWhen(hrApprovedAt),
+            returnReason,
+            baseUrl,
+        }),
     });
 }
 
@@ -42,6 +79,8 @@ export async function notifySalaryDmfStep({
     employeeId,
     monthKey,
     requestedByName,
+    returnReason,
+    silent = false,
 }) {
     const step = currentDmfStep(dmf);
     const assignedTo = step?.assignedTo?.employeeObjectId;
@@ -72,8 +111,25 @@ export async function notifySalaryDmfStep({
 
     const to = String(step.assignedTo?.companyEmail || '').trim();
     const assigneeName = step.assignedTo?.name || step.label;
-    if (!to) return;
+    if (!to || silent) return;
     const baseUrl = resolveFrontendBaseUrl(req);
+    const stepKey = String(step.key || '');
+    if (kind === 'month' && (stepKey === 'hr' || stepKey === 'management') && monthKey) {
+        const stage = stepKey === 'management' ? 'MANAGEMENT' : 'HR';
+        const hrStep = (Array.isArray(dmf?.steps) ? dmf.steps : []).find((row) => row.key === 'hr');
+        void deliverPayrollApprovalEmail({
+            to,
+            stage,
+            monthKey,
+            baseUrl,
+            hrApproverName: hrStep?.actionedByName || '',
+            hrApprovedAt: hrStep?.actionedAt || null,
+            returnReason,
+        }).catch((error) => {
+            console.error('[payroll approval email]', monthKey, stage, error?.message || error);
+        });
+        return;
+    }
     const payrollTitle =
         kind === 'month' ? `${monthKey} payroll` : `${subjectName} payroll`;
     const openLabel = kind === 'month' ? 'Open the payroll' : 'Open in VERP';
@@ -118,22 +174,37 @@ export async function notifySalaryMonthRejected({ req, dmf, monthKey, rejectedBy
     });
 }
 
-export async function notifySalaryMonthSlotReady({ req, dmf, monthKey }) {
+async function payrollExcelAttachment(monthKey) {
+    const monthLabel = payrollMonthLabel(monthKey);
+    const employees = await loadPayrollSheetEmployees(monthKey);
+    const { buildPayrollWorkbookBytes } = await import(new URL(
+        '../../VERP_frontend/src/app/HRM/Salary/utils/payrollExcel.js',
+        import.meta.url,
+    ));
+    const bytes = buildPayrollWorkbookBytes({ monthLabel, employees });
+    return {
+        filename: `Payroll ${monthLabel}.xlsx`,
+        content: Buffer.from(bytes),
+        contentType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    };
+}
+
+export async function notifySalaryMonthSlotReady({ dmf, monthKey }) {
     const accountsStep = (Array.isArray(dmf?.steps) ? dmf.steps : []).find((step) => step.key === 'accounts');
     const to = String(accountsStep?.assignedTo?.companyEmail || '').trim();
-    const name = accountsStep?.assignedTo?.name || 'Accounts';
     if (!to || !monthKey) return;
-    const href = inboxHref({ kind: 'month', monthKey });
-    const baseUrl = resolveFrontendBaseUrl(req);
+    const monthLabel = payrollMonthLabel(monthKey);
+    let attachments;
+    try {
+        attachments = [await payrollExcelAttachment(monthKey)];
+    } catch (error) {
+        console.error('[notifySalaryMonthSlotReady] excel', monthKey, error?.message || error);
+    }
     sendMailLater({
         to,
         subject: `${monthKey} payroll approved — create slot`,
-        html: `
-            <p>Hello ${escapeHtml(name)},</p>
-            <p>Management approved <strong>${escapeHtml(monthKey)} payroll</strong>.</p>
-            <p>Create slot is now on the payroll page.</p>
-            <p><a href="${baseUrl}${href}">Open the payroll</a></p>
-        `,
+        html: buildAccountsPayrollApprovedEmailHtml({ monthLabel }),
+        attachments,
     });
 }
 

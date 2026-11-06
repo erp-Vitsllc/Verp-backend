@@ -403,10 +403,36 @@ export function viewerCanCreateSalarySlot(dmf, ctx) {
     return String(dmf?.status || '') === 'approved' && Boolean(ctx?.isAccounts);
 }
 
-/** After Management processes the month, only flowchart Management can change a salary slip. */
+/** While HR has the payroll, only HR can edit. While Management has it, only Management can edit. After it is processed, nobody can edit. */
+export function salarySlipEditLockMessage(dmf) {
+    const status = String(dmf?.status || 'idle');
+    if (status === 'approved') return 'This salary slip can no longer be edited.';
+    if (status !== 'pending') return '';
+    const key = String(currentDmfStep(dmf)?.key || '');
+    if (key === 'hr') return 'Only HR can edit this salary slip.';
+    if (key === 'management') return 'Only Management can edit this salary slip.';
+    return '';
+}
+
 export function viewerCanUpdateSalarySlip(dmf, ctx, { canEditSetup = false } = {}) {
-    if (String(dmf?.status || '') === 'approved') return Boolean(ctx?.isManagement);
+    const status = String(dmf?.status || 'idle');
+    if (status === 'approved') return false;
+    if (status === 'pending') {
+        const key = String(currentDmfStep(dmf)?.key || '');
+        if (key === 'hr') return Boolean(ctx?.isHr);
+        if (key === 'management') return Boolean(ctx?.isManagement);
+        return false;
+    }
     return Boolean(canEditSetup);
+}
+
+/** Accounts recalls from HR. HR recalls from Management. Accounts cannot recall after HR approves. */
+export function viewerCanRecallMonthPayroll(dmf, ctx) {
+    if (String(dmf?.status || '') !== 'pending') return false;
+    const key = String(currentDmfStep(dmf)?.key || '');
+    if (key === 'hr') return Boolean(ctx?.isAccounts);
+    if (key === 'management') return Boolean(ctx?.isHr);
+    return false;
 }
 
 export function serializeDmf(dmf, { ready = false, ctx = null, flow = '' } = {}) {
@@ -455,6 +481,7 @@ export function serializeDmf(dmf, { ready = false, ctx = null, flow = '' } = {})
         canStart,
         canAct,
         canReject: canAct,
+        canRecall: monthFlow && viewerCanRecallMonthPayroll(row, ctx),
         canCreateSlot: monthFlow && viewerCanCreateSalarySlot(row, ctx),
     };
 }
@@ -480,20 +507,107 @@ export function approveCurrentDmfStep(dmf, { actor, comment } = {}) {
     if (!nextKey) {
         dmf.status = 'approved';
         dmf.currentStepKey = '';
+        dmf.rejectReason = '';
+        dmf.rejectedByName = '';
+        dmf.rejectedAt = null;
         return { completed: true, nextStep: null };
     }
 
     const next = (dmf.steps || []).find((row) => row.key === nextKey);
     if (next) {
         next.status = 'pending';
+        next.actionedByName = '';
+        next.actionedByUserId = null;
+        next.actionedAt = null;
+        next.comment = '';
         dmf.currentStepKey = next.key;
         dmf.status = 'pending';
+        dmf.rejectReason = '';
+        dmf.rejectedByName = '';
+        dmf.rejectedAt = null;
         return { completed: false, nextStep: next };
     }
 
     dmf.status = 'approved';
     dmf.currentStepKey = '';
+    dmf.rejectReason = '';
+    dmf.rejectedByName = '';
+    dmf.rejectedAt = null;
     return { completed: true, nextStep: null };
+}
+
+function clearStepAction(step, status) {
+    if (!step) return;
+    step.status = status;
+    step.actionedByName = '';
+    step.actionedByUserId = null;
+    step.actionedAt = null;
+    step.comment = '';
+}
+
+/** Accounts pulls the payroll back from HR, or HR pulls it back from Management. */
+export function recallMonthPayroll(dmf) {
+    dropLegacyUser2Step(dmf);
+    if (String(dmf?.status || '') !== 'pending') {
+        throw dmfError(400, 'This payroll is not with an approver.');
+    }
+    const step = currentDmfStep(dmf);
+    const key = String(step?.key || '');
+    if (key === 'hr') {
+        for (const row of dmf.steps || []) clearStepAction(row, 'scheduled');
+        dmf.status = 'idle';
+        dmf.currentStepKey = '';
+        dmf.rejectReason = '';
+        dmf.rejectedByName = '';
+        dmf.rejectedAt = null;
+        return { returnedTo: 'accounts' };
+    }
+    if (key === 'management') {
+        clearStepAction(step, 'scheduled');
+        const hr = (dmf.steps || []).find((row) => row.key === 'hr');
+        if (!hr) throw dmfError(400, 'HR is not on this payroll approval.');
+        clearStepAction(hr, 'pending');
+        dmf.status = 'pending';
+        dmf.currentStepKey = 'hr';
+        dmf.rejectReason = '';
+        dmf.rejectedByName = '';
+        dmf.rejectedAt = null;
+        return { returnedTo: 'hr' };
+    }
+    throw dmfError(400, 'This payroll cannot be recalled.');
+}
+
+/** Management rejection returns the month payroll to HR. HR must approve it again. */
+export function returnMonthPayrollToHr(dmf, { actor, reason } = {}) {
+    dropLegacyUser2Step(dmf);
+    const why = String(reason || '').trim();
+    if (!why) throw dmfError(400, 'A rejection reason is required.');
+    if (String(dmf?.status || '') !== 'pending') {
+        throw dmfError(400, 'This DMF is not waiting for approval.');
+    }
+    const step = currentDmfStep(dmf);
+    if (String(step?.key || '') !== 'management') {
+        throw dmfError(400, 'Only Management can return this payroll to HR.');
+    }
+    const hr = (dmf.steps || []).find((row) => row.key === 'hr');
+    if (!hr) throw dmfError(400, 'HR is not on this payroll approval.');
+    const now = new Date();
+    step.status = 'scheduled';
+    step.actionedByName = actor?.name || '';
+    step.actionedByUserId = actor?.id || null;
+    step.actionedAt = now;
+    step.comment = why;
+    hr.status = 'pending';
+    hr.actionedByName = '';
+    hr.actionedByUserId = null;
+    hr.actionedAt = null;
+    hr.comment = '';
+    dmf.status = 'pending';
+    dmf.currentStepKey = 'hr';
+    dmf.rejectedByName = actor?.name || '';
+    dmf.rejectedAt = now;
+    dmf.rejectReason = why;
+    return dmf;
 }
 
 export function rejectDmf(dmf, { actor, reason } = {}) {

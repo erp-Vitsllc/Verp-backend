@@ -5,9 +5,13 @@ import {
     approveCurrentDmfStep,
     buildInitialDmf,
     payrollApprovalStatusLabel,
+    recallMonthPayroll,
     rejectDmf,
+    returnMonthPayrollToHr,
+    salarySlipEditLockMessage,
     serializeDmf,
     viewerCanCreateSalarySlot,
+    viewerCanRecallMonthPayroll,
     viewerCanSubmitMonthPayroll,
     viewerCanUpdateSalarySlip,
 } from './salaryDmfApproval.js';
@@ -31,8 +35,9 @@ function monthDraft() {
     });
 }
 
-const accounts = { isAccounts: true };
-const hr = { isHr: true, isAccounts: false };
+const accounts = { isAccounts: true, isHr: false, isManagement: false };
+const hr = { isHr: true, isAccounts: false, isManagement: false };
+const management = { isManagement: true, isHr: false, isAccounts: false };
 
 describe('month payroll submit', () => {
     it('sends Accounts submit straight to HR', () => {
@@ -78,20 +83,74 @@ describe('month payroll submit', () => {
         assert.equal(serializeDmf(dmf, { ready: true, ctx: hr, flow: 'month' }).canCreateSlot, false);
     });
 
-    it('lets only Management update a salary slip after the month is processed', () => {
-        const management = { isManagement: true };
+    it('locks salary slip edits to the current approver, then to nobody', () => {
         const idle = { status: 'idle' };
         assert.equal(viewerCanUpdateSalarySlip(idle, accounts, { canEditSetup: true }), true);
         assert.equal(viewerCanUpdateSalarySlip(idle, management, { canEditSetup: false }), false);
-        assert.equal(viewerCanUpdateSalarySlip({ status: 'pending' }, hr, { canEditSetup: true }), true);
 
         const dmf = monthDraft();
         approveCurrentDmfStep(dmf, { actor: { name: 'Ada User' }, comment: 'Submitted' });
+        assert.equal(dmf.currentStepKey, 'hr');
+        assert.equal(viewerCanUpdateSalarySlip(dmf, hr, { canEditSetup: false }), true);
+        assert.equal(viewerCanUpdateSalarySlip(dmf, accounts, { canEditSetup: true }), false);
+        assert.equal(salarySlipEditLockMessage(dmf), 'Only HR can edit this salary slip.');
+        assert.equal(viewerCanRecallMonthPayroll(dmf, accounts), true);
+        assert.equal(viewerCanRecallMonthPayroll(dmf, hr), false);
+
         approveCurrentDmfStep(dmf, { actor: { name: 'Hana User' }, comment: '' });
+        assert.equal(dmf.currentStepKey, 'management');
+        assert.equal(viewerCanUpdateSalarySlip(dmf, management, { canEditSetup: false }), true);
+        assert.equal(viewerCanUpdateSalarySlip(dmf, hr, { canEditSetup: true }), false);
+        assert.equal(viewerCanUpdateSalarySlip(dmf, accounts, { canEditSetup: true }), false);
+        assert.equal(salarySlipEditLockMessage(dmf), 'Only Management can edit this salary slip.');
+        assert.equal(viewerCanRecallMonthPayroll(dmf, hr), true);
+        assert.equal(viewerCanRecallMonthPayroll(dmf, accounts), false);
+
         approveCurrentDmfStep(dmf, { actor: { name: 'Mina User' }, comment: '' });
         assert.equal(dmf.status, 'approved');
-        assert.equal(viewerCanUpdateSalarySlip(dmf, management, { canEditSetup: false }), true);
+        assert.equal(viewerCanUpdateSalarySlip(dmf, management, { canEditSetup: true }), false);
         assert.equal(viewerCanUpdateSalarySlip(dmf, accounts, { canEditSetup: true }), false);
         assert.equal(viewerCanUpdateSalarySlip(dmf, hr, { canEditSetup: true }), false);
+        assert.equal(salarySlipEditLockMessage(dmf), 'This salary slip can no longer be edited.');
+        assert.equal(viewerCanRecallMonthPayroll(dmf, accounts), false);
+        assert.equal(viewerCanRecallMonthPayroll(dmf, hr), false);
+    });
+
+    it('lets Accounts recall from HR, and HR recall from Management', () => {
+        const dmf = monthDraft();
+        approveCurrentDmfStep(dmf, { actor: { name: 'Ada User' }, comment: 'Submitted' });
+        recallMonthPayroll(dmf);
+        assert.equal(dmf.status, 'idle');
+        assert.equal(dmf.currentStepKey, '');
+        assert.equal(dmf.steps.every((step) => step.status === 'scheduled'), true);
+        assert.equal(viewerCanSubmitMonthPayroll(dmf, accounts), true);
+
+        const withManagement = monthDraft();
+        approveCurrentDmfStep(withManagement, { actor: { name: 'Ada User' }, comment: 'Submitted' });
+        approveCurrentDmfStep(withManagement, { actor: { name: 'Hana User' }, comment: '' });
+        const back = recallMonthPayroll(withManagement);
+        assert.equal(back.returnedTo, 'hr');
+        assert.equal(withManagement.status, 'pending');
+        assert.equal(withManagement.currentStepKey, 'hr');
+        assert.equal(withManagement.steps.find((step) => step.key === 'management').status, 'scheduled');
+        assert.equal(viewerCanRecallMonthPayroll(withManagement, accounts), true);
+        assert.throws(() => recallMonthPayroll({ status: 'approved', steps: [], currentStepKey: '' }));
+    });
+
+    it('returns a Management rejection to HR and requires a reason', () => {
+        const dmf = monthDraft();
+        approveCurrentDmfStep(dmf, { actor: { name: 'Ada User' }, comment: 'Submitted' });
+        approveCurrentDmfStep(dmf, { actor: { name: 'Hana User' }, comment: '' });
+        assert.equal(dmf.currentStepKey, 'management');
+        assert.throws(() => returnMonthPayrollToHr(dmf, { actor: { name: 'Mina User' }, reason: '  ' }));
+        returnMonthPayrollToHr(dmf, { actor: { name: 'Mina User' }, reason: 'Overtime is wrong' });
+        assert.equal(dmf.status, 'pending');
+        assert.equal(dmf.currentStepKey, 'hr');
+        assert.equal(dmf.rejectReason, 'Overtime is wrong');
+        assert.equal(dmf.steps.find((step) => step.key === 'hr').status, 'pending');
+        assert.equal(dmf.steps.find((step) => step.key === 'management').status, 'scheduled');
+        approveCurrentDmfStep(dmf, { actor: { name: 'Hana User' }, comment: '' });
+        assert.equal(dmf.currentStepKey, 'management');
+        assert.equal(dmf.rejectReason, '');
     });
 });
