@@ -1461,11 +1461,11 @@ export function isZohoBooksRateLimitError(err) {
 
 const zohoOrgCooldown = new Map();
 
-/** Code 45 / "limit of 5,000" is the organization allowance. A short retry cannot clear it. */
+/** Code 45 is Zoho's own daily allowance. Do not add an ERP lock on top of it. */
 export function zohoRateLimitHoldMs(message, zohoCode) {
     const code = Number(zohoCode);
     if (code === 45 || /call rate limit of\s*[\d,]+|5[,.]?000/i.test(String(message || ''))) {
-        return 60 * 60 * 1000;
+        return 0;
     }
     return 70 * 1000;
 }
