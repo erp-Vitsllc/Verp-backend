@@ -54,6 +54,10 @@ import {
 import { ATTENDANCE_CHANGE_OPEN_STAGES } from '../../utils/attendanceChangeApproval.js';
 import { buildSalaryPreparationPending, leaveCardMatchesOpenRequest } from '../../utils/salaryPreparationPending.js';
 import { getDepartmentHOD } from '../../utils/getDepartmentHOD.js';
+import {
+    loadUtilityPortionContext,
+    unpaidEmployeePortionOnSalaryMonth,
+} from '../../utils/utilityEmployeePortionStatus.js';
 
 const LEAVE_STATUS_KEYS = new Set([
     'on_leave',
@@ -707,16 +711,7 @@ function mapUtilityExcess(bills) {
     let outstanding = 0;
     let latest = null;
     for (const bill of bills || []) {
-        const status = String(bill?.status || '');
-        if (status === 'Paid' || status === 'Rejected') continue;
-        const excess = Number(bill?.employeeDiffAmount);
-        const pay = Number(bill?.employeePayAmount);
-        const amount =
-            Number.isFinite(excess) && excess > 0.009
-                ? excess
-                : Number.isFinite(pay) && pay > 0.009
-                  ? pay
-                  : 0;
+        const amount = Number(bill?.employeePortionOutstanding) || 0;
         if (amount <= 0.009) continue;
         outstanding += amount;
         if (!latest) latest = bill;
@@ -732,25 +727,18 @@ function mapUtilityExcess(bills) {
 function mapUtilityItems(bills) {
     return (bills || [])
         .map((bill) => {
-            const excess = Number(bill?.employeeDiffAmount);
-            const pay = Number(bill?.employeePayAmount);
-            const amount =
-                Number.isFinite(excess) && excess > 0.009
-                    ? excess
-                    : Number.isFinite(pay) && pay > 0.009
-                      ? pay
-                      : 0;
+            const amount = roundMoney(Number(bill?.employeePortionOutstanding) || 0);
             const month = String(bill?.billMonth || '').trim();
             return {
                 id: String(bill._id),
                 utilityType: String(bill?.utilityType || '').trim(),
                 billMonth: month,
                 billMonthLabel: formatMonthYear(month),
-                amount: roundMoney(amount),
-                status: String(bill?.status || ''),
+                amount,
+                status: 'Not Paid',
             };
         })
-        .filter((row) => row.amount > 0.009 || row.status);
+        .filter((row) => row.amount > 0.009);
 }
 
 /**
@@ -807,6 +795,9 @@ export async function getEmployeeAttendanceProfile(req, res) {
 
         const employeeMongoId = String(employee._id);
         const employeeCode = String(employee.employeeId || '').trim();
+        const utilityCodePattern = employeeCode
+            ? new RegExp(`^${employeeCode.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'i')
+            : null;
         const staffType = normalizeStaffTypeKey(employee.staffType) || 'office';
 
         const [records, loans, rewards, fines, assets, personal, policy, offSet, nextBirthday, salaryDoc, utilityBills, historicalProfile, requestRows] =
@@ -855,13 +846,22 @@ export async function getEmployeeAttendanceProfile(req, res) {
                 )
                 .lean(),
             UtilityBillPayment.find({
-                payByEmployeeId: employeeCode,
-                status: { $nin: ['Rejected'] },
+                status: { $in: ['Approved', 'Paid'] },
+                $or: [
+                    ...(utilityCodePattern
+                        ? [
+                            { payByEmployeeId: utilityCodePattern },
+                            { 'zohoLineItems.payByEmployeeId': utilityCodePattern },
+                        ]
+                        : []),
+                    { payByEmployeeId: employeeMongoId },
+                    { 'zohoLineItems.payByEmployeeId': employeeMongoId },
+                ],
             })
                 .select(
-                    'utilityType billMonth employeePayAmount employeeDiffAmount differenceAmount paymentBy status createdAt',
+                    'utilityType billMonth employeePayAmount payByEmployeeId paymentBy status createdAt zohoLineItems.payByEmployeeId zohoLineItems.amount billNumber accountNo',
                 )
-                .sort({ createdAt: -1 })
+                .sort({ billMonth: -1, createdAt: -1 })
                 .limit(30)
                 .lean(),
             loadHistoricalLeaveProfile(employeeCode),
@@ -1192,6 +1192,21 @@ export async function getEmployeeAttendanceProfile(req, res) {
         const approvedRewards = (rewards || []).filter((r) => rewardIsVisibleToEmployee(r));
         const approvedFines = (fines || []).filter((f) => fineIsVisibleToEmployee(f, employeeCode));
         const approvedUtilityBills = (utilityBills || []).filter((bill) => utilityBillIsVisibleToEmployee(bill));
+        const utilityContext = await loadUtilityPortionContext(
+            [employeeCode, employeeMongoId],
+            approvedUtilityBills,
+        );
+        for (const bill of approvedUtilityBills) {
+            const billId = String(bill._id || '');
+            bill.employeePortionOutstanding = unpaidEmployeePortionOnSalaryMonth({
+                bill,
+                employeeIds: utilityContext.employeeIds,
+                payments: utilityContext.payments,
+                partyExpense: utilityContext.expenseByBill.get(billId) || null,
+                payrollZohoMonths: utilityContext.payrollZohoMonths,
+                zohoExpenseMatched: utilityContext.zohoMatched.has(billId),
+            });
+        }
         const salary = pickSalary(salaryDoc);
         const increment = pickLatestIncrement(salaryDoc?.salaryHistory);
         const utility = mapUtilityExcess(approvedUtilityBills);

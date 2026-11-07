@@ -44,6 +44,10 @@ import {
 } from './salaryPolicyExclusions.js';
 import { getAedCurrencyRates } from './currencyRates.js';
 import { payLocationFromEmployee } from './workPayLocation.js';
+import {
+    loadUtilityPortionContext,
+    unpaidEmployeePortionOnSalaryMonth,
+} from './utilityEmployeePortionStatus.js';
 
 const MONTH_FULL = [
     'January', 'February', 'March', 'April', 'May', 'June',
@@ -621,19 +625,27 @@ export function unpaidSchedulePortion({ total, repaid, startYm, duration, ym }) 
     return dueByMonth;
 }
 
-function unpaidThisMonthFromPartyOrSchedule(party, schedule) {
+/**
+ * Not Paid amount for this salary month and every earlier installment.
+ * A later month (November on an October slip) stays off the total.
+ * Installment rows are used when they exist. Otherwise the loan or fine
+ * schedule is split by month, so September plus October is not the whole balance.
+ */
+export function dueThroughSalaryMonth(party, schedule) {
     if (party && !isEmployeeUnpaidStatus(party.status)) return 0;
-    const fromParty = unpaidDueByMonth(party, schedule.ym);
-    if (fromParty > 0) return fromParty;
     const parts = Array.isArray(party?.installments) ? party.installments : [];
-    if (parts.length) {
-        const hasDueOrPastPart = parts.some((row) => {
-            const key = payableMonthKey(row.monthKey);
-            return Boolean(key) && compareYm(key, schedule.ym) <= 0;
-        });
+    const datedParts = parts.filter((row) => payableMonthKey(row?.monthKey));
+    if (datedParts.length) {
+        const fromParts = unpaidDueByMonth({ ...party, installments: datedParts }, schedule.ym);
+        if (fromParts > 0) return fromParts;
+        const hasDueOrPastPart = datedParts.some((row) => compareYm(row.monthKey, schedule.ym) <= 0);
         if (hasDueOrPastPart) return 0;
     }
     return unpaidSchedulePortion(schedule);
+}
+
+function unpaidThisMonthFromPartyOrSchedule(party, schedule) {
+    return dueThroughSalaryMonth(party, schedule);
 }
 
 function partyExpenseFor(expenses, { kind, mongoField, mongoId } = {}) {
@@ -643,19 +655,6 @@ function partyExpenseFor(expenses, { kind, mongoField, mongoId } = {}) {
         if (wantId && String(exp[mongoField] || '') !== wantId) return false;
         return true;
     }) || null;
-}
-
-function employeeExcessAmount(bill) {
-    if (String(bill?.paymentBy || '').toLowerCase() === 'company') return 0;
-    const excess = Number(bill?.employeeDiffAmount);
-    return Number.isFinite(excess) && excess > 0.009 ? money(excess) : 0;
-}
-
-function employeeExcessDueByMonth(bill, ym) {
-    const billYm = payableMonthKey(bill?.billMonth);
-    const target = payableMonthKey(ym);
-    if (!billYm || !target || compareYm(billYm, target) > 0) return 0;
-    return employeeExcessAmount(bill);
 }
 
 function isApprovedAssignee(assignee) {
@@ -685,6 +684,7 @@ function emptyLoanRow(type) {
         originalAmount: 0,
         paidAmount: 0,
         remainingAmount: 0,
+        dueAmount: 0,
         approved: false,
     };
 }
@@ -771,10 +771,17 @@ export async function buildSalarySlipPayload({
                 .select('amount awardedDate approvedDate rewardStatus rewardType')
                 .lean(),
             UtilityBillPayment.find({
-                payByEmployeeId: idPattern,
                 status: { $in: ['Approved', 'Paid'] },
+                $or: [
+                    { payByEmployeeId: idPattern },
+                    { payByEmployeeId: mongoId },
+                    { 'zohoLineItems.payByEmployeeId': idPattern },
+                    { 'zohoLineItems.payByEmployeeId': mongoId },
+                ],
             })
-                .select('utilityType billMonth employeePayAmount employeeDiffAmount paymentBy notes status')
+                .select(
+                    'utilityType billMonth employeePayAmount payByEmployeeId paymentBy notes status zohoLineItems.payByEmployeeId zohoLineItems.amount billNumber accountNo',
+                )
                 .lean(),
             PartyExpense.find({
                 partyType: 'employee',
@@ -1111,9 +1118,9 @@ export async function buildSalarySlipPayload({
         const total = money(loan.amount);
         const repaid = money(loan.repaidAmount);
         const remaining = Math.max(0, money(total - repaid));
-        const thisMonthAmount = Math.min(
+        const dueAmount = Math.min(
             remaining,
-            unpaidThisMonthFromPartyOrSchedule(party, {
+            dueThroughSalaryMonth(party, {
                 total,
                 repaid,
                 startYm: start,
@@ -1121,6 +1128,7 @@ export async function buildSalarySlipPayload({
                 ym,
             }),
         );
+        const thisMonthAmount = dueAmount;
         const type = isAdvance ? 'Salary Advance' : 'Loan';
         countedLoanIds.add(String(loan._id || ''));
         if (thisMonthAmount > 0) {
@@ -1139,6 +1147,7 @@ export async function buildSalarySlipPayload({
             originalAmount: total,
             paidAmount: repaid,
             remainingAmount: remaining,
+            dueAmount,
             approved: true,
         });
     }
@@ -1165,9 +1174,9 @@ export async function buildSalarySlipPayload({
         });
         const paid = money(fine.paidAmount);
         const remaining = Math.max(0, money(payable - paid));
-        const thisMonthAmount = Math.min(
+        const dueAmount = Math.min(
             remaining,
-            unpaidThisMonthFromPartyOrSchedule(party, {
+            dueThroughSalaryMonth(party, {
                 total: payable,
                 repaid: paid,
                 startYm: startFineYm,
@@ -1175,6 +1184,7 @@ export async function buildSalarySlipPayload({
                 ym,
             }),
         );
+        const thisMonthAmount = dueAmount;
         const installment = money(payable / duration);
         countedFineIds.add(String(fine._id || ''));
         if (thisMonthAmount > 0) fineMonth = money(fineMonth + thisMonthAmount);
@@ -1191,18 +1201,32 @@ export async function buildSalarySlipPayload({
             originalAmount: payable,
             paidAmount: paid,
             remainingAmount: remaining,
+            dueAmount,
             approved: true,
         });
     }
 
     let utilityMonth = 0;
     const utilities = [];
+    const utilityContext = (utilityBills || []).length
+        ? await loadUtilityPortionContext([code, mongoId], utilityBills)
+        : null;
     for (const exp of partyExpenses || []) {
         if (exp.kind === 'balance') continue;
         const total = money(exp.amount);
         const paid = paidFromPartyExpense(exp);
         const remaining = Math.max(0, money(total - paid));
-        const thisMonthAmount = Math.min(remaining, unpaidInstallmentForMonth(exp, ym));
+        const dueAmount = Math.min(
+            remaining,
+            dueThroughSalaryMonth(exp, {
+                total,
+                repaid: paid,
+                startYm: exp.monthStart || exp.billMonth,
+                duration: exp.duration,
+                ym,
+            }),
+        );
+        const thisMonthAmount = dueAmount;
         if (total <= 0 && thisMonthAmount <= 0) continue;
         if (exp.kind === 'fine') {
             if (countedFineIds.has(String(exp.fineMongoId || ''))) continue;
@@ -1220,6 +1244,7 @@ export async function buildSalarySlipPayload({
                 originalAmount: total,
                 paidAmount: paid,
                 remainingAmount: remaining,
+                dueAmount,
                 approved: true,
             });
             continue;
@@ -1244,6 +1269,7 @@ export async function buildSalarySlipPayload({
                 originalAmount: total,
                 paidAmount: paid,
                 remainingAmount: remaining,
+                dueAmount,
                 approved: true,
             });
         }
@@ -1254,51 +1280,32 @@ export async function buildSalarySlipPayload({
 
     for (const bill of utilityBills || []) {
         const billId = String(bill._id || '');
-        const total = employeeExcessAmount(bill);
-        if (total <= 0) continue;
         if (billId && countedUtilityIds.has(billId)) continue;
         if (billId) countedUtilityIds.add(billId);
-        const party = partyExpenseFor(partyExpenses, {
-            kind: 'balance',
-            mongoField: 'utilityBillId',
-            mongoId: bill._id,
+        const outstanding = unpaidEmployeePortionOnSalaryMonth({
+            bill,
+            employeeIds: utilityContext?.employeeIds || [code, mongoId],
+            payments: utilityContext?.payments || [],
+            partyExpense: utilityContext?.expenseByBill.get(billId) || null,
+            payrollZohoMonths: utilityContext?.payrollZohoMonths || [],
+            zohoExpenseMatched: Boolean(utilityContext?.zohoMatched.has(billId)),
+            salaryMonth: ym,
         });
-        const paid = paidFromPartyExpense(party);
-        const thisMonthAmount = unpaidInstallmentForMonth(party, ym)
-            || (paid > 0 ? 0 : employeeExcessDueByMonth(bill, ym));
-        if (thisMonthAmount > 0) utilityMonth = money(utilityMonth + thisMonthAmount);
+        if (outstanding <= 0.009) continue;
+        utilityMonth = money(utilityMonth + outstanding);
         utilities.push({
             sourceId: billId,
             details: String(bill.utilityType || 'Utility').trim() || 'Utility',
-            amount: formatAed(total),
-            reason: String(bill.notes || 'Usage exceeded the approved monthly plan limit.').trim(),
-            total,
-            paid,
-            thisMonthAmount,
-            thisMonth: formatAed(thisMonthAmount),
-            approved: true,
-        });
-    }
-
-    for (const exp of partyExpenses || []) {
-        if (exp.kind !== 'balance') continue;
-        const billId = String(exp.utilityBillId || '');
-        if (billId && countedUtilityIds.has(billId)) continue;
-        const total = money(exp.amount);
-        const thisMonthAmount = unpaidInstallmentForMonth(exp, ym);
-        if (total <= 0 && thisMonthAmount <= 0) continue;
-        if (billId) countedUtilityIds.add(billId);
-        const paid = paidFromPartyExpense(exp);
-        if (thisMonthAmount > 0) utilityMonth = money(utilityMonth + thisMonthAmount);
-        utilities.push({
-            sourceId: String(exp.utilityBillId || exp._id || ''),
-            details: String(exp.utilityType || 'Utility').trim() || 'Utility',
-            amount: formatAed(total),
-            reason: 'Employee excess',
-            total,
-            paid,
-            thisMonthAmount,
-            thisMonth: formatAed(thisMonthAmount),
+            amount: formatAed(outstanding),
+            reason: String(bill.notes || 'Unpaid employee portion').trim(),
+            total: outstanding,
+            paid: 0,
+            thisMonthAmount: outstanding,
+            thisMonth: formatAed(outstanding),
+            dueAmount: outstanding,
+            remainingAmount: outstanding,
+            originalAmount: outstanding,
+            paidAmount: 0,
             approved: true,
         });
     }
@@ -1637,7 +1644,7 @@ function mergeStoredThisMonth(liveRows, storedRows, applyRow) {
         const storedRow = (live.sourceId && byId.get(String(live.sourceId))) || stored[index];
         if (!storedRow) return live;
         if (storedRow.thisMonthAmount == null && storedRow.thisMonth == null) return live;
-        const total = money(live?.originalAmount ?? live?.total ?? live?.amount);
+        const total = money(live?.dueAmount ?? live?.remainingAmount ?? live?.originalAmount ?? live?.total ?? live?.amount);
         const next = money(storedRow.thisMonthAmount ?? storedRow.thisMonth);
         const capped = Math.max(0, total > 0 ? Math.min(next, total) : 0);
         return { ...live, thisMonthAmount: capped, thisMonth: formatAed(capped) };

@@ -8,6 +8,7 @@ import {
     salarySlipPayrollFigures,
     unpaidDueByMonth,
     unpaidSchedulePortion,
+    dueThroughSalaryMonth,
     yearlyEndOfServiceBenefit,
 } from './buildSalarySlipPayload.js';
 
@@ -239,6 +240,80 @@ describe('unpaid deduction carry-over', () => {
                 '2026-09',
             ),
             0,
+        );
+    });
+
+    it('sums only unpaid months on or before the salary month', () => {
+        const party = {
+            status: 'Not Paid',
+            amount: 3500,
+            installments: [
+                { monthKey: '2026-09', amount: 875, status: 'Not Paid' },
+                { monthKey: '2026-10', amount: 875, status: 'Not Paid' },
+                { monthKey: '2026-11', amount: 875, status: 'Not Paid' },
+                { monthKey: '2026-12', amount: 875, status: 'Not Paid' },
+            ],
+        };
+        assert.equal(
+            dueThroughSalaryMonth(party, {
+                total: 3500,
+                repaid: 0,
+                startYm: '2026-09',
+                duration: 4,
+                ym: '2026-10',
+            }),
+            1750,
+        );
+        assert.equal(
+            dueThroughSalaryMonth(
+                {
+                    ...party,
+                    installments: party.installments.map((row) =>
+                        row.monthKey === '2026-09' ? { ...row, status: 'Paid' } : row,
+                    ),
+                },
+                {
+                    total: 3500,
+                    repaid: 875,
+                    startYm: '2026-09',
+                    duration: 4,
+                    ym: '2026-10',
+                },
+            ),
+            875,
+        );
+        assert.equal(
+            unpaidSchedulePortion({
+                total: 3500,
+                repaid: 0,
+                startYm: '2026-09',
+                duration: 4,
+                ym: '2026-10',
+            }),
+            1750,
+        );
+        assert.equal(
+            dueThroughSalaryMonth(null, {
+                total: 900,
+                repaid: 0,
+                startYm: '2026-09',
+                duration: 3,
+                ym: '2026-10',
+            }),
+            600,
+        );
+        assert.equal(
+            dueThroughSalaryMonth(
+                { status: 'Not Paid', amount: 3500, monthStart: '2026-09', installments: [] },
+                {
+                    total: 3500,
+                    repaid: 0,
+                    startYm: '2026-09',
+                    duration: 4,
+                    ym: '2026-10',
+                },
+            ),
+            1750,
         );
     });
 });

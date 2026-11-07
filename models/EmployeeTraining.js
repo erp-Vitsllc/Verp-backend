@@ -1,9 +1,5 @@
 import mongoose from "mongoose";
 
-/**
- * EmployeeTraining - Training details
- * Contains: Training history array
- */
 const trainingDetailSchema = new mongoose.Schema(
     {
         trainingName: { type: String, required: true },

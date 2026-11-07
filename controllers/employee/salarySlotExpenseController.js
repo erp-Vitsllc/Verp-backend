@@ -227,6 +227,17 @@ export const postSalarySlotExpense = async (req, res) => {
         doc.zohoOrganizationId = organizationId;
         await doc.save();
         await applySlotPaid(doc.employeeIds || [], monthKey);
+        try {
+            const { markUtilityPortionsPaidFromPayrollZoho } = await import(
+                '../../utils/utilityEmployeePortionStatus.js'
+            );
+            await markUtilityPortionsPaidFromPayrollZoho(doc.employeeIds || [], [monthKey]);
+        } catch (utilityErr) {
+            console.error(
+                '[salary slot expense] utility portion',
+                utilityErr?.message || utilityErr,
+            );
+        }
         await closeAccountsSalarySlotInbox(doc._id);
 
         const label = String(body.organizationLabel || 'Zoho').trim() || 'Zoho';

@@ -682,7 +682,7 @@ async function refreshUtilityBillBatchInbox(batchId, { comment = '' } = {}) {
 }
 
 const OVERVIEW_BILL_FIELDS =
-    '_id entryId batchId utilityType provider accountNo billMonth amount monthlyRental differenceAmount status paymentDay payByCompanyName payByEmployeeName payByEmployeeId companyPayAmount employeePayAmount zohoBillId zohoBillIds zohoBillNumber zohoBillStatus zohoLineItems.zohoBillId zohoLineItems.payByEmployeeId zohoLineItems.amount createdAt';
+    '_id entryId batchId utilityType provider accountNo billNumber billMonth amount monthlyRental differenceAmount status paymentDay paymentBy payByCompanyName payByEmployeeName payByEmployeeId companyPayAmount employeePayAmount employeeDiffAmount expenseAccountId expenseAccountName partyAccountId partyAccountName partyAccountCode zohoVendorId zohoOrganizationId zohoBillId zohoBillIds zohoBillNumber zohoBillStatus zohoLineItems.zohoBillId zohoLineItems.payBy zohoLineItems.payByEmployeeId zohoLineItems.payByEmployeeName zohoLineItems.amount createdAt';
 
 /**
  * POST /api/UtilityBill/check-duplicates
@@ -3230,5 +3230,29 @@ export async function deleteUtilityBillPayment(req, res) {
     } catch (err) {
         console.error('[deleteUtilityBillPayment]', err);
         return res.status(500).json({ message: err?.message || 'Failed to delete bill' });
+    }
+}
+
+/** Employee profile: portion paid via payroll Zoho, Zoho expense, or employee pay. */
+export async function getUtilityEmployeePortionStatus(req, res) {
+    try {
+        const employeeId = String(req.body?.employeeId || req.query?.employeeId || '').trim();
+        const billIds = Array.isArray(req.body?.billIds)
+            ? req.body.billIds
+            : String(req.body?.billIds || req.query?.billIds || '')
+                  .split(',')
+                  .map((id) => id.trim())
+                  .filter(Boolean);
+        if (!employeeId) {
+            return res.status(400).json({ message: 'employeeId is required.' });
+        }
+        const { buildUtilityEmployeePortionStatus } = await import(
+            '../../utils/utilityEmployeePortionStatus.js'
+        );
+        const payload = await buildUtilityEmployeePortionStatus({ employeeId, billIds });
+        return res.status(200).json(payload);
+    } catch (err) {
+        console.error('[getUtilityEmployeePortionStatus]', err);
+        return res.status(500).json({ message: err?.message || 'Failed to load utility pay status.' });
     }
 }

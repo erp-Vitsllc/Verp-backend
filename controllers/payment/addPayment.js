@@ -13,6 +13,7 @@ import {
     resolveEmployeeFinePayableAmount,
     resolvePrimaryEmployeeId,
 } from "../../utils/finePayableAmount.js";
+import { countsTowardUtilityEmployeePortion } from "../../utils/utilityEmployeePortionStatus.js";
 
 const COMPANY_PARTY_IDS = new Set(['VEGA-HR-0000', 'VEGA_INTERNAL']);
 
@@ -89,6 +90,8 @@ export const addPayment = async (req, res) => {
         const isEmployeeLoanRepayPay =
             isEmployeePaySettlement &&
             ['LoanRepayment', 'AdvanceRepayment'].includes(employeePayEntityType);
+        const isEmployeeUtilityPay =
+            isEmployeePaySettlement && employeePayEntityType === 'UtilityBill';
         
         // CHECK IF CREATOR IS ACCOUNTS PERSON
         const isAccountsUser = await isUserInFlowchart(req.user, 'accounts');
@@ -172,10 +175,10 @@ export const addPayment = async (req, res) => {
         }
 
         if (isEmployeePaySettlement) {
-            if (!isEmployeeFinePay && !isEmployeeLoanRepayPay) {
+            if (!isEmployeeFinePay && !isEmployeeLoanRepayPay && !isEmployeeUtilityPay) {
                 return res.status(400).json({
                     success: false,
-                    message: 'Employee pay is only for fines, loans, or advances.',
+                    message: 'Employee pay is only for fines, loans, advances, or utility bills.',
                 });
             }
             if (!['Salary', 'Cash'].includes(normalizedSource)) {
@@ -350,6 +353,75 @@ export const addPayment = async (req, res) => {
             }
         }
 
+        let employeeUtilitySettle = null;
+        let employeeUtilityPortion = 0;
+        const utilityPortionPay = isEmployeeUtilityPay || isUtilityCompanyZohoRefund;
+        if (utilityPortionPay) {
+            const accountsOnly =
+                isAccountsUser ||
+                inheritedAccountsAction ||
+                req.user?.isAdmin === true ||
+                String(req.user?.role || '').toLowerCase() === 'admin';
+            if (!accountsOnly) {
+                return res.status(403).json({
+                    success: false,
+                    message: 'Only Accounts can pay the utility employee portion.',
+                });
+            }
+            const { buildUtilityEmployeePortionStatus } = await import(
+                '../../utils/utilityEmployeePortionStatus.js'
+            );
+            const billId = String(relatedEntityId || '').trim();
+            const portionStatus = await buildUtilityEmployeePortionStatus({
+                employeeId: String(settleEmployeeId || employee.employeeId || paidBy || '').trim(),
+                billIds: billId ? [billId] : [],
+            });
+            const portionRow = (portionStatus.rows || []).find((row) => String(row.billId) === billId);
+            employeeUtilitySettle = billId ? await UtilityBillPayment.findById(billId) : null;
+            if (!employeeUtilitySettle || !portionRow) {
+                return res.status(404).json({
+                    success: false,
+                    message: 'Utility bill not found',
+                });
+            }
+            employeeUtilityPortion = Number(portionRow.portion) || 0;
+            const expected = Math.round((Number(portionRow.outstanding) || 0) * 100) / 100;
+            const entered = Math.round((parseFloat(amount) || 0) * 100) / 100;
+            if (expected <= 0.01 || portionRow.status === 'Paid' || portionRow.status === 'Paid Employee') {
+                return res.status(400).json({
+                    success: false,
+                    message: 'This utility employee portion is already paid.',
+                });
+            }
+            if (!portionRow.canPay) {
+                return res.status(400).json({
+                    success: false,
+                    message: 'Approve the utility bill before collecting the employee portion.',
+                });
+            }
+            if (entered <= 0.009) {
+                return res.status(400).json({
+                    success: false,
+                    message: 'Amount Pay is required.',
+                });
+            }
+            if (entered - expected > 0.009) {
+                return res.status(400).json({
+                    success: false,
+                    message: `Expense can only collect the unpaid employee portion (AED ${expected.toFixed(2)}).`,
+                });
+            }
+            if (isEmployeeUtilityPay) {
+                const settleId = String(
+                    settleEmployeeId || employeeUtilitySettle.payByEmployeeId || employee.employeeId || '',
+                ).trim();
+                if (settleId && settleId !== employee.employeeId) {
+                    const settlePerson = await EmployeeBasic.findOne({ employeeId: settleId });
+                    if (settlePerson) employee = settlePerson;
+                }
+            }
+        }
+
         // Generate paymentId before creating payment
         const paymentCount = await Payment.countDocuments();
         const paymentId = `PAY-${String(paymentCount + 1).padStart(6, '0')}`;
@@ -366,7 +438,12 @@ export const addPayment = async (req, res) => {
             description: description || '',
             referenceId: employeeFineSettle?.fineId || employeeLoanSettle?.loanId || referenceId || null,
             relatedEntityType: relatedEntityType || null,
-            relatedEntityId: employeeFineSettle?._id || employeeLoanSettle?._id || relatedEntityId || null,
+            relatedEntityId:
+                employeeFineSettle?._id ||
+                employeeLoanSettle?._id ||
+                employeeUtilitySettle?._id ||
+                relatedEntityId ||
+                null,
             settleEmployeeId: isEmployeePaySettlement
                 ? String(
                       settleEmployeeId ||
@@ -1106,7 +1183,7 @@ export const addPayment = async (req, res) => {
                 ).trim();
 
                 let zohoResult = { ok: false };
-                if (paidThroughId && expenseId) {
+                if (!isEmployeeUtilityPay && paidThroughId && expenseId) {
                     try {
                         // Prefer Banking Expense Refund when tax fields are present (profile modal).
                         // Fall back to legacy journal payout for older Payments UI paths.
@@ -1211,21 +1288,42 @@ export const addPayment = async (req, res) => {
                     const { markUtilityBalancePartyExpensePaid } = await import(
                         '../../utils/upsertUtilityBalancePartyExpense.js'
                     );
-                    await markUtilityBalancePartyExpensePaid({
-                        utilityBillId: String(
-                            utilityBill?._id || relatedEntityId || '',
-                        ).trim(),
-                        employeeId: employee?.employeeId || paidBy,
-                        amount: payment.amount,
-                        payment,
-                        zohoResult: zohoResult.ok ? zohoResult : {},
-                        expenseAccountId: expenseId,
-                        expenseAccountName: expenseAccountName || payment.expenseAccountName,
-                        paidThroughAccountId: paidThroughId,
-                        paidThroughAccountName:
-                            paidThroughAccountName || payment.paidThroughAccountName,
-                        userId: req.user?._id || null,
-                    });
+                    const utilityPortionPay = isEmployeeUtilityPay || isUtilityCompanyZohoRefund;
+                    let markPaid = !utilityPortionPay;
+                    if (utilityPortionPay) {
+                        const paidRows = await Payment.find({
+                            relatedEntityType: 'UtilityBill',
+                            relatedEntityId: utilityBill?._id || relatedEntityId,
+                            status: 'Completed',
+                        }).select('amount description');
+                        const paidTotal = paidRows.reduce((sum, row) => {
+                            if (!countsTowardUtilityEmployeePortion(row)) return sum;
+                            return sum + (Number(row.amount) || 0);
+                        }, 0);
+                        markPaid =
+                            employeeUtilityPortion > 0.009 &&
+                            paidTotal + 0.009 >= employeeUtilityPortion;
+                    }
+                    if (markPaid) {
+                        await markUtilityBalancePartyExpensePaid({
+                            utilityBillId: String(
+                                utilityBill?._id || relatedEntityId || '',
+                            ).trim(),
+                            employeeId: String(
+                                payment.settleEmployeeId || employee?.employeeId || paidBy || '',
+                            ).trim(),
+                            amount: isEmployeeUtilityPay ? employeeUtilityPortion : payment.amount,
+                            payment,
+                            zohoResult: zohoResult.ok ? zohoResult : {},
+                            expenseAccountId: expenseId,
+                            expenseAccountName: expenseAccountName || payment.expenseAccountName,
+                            paidThroughAccountId: paidThroughId,
+                            paidThroughAccountName:
+                                paidThroughAccountName || payment.paidThroughAccountName,
+                            userId: req.user?._id || null,
+                            paymentMode: isEmployeeUtilityPay ? 'Employee' : '',
+                        });
+                    }
                 } catch (expenseErr) {
                     console.warn(
                         '[AddPayment] Utility party expense mark-paid failed:',
@@ -1297,6 +1395,8 @@ export const addPayment = async (req, res) => {
             const kind =
                 employeePayEntityType === 'AdvanceRepayment' ? 'advance' : 'loan';
             message = `Payment recorded. Invoice emailed for this ${kind} payment.`;
+        } else if (isEmployeeUtilityPay) {
+            message = 'Payment recorded. Invoice emailed for this utility payment. No Zoho entry.';
         }
         if (zohoSync) {
             if (zohoSync.ok && zohoSync.expenseId) {

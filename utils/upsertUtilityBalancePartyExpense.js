@@ -550,6 +550,7 @@ export async function markUtilityBalancePartyExpensePaid({
     paidThroughAccountId = '',
     paidThroughAccountName = '',
     userId = null,
+    paymentMode = '',
 } = {}) {
     const billId = clean(utilityBillId);
     const businessEmployeeId = await resolveBusinessEmployeeId(employeeId);
@@ -627,7 +628,13 @@ export async function markUtilityBalancePartyExpensePaid({
     doc.paidThroughAccountName = creditName || doc.paidThroughAccountName;
     doc.paidAt = new Date();
     doc.erpPaymentId = clean(payment?._id, doc.erpPaymentId);
-    doc.paymentMode = clean(payment?.paymentSource, doc.paymentMode);
+    const employeeSettlement =
+        Boolean(clean(payment?.settleEmployeeId)) &&
+        !clean(zohoResult?.expenseId || payment?.zohoExpenseId);
+    doc.paymentMode = clean(
+        paymentMode || (employeeSettlement ? 'Employee' : payment?.paymentSource),
+        doc.paymentMode,
+    );
     await doc.save();
 
     return { ok: true, expense: doc.toObject() };

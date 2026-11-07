@@ -3,6 +3,7 @@ import { protect } from '../middleware/authMiddleware.js';
 import {
     checkUtilityBillDuplicates,
     listUtilityBillPayments,
+    getUtilityEmployeePortionStatus,
     createUtilityBillPayment,
     createUtilityBillBatch,
     updateUtilityBillBatch,
@@ -70,6 +71,7 @@ router.put('/entries/:id', updateUtilityEntry);
 router.delete('/entries/:id', deleteUtilityEntry);
 
 router.get('/', listUtilityBillPayments);
+router.post('/employee-portion-status', getUtilityEmployeePortionStatus);
 router.post('/check-duplicates', checkUtilityBillDuplicates);
 router.post('/payment-day', upsertUtilityBillPaymentDay);
 router.put('/payment-day/:entryId/status', updateUtilityBillPaymentDayStatus);
