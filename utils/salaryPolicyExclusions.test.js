@@ -84,6 +84,7 @@ describe('salary policy employee exclusions', () => {
             sickDays: 0,
             unpaidSickDays: 0,
             annualDays: 0,
+            sandwichDays: 0,
             compOffDays: 0,
         });
         assert.deepEqual(applySalarySlipCountExclusions(counted, { attendance: true }), {
@@ -94,8 +95,10 @@ describe('salary policy employee exclusions', () => {
             sickDays: 0,
             unpaidSickDays: 0,
             annualDays: 0,
+            sandwichDays: 0,
             compOffDays: 0,
             lateEvents: 0,
+            missedPunchDays: 0,
             holidaysWorked: 0,
             otHours: 0,
             otDays: 0,

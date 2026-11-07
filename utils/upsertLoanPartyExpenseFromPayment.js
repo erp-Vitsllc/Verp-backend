@@ -118,13 +118,22 @@ export async function upsertLoanPartyExpenseFromPayment({
     doc.erpPaymentId = clean(payment?._id?.toString?.() || payment?._id);
     doc.currencyCode = 'AED';
 
-    // Company disbursement posted — employee schedule remains Not Paid until recovered.
-    const remaining = Math.max(0, total - money(loan.paidAmount));
-    doc.status = remaining <= 0.01 ? 'Paid' : 'Not Paid';
-    if (doc.status === 'Paid') {
-        doc.paidAt = new Date();
-        doc.installments = installments.map((row) => ({ ...row, status: 'Paid' }));
-    }
+    // Disbursement to the employee is paidAmount. Recovery is repaidAmount.
+    // The salary slip stays Not Paid until the employee has repaid the loan.
+    const recovered = money(loan.repaidAmount);
+    let recoveredLeft = recovered;
+    doc.installments = installments.map((row) => {
+        const part = money(row.amount);
+        const paidHere = Math.min(recoveredLeft, part);
+        recoveredLeft = money(recoveredLeft - paidHere);
+        return {
+            ...row,
+            status: part > 0.009 && paidHere + 0.009 >= part ? 'Paid' : 'Not Paid',
+        };
+    });
+    const fullyRecovered = total > 0.009 && recovered + 0.01 >= total;
+    doc.status = fullyRecovered ? 'Paid' : 'Not Paid';
+    if (fullyRecovered) doc.paidAt = doc.paidAt || new Date();
 
     await doc.save();
     return doc;

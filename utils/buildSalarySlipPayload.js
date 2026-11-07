@@ -14,19 +14,22 @@ import { isCompanyShellEmployee } from './attendanceEmployeeFilters.js';
 import { resolveEmployeeFinePayableAmount } from './finePayableAmount.js';
 import { getScheduledEmailTimeZone, getZonedParts } from './scheduleDailyAtMidnight.js';
 import {
+    getOffWeekdayKeys,
     getWeekForStaffType,
     holidayAppliesToStaff,
     loadWorkingTimeDoc,
 } from './workingTimeHelpers.js';
+import { applyLeaveCoverIndex, loadLeaveCoverIndex } from './attendanceLeaveDayCover.js';
+import { addDays, policyLeaveMultipliers } from './salaryHistoricalCalculations.js';
 import { approvedOtRemainder } from './flexibleAttendance.js';
 import { compOffAdjustedHours } from './compOffSettlement.js';
 import { getVegaLogoDataUrl } from './buildSalarySlipPdfHtml.js';
 import { resolveEmployeePayrollPolicy } from './employeeLeavePolicy.js';
+import { lateDeductionFromEvents } from './lateDeductionPolicy.js';
 import {
-    lateDeductionFromEvents,
-    lateInOutSummary,
-    missedPunchDeduction,
-} from './lateDeductionPolicy.js';
+    leaveDeductionCountWindow,
+    summarizeLeavePageDeductions,
+} from './leavePageSalaryDeductions.js';
 import { loadLeaveTicketEntitlement } from './loadLeaveTicketEntitlement.js';
 import { resolveSalarySlipApprovers } from './resolveSalarySlipApprovers.js';
 import { isSalarySlipCycle } from './salarySlipLeaveTicket.js';
@@ -483,11 +486,6 @@ function structureYearlySalary(entry) {
         }));
 }
 
-function policyTimes(value, fallback) {
-    const n = Number(value);
-    return Number.isFinite(n) && n >= 0 ? n : fallback;
-}
-
 function cycleStatus(cycle) {
     return String(cycle?.paymentStatus || cycle?.status || '').trim().toLowerCase();
 }
@@ -644,6 +642,35 @@ export function dueThroughSalaryMonth(party, schedule) {
     return unpaidSchedulePortion(schedule);
 }
 
+function installmentPaidTotal(parts) {
+    return money((parts || []).reduce((sum, row) => {
+        if (isEmployeeUnpaidStatus(row?.status)) return sum;
+        return money(sum + money(row?.amount));
+    }, 0));
+}
+
+/**
+ * Not Paid loan or advance due on this slip.
+ * Company disbursement marks the party expense Paid. That is not employee repayment.
+ * Installment Paid flags count only when their total matches repaidAmount.
+ */
+export function recoveryDueThroughSalaryMonth({ total, repaid, startYm, duration, ym, party } = {}) {
+    const due = money(total);
+    const recovered = Math.max(0, money(repaid));
+    const remaining = Math.max(0, money(due - recovered));
+    if (remaining <= 0.009 || due <= 0) return 0;
+    const schedule = { total: due, repaid: recovered, startYm, duration, ym };
+    const datedParts = (Array.isArray(party?.installments) ? party.installments : [])
+        .filter((row) => payableMonthKey(row?.monthKey));
+    const paidOnParts = installmentPaidTotal(datedParts);
+    const partsMatchRecovery = datedParts.length > 0 && Math.abs(paidOnParts - recovered) <= 0.05;
+    if (!partsMatchRecovery) return Math.min(remaining, unpaidSchedulePortion(schedule));
+    const openParty = party && !isEmployeeUnpaidStatus(party.status)
+        ? { ...party, status: 'Not Paid' }
+        : party;
+    return Math.min(remaining, dueThroughSalaryMonth(openParty, schedule));
+}
+
 function unpaidThisMonthFromPartyOrSchedule(party, schedule) {
     return dueThroughSalaryMonth(party, schedule);
 }
@@ -738,7 +765,7 @@ export async function buildSalarySlipPayload({
                 $or: [{ employeeMongoId: mongoId }, { employeeId: idPattern }],
                 date: { $gte: from, $lte: to },
             })
-                .select('date statusKey reason leavePayType timeIn timeOut timeOutDate punchSessions flexibleWorkedHours hourAdjustStatus hourAdjustMode hoursApproved hoursTaken deductionWaived flexibleOtStatus flexibleOtApprovedHours flexibleOtNextDayDate')
+                .select('date statusKey statusLabel reason leavePayType timeIn timeOut timeOutDate punchSessions flexibleWorkedHours flexibleRequiredHours hourAdjustStatus hourAdjustMode hourAdjustKind hoursApproved hoursTaken deductionWaived flexibleOtStatus flexibleOtApprovedHours flexibleOtNextDayDate leaveRequestStatus requestedStatusKey leaveRequestKind leaveRequestDayPart leaveDayFraction leaveDeductionTimes leaveRequestSession leaveCoverBlocked employeeMongoId')
                 .lean(),
             Holiday.find({ date: { $gte: from, $lte: to } }).select('date appliesTo').lean(),
             Loan.find({
@@ -820,8 +847,9 @@ export async function buildSalarySlipPayload({
     if (perAed !== 1) entry = convertSalaryEntryToAed(entry, perAed);
     const monthly = monthlySalaryOf(entry);
     const daily = monthly > 0 && daysInMonth > 0 ? money(monthly / daysInMonth) : 0;
-    const authTimes = policyTimes(policy?.authorizedLeaveDeductionDays, 1);
-    const unauthTimes = policyTimes(policy?.unauthorizedLeaveDeductionDays, 2);
+    const leaveMultipliers = policyLeaveMultipliers(policy);
+    const authTimes = leaveMultipliers.authorized;
+    const unauthTimes = leaveMultipliers.unauthorized;
     const latePolicy = lateDeductionFromEvents(0, policy);
     const lateTimes = latePolicy.multiplier;
     const week = getWeekForStaffType(workingTime, emp.staffType);
@@ -831,9 +859,16 @@ export async function buildSalarySlipPayload({
             .map((row) => dateKeyOf(row.date))
             .filter((date) => isDateInSalaryMonth(date, ym)),
     );
+    let coveredAttendance = attendance || [];
+    try {
+        const coverIndex = await loadLeaveCoverIndex({ from, to, employees: [emp] });
+        coveredAttendance = applyLeaveCoverIndex(coveredAttendance, coverIndex);
+    } catch (error) {
+        console.error('[buildSalarySlipPayload] leave cover', error?.message || error);
+    }
 
     const coveredOtSources = new Set(
-        (attendance || [])
+        coveredAttendance
             .map((row) => String(row?.flexibleFromOtDate || '').trim())
             .filter(Boolean),
     );
@@ -863,7 +898,7 @@ export async function buildSalarySlipPayload({
         verpStartDate: profile?.verpStartDate,
         enrollment,
     });
-    for (const row of attendance || []) {
+    for (const row of coveredAttendance) {
         const date = dateKeyOf(row.date);
         if (!isDateInSalaryMonth(date, ym) || countedDates.has(date)) continue;
         if (!keepAttendanceForProcessingStart(row, processingStart)) continue;
@@ -947,22 +982,57 @@ export async function buildSalarySlipPayload({
     }
 
     const holidays = Math.max(holidaySet.size, holidayMarks);
-    const authorizedDeductionDays = authorizedDays;
     const otHoursAmount = money((daily / 10) * otHours);
     const otDaysAmount = money(daily * otDays);
-    const authorizedAmount = money(daily * authTimes * authorizedDeductionDays + daily * explicitAuthorizedShares);
-    const unauthorizedAmount = money(daily * unauthTimes * unauthorizedDays);
+    const countWindow = leaveDeductionCountWindow({
+        monthKey: ym,
+        joinKey: dateKeyOf(profile?.contractJoiningDate) || dateKeyOf(emp.dateOfJoining),
+        processingStart,
+        todayKey: (() => {
+            const dubai = getZonedParts(new Date(), getScheduledEmailTimeZone());
+            return `${dubai.year}-${pad2(dubai.month)}-${pad2(dubai.day)}`;
+        })(),
+    });
+    const pageDeductions = summarizeLeavePageDeductions({
+        records: coveredAttendance,
+        policy,
+        week,
+        daily,
+        holidayDates: holidaySet,
+        offWeekdays: new Set(getOffWeekdayKeys(week)),
+        from: countWindow.from,
+        to: countWindow.to,
+        authTimes,
+        unauthTimes,
+    });
+    if (exclusions.leave || exclusions.attendance) {
+        pageDeductions.authorized = { days: 0, amount: 0 };
+        pageDeductions.unauthorized = { days: 0, amount: 0 };
+        pageDeductions.annual = { days: 0, amount: 0 };
+        pageDeductions.sandwich = { days: 0, amount: 0 };
+    }
+    if (exclusions.attendance) {
+        pageDeductions.lateIn = { count: 0, amount: 0 };
+        pageDeductions.lateOut = { count: 0, amount: 0 };
+        pageDeductions.missed = { count: 0, amount: 0 };
+    }
+    authorizedDays = pageDeductions.authorized.days;
+    explicitAuthorizedShares = 0;
+    unauthorizedDays = pageDeductions.unauthorized.days;
+    annualDays = pageDeductions.annual.days;
+    missedPunchDays = pageDeductions.missed.count;
+    const sandwichDays = pageDeductions.sandwich.days;
+    const authorizedDeductionDays = authorizedDays;
+    const authorizedAmount = pageDeductions.authorized.amount;
+    const unauthorizedAmount = pageDeductions.unauthorized.amount;
     const sickAmount = money(daily * unpaidSickDays);
-    const annualAmount = 0;
-    const lateSummary = exclusions.attendance
-        ? lateInOutSummary([], policy, week)
-        : lateInOutSummary(countedAttendance, policy, week);
-    const lateInDays = lateSummary.lateIn.dayFraction;
-    const lateOutDays = lateSummary.lateOut.dayFraction;
-    const lateInAmount = money(daily * lateInDays);
-    const lateOutAmount = money(daily * lateOutDays);
-    const missedCharge = missedPunchDeduction(missedPunchDays, policy);
-    const missedAmount = money(daily * missedCharge.dayFraction);
+    const annualAmount = pageDeductions.annual.amount;
+    const sandwichAmount = pageDeductions.sandwich.amount;
+    const lateInAmount = pageDeductions.lateIn.amount;
+    const lateOutAmount = pageDeductions.lateOut.amount;
+    const missedAmount = pageDeductions.missed.amount;
+    const lateInCount = pageDeductions.lateIn.count;
+    const lateOutCount = pageDeductions.lateOut.count;
 
     const earnings = structureEarnings(entry);
     upsertEarning(
@@ -1118,16 +1188,14 @@ export async function buildSalarySlipPayload({
         const total = money(loan.amount);
         const repaid = money(loan.repaidAmount);
         const remaining = Math.max(0, money(total - repaid));
-        const dueAmount = Math.min(
-            remaining,
-            dueThroughSalaryMonth(party, {
-                total,
-                repaid,
-                startYm: start,
-                duration,
-                ym,
-            }),
-        );
+        const dueAmount = recoveryDueThroughSalaryMonth({
+            total,
+            repaid,
+            startYm: start,
+            duration,
+            ym,
+            party,
+        });
         const thisMonthAmount = dueAmount;
         const type = isAdvance ? 'Salary Advance' : 'Loan';
         countedLoanIds.add(String(loan._id || ''));
@@ -1311,13 +1379,14 @@ export async function buildSalarySlipPayload({
     }
 
     const deductions = [
+        { component: 'Late in', basis: qtyLabel(lateInCount, 'event'), amount: lateInAmount },
+        { component: 'Late out', basis: qtyLabel(lateOutCount, 'event'), amount: lateOutAmount },
+        { component: 'Missed Punch', basis: qtyLabel(missedPunchDays, 'event'), amount: missedAmount },
         { component: 'Authorized Leave', basis: qtyLabel(authorizedDeductionDays, 'day'), amount: authorizedAmount },
         { component: 'Unauthorized Leave', basis: qtyLabel(unauthorizedDays, 'day'), amount: unauthorizedAmount },
-        { component: 'Sick Leave', basis: qtyLabel(sickDays, 'day'), amount: sickAmount },
+        { component: 'Sandwich Leave', basis: qtyLabel(sandwichDays, 'day'), amount: sandwichAmount },
         { component: 'Annual Leave', basis: qtyLabel(annualDays, 'day'), amount: annualAmount },
-        { component: 'Late in', basis: qtyLabel(lateSummary.lateIn.count, 'event'), amount: lateInAmount },
-        { component: 'Late out', basis: qtyLabel(lateSummary.lateOut.count, 'event'), amount: lateOutAmount },
-        { component: 'Missed Punch', basis: qtyLabel(missedCharge.units, 'day'), amount: missedAmount },
+        { component: 'Sick Leave', basis: qtyLabel(sickDays, 'day'), amount: sickAmount },
         { component: 'Salary Advance', basis: 'Schedule', amount: advanceMonth },
         { component: 'Loan', basis: 'Monthly', amount: loanMonth },
         { component: 'Fine', basis: 'Installment', amount: fineMonth },
@@ -1328,7 +1397,7 @@ export async function buildSalarySlipPayload({
     const totalDeductions = money(deductions.reduce((sum, row) => sum + money(row.amount), 0));
     const netSalary = money(Math.max(0, grossEarnings - totalDeductions));
     const attendanceDeductionTotal = money(
-        authorizedAmount + unauthorizedAmount + sickAmount + annualAmount + lateInAmount + lateOutAmount + missedAmount,
+        authorizedAmount + unauthorizedAmount + sickAmount + annualAmount + sandwichAmount + lateInAmount + lateOutAmount + missedAmount,
     );
 
     const attendanceDeductions = [
@@ -1365,35 +1434,44 @@ export async function buildSalarySlipPayload({
             category: 'Annual Leave',
             qty: qtyLabel(annualDays, 'day'),
             rate: formatAed(annualDays > 0 ? daily : 0),
-            calculation: annualDays > 0 ? 'Paid annual leave — no deduction' : 'No deduction for this month',
+            calculation: annualDays > 0
+                ? `${qtyLabel(annualDays, 'day')} x 1 x ${formatAed(daily)}`
+                : 'No deduction for this month',
             total: annualAmount,
         },
         {
+            category: 'Sandwich Leave',
+            qty: qtyLabel(sandwichDays, 'day'),
+            rate: formatAed(sandwichDays > 0 ? daily : 0),
+            calculation: sandwichDays > 0
+                ? `${qtyLabel(sandwichDays, 'day')} x 1 x ${formatAed(daily)}`
+                : 'No deduction for this month',
+            total: sandwichAmount,
+        },
+        {
             category: 'Late in',
-            qty: qtyLabel(lateSummary.lateIn.count, 'event'),
+            qty: qtyLabel(lateInCount, 'event'),
             rate: formatAed(daily),
             calculation: lateInAmount > 0
-                ? `${qtyLabel(lateInDays, 'day')} x ${formatAed(daily)}`
+                ? `${qtyLabel(lateInCount, 'event')} x ${formatAed(lateInAmount / Math.max(lateInCount, 1))}`
                 : 'No deduction for this month',
             total: lateInAmount,
         },
         {
             category: 'Late out',
-            qty: qtyLabel(lateSummary.lateOut.count, 'event'),
+            qty: qtyLabel(lateOutCount, 'event'),
             rate: formatAed(daily),
             calculation: lateOutAmount > 0
-                ? `${qtyLabel(lateOutDays, 'day')} x ${formatAed(daily)}`
+                ? `${qtyLabel(lateOutCount, 'event')} x ${formatAed(lateOutAmount / Math.max(lateOutCount, 1))}`
                 : 'No deduction for this month',
             total: lateOutAmount,
         },
         {
             category: 'Missed Punch',
-            qty: qtyLabel(missedCharge.units, 'day'),
-            rate: formatAed(money(daily * missedCharge.multiplier)),
+            qty: qtyLabel(missedPunchDays, 'event'),
+            rate: formatAed(missedPunchDays > 0 ? money(missedAmount / missedPunchDays) : 0),
             calculation: missedAmount > 0
-                ? missedCharge.eventBundle > 0
-                    ? `${missedPunchDays} missed punches, free ${missedCharge.eventBundle}, x ${missedCharge.multiplier} x ${formatAed(daily)}`
-                    : `${missedPunchDays} missed punches x ${missedCharge.multiplier} x ${formatAed(daily)}`
+                ? `${qtyLabel(missedPunchDays, 'event')} x ${formatAed(daily)}`
                 : 'No deduction for this month',
             total: missedAmount,
         },
@@ -1485,9 +1563,10 @@ export async function buildSalarySlipPayload({
             lossOfPayDays: {
                 authorized: authorizedDeductionDays,
                 unauthorized: unauthorizedDays,
-                late: lateInDays,
-                earlyOut: lateOutDays,
+                late: lateInCount,
+                earlyOut: lateOutCount,
                 annual: annualDays,
+                sandwich: sandwichDays,
                 compOff: compOffDays,
             },
             otherDeductionTimes: {
@@ -1555,7 +1634,7 @@ function presentSalarySlipPolicyExclusions(slip) {
             lossOfPayDays: {
                 ...(slip.summary?.lossOfPayDays || {}),
                 ...(hideLeaveStats
-                    ? { authorized: 0, unauthorized: 0, annual: 0, compOff: 0 }
+                    ? { authorized: 0, unauthorized: 0, annual: 0, sandwich: 0, compOff: 0 }
                     : {}),
                 ...(exclusions.attendance ? { late: 0, earlyOut: 0 } : {}),
             },
@@ -1932,6 +2011,7 @@ const ZOHO_LOSS_OF_PAY = [
     'Late in',
     'Late out',
     'Annual Leave',
+    'Sandwich Leave',
     'Comp off leave',
 ];
 

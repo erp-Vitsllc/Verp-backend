@@ -3,6 +3,7 @@ const LEAVE_TAKEN_DEDUCTION_NAMES = new Set([
     'unauthorized leave',
     'sick leave',
     'annual leave',
+    'sandwich leave',
     'comp off leave',
     'comp-off leave',
     'compoff leave',
@@ -84,6 +85,7 @@ export function applySalarySlipCountExclusions(counts = {}, exclusions = {}) {
         next.sickDays = 0;
         next.unpaidSickDays = 0;
         next.annualDays = 0;
+        next.sandwichDays = 0;
         next.compOffDays = 0;
     }
     if (exclusions.attendance) {

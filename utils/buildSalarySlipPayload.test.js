@@ -9,6 +9,7 @@ import {
     unpaidDueByMonth,
     unpaidSchedulePortion,
     dueThroughSalaryMonth,
+    recoveryDueThroughSalaryMonth,
     yearlyEndOfServiceBenefit,
 } from './buildSalarySlipPayload.js';
 
@@ -314,6 +315,58 @@ describe('unpaid deduction carry-over', () => {
                 },
             ),
             1750,
+        );
+    });
+
+    it('still shows an unrepaid loan after company disbursement marked the schedule paid', () => {
+        const party = {
+            status: 'Paid',
+            amount: 3500,
+            installments: [
+                { monthKey: '2026-09', amount: 875, status: 'Paid' },
+                { monthKey: '2026-10', amount: 875, status: 'Paid' },
+                { monthKey: '2026-11', amount: 875, status: 'Paid' },
+                { monthKey: '2026-12', amount: 875, status: 'Paid' },
+            ],
+        };
+        assert.equal(
+            recoveryDueThroughSalaryMonth({
+                total: 3500,
+                repaid: 0,
+                startYm: '2026-09',
+                duration: 4,
+                ym: '2026-10',
+                party,
+            }),
+            1750,
+        );
+        assert.equal(
+            recoveryDueThroughSalaryMonth({
+                total: 3500,
+                repaid: 875,
+                startYm: '2026-09',
+                duration: 4,
+                ym: '2026-10',
+                party: {
+                    ...party,
+                    status: 'Not Paid',
+                    installments: party.installments.map((row) =>
+                        row.monthKey === '2026-09' ? row : { ...row, status: 'Not Paid' },
+                    ),
+                },
+            }),
+            875,
+        );
+        assert.equal(
+            recoveryDueThroughSalaryMonth({
+                total: 3500,
+                repaid: 3500,
+                startYm: '2026-09',
+                duration: 4,
+                ym: '2026-10',
+                party,
+            }),
+            0,
         );
     });
 });
