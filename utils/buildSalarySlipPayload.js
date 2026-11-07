@@ -20,6 +20,7 @@ import {
     loadWorkingTimeDoc,
 } from './workingTimeHelpers.js';
 import { applyLeaveCoverIndex, loadLeaveCoverIndex } from './attendanceLeaveDayCover.js';
+import { overlaySuspendedAttendance } from './attendanceSuspension.js';
 import { addDays, policyLeaveMultipliers } from './salaryHistoricalCalculations.js';
 import { approvedOtRemainder } from './flexibleAttendance.js';
 import { compOffAdjustedHours } from './compOffSettlement.js';
@@ -734,7 +735,7 @@ export async function buildSalarySlipPayload({
     const emp =
         preloadedEmp ||
         (await EmployeeBasic.findOne({ employeeId: code })
-            .select('employeeId firstName lastName designation staffType status overtime company dateOfJoining noticeRequest.exitDate workLocation workingFromCountry workingFromCountryCode salaryCurrency workTimeZone')
+            .select('employeeId firstName lastName designation staffType status overtime company dateOfJoining noticeRequest.exitDate workLocation workingFromCountry workingFromCountryCode salaryCurrency workTimeZone attendanceAccountStatus attendanceSuspension')
             .populate('company', 'name nickName')
             .lean());
     if (!emp || isCompanyShellEmployee(emp)) {
@@ -866,6 +867,8 @@ export async function buildSalarySlipPayload({
     } catch (error) {
         console.error('[buildSalarySlipPayload] leave cover', error?.message || error);
     }
+    // A suspended day is not worked and not leave. The Leave page uses the same overlay.
+    coveredAttendance = overlaySuspendedAttendance(coveredAttendance, emp, from, to);
 
     const coveredOtSources = new Set(
         coveredAttendance
@@ -1955,20 +1958,6 @@ function payrollFigureKey(value) {
 }
 
 const LOSS_OF_PAY_NAME = /leave|late|early|miss(?:ed)?[\s-]*punch|comp[\s-]*off/i;
-const OTHER_DEDUCTION_NAME = /loan|fine|utility|advance/i;
-
-/** Loss of pay is leave, late in, early out, and missed punch. The rest of the slip deductions are loan, fine, utility, and salary advance. */
-function splitPayrollDeductions(rows) {
-    let lossOfPay = 0;
-    let otherDeduction = 0;
-    for (const row of rows || []) {
-        const name = String(row?.component || '');
-        const amount = money(row?.amount);
-        if (LOSS_OF_PAY_NAME.test(name)) lossOfPay = money(lossOfPay + amount);
-        else if (OTHER_DEDUCTION_NAME.test(name)) otherDeduction = money(otherDeduction + amount);
-    }
-    return { lossOfPay, otherDeduction };
-}
 
 function labeledCount(value) {
     const match = String(value ?? '').match(/-?\d+(?:\.\d+)?/);
@@ -2005,14 +1994,15 @@ const ZOHO_MONTHLY_EARNINGS = [
     'Reward',
 ];
 
+/** Same loss-of-pay lines as the salary slip card. */
 const ZOHO_LOSS_OF_PAY = [
-    'Authorized Leave',
-    'Unauthorized Leave',
     'Late in',
     'Late out',
-    'Annual Leave',
+    'Missed Punch',
+    'Authorized Leave',
+    'Unauthorized Leave',
     'Sandwich Leave',
-    'Comp off leave',
+    'Annual Leave',
 ];
 
 function namedAmount(rows, name) {
@@ -2024,7 +2014,7 @@ function namedAmount(rows, name) {
     return 0;
 }
 
-/** Loss of pay total on the salary slip card: leave, late in, early out, annual leave, and comp off. */
+/** Loss of pay total on the salary slip card and the payroll sheet. */
 export function salarySlipLossOfPay(slip) {
     return ZOHO_LOSS_OF_PAY.reduce(
         (sum, name) => money(sum + namedAmount(slip?.deductions, name)),
@@ -2073,22 +2063,17 @@ export function salarySlipPayrollFigures(slip) {
         }
     }
     const reconciliation = slip?.reconciliation || {};
-    const deduction = money(slip?.totalDeductions);
     const netSalary = money(slip?.netSalary);
-    const split = splitPayrollDeductions(slip?.deductions);
     const monthlySalary = structure || money(slip?.summary?.monthlySalary);
     const buckets = splitSheetDeductions(slip?.deductions);
-    const sheetOtherDeduction = money(Math.max(
-        0,
-        deduction - split.lossOfPay - buckets.fineAmount - buckets.advanceAmount - buckets.loanAmount,
-    ));
     const zohoSalary = salarySlipZohoPay(slip);
-    // Same as the slip's Net salary payable: Zoho salary minus loan, fine, utility, and advance.
-    // Sick leave and missed punch stay out of that pair, so they must not lower the sheet net either.
-    const actualSalary = money(Math.max(
-        0,
-        zohoSalary - buckets.fineAmount - buckets.advanceAmount - buckets.loanAmount - sheetOtherDeduction,
-    ));
+    const cardLossOfPay = salarySlipLossOfPay(slip);
+    const utilityAmount = namedAmount(slip?.deductions, 'Utility Excess');
+    const cardOtherDeduction = money(
+        buckets.fineAmount + buckets.advanceAmount + buckets.loanAmount + utilityAmount,
+    );
+    // Same as the slip: Zoho salary minus loan, fine, utility, and salary advance.
+    const actualSalary = money(Math.max(0, zohoSalary - cardOtherDeduction));
     return {
         monthKey: monthKeyOf(slip?.monthKey),
         monthlySalary,
@@ -2102,13 +2087,13 @@ export function salarySlipPayrollFigures(slip) {
         fineAmount: buckets.fineAmount,
         advanceAmount: buckets.advanceAmount,
         loanAmount: buckets.loanAmount,
-        sheetOtherDeduction,
+        sheetOtherDeduction: utilityAmount,
         extra,
         ot: overtime,
-        deduction,
-        lossOfPay: split.lossOfPay,
-        sheetLossOfPay: salarySlipLossOfPay(slip),
-        otherDeduction: split.otherDeduction,
+        deduction: money(cardLossOfPay + cardOtherDeduction),
+        lossOfPay: cardLossOfPay,
+        sheetLossOfPay: cardLossOfPay,
+        otherDeduction: cardOtherDeduction,
         actualSalary,
         netSalary,
         zohoSalary,

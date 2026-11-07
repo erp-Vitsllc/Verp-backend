@@ -89,6 +89,7 @@ function deductionKind(row) {
 
 /** Same type the Leave page salary deduction table uses for one attendance day. */
 export function shownDeductionKind(row) {
+    if (isSuspendedAttendance(row)) return 'suspended';
     const status = String(row?.statusKey || '');
     if (status === 'sandwich') return 'sandwich';
     const approved = String(row?.leaveRequestStatus || '').toLowerCase() === 'approved';
@@ -113,7 +114,12 @@ function weekdayKey(date) {
     return WEEKDAY_KEYS[new Date(`${date}T00:00:00Z`).getUTCDay()] || '';
 }
 
+function isSuspendedAttendance(row) {
+    return String(row?.statusKey || '') === 'suspended' || row?.attendanceSuspended === true;
+}
+
 function leaveKeyOf(row) {
+    if (isSuspendedAttendance(row)) return '';
     const key = String(row?.statusKey || '');
     if (SANDWICH_LEAVE_KEYS.has(key)) return key;
     const requested = String(row?.requestedStatusKey || '');
@@ -206,7 +212,7 @@ function hourDeductionAmount(row, week, daily, kind, unauthTimes) {
 }
 
 function rowDeductionAmount(row, week, daily, policy, mispunchAmounts, authTimes, unauthTimes) {
-    if (isDeductionWaived(row)) return 0;
+    if (isSuspendedAttendance(row) || isDeductionWaived(row)) return 0;
     const key = deductionKind(row);
     if (key === 'mispunch') {
         const hoursWaived = String(row?.hourAdjustStatus || '') === 'approved' && !(n(row?.hoursApproved) > 0);
@@ -309,7 +315,7 @@ export function summarizeLeavePageDeductions({
         sandwich: { days: 0, amount: 0 },
     };
     if (!from || !to) return empty;
-    const rows = uniqueRows(records, from, to);
+    const rows = uniqueRows(records, from, to).filter((row) => !isSuspendedAttendance(row));
     const mispunchAmounts = mispunchAmountsFor(rows, policy, daily);
     const forgiven = (row) => isDeductionWaived(row) || isHourLossWaived(row);
 
