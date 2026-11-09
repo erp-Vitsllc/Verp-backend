@@ -13,7 +13,7 @@ describe("waiting steps", () => {
         assert.equal(steps.find((step) => step.key === "reportee").status, "Completed");
     });
 
-    it("keeps a later HR approval when the reportee is still waiting", () => {
+    it("names only the reportee while that approval is still open", () => {
         const steps = waitingStepsFromFacts(
             { displayStatus: "Pending", assigneeName: "Ali Khan" },
             { stage: "pending_reportee", reporteeName: "Ali Khan", hrName: "Sara Ali" },
@@ -22,7 +22,6 @@ describe("waiting steps", () => {
             steps.map((step) => [step.status, step.approvalTitle, step.personName]),
             [
                 ["In Progress", "Reportee Approval", "Ali Khan"],
-                ["Not Started", "HR Approval", "Sara Ali"],
             ],
         );
     });
@@ -42,7 +41,7 @@ describe("waiting steps", () => {
         assert.equal(steps.some((step) => step.personName === "Raseel Muhammad"), false);
     });
 
-    it("adds a different approval that is still waiting after completion is submitted", () => {
+    it("does not add HR while the request is still with the reportee", () => {
         const steps = waitingStepsFromFacts(
             {
                 displayStatus: "Pending",
@@ -52,7 +51,7 @@ describe("waiting steps", () => {
             },
             { stage: "pending_reportee", reporteeName: "Raseel Muhammad", hrName: "Sara Ali" },
         );
-        assert.deepEqual(steps.map((step) => step.personName), ["Vishnu Prasad", "Sara Ali"]);
+        assert.deepEqual(steps.map((step) => step.personName), ["Vishnu Prasad"]);
     });
 
     it("hides the line once the task is finished", () => {

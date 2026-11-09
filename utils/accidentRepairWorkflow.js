@@ -1,7 +1,7 @@
 import AssetItem from '../models/AssetItem.js';
 import EmployeeBasic from '../models/EmployeeBasic.js';
-import User from '../models/User.js';
 import Fine from '../models/Fine.js';
+import { applyInitialFineRoute } from './fineAdminCreateGate.js';
 import { getDepartmentHOD } from './getDepartmentHOD.js';
 import { syncDashboardAction } from './syncDashboard.js';
 import { sendVehicleServiceWorkflowEmail } from './sendVehicleServiceWorkflowEmail.js';
@@ -549,31 +549,11 @@ export async function submitAccidentRepairGarage(asset, serviceId, serviceUpdate
     return asset;
 }
 
-async function resolveFineWorkflowTarget(_employeeDoc, hrHOD) {
-    const hrUser = hrHOD ? await User.findOne({ employeeId: hrHOD.employeeId }).select('_id') : null;
-    if (hrUser?._id) {
-        return {
-            submittedTo: hrUser._id,
-            workflow: [
-                {
-                    role: 'HR',
-                    assignedTo: hrUser._id,
-                    status: 'Pending',
-                    assignedAt: new Date(),
-                },
-            ],
-            fineStatus: 'Pending HR',
-        };
-    }
-    return { fineStatus: 'Pending HR', workflow: [], submittedTo: null };
-}
-
 export async function createAccidentRepairEmployeeFines(asset, service, reqUser) {
     const remark = parseRemark(service);
     const paymentByMode = String(remark.paymentByMode || remark.liableOn || 'company').toLowerCase();
     if (paymentByMode === 'company') return [];
 
-    const hrHOD = await getDepartmentHOD('hr');
     const rows = Array.isArray(remark.employeeLiabilityRows) ? remark.employeeLiabilityRows : [];
     const estimated = Number(remark.estimatedCost || service.value || 0);
     const employeePct = Number(remark.employeePayPercent || 0);
@@ -616,10 +596,6 @@ export async function createAccidentRepairEmployeeFines(asset, service, reqUser)
             ? 'Company'
             : `${emp?.firstName || ''} ${emp?.lastName || ''}`.trim() || party.employeeId;
 
-        const wfTarget = party.isCompany
-            ? await resolveFineWorkflowTarget(null, hrHOD)
-            : await resolveFineWorkflowTarget(emp, hrHOD);
-
         const finePayload = {
             fineId: `${baseFineId}${suffix(i)}`,
             assignedEmployees: [
@@ -631,7 +607,7 @@ export async function createAccidentRepairEmployeeFines(asset, service, reqUser)
                 },
             ],
             fineType: 'Vehicle Fine',
-            fineStatus: wfTarget.fineStatus,
+            fineStatus: 'Pending HR',
             fineAmount: party.amount,
             totalFineAmount: party.amount,
             employeeAmount: party.isCompany ? 0 : party.amount,
@@ -649,9 +625,9 @@ export async function createAccidentRepairEmployeeFines(asset, service, reqUser)
             companyName: emp?.company?.name || '',
             sourceOfIncome: 'Salary',
             createdBy: reqUser?._id || reqUser?.id,
-            submittedTo: wfTarget.submittedTo || undefined,
-            workflow: wfTarget.workflow?.length ? wfTarget.workflow : undefined,
         };
+        const routed = await applyInitialFineRoute(finePayload, { creator: reqUser });
+        if (!routed.ok) throw new Error(routed.message);
 
         const saved = await new Fine(finePayload).save();
         created.push(saved);
@@ -675,6 +651,13 @@ export async function createAccidentRepairEmployeeFines(asset, service, reqUser)
                 extra1: 'Vehicle Fine',
                 extra2: `Accident repair liability — AED ${created.reduce((s, f) => s + Number(f.fineAmount || 0), 0)}`,
             });
+        }
+        if (String(first.fineStatus) === 'Pending Admin') {
+            const { sendFineApprovalEmail } = await import('./sendFineApprovalEmail.js');
+            sendFineApprovalEmail(
+                first,
+                created.flatMap((row) => row.assignedEmployees || []),
+            ).catch(() => {});
         }
     }
 

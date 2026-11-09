@@ -1,6 +1,5 @@
 import Fine from "../../models/Fine.js";
 import EmployeeBasic from "../../models/EmployeeBasic.js";
-import User from "../../models/User.js";
 import Company from "../../models/Company.js";
 import { ensureAttachmentPersistedToS3 } from "../../utils/s3Upload.js";
 import { sendFineApprovalEmail } from "../../utils/sendFineApprovalEmail.js";
@@ -8,6 +7,11 @@ import { isVehicleFinePayload, validateVehicleFinePayload } from "../../utils/va
 import { normalizeFineSourceSchedule } from "../../utils/normalizeFineSourceSchedule.js";
 import { parseFineCalendarDate } from "../../utils/fineCalendarDate.js";
 import { fineDashboardRequest, fineStillNeedsApprovalInbox, realFineEmployeeIds } from "../../utils/fineStageAuth.js";
+import {
+    applyInitialFineRoute,
+    creatorIsFlowchartAdminOfficer,
+    resolveAdminOfficerUser,
+} from "../../utils/fineAdminCreateGate.js";
 
 async function persistFineAttachmentsList(attachments, folder) {
     if (!Array.isArray(attachments) || attachments.length === 0) return [];
@@ -217,6 +221,15 @@ export const addFine = async (req, res) => {
                     message: "Cannot proceed. HR Admin designation is not assigned in Flowchart. Please assign HR Admin designation in Settings > FlowChart before creating a fine request."
                 });
             }
+            const creatorIsAdminOfficer = await creatorIsFlowchartAdminOfficer(req.user);
+            if (!creatorIsAdminOfficer) {
+                const { user: adminUser } = await resolveAdminOfficerUser();
+                if (!adminUser) {
+                    return res.status(400).json({
+                        message: "Admin Officer is not assigned in Flowchart. Assign the Admin Officer in Settings > FlowChart before creating a fine.",
+                    });
+                }
+            }
         }
 
         // --- BULK CREATION LOGIC ---
@@ -421,51 +434,13 @@ export const addFine = async (req, res) => {
                     finePayload.handoverHrApproval = true;
                 }
 
-                // BULK: HR already approved on handover — next is Management
-                if (commonData.handoverHrApproval === true) {
-                    finePayload.fineStatus = commonData.fineStatus === 'Approved' ? 'Approved' : 'Pending Authorization';
-                    finePayload.workflow = [
-                        {
-                            role: 'HR',
-                            assignedTo: req.user._id,
-                            status: 'Approved',
-                            assignedAt: new Date(),
-                            actionedAt: new Date(),
-                        },
-                    ];
-                    try {
-                        const { getManagementHOD } = await import('../../utils/getManagementHOD.js');
-                        const managementHOD = await getManagementHOD(empData.employeeId);
-                        if (managementHOD) {
-                            const mgmtUser = await User.findOne({ employeeId: managementHOD.employeeId });
-                            if (mgmtUser) {
-                                finePayload.submittedTo = mgmtUser._id;
-                                finePayload.workflow.push({
-                                    role: 'Management',
-                                    assignedTo: mgmtUser._id,
-                                    status: 'Pending',
-                                    assignedAt: new Date(),
-                                });
-                            }
-                        }
-                    } catch (mgmtErr) {
-                        console.error('[AddFine] Handover Management routing failed:', mgmtErr);
-                    }
-                } else if (finePayload.fineStatus !== 'Draft' && hrHOD) {
-                    try {
-                        const hrUser = await User.findOne({ employeeId: hrHOD.employeeId });
-                        if (hrUser) {
-                            finePayload.submittedTo = hrUser._id;
-                            finePayload.fineStatus = 'Pending HR';
-                            finePayload.workflow = [{
-                                role: 'HR',
-                                assignedTo: hrUser._id,
-                                status: 'Pending',
-                                assignedAt: new Date()
-                            }];
-                        }
-                    } catch (snapErr) {
-                        console.error('[AddFine] Error resolving HR for:', empData.employeeId, snapErr);
+                if (finePayload.fineStatus !== 'Draft' && commonData.fineStatus !== 'Approved') {
+                    const routed = await applyInitialFineRoute(finePayload, {
+                        creator: req.user,
+                        handoverHrApproval: commonData.handoverHrApproval === true,
+                    });
+                    if (!routed.ok) {
+                        return res.status(400).json({ message: routed.message });
                     }
                 }
 
@@ -670,32 +645,13 @@ export const addFine = async (req, res) => {
 
         normalizeFineSourceSchedule(fineData);
 
-        // SINGLE: Route directly to HR (no reportee step)
-        if (fineData.fineStatus !== 'Draft') {
-            const targetEmpId = (fineData.assignedEmployees && fineData.assignedEmployees.length > 0)
-                ? fineData.assignedEmployees[0].employeeId
-                : employeeId;
-
-            if (targetEmpId && targetEmpId !== 'PENDING') {
-                try {
-                    // hrHOD already validated above
-                    if (hrHOD) {
-                        const hrUser = await User.findOne({ employeeId: hrHOD.employeeId });
-                        if (hrUser) {
-                            fineData.submittedTo = hrUser._id;
-                            fineData.fineStatus = 'Pending HR';
-                            fineData.workflow = [{
-                                role: 'HR',
-                                assignedTo: hrUser._id,
-                                status: 'Pending',
-                                assignedAt: new Date()
-                            }];
-                            console.log(`[AddFine] Fine routed directly to HR: ${hrUser._id}`);
-                        }
-                    }
-                } catch (snapErr) {
-                    console.error('[AddFine] Error resolving HR:', snapErr);
-                }
+        if (fineData.fineStatus !== 'Draft' && fineStatus !== 'Approved') {
+            const routed = await applyInitialFineRoute(fineData, {
+                creator: req.user,
+                handoverHrApproval: req.body?.handoverHrApproval === true,
+            });
+            if (!routed.ok) {
+                return res.status(400).json({ message: routed.message });
             }
         }
 

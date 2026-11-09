@@ -945,7 +945,7 @@ export async function buildSalarySlipPayload({
     } catch (error) {
         console.error('[buildSalarySlipPayload] leave cover', error?.message || error);
     }
-    // A suspended day is not worked and not leave. The Leave page uses the same overlay.
+    // A suspended day is not worked and not leave. Each one deducts one day's salary.
     coveredAttendance = overlaySuspendedAttendance(coveredAttendance, emp, from, to);
 
     const coveredOtSources = new Set(
@@ -1109,6 +1109,7 @@ export async function buildSalarySlipPayload({
         pageDeductions.lateIn = { count: 0, amount: 0 };
         pageDeductions.lateOut = { count: 0, amount: 0 };
         pageDeductions.missed = { count: 0, amount: 0 };
+        pageDeductions.suspended = { days: 0, amount: 0 };
     }
     authorizedDays = pageDeductions.authorized.days;
     explicitAuthorizedShares = 0;
@@ -1116,12 +1117,14 @@ export async function buildSalarySlipPayload({
     annualDays = pageDeductions.annual.days;
     missedPunchDays = pageDeductions.missed.count;
     const sandwichDays = pageDeductions.sandwich.days;
+    const suspendedDays = pageDeductions.suspended.days;
     const authorizedDeductionDays = authorizedDays;
     const authorizedAmount = pageDeductions.authorized.amount;
     const unauthorizedAmount = pageDeductions.unauthorized.amount;
     const sickAmount = money(daily * unpaidSickDays);
     const annualAmount = pageDeductions.annual.amount;
     const sandwichAmount = pageDeductions.sandwich.amount;
+    const suspendedAmount = pageDeductions.suspended.amount;
     const lateInAmount = pageDeductions.lateIn.amount;
     const lateOutAmount = pageDeductions.lateOut.amount;
     const missedAmount = pageDeductions.missed.amount;
@@ -1481,11 +1484,12 @@ export async function buildSalarySlipPayload({
 
     const deductions = [
         { component: 'Late in', basis: qtyLabel(lateInCount, 'event'), amount: lateInAmount },
-        { component: 'Late out', basis: qtyLabel(lateOutCount, 'event'), amount: lateOutAmount },
+        { component: 'Early Out', basis: qtyLabel(lateOutCount, 'event'), amount: lateOutAmount },
         { component: 'Missed Punch', basis: qtyLabel(missedPunchDays, 'event'), amount: missedAmount },
         { component: 'Authorized Leave', basis: qtyLabel(authorizedDeductionDays, 'day'), amount: authorizedAmount },
         { component: 'Unauthorized Leave', basis: qtyLabel(unauthorizedDays, 'day'), amount: unauthorizedAmount },
         { component: 'Sandwich Leave', basis: qtyLabel(sandwichDays, 'day'), amount: sandwichAmount },
+        { component: 'Suspended', basis: qtyLabel(suspendedDays, 'day'), amount: suspendedAmount },
         { component: 'Annual Leave', basis: qtyLabel(annualDays, 'day'), amount: annualAmount },
         { component: 'Sick Leave', basis: qtyLabel(sickDays, 'day'), amount: sickAmount },
         { component: 'Salary Advance', basis: 'Schedule', amount: advanceMonth },
@@ -1498,7 +1502,7 @@ export async function buildSalarySlipPayload({
     const totalDeductions = money(deductions.reduce((sum, row) => sum + money(row.amount), 0));
     const netSalary = money(Math.max(0, grossEarnings - totalDeductions));
     const attendanceDeductionTotal = money(
-        authorizedAmount + unauthorizedAmount + sickAmount + annualAmount + sandwichAmount + lateInAmount + lateOutAmount + missedAmount,
+        authorizedAmount + unauthorizedAmount + sickAmount + annualAmount + sandwichAmount + suspendedAmount + lateInAmount + lateOutAmount + missedAmount,
     );
 
     const attendanceDeductions = [
@@ -1550,6 +1554,15 @@ export async function buildSalarySlipPayload({
             total: sandwichAmount,
         },
         {
+            category: 'Suspended',
+            qty: qtyLabel(suspendedDays, 'day'),
+            rate: formatAed(suspendedDays > 0 ? daily : 0),
+            calculation: suspendedDays > 0
+                ? `${qtyLabel(suspendedDays, 'day')} x 1 x ${formatAed(daily)}`
+                : 'No deduction for this month',
+            total: suspendedAmount,
+        },
+        {
             category: 'Late in',
             qty: qtyLabel(lateInCount, 'event'),
             rate: formatAed(daily),
@@ -1559,7 +1572,7 @@ export async function buildSalarySlipPayload({
             total: lateInAmount,
         },
         {
-            category: 'Late out',
+            category: 'Early Out',
             qty: qtyLabel(lateOutCount, 'event'),
             rate: formatAed(daily),
             calculation: lateOutAmount > 0
@@ -1668,6 +1681,7 @@ export async function buildSalarySlipPayload({
                 earlyOut: lateOutCount,
                 annual: annualDays,
                 sandwich: sandwichDays,
+                suspended: suspendedDays,
                 compOff: compOffDays,
             },
             otherDeductionTimes: {
@@ -1737,7 +1751,7 @@ function presentSalarySlipPolicyExclusions(slip) {
                 ...(hideLeaveStats
                     ? { authorized: 0, unauthorized: 0, annual: 0, sandwich: 0, compOff: 0 }
                     : {}),
-                ...(exclusions.attendance ? { late: 0, earlyOut: 0 } : {}),
+                ...(exclusions.attendance ? { late: 0, earlyOut: 0, suspended: 0 } : {}),
             },
         },
     };
@@ -1755,6 +1769,7 @@ function rowNameKey(row) {
     if (raw.includes('end of service') || raw.includes('gratuity') || raw === 'eosb') {
         return 'end of service benefit';
     }
+    if (raw === 'late out') return 'early out';
     return raw;
 }
 
@@ -1908,7 +1923,9 @@ function preferLiveComputed(merged, live) {
 }
 
 function deductionKey(name) {
-    return String(name || '').trim().toLowerCase();
+    const key = String(name || '').trim().toLowerCase();
+    if (key === 'late out') return 'early out';
+    return key;
 }
 
 function deductionMatches(component, name) {
@@ -2067,7 +2084,7 @@ function payrollFigureKey(value) {
     return String(value || '').trim().replace(/\s+/g, '').toUpperCase();
 }
 
-const LOSS_OF_PAY_NAME = /leave|late|early|miss(?:ed)?[\s-]*punch|comp[\s-]*off/i;
+const LOSS_OF_PAY_NAME = /leave|late|early|miss(?:ed)?[\s-]*punch|comp[\s-]*off|suspend/i;
 
 function labeledCount(value) {
     const match = String(value ?? '').match(/-?\d+(?:\.\d+)?/);
@@ -2095,19 +2112,20 @@ function splitSheetDeductions(rows) {
 /** Same loss-of-pay lines as the salary slip card. */
 const ZOHO_LOSS_OF_PAY = [
     'Late in',
-    'Late out',
+    'Early Out',
     'Missed Punch',
     'Authorized Leave',
     'Unauthorized Leave',
     'Sandwich Leave',
+    'Suspended',
     'Annual Leave',
 ];
 
 function namedRow(rows, name) {
-    const want = String(name || '').trim().toLowerCase();
+    const want = deductionKey(name);
     if (!want) return null;
     for (const row of rows || []) {
-        if (String(row?.component || '').trim().toLowerCase() === want) return row;
+        if (deductionKey(row?.component) === want) return row;
     }
     return null;
 }
@@ -2185,11 +2203,12 @@ function cardMonthlyEarning(slip, name) {
 
 const LOSS_OF_PAY_GROUP = {
     'Late in': 'attendance',
-    'Late out': 'attendance',
+    'Early Out': 'attendance',
     'Missed Punch': 'attendance',
     'Authorized Leave': 'leave',
     'Unauthorized Leave': 'leave',
     'Sandwich Leave': 'leave',
+    'Suspended': 'attendance',
     'Annual Leave': 'leave',
 };
 

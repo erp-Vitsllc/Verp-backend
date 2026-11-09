@@ -18403,8 +18403,6 @@ export const handleAssetActionApproval = async (req, res) => {
                 if (fd) {
                     try {
                         const Fine = (await import('../models/Fine.js')).default;
-                        const { getDepartmentHOD } = await import('../utils/getDepartmentHOD.js');
-                        const User = (await import('../models/User.js')).default;
                         const { syncDashboardAction } = await import('../utils/syncDashboard.js');
 
                         const finePayload = fd || asset.pendingActionDetails?.fineData;
@@ -18415,27 +18413,14 @@ export const handleAssetActionApproval = async (req, res) => {
                         if (!trackerValidation.ok) {
                             return res.status(400).json({ message: trackerValidation.message });
                         }
-                        const hrHOD = trackerValidation.hrHOD;
-
-                        const hrUser = await User.findOne({ employeeId: hrHOD.employeeId });
-                        const hrAssignmentId = hrUser ? hrUser._id : hrHOD._id;
-
                         const { employees, ...cleanFd } = finePayload;
-                        const fineModel = new Fine({
+                        const fineFields = {
                             ...cleanFd,
                             assignedEmployees: employees || finePayload.assignedEmployees || [],
                             company: asset.assignedTo?.company?._id || finePayload.company,
                             companyName: asset.assignedTo?.company?.name || finePayload.companyName || '',
                             fineId: uniqueFineId,
-                            fineStatus: 'Pending HR', // Direct to Pending HR, not Draft
-                            approvalStatus: 'Pending HR',
-                            submittedTo: hrAssignmentId,
-                            workflow: [{
-                                role: 'HR',
-                                assignedTo: hrAssignmentId,
-                                status: 'Pending',
-                                assignedAt: new Date()
-                            }],
+                            fineStatus: 'Pending HR',
                             createdBy: req.user._id,
                             awardedDate: new Date(),
                             assetId: asset.assetId,
@@ -18445,7 +18430,13 @@ export const handleAssetActionApproval = async (req, res) => {
                                 name: 'Loss and Damage.pdf',
                                 mimeType: 'application/pdf'
                             } : finePayload.attachment
-                        });
+                        };
+                        const { applyInitialFineRoute } = await import('../utils/fineAdminCreateGate.js');
+                        const routed = await applyInitialFineRoute(fineFields, { creator: req.user });
+                        if (!routed.ok) {
+                            return res.status(400).json({ message: routed.message });
+                        }
+                        const fineModel = new Fine(fineFields);
                         await fineModel.save();
 
                         // Sync Dashboard Action for Fine
@@ -18456,7 +18447,7 @@ export const handleAssetActionApproval = async (req, res) => {
                             await syncDashboardAction({
                                 requestId: fineModel._id,
                                 requestType: 'Fine',
-                                assignedTo: hrAssignmentId,
+                                assignedTo: fineModel.submittedTo,
                                 status: 'Pending',
                                 subjectEmployee: subjectEmp,
                                 requestedByName: req.user.name || '',
@@ -18478,7 +18469,7 @@ export const handleAssetActionApproval = async (req, res) => {
                             assetId: asset._id,
                             action: 'Comment',
                             performedBy: req.user._id,
-                            comments: `Asset Controller approved "${actionType}". Fine created (${uniqueFineId}) with status Pending HR. ${comment || ''}`,
+                            comments: `Asset Controller approved "${actionType}". Fine created (${uniqueFineId}) with status ${fineModel.fineStatus}. ${comment || ''}`,
                             date: new Date(),
                             details: { status: 'AssetControllerApproved', originalAction: actionType, fineId: uniqueFineId }
                         });
@@ -18506,7 +18497,7 @@ export const handleAssetActionApproval = async (req, res) => {
                             assetId: asset._id,
                             action: 'Lost',
                             performedBy: req.user.employeeObjectId || req.user._id,
-                            comments: `Loss and Damage finalized. Fine ${uniqueFineId} created (Pending HR). ${comment || ''}`,
+                            comments: `Loss and Damage finalized. Fine ${uniqueFineId} created (${fineModel.fineStatus}). ${comment || ''}`,
                             date: new Date(),
                             details: { status: 'Lost', fineId: uniqueFineId, lastAssignee: lostAssignee?._id || null },
                         });
@@ -18531,9 +18522,9 @@ export const handleAssetActionApproval = async (req, res) => {
                             }
                         }
 
-                        await notifyAssignedEmployeeIfController(req, asset, actionType, `${actionType} was approved by Asset Controller and moved to Pending HR.`);
+                        await notifyAssignedEmployeeIfController(req, asset, actionType, `${actionType} was approved by Asset Controller. Fine ${uniqueFineId} is ${fineModel.fineStatus}.`);
                         return res.status(200).json({
-                            message: `Approved by Asset Controller. Fine created (${uniqueFineId}) with status Pending HR.`,
+                            message: `Approved by Asset Controller. Fine created (${uniqueFineId}) with status ${fineModel.fineStatus}.`,
                             asset,
                             fineId: uniqueFineId
                         });
@@ -19735,7 +19726,6 @@ export const respondAccessoryAction = async (req, res) => {
                 if (pendingActionDetails?.fineData) {
                     try {
                         const Fine = (await import('../models/Fine.js')).default;
-                        const User = (await import('../models/User.js')).default;
                         const { syncDashboardAction } = await import('../utils/syncDashboard.js');
                         const fd = pendingActionDetails.fineData;
                         const uniqueFineId = await generateFineIdInternal();
@@ -19745,37 +19735,29 @@ export const respondAccessoryAction = async (req, res) => {
                         if (!trackerValidation.ok) {
                             return res.status(400).json({ message: trackerValidation.message });
                         }
-                        const hrHOD = trackerValidation.hrHOD;
-
-                        const hrUser = await User.findOne({ employeeId: hrHOD.employeeId });
-                        const hrAssignmentId = hrUser ? hrUser._id : hrHOD._id;
-
                         const { employees, ...cleanFd } = fd;
-                        const fineModel = new Fine({
+                        const fineFields = {
                             ...cleanFd,
                             assignedEmployees: employees || fd.assignedEmployees || [],
                             company: asset.assignedTo?.company?._id || fd.company,
                             companyName: asset.assignedTo?.company?.name || fd.companyName || '',
                             fineId: uniqueFineId,
                             fineStatus: 'Pending HR',
-                            approvalStatus: 'Pending HR',
-                            submittedTo: hrAssignmentId,
-                            workflow: [{
-                                role: 'HR',
-                                assignedTo: hrAssignmentId,
-                                status: 'Pending',
-                                assignedAt: new Date()
-                            }],
                             createdBy: req.user._id,
                             awardedDate: new Date(),
                             assetId: asset.assetId,
                             assetObjectId: asset._id,
-                            // Store accessory identity so Fine pages can show accessory-specific fines
                             accessoryId: accessory.accessoryId,
                             accessoryName: accessory.name,
                             accessoryObjectId: accessory._id,
                             attachment: fileUrl ? { url: fileUrl, name: 'L&D Photo.pdf', mimeType: 'application/pdf' } : (pendingActionDetails.attachment ? { url: pendingActionDetails.attachment, name: 'L&D Photo.pdf', mimeType: 'application/pdf' } : fd.attachment)
-                        });
+                        };
+                        const { applyInitialFineRoute } = await import('../utils/fineAdminCreateGate.js');
+                        const routed = await applyInitialFineRoute(fineFields, { creator: req.user });
+                        if (!routed.ok) {
+                            return res.status(400).json({ message: routed.message });
+                        }
+                        const fineModel = new Fine(fineFields);
                         await fineModel.save();
 
                         // Sync Dashboard Action for Fine
@@ -19786,7 +19768,7 @@ export const respondAccessoryAction = async (req, res) => {
                             await syncDashboardAction({
                                 requestId: fineModel._id,
                                 requestType: 'Fine',
-                                assignedTo: hrAssignmentId,
+                                assignedTo: fineModel.submittedTo,
                                 status: 'Pending',
                                 subjectEmployee: subjectEmp,
                                 requestedByName: req.user.name || '',
@@ -19808,7 +19790,7 @@ export const respondAccessoryAction = async (req, res) => {
                             assetId: asset._id,
                             action: 'Comment',
                             performedBy: req.user.employeeObjectId,
-                            comments: `Asset Controller approved accessory "${accessory.name}" "${pendingAction}". Fine created (${uniqueFineId}) with status Pending HR. ${comment || ''}`,
+                            comments: `Asset Controller approved accessory "${accessory.name}" "${pendingAction}". Fine created (${uniqueFineId}) with status ${fineModel.fineStatus}. ${comment || ''}`,
                             date: new Date(),
                             details: { status: 'AssetControllerApproved', originalAction: pendingAction, accessoryId: accessory.accessoryId, fineId: uniqueFineId }
                         });
@@ -19907,7 +19889,7 @@ export const respondAccessoryAction = async (req, res) => {
                             await syncAllAccessoryInstancesForAsset(asset);
                         } catch (syncErr) {
                         }
-                        await notifyAssignedEmployeeIfController(req, asset, 'Loss and Damage Accessory', `Accessory "${accToDetach.name}" loss and damage was approved by Asset Controller and moved to Pending HR.`);
+                        await notifyAssignedEmployeeIfController(req, asset, 'Loss and Damage Accessory', `Accessory "${accToDetach.name}" loss and damage was approved by Asset Controller. Fine ${uniqueFineId} is ${fineModel.fineStatus}.`);
 
                         void emailAccessoryDecisionToRequester(true, comment || '');
 
@@ -19915,7 +19897,7 @@ export const respondAccessoryAction = async (req, res) => {
                         await removeAccessoryFromHistorySnapshots(asset._id, accToDetach._id || accToDetach.accessoryId);
 
                         return res.status(200).json({
-                            message: `Approved by Asset Controller. Fine created (${uniqueFineId}) with status Pending HR.`,
+                            message: `Approved by Asset Controller. Fine created (${uniqueFineId}) with status ${fineModel.fineStatus}.`,
                             asset,
                             fineId: uniqueFineId
                         });

@@ -2,6 +2,7 @@ import nodemailer from 'nodemailer';
 import { emailFrontendUrl } from './resolveFrontendBaseUrl.js';
 import { resolveEmployeeEmail } from './resolveEmployeeEmail.js';
 import { rememberSentEmail } from './emailDispatch.js';
+import { getDepartmentHOD } from './getDepartmentHOD.js';
 
 function mailRecordIds(recordIds) {
     const list = Array.isArray(recordIds) ? recordIds : [recordIds];
@@ -48,6 +49,16 @@ function createTransport() {
 
 function personName(person) {
     return `${person?.firstName || ''} ${person?.lastName || ''}`.trim() || 'Employee';
+}
+
+/** Flowchart HR already made the decision, so the "HR approved" notice is not sent back to HR. */
+async function recipientIsFlowchartHr(person, email) {
+    const hr = await getDepartmentHOD('hr').catch(() => null);
+    if (!hr) return false;
+    if (person?._id && hr._id && String(person._id) === String(hr._id)) return true;
+    const hrEmail = String(resolveEmployeeEmail(hr).email || '').trim().toLowerCase();
+    const target = String(email || resolveEmployeeEmail(person || {}).email || '').trim().toLowerCase();
+    return Boolean(hrEmail && target && hrEmail === target);
 }
 
 function escapeHtml(value) {
@@ -220,6 +231,7 @@ export async function sendHourRequestCompletedEmail({
         const mail = createTransport();
         const { email: to } = resolveEmployeeEmail(toEmp || {});
         if (!mail || !to) return;
+        if (await recipientIsFlowchartHr(toEmp, to)) return;
         const subject = 'Hour request completed by HR';
         const html = `
             <p>Hello,</p>
@@ -471,6 +483,7 @@ export async function sendAttendanceLeaveDecisionEmail({
             console.warn('[AttendanceLeaveEmail] Missing SMTP or employee company email for decision.');
             return;
         }
+        if (await recipientIsFlowchartHr(employee, to)) return;
 
         const empName = personName(employee);
         const approved = String(decision || '').toLowerCase() === 'approved';

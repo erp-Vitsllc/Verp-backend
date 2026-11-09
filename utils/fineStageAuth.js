@@ -3,6 +3,7 @@ import { getManagementHOD } from './getManagementHOD.js';
 import { viewerInheritsRequestAction } from './reassigneeTaskPower.js';
 
 const STATUS_ROLE_MAP = {
+    'Pending Admin': 'Admin Officer',
     'Pending HR': 'HR',
     'Pending Review': 'HR',
     'Pending Accounts': 'Accounts',
@@ -27,6 +28,7 @@ export function getExpectedRoleForFineStatus(fineStatus, workflow = []) {
 
 const FINE_PENDING_APPROVAL_STATUSES = new Set([
     'Pending',
+    'Pending Admin',
     'Pending HR',
     'Pending Review',
     'Pending Accounts',
@@ -189,7 +191,9 @@ export async function resolveCurrentStageAssignee(fine) {
     const targetEmployeeId = getTargetEmployeeIdFromFine(fine);
     let hod = null;
 
-    if (expectedRole === 'HR') {
+    if (expectedRole === 'Admin Officer') {
+        hod = await getDepartmentHOD('admincontroller');
+    } else if (expectedRole === 'HR') {
         hod = await getDepartmentHOD('hr', targetEmployeeId);
     } else if (expectedRole === 'Accounts') {
         hod = await getDepartmentHOD('finance', targetEmployeeId);
@@ -290,6 +294,7 @@ export function getFlowchartEmployeeIdForRole(fine, expectedRole) {
 }
 
 const FINE_INBOX_PENDING_STATUSES = [
+    'Pending Admin',
     'Pending HR',
     'Pending Review',
     'Pending Accounts',
@@ -434,13 +439,17 @@ export async function backfillFineApprovalInboxForViewer(ctx) {
         found.push(...workflowAssigned);
     }
 
-    const [hrHod, accountsHod, mgmtHod] = await Promise.all([
+    const [hrHod, accountsHod, mgmtHod, adminHod] = await Promise.all([
         getDepartmentHOD('hr'),
         getDepartmentHOD('finance'),
         getManagementHOD(),
+        getDepartmentHOD('admincontroller'),
     ]);
 
     const flowchartStatuses = [];
+    if (viewerMatchesFlowchartHod(ctx, adminHod)) {
+        flowchartStatuses.push('Pending Admin');
+    }
     if (viewerMatchesFlowchartHod(ctx, hrHod)) {
         flowchartStatuses.push('Pending HR', 'Pending Review', 'Pending');
     }

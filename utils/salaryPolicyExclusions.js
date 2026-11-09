@@ -16,6 +16,7 @@ const LATE_DEDUCTION_NAMES = new Set([
     'early out',
     'early go',
     'missed punch',
+    'suspended',
 ]);
 
 function deductionNameKey(name) {

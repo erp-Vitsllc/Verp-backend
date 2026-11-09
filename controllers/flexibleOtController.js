@@ -8,6 +8,7 @@ import { hasPermission } from '../services/permissionService.js';
 import {
     attendanceChangeQueuedMessage,
     openAttendanceChangeForEmployee,
+    pendingDateRequestMessage,
     supersedeOpenAttendanceChanges,
 } from '../utils/attendanceChangeApproval.js';
 import { isAttendanceSuspendedOn } from '../utils/attendanceSuspension.js';
@@ -349,6 +350,14 @@ export async function requestFlexibleOvertime(req, res) {
         });
         if (placement.error) {
             return res.status(placement.error.status).json(placement.error.body);
+        }
+        if (!isHr) {
+            const sourcePending = await pendingDateRequestMessage(record.employeeMongoId, record.date);
+            if (sourcePending) return res.status(400).json({ message: sourcePending });
+        }
+        if (confirmNextDay && targetDate) {
+            const targetPending = await pendingDateRequestMessage(record.employeeMongoId, targetDate);
+            if (targetPending) return res.status(400).json({ message: targetPending });
         }
 
         if (confirmNextDay) {

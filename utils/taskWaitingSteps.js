@@ -65,9 +65,8 @@ function attendanceSteps(change, currentName) {
             });
         }
     }
-    if (hr) {
-        const active = stage === "pending_hr";
-        const away = active && currentName && !samePerson(currentName, hr);
+    if (hr && stage === "pending_hr") {
+        const away = currentName && !samePerson(currentName, hr);
         if (away) {
             steps.push({
                 key: "hr",
@@ -86,7 +85,7 @@ function attendanceSteps(change, currentName) {
         } else {
             steps.push({
                 key: "hr",
-                status: active ? "In Progress" : "Not Started",
+                status: "In Progress",
                 personName: hr,
                 personId: String(change.hrId || ""),
                 approvalTitle: "HR Approval",
@@ -98,8 +97,8 @@ function attendanceSteps(change, currentName) {
 
 /**
  * Steps the list and the details page both use to say who a task is waiting on.
- * A completion that is with the original assignee names that person, plus any
- * other approval that is still waiting.
+ * Only the person whose turn it is now is named. HR is not listed while the
+ * request is still with the reportee.
  */
 export function waitingStepsFromFacts(task = {}, change = null) {
     const shown = String(task.displayStatus || task.status || "");

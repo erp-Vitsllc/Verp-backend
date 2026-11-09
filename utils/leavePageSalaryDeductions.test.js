@@ -72,7 +72,7 @@ describe('leave page salary deductions', () => {
         assert.equal(summary.annual.amount, 160);
     });
 
-    it('does not deduct suspended days as unauthorized leave or sandwich leave', () => {
+    it('deducts each suspended day at one day salary, not as unauthorized or sandwich leave', () => {
         const employee = {
             attendanceAccountStatus: 'suspended',
             attendanceSuspension: {
@@ -104,9 +104,31 @@ describe('leave page salary deductions', () => {
         assert.equal(summary.unauthorized.amount, 0);
         assert.equal(summary.sandwich.days, 0);
         assert.equal(summary.sandwich.amount, 0);
+        assert.equal(summary.suspended.days, 13);
+        assert.equal(summary.suspended.amount, 1040);
         assert.equal(summary.authorized.days, 1);
         assert.equal(summary.authorized.amount, 80);
         assert.equal(summary.lateIn.count, 1);
+    });
+
+    it('counts a suspended weekly off as suspended, not sandwich leave', () => {
+        const summary = summarizeLeavePageDeductions({
+            records: [
+                { date: '2026-10-01', statusKey: 'on_leave' },
+                { date: '2026-10-02', statusKey: 'suspended', attendanceSuspended: true },
+                { date: '2026-10-03', statusKey: 'on_leave' },
+            ],
+            daily: 80,
+            from: '2026-10-01',
+            to: '2026-10-31',
+            offWeekdays: new Set(['friday']),
+        });
+        assert.equal(summary.sandwich.days, 0);
+        assert.equal(summary.sandwich.amount, 0);
+        assert.equal(summary.suspended.days, 1);
+        assert.equal(summary.suspended.amount, 80);
+        assert.equal(summary.annual.days, 2);
+        assert.equal(summary.annual.amount, 160);
     });
 
     it('counts the current month only through yesterday', () => {

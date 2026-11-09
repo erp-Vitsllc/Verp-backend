@@ -1,3 +1,4 @@
+import Attendance from '../models/Attendance.js';
 import AttendanceChangeRequest from '../models/AttendanceChangeRequest.js';
 import DashboardAction from '../models/DashboardAction.js';
 import EmployeeBasic from '../models/EmployeeBasic.js';
@@ -504,6 +505,34 @@ export async function supersedeOpenAttendanceChanges({ date, employeeMongoId, ac
     );
 }
 
+/** One open request per employee per date. Leave, hours, overtime, and attendance changes all count. */
+export async function pendingDateRequestMessage(employeeMongoId, date) {
+    const id = String(employeeMongoId || '').trim();
+    const dateKey = String(date || '').slice(0, 10);
+    if (!id || !/^\d{4}-\d{2}-\d{2}$/.test(dateKey)) return '';
+    const [record, change] = await Promise.all([
+        Attendance.findOne({ employeeMongoId: id, date: dateKey })
+            .select('leaveRequestStatus hourAdjustStatus flexibleOtStatus')
+            .lean(),
+        AttendanceChangeRequest.findOne({
+            employeeMongoId: id,
+            date: dateKey,
+            stage: { $in: OPEN_STAGES },
+        })
+            .select('_id')
+            .lean(),
+    ]);
+    if (
+        String(record?.leaveRequestStatus || '') === 'pending'
+        || String(record?.hourAdjustStatus || '') === 'pending'
+        || String(record?.flexibleOtStatus || '') === 'pending'
+        || change
+    ) {
+        return `A request is already pending for ${dateKey}.`;
+    }
+    return '';
+}
+
 export async function submitAttendanceChange({
     employee,
     date,
@@ -516,6 +545,12 @@ export async function submitAttendanceChange({
     action = 'mark',
 }) {
     const employeeMongoId = String(employee?._id || '');
+    const blocked = await pendingDateRequestMessage(employeeMongoId, date);
+    if (blocked) {
+        const error = new Error(blocked);
+        error.statusCode = 400;
+        throw error;
+    }
     const summaryEmployee = {
         _id: employee?._id,
         employeeId: employee?.employeeId || '',
@@ -547,18 +582,7 @@ export async function submitAttendanceChange({
         decidedAtHr: null,
     };
 
-    let request = await AttendanceChangeRequest.findOne({
-        date,
-        employeeMongoId,
-        stage: { $in: OPEN_STAGES },
-    });
-    if (request) {
-        await closeChangeBells(request._id, 'Rejected', actor?._id);
-        request.set(fields);
-        await request.save();
-    } else {
-        request = await AttendanceChangeRequest.create(fields);
-    }
+    const request = await AttendanceChangeRequest.create(fields);
 
     const approver = stage === 'pending_hr' ? hr : reportee;
     const summary = attendanceChangeSummary(request);
@@ -804,18 +828,23 @@ export async function openAttendanceChangeForEmployee({
         return { error: 'This employee has no primary reportee, so the change cannot be sent for approval.' };
     }
 
-    const pending = await submitAttendanceChange({
-        employee,
-        date,
-        proposed,
-        previous,
-        stage,
-        actor,
-        reportee,
-        hr,
-        action,
-    });
-    return { pending };
+    try {
+        const pending = await submitAttendanceChange({
+            employee,
+            date,
+            proposed,
+            previous,
+            stage,
+            actor,
+            reportee,
+            hr,
+            action,
+        });
+        return { pending };
+    } catch (error) {
+        if (error?.statusCode === 400) return { error: error.message };
+        throw error;
+    }
 }
 
 export async function loadAttendanceChangeInboxItems({ viewerId, viewerIsHr, reporteeIds }) {

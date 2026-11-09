@@ -165,7 +165,13 @@ export function sandwichDates({ records, holidayDates, offWeekdays, from, to } =
         }
         return '';
     };
+    const suspended = new Set();
+    for (const row of records || []) {
+        const date = dateKeyOf(row?.date);
+        if (date && isSuspendedAttendance(row)) suspended.add(date);
+    }
     for (const date of dateKeysBetween(from, to)) {
+        if (suspended.has(date)) continue;
         if (!offSet.has(date) || leaveByDate.has(date)) continue;
         const prev = leaveByDate.get(nearest(date, -1));
         const next = leaveByDate.get(nearest(date, 1));
@@ -291,7 +297,8 @@ function punchShare(row, week, kind) {
 
 /**
  * Attendance deductions for one salary month, using the Leave page rules.
- * Sandwich Leave is always returned, with 0 days and 0 amount when there is none.
+ * Sandwich Leave and Suspended are always returned, with 0 days and 0 amount when there are none.
+ * Each suspended calendar day deducts one day's salary.
  */
 export function summarizeLeavePageDeductions({
     records,
@@ -313,9 +320,17 @@ export function summarizeLeavePageDeductions({
         unauthorized: { days: 0, amount: 0 },
         annual: { days: 0, amount: 0 },
         sandwich: { days: 0, amount: 0 },
+        suspended: { days: 0, amount: 0 },
     };
     if (!from || !to) return empty;
-    const rows = uniqueRows(records, from, to).filter((row) => !isSuspendedAttendance(row));
+    const windowRows = uniqueRows(records, from, to);
+    const suspendedDates = new Set();
+    for (const row of windowRows) {
+        if (!isSuspendedAttendance(row)) continue;
+        const date = dateKeyOf(row?.date);
+        if (date) suspendedDates.add(date);
+    }
+    const rows = windowRows.filter((row) => !isSuspendedAttendance(row));
     const mispunchAmounts = mispunchAmountsFor(rows, policy, daily);
     const forgiven = (row) => isDeductionWaived(row) || isHourLossWaived(row);
 
@@ -361,5 +376,6 @@ export function summarizeLeavePageDeductions({
         unauthorized: { days: money2(unauthDays), amount: money2(unauthDays * unauthTimes * n(daily)) },
         annual: { days: annualDays, amount: money2(annualDays * n(daily)) },
         sandwich: { days: sandwich.size, amount: money2(sandwich.size * n(daily)) },
+        suspended: { days: suspendedDates.size, amount: money2(suspendedDates.size * n(daily)) },
     };
 }

@@ -3,10 +3,7 @@ import { sendFineRejectedEmail } from "../../utils/sendFineRejectedEmail.js";
 import { isValidStorageUrl } from "../../utils/validationHelper.js";
 
 import EmployeeBasic from "../../models/EmployeeBasic.js";
-import User from "../../models/User.js";
 import { sendFineApprovalEmail } from "../../utils/sendFineApprovalEmail.js";
-import { getDepartmentHOD } from "../../utils/getDepartmentHOD.js";
-import { getManagementHOD } from "../../utils/getManagementHOD.js";
 import { isVehicleFinePayload, validateVehicleFinePayload } from "../../utils/validateVehicleFinePayload.js";
 import { canUserActOnFineStageAsync, fineDashboardRequest, fineStillNeedsApprovalInbox } from "../../utils/fineStageAuth.js";
 import {
@@ -22,6 +19,7 @@ import { normalizeFineSourceSchedule } from "../../utils/normalizeFineSourceSche
 import { ensureAttachmentPersistedToS3 } from "../../utils/s3Upload.js";
 import { runAfterResponse } from "../../utils/runAfterResponse.js";
 import { parseFineCalendarDate } from "../../utils/fineCalendarDate.js";
+import { applyInitialFineRoute } from "../../utils/fineAdminCreateGate.js";
 
 export const updateFine = async (req, res) => {
     try {
@@ -354,26 +352,25 @@ export const updateFine = async (req, res) => {
 
             if (targetEmpId) {
                 try {
-                    const hrHOD = await getDepartmentHOD('hr', targetEmpId);
-                    if (hrHOD) {
-                        const hrUser = await User.findOne({ employeeId: hrHOD.employeeId });
-                        if (hrUser) {
-                            for (const f of fines) {
-                                f.submittedTo = hrUser._id;
-                                f.fineStatus = 'Pending HR';
-                                f.workflow = [
-                                    { role: 'HR', assignedTo: hrUser._id, status: 'Pending', assignedAt: new Date() }
-                                ];
-                                normalizeFineSourceSchedule(f);
-                                await f.save();
-                            }
-                            shouldSendApprovalEmail = true;
-                            statusHandled = true;
-                            console.log(`[UpdateFine] ${fines.length} Fines routed directly to HR: ${hrUser._id}`);
-                        }
+                    const routed = await applyInitialFineRoute(fine, {
+                        creator: req.user,
+                        handoverHrApproval: fine.handoverHrApproval === true,
+                    });
+                    if (!routed.ok) {
+                        return res.status(400).json({ message: routed.message });
                     }
+                    for (const f of fines) {
+                        f.submittedTo = fine.submittedTo;
+                        f.fineStatus = fine.fineStatus;
+                        f.workflow = fine.workflow;
+                        normalizeFineSourceSchedule(f);
+                        await f.save();
+                    }
+                    shouldSendApprovalEmail = true;
+                    statusHandled = true;
+                    console.log(`[UpdateFine] ${fines.length} fines routed to ${fine.fineStatus}`);
                 } catch (snapErr) {
-                    console.error('[UpdateFine] Error resolving HR:', snapErr);
+                    console.error('[UpdateFine] Error resolving first approver:', snapErr);
                 }
             }
         } else if (updates.resubmit && oldStatus === 'Rejected') {
@@ -387,7 +384,8 @@ export const updateFine = async (req, res) => {
                     rejectedStep.actionedAt = null;
                     if (updates.remarks) rejectedStep.comment = `RESUBMITTED: ${updates.remarks}`;
 
-                    if (rejectedStep.role === 'HR') f.fineStatus = 'Pending HR';
+                    if (rejectedStep.role === 'Admin Officer') f.fineStatus = 'Pending Admin';
+                    else if (rejectedStep.role === 'HR') f.fineStatus = 'Pending HR';
                     else if (rejectedStep.role === 'Accounts') f.fineStatus = 'Pending Accounts';
                     else if (rejectedStep.role === 'Management' || rejectedStep.role === 'CEO') f.fineStatus = 'Pending Authorization';
                     else f.fineStatus = 'Pending Review';

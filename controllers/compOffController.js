@@ -1,6 +1,7 @@
 import Attendance from '../models/Attendance.js';
 import EmployeeBasic from '../models/EmployeeBasic.js';
 import { getDepartmentHOD } from '../utils/getDepartmentHOD.js';
+import { pendingDateRequestMessage } from '../utils/attendanceChangeApproval.js';
 import { settleFulfilledLeaveRequest } from '../utils/leaveRequestSettlement.js';
 import { sendAttendanceDirectChangeEmail } from '../utils/sendAttendanceLeaveEmails.js';
 import { loadCompOffMonth, settleCompOffDay } from '../utils/compOffSettlement.js';
@@ -73,6 +74,10 @@ export async function requestCompOffLeave(req, res) {
         }
         if (!reason) {
             return res.status(400).json({ message: 'Reason is required.' });
+        }
+        const pendingMessage = await pendingDateRequestMessage(self._id, date);
+        if (pendingMessage) {
+            return res.status(400).json({ message: pendingMessage });
         }
 
         const employee = await EmployeeBasic.findById(self._id)

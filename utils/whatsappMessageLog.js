@@ -91,7 +91,7 @@ export async function logOutboundWhatsAppMessage({
             employeeId: String(employeeId || contact.employeeId || '').trim(),
             sentByUserId: actorId(actor),
             sentByName: sender,
-            error: success ? '' : String(result?.error || 'Send failed'),
+            error: success ? '' : formatWhatsAppFailure(result?.error, result?.metaError?.code),
             occurredAt: new Date(),
         });
         return doc;
@@ -149,12 +149,32 @@ export async function logInboundWhatsAppMessage({
     }
 }
 
+const STATUS_RANK = { queued: 0, sent: 1, delivered: 2, read: 3 };
+
+/** Later receipts must not move a message backwards. A failure replaces only an unconfirmed send. */
+export function shouldApplyWhatsAppStatus(currentStatus, nextStatus) {
+    const current = String(currentStatus || '').trim().toLowerCase();
+    const next = String(nextStatus || '').trim().toLowerCase();
+    if (!['sent', 'delivered', 'read', 'failed'].includes(next)) return false;
+    if (next === 'failed') return current === '' || current === 'queued' || current === 'sent';
+    return (STATUS_RANK[next] ?? 0) >= (STATUS_RANK[current] ?? 0);
+}
+
+export function formatWhatsAppFailure(message, code) {
+    const text = String(message || '').trim() || 'Send failed';
+    if (code == null || code === '') return text;
+    const label = String(code).trim();
+    if (!label || text.includes(label)) return text;
+    return `[${label}] ${text}`;
+}
+
 export async function applyWhatsAppDeliveryStatus({
     waMessageId = '',
     status = '',
     recipientPhone = '',
     occurredAt = null,
     errorMessage = '',
+    errorCode = null,
 } = {}) {
     try {
         const id = String(waMessageId || '').trim();
@@ -165,13 +185,20 @@ export async function applyWhatsAppDeliveryStatus({
             occurredAt instanceof Date && !Number.isNaN(occurredAt.getTime())
                 ? occurredAt
                 : new Date();
+        const existing = await WhatsAppMessage.findOne({ waMessageId: id }).select('status').lean();
+        if (!existing) return null;
+        if (!shouldApplyWhatsAppStatus(existing.status, mapped)) return existing;
+
         const update = { status: mapped };
         if (mapped === 'failed') {
-            update.error = String(errorMessage || '').trim() || 'Delivery failed. The attachment did not reach the phone.';
+            update.error = formatWhatsAppFailure(
+                String(errorMessage || '').trim() || 'Delivery failed. The message did not reach the phone.',
+                errorCode,
+            );
         }
 
         const doc = await WhatsAppMessage.findOneAndUpdate(
-            { waMessageId: id },
+            { waMessageId: id, status: existing.status },
             { $set: update },
             { new: true },
         );

@@ -1,5 +1,6 @@
 import mongoose from 'mongoose';
 import Attendance from '../models/Attendance.js';
+import AttendanceChangeRequest from '../models/AttendanceChangeRequest.js';
 import EmployeeBasic from '../models/EmployeeBasic.js';
 import { getDepartmentHOD, isUserActiveInFlowchart } from '../utils/getDepartmentHOD.js';
 import { flexibleExactLossHours, requiredHoursForDate } from '../utils/flexibleAttendance.js';
@@ -466,6 +467,20 @@ export async function decideHourAdjust(req, res) {
         const record = await Attendance.findById(attendanceId);
         if (!record || record.hourAdjustStatus !== 'pending') {
             return res.status(404).json({ message: 'Pending hour request not found.' });
+        }
+        const openChange = await AttendanceChangeRequest.findOne({
+            action: 'hour_adjust',
+            'proposed.attendanceId': attendanceId,
+            stage: { $in: ['pending_reportee', 'pending_requester'] },
+        })
+            .select('stage')
+            .lean();
+        if (openChange) {
+            return res.status(400).json({
+                message: openChange.stage === 'pending_requester'
+                    ? 'This request is pending with the requester.'
+                    : 'This request is pending with the primary reportee.',
+            });
         }
 
         if (decision === 'rejected') {

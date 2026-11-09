@@ -1,6 +1,7 @@
 import mongoose from 'mongoose';
 import Attendance from '../../models/Attendance.js';
 import AttendanceChangeRequest from '../../models/AttendanceChangeRequest.js';
+import { ATTENDANCE_CHANGE_OPEN_STAGES } from '../../utils/attendanceChangeApproval.js';
 import DashboardAction from '../../models/DashboardAction.js';
 import EmployeeBasic from '../../models/EmployeeBasic.js';
 import EmployeeHubRequest from '../../models/EmployeeHubRequest.js';
@@ -1549,10 +1550,11 @@ async function findLeaveApplyConflict(employeeMongoId, from, to, excludeGroupId 
             continue;
         }
         if (
-            row.leaveRequestStatus === 'pending' &&
-            PENDING_LEAVE_KINDS.includes(String(row.leaveRequestKind || ''))
+            row.leaveRequestStatus === 'pending'
+            || String(row.hourAdjustStatus || '') === 'pending'
+            || String(row.flexibleOtStatus || '') === 'pending'
         ) {
-            return `A leave request is already pending for ${row.date}.`;
+            return `A request is already pending for ${row.date}.`;
         }
         if (
             (row.leaveRequestStatus === 'approved' || row.approvalStatus === 'approved') &&
@@ -1561,6 +1563,14 @@ async function findLeaveApplyConflict(employeeMongoId, from, to, excludeGroupId 
             return `${row.date} already has approved leave.`;
         }
     }
+    const change = await AttendanceChangeRequest.findOne({
+        employeeMongoId: String(employeeMongoId),
+        date: { $gte: from, $lte: to },
+        stage: { $in: ATTENDANCE_CHANGE_OPEN_STAGES },
+    })
+        .select('date')
+        .lean();
+    if (change?.date) return `A request is already pending for ${change.date}.`;
     return '';
 }
 

@@ -162,6 +162,33 @@ describe('salary slip edits drive pay figures', () => {
         assert.equal(attendanceDayHasPunch({ punchSessions: [{ timeOut: '13:00' }] }), true);
     });
 
+    it('keeps a saved late out line in payroll loss of pay under Early Out', () => {
+        const figures = salarySlipPayrollFigures(sampleSlip({
+            deductions: [
+                { component: 'Late out', basis: '2 events', amount: 25 },
+                { component: 'Fine', basis: 'Installment', amount: 20 },
+                { component: 'Loan', basis: 'Monthly', amount: 30 },
+            ],
+        }));
+        assert.equal(figures.lossOfPay, 25);
+        assert.equal(figures.sheetLossOfPay, 25);
+    });
+
+    it('includes each suspended day in payroll loss of pay', () => {
+        const figures = salarySlipPayrollFigures(sampleSlip({
+            deductions: [
+                { component: 'Authorized Leave', basis: '1 day', amount: 48 },
+                { component: 'Suspended', basis: '3 days', amount: 150 },
+                { component: 'Fine', basis: 'Installment', amount: 20 },
+                { component: 'Loan', basis: 'Monthly', amount: 30 },
+            ],
+        }));
+        assert.equal(figures.lossOfPay, 198);
+        assert.equal(figures.sheetLossOfPay, 198);
+        assert.equal(figures.zohoSalary, 1361.68);
+        assert.equal(figures.netSalaryPayable, 1311.68);
+    });
+
     it('keeps the payroll sheet loss of pay to the slip total, and gross to zoho salary', () => {
         const figures = salarySlipPayrollFigures(sampleSlip({
             attendance: { presentDays: '22 days', punchedPresentDays: 26 },

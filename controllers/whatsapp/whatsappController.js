@@ -3,6 +3,7 @@ import { getWhatsAppConfig, isWhatsAppEnabled } from '../../config/whatsapp.js';
 import { isValidWhatsAppPhone, normalizeWhatsAppPhone, whatsAppPhoneKeys } from '../../utils/normalizeWhatsAppPhone.js';
 import { isAutoWhatsAppSource } from '../../utils/whatsappMessageLog.js';
 import { getWhatsAppWebhookHealth, rememberWhatsAppWebhook } from '../../utils/whatsappWebhookHealth.js';
+import { whatsAppSignatureMatches } from '../../utils/whatsappWebhookSignature.js';
 import WhatsAppMessage from '../../models/WhatsAppMessage.js';
 import EmployeeBasic from '../../models/EmployeeBasic.js';
 import EmployeeContact from '../../models/EmployeeContact.js';
@@ -451,6 +452,11 @@ export function getWhatsAppWebhook(req, res) {
 
 export async function postWhatsAppWebhook(req, res) {
     try {
+        const appSecret = String(process.env.WHATSAPP_APP_SECRET || '').trim();
+        if (appSecret && !whatsAppSignatureMatches(req.rawBody, req.get('x-hub-signature-256'), appSecret)) {
+            return res.status(403).json({ message: 'WhatsApp webhook signature failed' });
+        }
+
         let body = req.body;
         if (typeof body === 'string') {
             try {
@@ -522,6 +528,7 @@ export async function postWhatsAppWebhook(req, res) {
                         status: String(statusRow?.status || '').trim(),
                         recipientPhone: String(statusRow?.recipient_id || '').trim(),
                         occurredAt: Number.isFinite(ts) ? new Date(ts * 1000) : new Date(),
+                        errorCode: firstError.code,
                         errorMessage: firstError.title || firstError.message || firstError.error_data?.details || '',
                     });
                 }
@@ -531,7 +538,7 @@ export async function postWhatsAppWebhook(req, res) {
         return res.status(200).json({ success: true });
     } catch (error) {
         console.error('[WhatsApp] webhook receive failed:', error?.message || error);
-        return res.status(200).json({ success: true });
+        return res.status(500).json({ success: false });
     }
 }
 

@@ -55,6 +55,8 @@ describe('salary policy employee exclusions', () => {
         assert.equal(shouldHideSalarySlipDeduction('Early Out', attendanceOnly), true);
         assert.equal(shouldHideSalarySlipDeduction('Late out', attendanceOnly), true);
         assert.equal(shouldHideSalarySlipDeduction('Unauthorized Leave', attendanceOnly), true);
+        assert.equal(shouldHideSalarySlipDeduction('Suspended', leaveOnly), false);
+        assert.equal(shouldHideSalarySlipDeduction('Suspended', attendanceOnly), true);
         assert.equal(shouldHideSalarySlipDeduction('Fine', attendanceOnly), false);
         assert.equal(shouldHideSalarySlipEarning('Overtime Hours', attendanceOnly), true);
         assert.equal(shouldHideSalarySlipEarning('Reward', attendanceOnly), false);

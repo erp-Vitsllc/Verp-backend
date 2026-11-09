@@ -196,8 +196,10 @@ function isSameEmployee(a, b) {
 }
 
 /**
- * Diff → HR first, then Accounts (Zoho). No diff → Accounts → Zoho.
- * Accounts + difference: HR approve goes to Zoho (no second Accounts approve).
+ * Creator is not flowchart Accounts: Accounts is emailed and must Approve
+ * before anyone else. A difference then goes to HR; no difference goes to Zoho / Pay.
+ * Creator is flowchart Accounts: existing flow — difference → HR, then Zoho;
+ * no difference → Approved (awaiting Pay). No second Accounts approve after HR.
  * Never auto-marks Paid — Accounts still clicks Pay after Zoho is Open.
  *
  * needsHr: true when |contract − actual| (or a named diff share) > 0.01.
@@ -218,11 +220,19 @@ function resolveStageAfterActor({
     const accountsDone = accountsAlreadyDone === true || actorIsAccounts;
 
     if (from === 'submit') {
+        // Not flowchart Accounts: hold the bill for Accounts approval first.
+        if (hrRequired && !hrDone && !accountsDone) {
+            return {
+                status: 'Pending Accounts',
+                pendingRole: 'accounts',
+                skipped: [],
+            };
+        }
         if (hrRequired && !hrDone) {
             return {
                 status: 'Pending HR',
                 pendingRole: 'hr',
-                skipped: accountsDone ? ['accounts'] : [],
+                skipped: ['accounts'],
             };
         }
         if (hrRequired && hrDone) {
@@ -240,8 +250,7 @@ function resolveStageAfterActor({
     }
 
     if (from === 'accounts_approve') {
-        // Accounts creates Zoho. Only bounce to HR when a difference bill
-        // landed here before HR has acted (legacy in-flight batches).
+        // Next person only after Accounts approves. Difference still needs HR.
         if (hrRequired && !hrDone) {
             return { status: 'Pending HR', pendingRole: 'hr', skipped: [] };
         }
@@ -1095,10 +1104,10 @@ export async function getUtilityBillBatch(req, res) {
 }
 
 /**
- * Submit: difference → Pending HR; no difference → Pending Accounts (Zoho).
- * Accounts + difference → HR, then Zoho (no second Accounts approve).
- * HR approve (user bill) → Accounts creates Zoho. HR reject → Rejected.
- * No difference → Accounts creates Zoho directly. Pay is never auto-skipped.
+ * Submit by anyone except flowchart Accounts → Pending Accounts (email + Approve).
+ * After that Approve, a difference goes to HR; no difference goes to Zoho / Pay.
+ * Submit by flowchart Accounts keeps the existing flow (difference → HR, else Zoho).
+ * Pay is never auto-skipped.
  */
 export async function createUtilityBillBatch(req, res) {
     try {

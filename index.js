@@ -171,7 +171,13 @@ app.use(
 
 // Global Rate Limiting
 app.use(commonLimiter);
-app.use(express.json({ limit: "50mb" }));
+app.use(express.json({
+    limit: "50mb",
+    verify(req, _res, buf) {
+        const pathOnly = String(req.originalUrl || req.url || "").split("?")[0];
+        if (pathOnly === "/api/whatsapp/webhook") req.rawBody = buf;
+    },
+}));
 app.use(express.urlencoded({ extended: true, limit: "50mb" }));
 
 app.use((req, _res, next) => {

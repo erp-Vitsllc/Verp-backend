@@ -158,7 +158,8 @@ export async function sendUtilityBillPaymentEmail({
             pending: '#0d9488',
         };
         const bodies = {
-            pending_accounts: 'New utility bills were submitted and need Accounts review/approval.',
+            pending_accounts:
+                'A utility bill is waiting for Accounts approval. Use Approve on the bill before it can move on.',
             pending_hr: 'Accounts approved these utility bills. HR review/approval is required.',
             pending_pay:
                 'HR approved these utility bills. Please open the batch and Pay the selected amounts.',

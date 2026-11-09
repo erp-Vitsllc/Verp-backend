@@ -126,6 +126,7 @@ import {
     loadPendingAttendanceChanges,
     openAttendanceChangeForEmployee,
     resubmitHourAttendanceChange,
+    pendingDateRequestMessage,
     submitAttendanceChange,
     supersedeOpenAttendanceChanges,
 } from '../utils/attendanceChangeApproval.js';
@@ -1802,17 +1803,22 @@ async function queueOrApplyManualMark(ctx, {
         return { error: 'This employee has no primary reportee, so the change cannot be sent for approval.' };
     }
 
-    const pending = await submitAttendanceChange({
-        employee,
-        date,
-        proposed: payload,
-        previous: previousAttendanceSnapshot(existing),
-        stage,
-        actor: ctx.actor,
-        reportee,
-        hr: ctx.hr,
-    });
-    return { applied: null, pending };
+    try {
+        const pending = await submitAttendanceChange({
+            employee,
+            date,
+            proposed: payload,
+            previous: previousAttendanceSnapshot(existing),
+            stage,
+            actor: ctx.actor,
+            reportee,
+            hr: ctx.hr,
+        });
+        return { applied: null, pending };
+    } catch (error) {
+        if (error?.statusCode === 400) return { error: error.message };
+        throw error;
+    }
 }
 
 async function queueOrApplyClear(ctx, { employee, employeeMongoId, date, markedBy }) {
@@ -4095,7 +4101,7 @@ export async function decideAttendanceChangeRequest(req, res) {
         const actorIsRequester = String(actor._id) === String(request.requestedBy || '');
 
         const inheritedChange = await viewerInheritsRequestAction(req.user, request._id);
-        if (request.stage === 'pending_reportee' && !actorIsReportee && !actorIsHr && !inheritedChange) {
+        if (request.stage === 'pending_reportee' && !actorIsReportee && !inheritedChange) {
             return res.status(403).json({ message: 'Only the primary reportee can approve this change.' });
         }
         if (request.stage === 'pending_hr' && !actorIsHr && !inheritedChange) {
@@ -4282,8 +4288,8 @@ export async function decideAttendanceChangeRequest(req, res) {
             return res.status(200).json({ message: sent.message });
         }
 
-        // HR's own approval writes the day. It does not wait for a second HR step.
-        if (request.stage === 'pending_reportee' && !actorIsHr) {
+        // Reportee approval sends the request to HR. It is written now only when that reportee is HR.
+        if (request.stage === 'pending_reportee' && !(actorIsReportee && actorIsHr)) {
             const hr = await getDepartmentHOD('hr').catch(() => null);
             if (!hr?._id) {
                 return res.status(400).json({
@@ -4561,9 +4567,10 @@ export async function requestAttendanceLeave(req, res) {
             });
         }
 
-        if (record.leaveRequestStatus === 'pending') {
+        const pendingMessage = await pendingDateRequestMessage(employee._id, date);
+        if (pendingMessage) {
             return res.status(400).json({
-                message: 'A leave request is already pending for this date.',
+                message: pendingMessage,
                 record,
             });
         }
@@ -4768,9 +4775,10 @@ export async function requestAttendanceYellow(req, res) {
             });
         }
 
-        if (record.leaveRequestStatus === 'pending') {
+        const pendingMessage = await pendingDateRequestMessage(employee._id, date);
+        if (pendingMessage) {
             return res.status(400).json({
-                message: 'A request is already pending for this date.',
+                message: pendingMessage,
                 record,
             });
         }
@@ -5132,13 +5140,12 @@ export async function requestAttendanceFuture(req, res) {
         const existingByDate = new Map(existing.map((row) => [row.date, row]));
 
         for (const dateKey of requestDates) {
+            const pendingMessage = await pendingDateRequestMessage(employee._id, dateKey);
+            if (pendingMessage) {
+                return res.status(400).json({ message: pendingMessage });
+            }
             const row = existingByDate.get(dateKey);
             if (!row) continue;
-            if (row.leaveRequestStatus === 'pending') {
-                return res.status(400).json({
-                    message: `A request is already pending for ${dateKey}.`,
-                });
-            }
             if (
                 (row.leaveRequestStatus === 'approved' || row.approvalStatus === 'approved') &&
                 ['authorized_leave', 'late_arrived', 'early_go', 'on_leave'].includes(String(row.statusKey || ''))

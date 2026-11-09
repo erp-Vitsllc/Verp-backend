@@ -17,6 +17,8 @@ import {
     resolveFineManagementActor,
     resolveFineAccountsActor,
 } from "../../utils/fineAccountsPaymentFlow.js";
+import { applyNormalFineFlow } from "../../utils/fineAdminCreateGate.js";
+import { sendFineApprovalEmail } from "../../utils/sendFineApprovalEmail.js";
 
 /**
  * Approve Fine - Sequential Workflow
@@ -92,11 +94,61 @@ export const approveFine = async (req, res) => {
 
         console.log("ApproveFine:", { fineId: fine.fineId, status: currentStatus, userId: req.user._id });
 
-        // --- STAGE 1: HR (Pending HR -> Pending Accounts) ---
+        // --- STAGE 0: Admin Officer (Pending Admin -> HR, or Management on handover) ---
+        const isAdminOfficerStage = currentStatus === 'Pending Admin' ||
+            (currentStatus === 'Pending' && fine.workflow?.some((w) => w.status === 'Pending' && w.role === 'Admin Officer'));
         const isHRStage = currentStatus === 'Pending HR' || currentStatus === 'Pending Review' ||
             (currentStatus === 'Pending' && (!fine.workflow || fine.workflow.length === 0 || fine.workflow.some(w => w.status === 'Pending' && w.role === 'HR')));
 
-        if (isHRStage) {
+        if (isAdminOfficerStage) {
+            if (!(await canActOnFine())) {
+                return res.status(403).json({
+                    message: 'Only the flowchart Admin Officer can approve at this stage.',
+                });
+            }
+
+            const adminEntry = fine.workflow?.find(
+                (w) => w.status === 'Pending' && w.role === 'Admin Officer',
+            );
+            if (adminEntry) {
+                adminEntry.status = 'Approved';
+                adminEntry.actionedAt = new Date();
+            } else {
+                if (!fine.workflow) fine.workflow = [];
+                fine.workflow.push({
+                    role: 'Admin Officer',
+                    assignedTo: req.user._id,
+                    status: 'Approved',
+                    assignedAt: new Date(),
+                    actionedAt: new Date(),
+                });
+            }
+
+            const next = await applyNormalFineFlow(fine, {
+                handoverHrApproval: fine.handoverHrApproval === true,
+                append: true,
+                actorId: fine.createdBy?._id || fine.createdBy || req.user._id,
+            });
+            if (!next.ok) {
+                return res.status(400).json({ message: next.message });
+            }
+
+            for (const f of fines) {
+                f.fineStatus = fine.fineStatus;
+                f.submittedTo = fine.submittedTo;
+                f.workflow = fine.workflow;
+                await f.save();
+            }
+            modified = true;
+
+            const fineSnapshot = fine.toObject?.() ? fine.toObject() : { ...fine };
+            const assigned = fines.flatMap((f) => f.assignedEmployees || []);
+            runAfterResponse('approveFine-admin-email', () =>
+                sendFineApprovalEmail(fineSnapshot, assigned),
+            );
+        }
+        // --- STAGE 1: HR (Pending HR -> Pending Accounts) ---
+        else if (isHRStage) {
             if (await canActOnFine()) {
                 const { accountsHOD, accountsUser } = await resolveFineAccountsActor(fine);
                 if (!accountsHOD || !accountsUser) {

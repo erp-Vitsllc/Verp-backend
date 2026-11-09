@@ -1,24 +1,14 @@
-import path from 'path';
-import { fileURLToPath, pathToFileURL } from 'url';
 import {
     getOffWeekdayKeys,
     getScheduledPunchMinutes,
     weekdayKeyFromDateKey,
 } from './workingTimeHelpers.js';
-
-const WEEKLY_ADDITION_FILE = path.resolve(
-    path.dirname(fileURLToPath(import.meta.url)),
-    '../../VERP_frontend/src/app/HRM/Leave/utils/weeklySalaryAddition.js',
-);
-
-let weeklyAdditionPromise;
-
-function loadWeeklyAddition() {
-    if (!weeklyAdditionPromise) {
-        weeklyAdditionPromise = import(pathToFileURL(WEEKLY_ADDITION_FILE).href);
-    }
-    return weeklyAdditionPromise;
-}
+import {
+    approvalPlacedAsNextDay,
+    buildMonthWorkWeeks,
+    buildWeeklySalaryAddition,
+    leaveDatesTakenByOvertime,
+} from './weeklySalaryAddition.js';
 
 function roundHours(value) {
     return Math.round((Number(value) || 0) * 100) / 100;
@@ -67,13 +57,6 @@ export async function leavePageApprovedOtHours({
 } = {}) {
     const month = String(monthKey || '');
     if (!/^\d{4}-\d{2}$/.test(month)) return 0;
-    const tools = await loadWeeklyAddition();
-    const {
-        approvalPlacedAsNextDay,
-        buildMonthWorkWeeks,
-        buildWeeklySalaryAddition,
-        leaveDatesTakenByOvertime,
-    } = tools;
     const rows = (records || [])
         .map((row) => {
             const date = String(row?.date || '').trim();

@@ -468,10 +468,7 @@ export async function sendWhatsAppValidationTemplate(to, extras = {}) {
             ? []
             : [{
                 type: 'body',
-                parameters: [
-                    { type: 'text', text: firstName },
-                    { type: 'text', text: 'Vega' },
-                ],
+                parameters: [{ type: 'text', text: firstName }],
             }]);
 
     return sendTemplateMessage(to, VALIDATION_TEMPLATE_NAME, 'en', components, {
