@@ -22,7 +22,13 @@ test('zoho salary is monthly earnings plus annual leave and ticket, minus loss o
             { component: 'Authorized Leave', amount: 30 },
             { component: 'Loan', amount: 400 },
         ],
-        summary: { leaveSalary: { amount: 80 }, airTicket: { amount: 20 } },
+        summary: {
+            monthlySalary: 1200,
+            monthDays: 30,
+            overtimeHoursCount: 12.5,
+            leaveSalary: { amount: 80 },
+            airTicket: { amount: 20 },
+        },
     });
     assert.equal(amount, 1320);
 });

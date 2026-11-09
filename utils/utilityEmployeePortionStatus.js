@@ -98,8 +98,16 @@ export function summarizeUtilityPortionSettlement({
     const partyPaid = String(partyExpense?.status || '') === 'Paid';
     const partyMode = String(partyExpense?.paymentMode || '').trim();
     const covered = portion > 0.009 && paidAmount + 0.009 >= portion;
+    const salaryPayrollCovered =
+        covered &&
+        rows.some(
+            (row) =>
+                String(row?.paymentSource || '') === 'Salary' ||
+                /payroll deduction/i.test(String(row?.description || '')),
+        );
     const employeeCovered =
         covered &&
+        !salaryPayrollCovered &&
         rows.some(
             (row) =>
                 String(row?.settleEmployeeId || '').trim() &&
@@ -109,9 +117,9 @@ export function summarizeUtilityPortionSettlement({
     let via = '';
     if (billStatus === 'Rejected') via = 'rejected';
     else if (hasZohoExpense) via = 'zoho_expense';
-    else if (payrollPaid && portion > 0.009) via = 'payroll';
-    else if (partyPaid && partyMode === 'Payroll') via = 'payroll';
-    else if ((partyPaid && partyMode === 'Employee') || employeeCovered) via = 'employee';
+    else if (salaryPayrollCovered || (partyPaid && partyMode === 'Payroll') || (payrollPaid && covered)) {
+        via = 'payroll';
+    } else if ((partyPaid && partyMode === 'Employee') || employeeCovered) via = 'employee';
     else if (partyPaid && covered) via = 'expense_refund';
 
     let status = 'Not Paid';
@@ -170,7 +178,7 @@ export async function loadUtilityPortionContext(employeeIds, bills = []) {
             relatedEntityId: { $in: objectIds },
             status: 'Completed',
         })
-            .select('relatedEntityId amount zohoExpenseId settleEmployeeId status description')
+            .select('relatedEntityId amount zohoExpenseId settleEmployeeId status description paymentSource')
             .lean(),
         PartyExpense.find({
             utilityBillId: { $in: ids },
@@ -208,6 +216,99 @@ async function payrollZohoMonthsFor(variants) {
         .select('monthKey zohoExpenseId')
         .lean();
     return [...new Set(slots.map((row) => utilityMonthKey(row?.monthKey)).filter(Boolean))].sort();
+}
+
+function employeeIdsOnBill(bill) {
+    const ids = new Set();
+    const add = (value) => {
+        const id = String(value || '').trim();
+        if (id) ids.add(id);
+    };
+    add(bill?.payByEmployeeId);
+    (Array.isArray(bill?.zohoLineItems) ? bill.zohoLineItems : []).forEach((line) => {
+        add(line?.payByEmployeeId);
+    });
+    return [...ids];
+}
+
+/** Whether the employee share of a utility difference is settled. Vendor payment does not count. */
+export function utilityDifferenceSettlement({ portion = 0, paidAmount = 0, partyRows = [] } = {}) {
+    const share = money(portion);
+    const paid = money(paidAmount);
+    const parties = Array.isArray(partyRows) ? partyRows : [];
+    const partySettled =
+        parties.length > 0 &&
+        parties.every((row) => {
+            const status = String(row?.status || '');
+            const mode = String(row?.paymentMode || '');
+            return status === 'Paid' && (mode === 'Payroll' || mode === 'Employee');
+        });
+    const covered = share > 0.009 && paid + 0.009 >= share;
+    const outstanding = partySettled || covered ? 0 : money(Math.max(0, share - paid));
+    return {
+        employeePortionAmount: share,
+        employeePortionPaidAmount: paid,
+        employeePortionOutstanding: share > 0.009 ? outstanding : 0,
+        employeeDifferencePaid: partySettled || covered,
+    };
+}
+
+/** Attach employee-difference payment flags used by the utility summary. */
+export async function attachUtilityDifferencePaid(bills = []) {
+    const list = Array.isArray(bills) ? bills : [];
+    const ids = list
+        .map((bill) => String(bill?._id || ''))
+        .filter((id) => mongoose.Types.ObjectId.isValid(id));
+    if (!ids.length) return list;
+    const objectIds = ids.map((id) => new mongoose.Types.ObjectId(id));
+    const [payments, expenses] = await Promise.all([
+        Payment.find({
+            relatedEntityType: 'UtilityBill',
+            relatedEntityId: { $in: objectIds },
+            status: 'Completed',
+        })
+            .select('relatedEntityId amount description paymentSource status')
+            .lean(),
+        PartyExpense.find({
+            utilityBillId: { $in: ids },
+            kind: 'balance',
+            partyType: 'employee',
+        })
+            .select('utilityBillId status paymentMode amount')
+            .lean(),
+    ]);
+    const paysByBill = new Map();
+    (payments || []).forEach((row) => {
+        const id = String(row?.relatedEntityId || '');
+        if (!paysByBill.has(id)) paysByBill.set(id, []);
+        paysByBill.get(id).push(row);
+    });
+    const expByBill = new Map();
+    (expenses || []).forEach((row) => {
+        const id = String(row?.utilityBillId || '');
+        if (!expByBill.has(id)) expByBill.set(id, []);
+        expByBill.get(id).push(row);
+    });
+    list.forEach((bill) => {
+        const id = String(bill?._id || '');
+        const empIds = employeeIdsOnBill(bill);
+        const portion = employeePortionAmount(bill, empIds) || money(bill?.employeePayAmount);
+        const paidAmount = money(
+            (paysByBill.get(id) || []).reduce((sum, row) => {
+                if (!countsTowardUtilityEmployeePortion(row)) return sum;
+                return sum + (Number(row?.amount) || 0);
+            }, 0),
+        );
+        Object.assign(
+            bill,
+            utilityDifferenceSettlement({
+                portion,
+                paidAmount,
+                partyRows: expByBill.get(id) || [],
+            }),
+        );
+    });
+    return list;
 }
 
 /** Payroll Zoho expense means this month's utility portion was deducted. Mark those balances paid. */
@@ -296,9 +397,6 @@ export async function buildUtilityEmployeePortionStatus({ employeeId = '', billI
         .filter((id) => mongoose.Types.ObjectId.isValid(id))
         .slice(0, 400);
     const payrollZohoMonths = await payrollZohoMonthsFor(variants);
-    if (variants.length && payrollZohoMonths.length) {
-        await markUtilityPortionsPaidFromPayrollZoho(variants, payrollZohoMonths);
-    }
 
     if (!ids.length) {
         return { employeeId: String(employeeId || ''), payrollZohoMonths, rows: [] };
@@ -312,7 +410,7 @@ export async function buildUtilityEmployeePortionStatus({ employeeId = '', billI
             relatedEntityId: { $in: objectIds },
             status: 'Completed',
         })
-            .select('relatedEntityId amount zohoExpenseId settleEmployeeId status description')
+            .select('relatedEntityId amount zohoExpenseId settleEmployeeId status description paymentSource')
             .lean(),
         PartyExpense.find({
             utilityBillId: { $in: ids },

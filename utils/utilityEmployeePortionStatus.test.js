@@ -4,6 +4,7 @@ import {
     employeePortionAmount,
     summarizeUtilityPortionSettlement,
     unpaidEmployeePortionOnSalaryMonth,
+    utilityDifferenceSettlement,
 } from './utilityEmployeePortionStatus.js';
 
 const employeeIds = ['VEGA-HR-0101', '507f1f77bcf86cd799439011'];
@@ -41,6 +42,38 @@ describe('employeePortionAmount', () => {
     });
 });
 
+describe('utilityDifferenceSettlement', () => {
+    it('stays unpaid until the employee share is paid', () => {
+        const open = utilityDifferenceSettlement({ portion: 18.87, paidAmount: 0 });
+        assert.equal(open.employeeDifferencePaid, false);
+        assert.equal(open.employeePortionOutstanding, 18.87);
+    });
+
+    it('is paid when salary or employee payments cover the difference', () => {
+        const paid = utilityDifferenceSettlement({ portion: 18.87, paidAmount: 18.87 });
+        assert.equal(paid.employeeDifferencePaid, true);
+        assert.equal(paid.employeePortionOutstanding, 0);
+    });
+
+    it('is paid when payroll or employee recovery marked the balance paid', () => {
+        const paid = utilityDifferenceSettlement({
+            portion: 13.76,
+            paidAmount: 0,
+            partyRows: [{ status: 'Paid', paymentMode: 'Payroll' }],
+        });
+        assert.equal(paid.employeeDifferencePaid, true);
+    });
+
+    it('does not treat a company balance as the employee payment', () => {
+        const open = utilityDifferenceSettlement({
+            portion: 18.87,
+            paidAmount: 0,
+            partyRows: [{ status: 'Paid', paymentMode: '' }],
+        });
+        assert.equal(open.employeeDifferencePaid, false);
+    });
+});
+
 describe('summarizeUtilityPortionSettlement', () => {
     it('still collects the unpaid employee portion after the vendor bill is paid', () => {
         const row = summarizeUtilityPortionSettlement({
@@ -64,14 +97,34 @@ describe('summarizeUtilityPortionSettlement', () => {
         assert.equal(row.via, 'zoho_expense');
     });
 
-    it('marks paid when payroll Zoho covers the bill month', () => {
+    it('does not clear the employee portion from a payroll month alone', () => {
         const row = summarizeUtilityPortionSettlement({
             bill: bill(),
             employeeIds,
             payrollZohoMonths: ['2026-10'],
         });
+        assert.equal(row.status, 'Not Paid');
+        assert.equal(row.outstanding, 274.16);
+        assert.equal(row.canPay, true);
+    });
+
+    it('marks the portion paid when salary payroll covers it', () => {
+        const row = summarizeUtilityPortionSettlement({
+            bill: bill(),
+            employeeIds,
+            payments: [
+                {
+                    relatedEntityId: 'bill-1',
+                    amount: 274.16,
+                    status: 'Completed',
+                    paymentSource: 'Salary',
+                    description: 'Payroll deduction 2026-10. Utility paid from salary.',
+                },
+            ],
+        });
         assert.equal(row.status, 'Paid');
         assert.equal(row.via, 'payroll');
+        assert.equal(row.outstanding, 0);
         assert.equal(row.canPay, false);
     });
 

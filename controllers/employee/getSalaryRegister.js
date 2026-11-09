@@ -86,6 +86,7 @@ import { salaryMonthPaymentLabel, slotHoldsEmployees, slotStatusOf, singleSlotPa
 import {
     closeAccountsSalarySlotInbox,
     notifyAccountsSalarySlot,
+    notifyHrSalarySlot,
     sendSalarySlotMail,
 } from '../../utils/salaryDmfNotify.js';
 import { sendMailLater } from '../../utils/salaryEnrollmentApprovalNotify.js';
@@ -1382,15 +1383,20 @@ function roundMoney(value) {
 
 function sumSalaryLines(lines) {
     const total = (lines || []).reduce((sum, row) => {
+        const gross = row.zohoSalary != null && row.zohoSalary !== ''
+            ? row.zohoSalary
+            : row.grossSalary;
         sum.monthlySalary += Number(row.monthlySalary) || 0;
+        sum.grossSalary += Number(gross) || 0;
         sum.basicSalary += Number(row.basicSalary) || 0;
         sum.ot += Number(row.ot) || 0;
         sum.deduction += Number(row.deduction) || 0;
         sum.actualSalary += Number(row.actualSalary) || 0;
         return sum;
-    }, { monthlySalary: 0, basicSalary: 0, ot: 0, deduction: 0, actualSalary: 0 });
+    }, { monthlySalary: 0, grossSalary: 0, basicSalary: 0, ot: 0, deduction: 0, actualSalary: 0 });
     return {
         monthlySalary: roundMoney(total.monthlySalary),
+        grossSalary: roundMoney(total.grossSalary),
         basicSalary: roundMoney(total.basicSalary),
         ot: roundMoney(total.ot),
         deduction: roundMoney(total.deduction),
@@ -1421,6 +1427,7 @@ function applySlipFigure(row, figures) {
     row.extra = figures.extra;
     row.ot = figures.ot;
     row.actualSalary = figures.actualSalary;
+    row.netSalaryPayable = figures.netSalaryPayable ?? figures.actualSalary;
 }
 
 function listMonthsInclusive(fromYm, toYm) {
@@ -2178,7 +2185,7 @@ export const getSalaryRegister = async (req, res) => {
             SalaryMonthDmf.find({
                 monthKey: { $in: visibleMonthKeys },
             })
-                .select('monthKey dmfApproval')
+                .select('monthKey dmfApproval zohoJournalUpdatedAt')
                 .lean(),
             visibleMonthKeys.length
                 ? SalaryMonthPayment.find({ monthKey: { $in: visibleMonthKeys } })
@@ -2187,7 +2194,7 @@ export const getSalaryRegister = async (req, res) => {
                 : [],
         ]);
         const dmfByMonth = new Map(
-            (dmfRows || []).map((row) => [String(row.monthKey), row.dmfApproval]),
+            (dmfRows || []).map((row) => [String(row.monthKey), row]),
         );
         const slotsByMonth = new Map();
         for (const slot of slotRows || []) {
@@ -2197,7 +2204,8 @@ export const getSalaryRegister = async (req, res) => {
         }
         const dmfCtx = await buildDmfViewerContext(req);
         visibleMonths = visibleMonths.map((row) => {
-            const dmf = dmfByMonth.get(String(row.monthKey));
+            const monthDoc = dmfByMonth.get(String(row.monthKey));
+            const dmf = monthDoc?.dmfApproval;
             const serialized = serializeDmf(dmf, { ready: true, ctx: dmfCtx, flow: 'month' });
             return {
                 ...row,
@@ -2230,7 +2238,10 @@ export const getSalaryRegister = async (req, res) => {
             employees: detailYm ? employeesForMonth : undefined,
             payments: detailYm ? monthPayments : undefined,
             dmf: detailYm
-                ? serializeDmf(dmfByMonth.get(String(detailYm)), { ready: true, ctx: dmfCtx, flow: 'month' })
+                ? {
+                    ...serializeDmf(dmfByMonth.get(String(detailYm))?.dmfApproval, { ready: true, ctx: dmfCtx, flow: 'month' }),
+                    zohoJournalUpdated: Boolean(dmfByMonth.get(String(detailYm))?.zohoJournalUpdatedAt),
+                }
                 : undefined,
             ...registerMeta,
             waitingForProcessingDate: Boolean(processDay && todayDay < processDay && endYm < currentYm),
@@ -2625,6 +2636,15 @@ async function assertMonthReadyForSlots(monthKey) {
     }
 }
 
+async function assertZohoJournalUpdated(monthKey) {
+    const monthDmf = await SalaryMonthDmf.findOne({ monthKey }).select('zohoJournalUpdatedAt').lean();
+    if (!monthDmf?.zohoJournalUpdatedAt) {
+        const error = new Error('Create slot opens after the Zoho journal is published.');
+        error.statusCode = 400;
+        throw error;
+    }
+}
+
 async function prepareSlotSelection({ monthKey, requested, companyName, ignorePaymentId }) {
     const company = String(companyName || '').trim();
     if (!company) {
@@ -2845,6 +2865,7 @@ export const createSalaryMonthPayment = async (req, res) => {
         }
 
         await assertMonthReadyForSlots(monthKey);
+        await assertZohoJournalUpdated(monthKey);
         const slotCtx = await buildDmfViewerContext(req);
         if (!slotCtx?.isAccounts) {
             return res.status(403).json({
@@ -2872,6 +2893,7 @@ export const createSalaryMonthPayment = async (req, res) => {
         });
         if (action === 'apply') {
             await mailSlotHr(req, monthKey, doc.paymentNo);
+            await notifyHrSalarySlot({ payment: doc, monthKey });
         }
         return res.status(201).json({
             message: action === 'apply' ? 'Slot sent to HR.' : 'Slot saved as draft.',
@@ -2911,11 +2933,30 @@ export const updateSalaryMonthPayment = async (req, res) => {
                 doc.status = 'rejected';
                 doc.rejectReason = reason;
                 await doc.save();
+                await closeAccountsSalarySlotInbox(doc._id);
                 await mailSlotAccounts(req, monthKey, doc.paymentNo, reason);
                 return res.status(200).json({
                     message: 'Slot rejected.',
                     payment: await serializeMonthPaymentWithName(doc),
                 });
+            }
+            const requested = slotRequestIds(req.body);
+            if (requested.length) {
+                const prepared = await prepareSlotSelection({
+                    monthKey,
+                    requested,
+                    companyName: doc.companyName,
+                    ignorePaymentId: doc._id,
+                });
+                const createdMethod = String(doc.paymentMethod || '').trim();
+                if (createdMethod && prepared.paymentMethod !== createdMethod) {
+                    return res.status(400).json({
+                        message: `This slot stays ${createdMethod}.`,
+                    });
+                }
+                doc.employeeIds = prepared.employeeIds;
+                doc.companyName = prepared.companyName;
+                doc.paymentMethod = prepared.paymentMethod || doc.paymentMethod;
             }
             const method = String(doc.paymentMethod || '').trim().toUpperCase() === 'CASH' ? 'Cash' : 'WPS';
             doc.status = method === 'Cash' ? 'pending_update' : 'pending_wps';
@@ -2997,7 +3038,10 @@ export const updateSalaryMonthPayment = async (req, res) => {
         doc.status = action === 'apply' ? 'pending_hr' : 'draft';
         doc.rejectReason = '';
         await doc.save();
-        if (action === 'apply') await mailSlotHr(req, monthKey, doc.paymentNo);
+        if (action === 'apply') {
+            await mailSlotHr(req, monthKey, doc.paymentNo);
+            await notifyHrSalarySlot({ payment: doc, monthKey });
+        }
         return res.status(200).json({
             message: action === 'apply' ? 'Slot sent to HR.' : 'Slot saved as draft.',
             payment: await serializeMonthPaymentWithName(doc),

@@ -389,6 +389,11 @@ export function viewerCanStartDmf(dmf, ctx) {
     return Boolean(ctx.isApprover || ctx.isHr);
 }
 
+/** Accounts and HR can validate a payroll month even when it is waiting on another approver. */
+export function viewerCanValidateMonthPayroll(ctx) {
+    return Boolean(ctx?.canBypass || ctx?.isAccounts || ctx?.isHr);
+}
+
 /** Month payroll submit is the flowchart Accounts assignee, including after a rejection. */
 export function viewerCanSubmitMonthPayroll(dmf, ctx) {
     const status = String(dmf?.status || 'idle') || 'idle';
@@ -401,27 +406,32 @@ export function viewerCanCreateSalarySlot(dmf, ctx) {
     return String(dmf?.status || '') === 'approved' && Boolean(ctx?.isAccounts);
 }
 
-/** While HR has the payroll, only HR can edit. While Management has it, only Management can edit. After it is processed, nobody can edit. */
+/**
+ * Salary bell stays with the role that still has work.
+ * Accounts keeps it for a rejection/recall and for Update Zoho.
+ * HR or Management keeps it only while that approval step is pending.
+ */
+export function salaryMonthBellStillOpen({ kind, dmfStatus, zohoJournalUpdated } = {}) {
+    const status = String(dmfStatus || '').toLowerCase();
+    const work = String(kind || '');
+    if (work === 'salary-zoho') return status === 'approved' && !zohoJournalUpdated;
+    if (work === 'salary-accounts') return status === 'rejected' || status === 'idle';
+    return status === 'pending';
+}
+
+/** The slip stays editable until the payroll is processed. It is not limited to the current approver. */
 export function salarySlipEditLockMessage(dmf) {
     const status = String(dmf?.status || 'idle');
     if (status === 'approved') return 'This salary slip can no longer be edited.';
-    if (status !== 'pending') return '';
-    const key = String(currentDmfStep(dmf)?.key || '');
-    if (key === 'hr') return 'Only HR can edit this salary slip.';
-    if (key === 'management') return 'Only Management can edit this salary slip.';
     return '';
 }
 
 export function viewerCanUpdateSalarySlip(dmf, ctx, { canEditSetup = false } = {}) {
     const status = String(dmf?.status || 'idle');
     if (status === 'approved') return false;
-    if (status === 'pending') {
-        const key = String(currentDmfStep(dmf)?.key || '');
-        if (key === 'hr') return Boolean(ctx?.isHr);
-        if (key === 'management') return Boolean(ctx?.isManagement);
-        return false;
-    }
-    return Boolean(canEditSetup);
+    return Boolean(
+        canEditSetup || ctx?.canBypass || ctx?.isAccounts || ctx?.isHr || ctx?.isManagement,
+    );
 }
 
 /** Accounts recalls from HR. HR recalls from Management. Accounts cannot recall after HR approves. */
@@ -478,6 +488,7 @@ export function serializeDmf(dmf, { ready = false, ctx = null, flow = '' } = {})
         ready: Boolean(ready),
         canStart,
         canAct,
+        canValidate: monthFlow && (canAct || canStart || viewerCanValidateMonthPayroll(ctx)),
         canReject: canAct,
         canRecall: monthFlow && viewerCanRecallMonthPayroll(row, ctx),
         canCreateSlot: monthFlow && viewerCanCreateSalarySlot(row, ctx),

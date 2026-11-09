@@ -455,7 +455,11 @@ export async function buildSalarySlotFile(payment) {
             incomeFix: money(pay.monthlySalary),
             incomeVar: money(money(pay.ot) + money(pay.rewardAdditions)),
             leaveDays: Number(pay.leaveDays) || 0,
-            net: money(pay.actualSalary || pay.netSalary),
+            net: money(
+                pay.netSalaryPayable != null && pay.netSalaryPayable !== ''
+                    ? pay.netSalaryPayable
+                    : (pay.actualSalary != null && pay.actualSalary !== '' ? pay.actualSalary : pay.netSalary),
+            ),
             bankName: String(bank?.bankName || '').trim(),
             accountNumber: accountNumber || iban,
             iban,

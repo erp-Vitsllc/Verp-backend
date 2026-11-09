@@ -20819,6 +20819,13 @@ export const getPendingAssetDashboardInbox = async (req, res) => {
             }
         };
 
+        if (isAccountsRoleHolder && scope !== 'vehicle') {
+            const { processUtilityBillPaymentDayReminders } = await import(
+                '../utils/processUtilityBillPaymentDayReminders.js'
+            );
+            await processUtilityBillPaymentDayReminders();
+        }
+
         let dashboardPendingItems = await DashboardAction.find(match).sort({ requestedDate: -1 }).limit(200).lean();
         if (scope !== 'tools') {
             try {

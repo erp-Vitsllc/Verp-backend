@@ -9,6 +9,9 @@ import {
     unpaidDueByMonth,
     unpaidSchedulePortion,
     dueThroughSalaryMonth,
+    currentMonthInstallment,
+    currentMonthShare,
+    recoveryCurrentMonthShare,
     recoveryDueThroughSalaryMonth,
     yearlyEndOfServiceBenefit,
 } from './buildSalarySlipPayload.js';
@@ -96,18 +99,21 @@ describe('salary slip edits drive pay figures', () => {
         const merged = mergeStoredSalarySlip(live, stored);
         const figures = salarySlipPayrollFigures(merged);
         assert.equal(figures.monthlySalary, 1500);
-        assert.equal(figures.ot, 100);
-        assert.equal(figures.extra, 100);
+        assert.equal(figures.ot, 9.68);
+        assert.equal(figures.extra, 9.68);
         assert.equal(figures.fine, 0);
         assert.equal(figures.loan, 0);
         assert.equal(figures.deduction, 10);
         assert.equal(figures.lossOfPay, 10);
         assert.equal(figures.otherDeduction, 0);
         assert.equal(figures.netSalary, 1590);
-        assert.equal(figures.actualSalary, figures.netSalary);
+        assert.equal(figures.zohoSalary, 1499.68);
+        assert.equal(figures.grossSalary, figures.zohoSalary);
+        assert.equal(figures.netSalaryPayable, 1499.68);
+        assert.equal(figures.actualSalary, figures.netSalaryPayable);
         assert.equal(
             Math.round((figures.monthlySalary + figures.extra - figures.deduction) * 100) / 100,
-            figures.netSalary,
+            figures.netSalaryPayable,
         );
     });
 
@@ -115,7 +121,7 @@ describe('salary slip edits drive pay figures', () => {
         const live = sampleSlip();
         const stored = sampleSlip();
         const figures = salarySlipPayrollFigures(mergeStoredSalarySlip(live, stored));
-        assert.equal(figures.extra, 150);
+        assert.equal(figures.extra, 59.68);
         assert.equal(figures.deduction, 98);
         assert.equal(figures.lossOfPay, 48);
         assert.equal(figures.otherDeduction, 50);
@@ -133,9 +139,10 @@ describe('salary slip edits drive pay figures', () => {
         assert.equal(figures.monthlySalary, 1500);
         assert.equal(figures.presentDays, 22);
         assert.equal(figures.lossOfPay, 48);
-        assert.equal(figures.ot, 100);
+        assert.equal(figures.ot, 9.68);
         assert.equal(figures.rewardAdditions, 50);
-        assert.equal(figures.grossSalary, 1650);
+        assert.equal(figures.grossSalary, 1511.68);
+        assert.equal(figures.zohoSalary, figures.grossSalary);
         assert.equal(figures.fineAmount, 20);
         assert.equal(figures.advanceAmount, 0);
         assert.equal(figures.loanAmount, 30);
@@ -172,9 +179,51 @@ describe('salary slip edits drive pay figures', () => {
         assert.equal(figures.lossOfPay, 65);
         assert.equal(figures.sheetLossOfPay, 65);
         assert.equal(figures.deduction, 115);
-        assert.equal(figures.zohoSalary, 1585);
-        assert.equal(figures.actualSalary, 1535);
-        assert.equal(figures.grossSalary, 1650);
+        assert.equal(figures.zohoSalary, 1494.68);
+        assert.equal(figures.netSalaryPayable, 1444.68);
+        assert.equal(figures.actualSalary, figures.netSalaryPayable);
+        assert.equal(figures.grossSalary, figures.zohoSalary);
+    });
+
+    it('uses the salary slip net salary payable, including every loan this month', () => {
+        const slip = sampleSlip({
+            summary: {
+                monthlySalary: 1500,
+                overtimeHoursCount: 2,
+                leaveSalary: { amount: 200 },
+                airTicket: { amount: 50 },
+                lossOfPayDays: { annual: 0 },
+            },
+            deductions: [
+                { component: 'Authorized Leave', basis: '1 day', amount: 48 },
+                { component: 'Annual Leave', basis: '2 days', amount: 80 },
+                { component: 'Sick Leave', basis: '1 day', amount: 7 },
+                { component: 'Fine', basis: 'Installment', amount: 20 },
+                { component: 'Loan', basis: 'Monthly', amount: 30 },
+            ],
+            loanSchedule: [
+                { type: 'Loan', sourceId: 'loan-1', thisMonthAmount: 30 },
+                { type: 'Loan', sourceId: 'loan-2', thisMonthAmount: 40 },
+            ],
+            fines: [{ sourceId: 'fine-1', thisMonthAmount: 20 }],
+            utilities: [{ sourceId: 'util-1', thisMonthAmount: 15 }],
+            yearlyEarnings: [{ component: 'Leave Salary', basis: 'Yearly', amount: 999 }],
+        });
+        const merged = mergeStoredSalarySlip(slip, slip);
+        const loanLine = merged.deductions.find((row) => row.component === 'Loan');
+        assert.equal(loanLine.amount, 70);
+        const figures = salarySlipPayrollFigures(slip);
+        assert.equal(figures.lossOfPay, 48);
+        assert.equal(figures.loanAmount, 70);
+        assert.equal(figures.fineAmount, 20);
+        assert.equal(figures.sheetOtherDeduction, 15);
+        assert.equal(figures.otherDeduction, 105);
+        assert.equal(figures.zohoSalary, 1761.68);
+        assert.equal(figures.netSalaryPayable, 1656.68);
+        assert.equal(figures.actualSalary, figures.netSalaryPayable);
+        assert.equal(figures.grossSalary, figures.zohoSalary);
+        assert.equal(figures.extra, 309.68);
+        assert.equal(figures.deduction, 153);
     });
 });
 
@@ -316,6 +365,64 @@ describe('unpaid deduction carry-over', () => {
                 },
             ),
             1750,
+        );
+    });
+
+    it('keeps this month share separate from the full outstanding balance', () => {
+        const party = {
+            status: 'Partially Paid',
+            amount: 3500,
+            installments: [
+                { monthKey: '2026-09', amount: 875, status: 'Not Paid' },
+                { monthKey: '2026-10', amount: 875, status: 'Not Paid' },
+                { monthKey: '2026-11', amount: 875, status: 'Partially Paid' },
+                { monthKey: '2026-12', amount: 875, status: 'Not Paid' },
+            ],
+        };
+        assert.equal(
+            currentMonthShare(party, {
+                total: 3500,
+                repaid: 0,
+                startYm: '2026-09',
+                duration: 4,
+                ym: '2026-10',
+            }),
+            875,
+        );
+        assert.equal(
+            currentMonthInstallment({
+                total: 3500,
+                repaid: 875,
+                startYm: '2026-09',
+                duration: 4,
+                ym: '2026-10',
+            }),
+            875,
+        );
+        assert.equal(
+            currentMonthInstallment({
+                total: 3500,
+                repaid: 1000,
+                startYm: '2026-09',
+                duration: 4,
+                ym: '2026-10',
+            }),
+            750,
+        );
+        assert.equal(
+            recoveryCurrentMonthShare({
+                total: 3500,
+                repaid: 0,
+                startYm: '2026-09',
+                duration: 4,
+                ym: '2026-10',
+                party: {
+                    status: 'Paid',
+                    amount: 3500,
+                    installments: party.installments.map((row) => ({ ...row, status: 'Paid' })),
+                },
+            }),
+            875,
         );
     });
 

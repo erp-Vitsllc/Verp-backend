@@ -22,7 +22,8 @@ import {
     salaryEnrollmentApproverLabel,
     salaryEnrollmentWaitingMessage,
 } from '../../utils/salaryEnrollmentApprovalNotify.js';
-import { SALARY_DMF_REQUEST_TYPE } from '../../utils/salaryDmfApproval.js';
+import { SALARY_DMF_REQUEST_TYPE, salaryMonthBellStillOpen } from '../../utils/salaryDmfApproval.js';
+import { syncPendingHrSalarySlotBells, syncSalaryMonthRoleBells } from '../../utils/salaryDmfNotify.js';
 import { isPendingEnrollmentReminder, syncPendingSalaryEnrollmentTasks } from '../../utils/syncPendingSalaryEnrollmentTasks.js';
 import { omitEnrollmentTaskDuplicates } from '../../utils/pendingEnrollmentReminder.js';
 import { listDeletedNoticeKeys, noticeKeysForRecord, salaryEnrollmentEmployeeKey } from '../../utils/deletedTaskNotice.js';
@@ -226,6 +227,8 @@ export const getPendingSalaryDashboardInbox = async (req, res) => {
         }
 
         const assigneeClauses = buildAssigneeClauses(ctx.relevantIds, ctx.employeeIdCode);
+        await syncSalaryMonthRoleBells();
+        await syncPendingHrSalarySlotBells();
         await syncPendingSalaryEnrollmentTasks();
         const deletedKeys = new Set(await listDeletedNoticeKeys());
         const items = [];
@@ -249,7 +252,7 @@ export const getPendingSalaryDashboardInbox = async (req, res) => {
                     : [],
                 profileIds.length
                     ? SalaryMonthDmf.find({ _id: { $in: profileIds } })
-                          .select('_id monthKey dmfApproval')
+                          .select('_id monthKey dmfApproval zohoJournalUpdatedAt')
                           .lean()
                     : [],
             ]);
@@ -297,7 +300,11 @@ export const getPendingSalaryDashboardInbox = async (req, res) => {
                 }
                 if (type === SALARY_DMF_REQUEST_TYPE && isSalarySlotNotice(da)) {
                     const slotStatus = String(slotById[String(da.requestId)]?.status || '').toLowerCase();
-                    if (slotStatus !== 'pending_wps' && slotStatus !== 'pending_update') {
+                    if (
+                        slotStatus !== 'pending_hr' &&
+                        slotStatus !== 'pending_wps' &&
+                        slotStatus !== 'pending_update'
+                    ) {
                         if (da._id) idsToDismiss.push(da._id);
                         continue;
                     }
@@ -306,8 +313,13 @@ export const getPendingSalaryDashboardInbox = async (req, res) => {
                 }
                 if (type === SALARY_DMF_REQUEST_TYPE) {
                     const monthRow = monthDmfById[String(da.requestId)];
-                    const dmfStatus = String(monthRow?.dmfApproval?.status || '');
-                    if (dmfStatus !== 'pending') {
+                    const meta = parseExtra3(da.extra3);
+                    const stillOpen = salaryMonthBellStillOpen({
+                        kind: meta.kind,
+                        dmfStatus: monthRow?.dmfApproval?.status,
+                        zohoJournalUpdated: Boolean(monthRow?.zohoJournalUpdatedAt),
+                    });
+                    if (!monthRow || !stillOpen) {
                         if (da._id) idsToDismiss.push(da._id);
                         continue;
                     }

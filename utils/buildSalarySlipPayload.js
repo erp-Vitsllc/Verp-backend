@@ -22,8 +22,8 @@ import {
 import { applyLeaveCoverIndex, loadLeaveCoverIndex } from './attendanceLeaveDayCover.js';
 import { overlaySuspendedAttendance } from './attendanceSuspension.js';
 import { addDays, policyLeaveMultipliers } from './salaryHistoricalCalculations.js';
-import { approvedOtRemainder } from './flexibleAttendance.js';
 import { compOffAdjustedHours } from './compOffSettlement.js';
+import { leavePageApprovedOtHours } from './leavePageApprovedOt.js';
 import { getVegaLogoDataUrl } from './buildSalarySlipPdfHtml.js';
 import { resolveEmployeePayrollPolicy } from './employeeLeavePolicy.js';
 import { lateDeductionFromEvents } from './lateDeductionPolicy.js';
@@ -51,6 +51,7 @@ import { payLocationFromEmployee } from './workPayLocation.js';
 import {
     loadUtilityPortionContext,
     unpaidEmployeePortionOnSalaryMonth,
+    utilityMonthKey,
 } from './utilityEmployeePortionStatus.js';
 
 const MONTH_FULL = [
@@ -61,6 +62,24 @@ const APPROVED_LOAN_STATUSES = ['Approved', 'Pending Payment to Employee', 'Paid
 const APPROVED_FINE_STATUSES = ['Approved', 'Active', 'Paid', 'Completed'];
 const APPROVED_REWARD_STATUSES = ['Approved', 'Approved (Paid)'];
 const PRESENT_KEYS = new Set(['on_office', 'work_from_home', 'late_arrived', 'early_go']);
+
+/**
+ * Approved overtime the employee Leave page pays.
+ * A day moved onto leave, or stored only as an OT placeholder, is not counted again.
+ * Amount is these hours × (monthly salary / days in the month) / 10.
+ */
+function approvedLeavePageOtHours(row, coveredSources, date) {
+    if (String(row?.flexibleOtStatus || '').trim() !== 'approved') return 0;
+    if (String(row?.flexibleOtNextDayDate || '').trim()) return 0;
+    if (coveredSources?.has(date)) return 0;
+    if (String(row?.flexibleFromOtDate || '').trim()) return 0;
+    if (String(row?.statusKey || '') === 'compoff_leave') return 0;
+    const inn = String(row?.timeIn || '').trim();
+    const out = String(row?.timeOut || '').trim();
+    if (inn === 'OT' || out === 'OT') return 0;
+    const hours = Number(row?.flexibleOtApprovedHours) || 0;
+    return hours > 0 ? hours : 0;
+}
 
 /** A payroll-sheet present day is any day with a time in, a time out, or both. */
 export function attendanceDayHasPunch(row) {
@@ -672,8 +691,66 @@ export function recoveryDueThroughSalaryMonth({ total, repaid, startYm, duration
     return Math.min(remaining, dueThroughSalaryMonth(openParty, schedule));
 }
 
-function unpaidThisMonthFromPartyOrSchedule(party, schedule) {
-    return dueThroughSalaryMonth(party, schedule);
+/** Unpaid installment that belongs to this salary month only. Earlier and later months stay out of it. */
+export function currentMonthInstallment({ total, repaid, startYm, duration, ym }) {
+    const start = payableMonthKey(startYm);
+    const target = payableMonthKey(ym);
+    const months = Math.max(1, Number(duration) || 1);
+    const due = money(total);
+    if (!start || !target || due <= 0) return 0;
+    if (compareYm(target, start) < 0) return 0;
+    const end = addMonthsYm(start, months - 1);
+    if (!end || compareYm(target, end) > 0) return 0;
+    let paidLeft = Math.max(0, money(repaid));
+    const base = money(due / months);
+    let allocated = 0;
+    for (let i = 0; i < months; i += 1) {
+        const key = addMonthsYm(start, i);
+        const portion = i === months - 1 ? money(due - allocated) : base;
+        allocated = money(allocated + portion);
+        const paidHere = Math.min(paidLeft, portion);
+        paidLeft = money(paidLeft - paidHere);
+        if (key === target) return money(Math.max(0, portion - paidHere));
+    }
+    return 0;
+}
+
+/** This salary month's unpaid share. Prior months and later installments are not added in. */
+export function currentMonthShare(party, schedule) {
+    if (party && !isEmployeeUnpaidStatus(party.status)) return 0;
+    const parts = Array.isArray(party?.installments) ? party.installments : [];
+    const datedParts = parts.filter((row) => payableMonthKey(row?.monthKey));
+    const target = payableMonthKey(schedule?.ym);
+    if (datedParts.length) {
+        if (!target) return 0;
+        return money(datedParts.reduce((sum, row) => {
+            if (payableMonthKey(row.monthKey) !== target) return sum;
+            if (!isEmployeeUnpaidStatus(row.status)) return sum;
+            return money(sum + money(row.amount));
+        }, 0));
+    }
+    return currentMonthInstallment(schedule);
+}
+
+/**
+ * This month's loan or advance share.
+ * Company disbursement can mark the party Paid. That is not employee repayment.
+ */
+export function recoveryCurrentMonthShare({ total, repaid, startYm, duration, ym, party } = {}) {
+    const due = money(total);
+    const recovered = Math.max(0, money(repaid));
+    const remaining = Math.max(0, money(due - recovered));
+    if (remaining <= 0.009 || due <= 0) return 0;
+    const schedule = { total: due, repaid: recovered, startYm, duration, ym };
+    const datedParts = (Array.isArray(party?.installments) ? party.installments : [])
+        .filter((row) => payableMonthKey(row?.monthKey));
+    const paidOnParts = installmentPaidTotal(datedParts);
+    const partsMatchRecovery = datedParts.length > 0 && Math.abs(paidOnParts - recovered) <= 0.05;
+    if (!partsMatchRecovery) return Math.min(remaining, currentMonthInstallment(schedule));
+    const openParty = party && !isEmployeeUnpaidStatus(party.status)
+        ? { ...party, status: 'Not Paid' }
+        : party;
+    return Math.min(remaining, currentMonthShare(openParty, schedule));
 }
 
 function partyExpenseFor(expenses, { kind, mongoField, mongoId } = {}) {
@@ -713,6 +790,7 @@ function emptyLoanRow(type) {
         paidAmount: 0,
         remainingAmount: 0,
         dueAmount: 0,
+        monthShare: 0,
         approved: false,
     };
 }
@@ -766,7 +844,7 @@ export async function buildSalarySlipPayload({
                 $or: [{ employeeMongoId: mongoId }, { employeeId: idPattern }],
                 date: { $gte: from, $lte: to },
             })
-                .select('date statusKey statusLabel reason leavePayType timeIn timeOut timeOutDate punchSessions flexibleWorkedHours flexibleRequiredHours hourAdjustStatus hourAdjustMode hourAdjustKind hoursApproved hoursTaken deductionWaived flexibleOtStatus flexibleOtApprovedHours flexibleOtNextDayDate leaveRequestStatus requestedStatusKey leaveRequestKind leaveRequestDayPart leaveDayFraction leaveDeductionTimes leaveRequestSession leaveCoverBlocked employeeMongoId')
+                .select('date statusKey statusLabel reason leavePayType timeIn timeOut timeOutDate punchSessions flexibleWorkedHours flexibleRequiredHours hourAdjustStatus hourAdjustMode hourAdjustKind hoursApproved hoursTaken deductionWaived flexibleOtStatus flexibleOtApprovedHours flexibleOtNextDayDate flexibleFromOtDate compOff leaveRequestStatus requestedStatusKey leaveRequestKind leaveRequestDayPart leaveDayFraction leaveDeductionTimes leaveRequestSession leaveCoverBlocked employeeMongoId')
                 .lean(),
             Holiday.find({ date: { $gte: from, $lte: to } }).select('date appliesTo').lean(),
             Loan.find({
@@ -931,20 +1009,40 @@ export async function buildSalarySlipPayload({
         const punched = Boolean(row.timeIn && row.timeOut);
         if (isHolidayDate && punched) holidaysWorked += 1;
 
-        const nextDayOt = String(row.flexibleOtNextDayDate || '').trim();
-        const otHoursApproved =
-            String(row.flexibleOtStatus || '') === 'approved' &&
-            !nextDayOt &&
-            !coveredOtSources.has(date)
-                ? approvedOtRemainder(row.flexibleOtApprovedHours)
-                : 0;
-        const ot = { hours: otHoursApproved, isOffDay: false };
-        if (ot.hours <= 0) continue;
-        if (ot.isOffDay || isHolidayDate) {
-            otDays += 1;
-        } else {
-            otHours += ot.hours;
+        const approvedHours = approvedLeavePageOtHours(row, coveredOtSources, date);
+        if (approvedHours > 0) otHours += approvedHours;
+    }
+
+    const fallbackOtHours = otHours;
+    const joinKey = dateKeyOf(profile?.contractJoiningDate) || dateKeyOf(emp.dateOfJoining);
+    const dubaiNow = getZonedParts(new Date(), getScheduledEmailTimeZone());
+    const todayKey = `${dubaiNow.year}-${pad2(dubaiNow.month)}-${pad2(dubaiNow.day)}`;
+    const countWindow = leaveDeductionCountWindow({
+        monthKey: ym,
+        joinKey,
+        processingStart,
+        todayKey,
+    });
+    let leavePageOtUsed = false;
+    try {
+        const leavePageOt = await leavePageApprovedOtHours({
+            records: coveredAttendance,
+            monthKey: ym,
+            countTo: countWindow.to,
+            joinKey,
+            daily,
+            week,
+            holidayDates: holidaySet,
+            monthlySalary: monthly,
+        });
+        if (leavePageOt != null) {
+            otHours = leavePageOt;
+            otDays = 0;
+            leavePageOtUsed = true;
         }
+    } catch (error) {
+        console.error('[buildSalarySlipPayload] leave page overtime', error?.message || error);
+        otHours = fallbackOtHours;
     }
 
     const exclusions = salarySlipPolicyExclusions(code, policy);
@@ -979,23 +1077,16 @@ export async function buildSalarySlipPayload({
         exclusions,
     ));
 
-    const compOffOtDeducted = await compOffAdjustedHours(mongoId, ym);
-    if (compOffOtDeducted > 0) {
-        otHours = Math.max(0, Math.round((otHours - compOffOtDeducted) * 100) / 100);
+    if (!leavePageOtUsed) {
+        const compOffOtDeducted = await compOffAdjustedHours(mongoId, ym);
+        if (compOffOtDeducted > 0) {
+            otHours = Math.max(0, Math.round((otHours - compOffOtDeducted) * 100) / 100);
+        }
     }
 
     const holidays = Math.max(holidaySet.size, holidayMarks);
     const otHoursAmount = money((daily / 10) * otHours);
     const otDaysAmount = money(daily * otDays);
-    const countWindow = leaveDeductionCountWindow({
-        monthKey: ym,
-        joinKey: dateKeyOf(profile?.contractJoiningDate) || dateKeyOf(emp.dateOfJoining),
-        processingStart,
-        todayKey: (() => {
-            const dubai = getZonedParts(new Date(), getScheduledEmailTimeZone());
-            return `${dubai.year}-${pad2(dubai.month)}-${pad2(dubai.day)}`;
-        })(),
-    });
     const pageDeductions = summarizeLeavePageDeductions({
         records: coveredAttendance,
         policy,
@@ -1191,7 +1282,7 @@ export async function buildSalarySlipPayload({
         const total = money(loan.amount);
         const repaid = money(loan.repaidAmount);
         const remaining = Math.max(0, money(total - repaid));
-        const dueAmount = recoveryDueThroughSalaryMonth({
+        const monthShare = recoveryCurrentMonthShare({
             total,
             repaid,
             startYm: start,
@@ -1199,7 +1290,7 @@ export async function buildSalarySlipPayload({
             ym,
             party,
         });
-        const thisMonthAmount = dueAmount;
+        const thisMonthAmount = monthShare;
         const type = isAdvance ? 'Salary Advance' : 'Loan';
         countedLoanIds.add(String(loan._id || ''));
         if (thisMonthAmount > 0) {
@@ -1218,7 +1309,8 @@ export async function buildSalarySlipPayload({
             originalAmount: total,
             paidAmount: repaid,
             remainingAmount: remaining,
-            dueAmount,
+            dueAmount: remaining,
+            monthShare,
             approved: true,
         });
     }
@@ -1245,9 +1337,9 @@ export async function buildSalarySlipPayload({
         });
         const paid = money(fine.paidAmount);
         const remaining = Math.max(0, money(payable - paid));
-        const dueAmount = Math.min(
+        const monthShare = Math.min(
             remaining,
-            dueThroughSalaryMonth(party, {
+            currentMonthShare(party, {
                 total: payable,
                 repaid: paid,
                 startYm: startFineYm,
@@ -1255,7 +1347,7 @@ export async function buildSalarySlipPayload({
                 ym,
             }),
         );
-        const thisMonthAmount = dueAmount;
+        const thisMonthAmount = monthShare;
         const installment = money(payable / duration);
         countedFineIds.add(String(fine._id || ''));
         if (thisMonthAmount > 0) fineMonth = money(fineMonth + thisMonthAmount);
@@ -1272,7 +1364,8 @@ export async function buildSalarySlipPayload({
             originalAmount: payable,
             paidAmount: paid,
             remainingAmount: remaining,
-            dueAmount,
+            dueAmount: remaining,
+            monthShare,
             approved: true,
         });
     }
@@ -1287,9 +1380,9 @@ export async function buildSalarySlipPayload({
         const total = money(exp.amount);
         const paid = paidFromPartyExpense(exp);
         const remaining = Math.max(0, money(total - paid));
-        const dueAmount = Math.min(
+        const monthShare = Math.min(
             remaining,
-            dueThroughSalaryMonth(exp, {
+            currentMonthShare(exp, {
                 total,
                 repaid: paid,
                 startYm: exp.monthStart || exp.billMonth,
@@ -1297,7 +1390,7 @@ export async function buildSalarySlipPayload({
                 ym,
             }),
         );
-        const thisMonthAmount = dueAmount;
+        const thisMonthAmount = monthShare;
         if (total <= 0 && thisMonthAmount <= 0) continue;
         if (exp.kind === 'fine') {
             if (countedFineIds.has(String(exp.fineMongoId || ''))) continue;
@@ -1315,7 +1408,8 @@ export async function buildSalarySlipPayload({
                 originalAmount: total,
                 paidAmount: paid,
                 remainingAmount: remaining,
-                dueAmount,
+                dueAmount: remaining,
+                monthShare,
                 approved: true,
             });
             continue;
@@ -1340,7 +1434,8 @@ export async function buildSalarySlipPayload({
                 originalAmount: total,
                 paidAmount: paid,
                 remainingAmount: remaining,
-                dueAmount,
+                dueAmount: remaining,
+                monthShare,
                 approved: true,
             });
         }
@@ -1363,7 +1458,9 @@ export async function buildSalarySlipPayload({
             salaryMonth: ym,
         });
         if (outstanding <= 0.009) continue;
-        utilityMonth = money(utilityMonth + outstanding);
+        const billMonth = utilityMonthKey(bill.billMonth);
+        const monthShare = billMonth && billMonth === ym ? outstanding : 0;
+        if (monthShare > 0) utilityMonth = money(utilityMonth + monthShare);
         utilities.push({
             sourceId: billId,
             details: String(bill.utilityType || 'Utility').trim() || 'Utility',
@@ -1371,12 +1468,13 @@ export async function buildSalarySlipPayload({
             reason: String(bill.notes || 'Unpaid employee portion').trim(),
             total: outstanding,
             paid: 0,
-            thisMonthAmount: outstanding,
-            thisMonth: formatAed(outstanding),
+            thisMonthAmount: monthShare,
+            thisMonth: formatAed(monthShare),
             dueAmount: outstanding,
             remainingAmount: outstanding,
             originalAmount: outstanding,
             paidAmount: 0,
+            monthShare,
             approved: true,
         });
     }
@@ -1726,7 +1824,11 @@ function mergeStoredThisMonth(liveRows, storedRows, applyRow) {
         const storedRow = (live.sourceId && byId.get(String(live.sourceId))) || stored[index];
         if (!storedRow) return live;
         if (storedRow.thisMonthAmount == null && storedRow.thisMonth == null) return live;
-        const total = money(live?.dueAmount ?? live?.remainingAmount ?? live?.originalAmount ?? live?.total ?? live?.amount);
+        const total = money(
+            live?.remainingAmount != null && live.remainingAmount !== ''
+                ? live.remainingAmount
+                : (live?.dueAmount ?? live?.originalAmount ?? live?.monthShare ?? live?.total ?? live?.amount),
+        );
         const next = money(storedRow.thisMonthAmount ?? storedRow.thisMonth);
         const capped = Math.max(0, total > 0 ? Math.min(next, total) : 0);
         return { ...live, thisMonthAmount: capped, thisMonth: formatAed(capped) };
@@ -1849,8 +1951,18 @@ function pushDetailsIntoDeductions(slip) {
         if (deductionLineOverridden(overrides, row.category)) continue;
         deductions = setDeductionAmount(deductions, row.category, row.total);
     }
-    for (const loan of slip.loanSchedule || []) {
-        deductions = setDeductionAmount(deductions, loan.type, loan.thisMonthAmount ?? loan.thisMonth);
+    const loans = Array.isArray(slip.loanSchedule) ? slip.loanSchedule : [];
+    if (loans.length) {
+        deductions = setDeductionAmount(
+            deductions,
+            'Salary Advance',
+            scheduleMonthTotal(loans, (row) => /advance/i.test(String(row?.type || ''))),
+        );
+        deductions = setDeductionAmount(
+            deductions,
+            'Loan',
+            scheduleMonthTotal(loans, (row) => !/advance/i.test(String(row?.type || ''))),
+        );
     }
     const fineTotal = (slip.fines || []).reduce(
         (sum, row) => sum + money(row.thisMonthAmount ?? row.thisMonth),
@@ -1951,8 +2063,6 @@ export function mergeStoredSalarySlip(live, stored) {
     return preferLiveComputed(applySalarySlipOverride(live, stored), live);
 }
 
-const ADDITION_EARNING = /overtime|leave salary|ticket|reward/i;
-
 function payrollFigureKey(value) {
     return String(value || '').trim().replace(/\s+/g, '').toUpperCase();
 }
@@ -1982,18 +2092,6 @@ function splitSheetDeductions(rows) {
     return { fineAmount, advanceAmount, loanAmount };
 }
 
-const ZOHO_MONTHLY_EARNINGS = [
-    'Basic Salary',
-    'Other Allowance',
-    'House Rental Allowance',
-    'Vehicle Allowance',
-    'Fuel Allowance',
-    'Phone Allowance',
-    'Overtime Hours',
-    'Overtime Days',
-    'Reward',
-];
-
 /** Same loss-of-pay lines as the salary slip card. */
 const ZOHO_LOSS_OF_PAY = [
     'Late in',
@@ -2005,21 +2103,137 @@ const ZOHO_LOSS_OF_PAY = [
     'Annual Leave',
 ];
 
-function namedAmount(rows, name) {
+function namedRow(rows, name) {
     const want = String(name || '').trim().toLowerCase();
-    if (!want) return 0;
+    if (!want) return null;
     for (const row of rows || []) {
-        if (String(row?.component || '').trim().toLowerCase() === want) return money(row?.amount);
+        if (String(row?.component || '').trim().toLowerCase() === want) return row;
     }
-    return 0;
+    return null;
+}
+
+function namedAmount(rows, name) {
+    return money(namedRow(rows, name)?.amount);
+}
+
+function parseLeadingNumber(value) {
+    const match = String(value ?? '').match(/-?\d+(?:\.\d+)?/);
+    return match ? Number(match[0]) : 0;
+}
+
+function slipMonthDays(slip) {
+    const match = String(slip?.monthKey || '').trim().match(/^(\d{4})-(\d{2})$/);
+    if (match) return new Date(Number(match[1]), Number(match[2]), 0).getDate();
+    const fromSummary = Number(slip?.summary?.monthDays);
+    return Number.isFinite(fromSummary) && fromSummary > 0 ? fromSummary : 0;
+}
+
+const CONTRACT_SALARY_NAMES = [
+    'Basic Salary',
+    'Other Allowance',
+    'House Rental Allowance',
+    'Vehicle Allowance',
+    'Fuel Allowance',
+];
+
+function cardSalaryAmount(slip, name) {
+    const yearly = namedAmount(slip?.yearlyEarnings, name);
+    if (yearly > 0) return yearly;
+    return namedAmount(slip?.earnings, name);
+}
+
+function contractedMonthlySalary(slip) {
+    const fromSummary = money(slip?.summary?.monthlySalary);
+    if (fromSummary > 0) return fromSummary;
+    return money(CONTRACT_SALARY_NAMES.reduce((sum, name) => sum + cardSalaryAmount(slip, name), 0));
+}
+
+function daySalaryOfSlip(slip) {
+    const days = slipMonthDays(slip);
+    const monthly = contractedMonthlySalary(slip);
+    if (days > 0 && monthly > 0) return money(monthly / days);
+    return money(slip?.summary?.daySalary);
+}
+
+function overtimeHoursCount(slip) {
+    const summary = slip?.summary || {};
+    return (
+        Number(summary.overtimeHoursCount)
+        || parseLeadingNumber(slip?.attendance?.overtimeHours)
+        || parseLeadingNumber(namedRow(slip?.earnings, 'Overtime Hours')?.basis)
+        || 0
+    );
+}
+
+function overtimeDaysCount(slip) {
+    const summary = slip?.summary || {};
+    return (
+        Number(summary.overtimeDaysCount)
+        || parseLeadingNumber(namedRow(slip?.earnings, 'Overtime Days')?.basis)
+        || 0
+    );
+}
+
+/** Same monthly earning rows and overtime formula as the salary slip card. */
+function cardMonthlyEarning(slip, name) {
+    const daily = daySalaryOfSlip(slip);
+    if (name === 'Overtime Hours') return money((daily / 10) * overtimeHoursCount(slip));
+    if (name === 'Overtime Days') return money(daily * overtimeDaysCount(slip));
+    if (name === 'Phone Allowance' || name === 'Reward') return namedAmount(slip?.earnings, name);
+    return cardSalaryAmount(slip, name);
+}
+
+const LOSS_OF_PAY_GROUP = {
+    'Late in': 'attendance',
+    'Late out': 'attendance',
+    'Missed Punch': 'attendance',
+    'Authorized Leave': 'leave',
+    'Unauthorized Leave': 'leave',
+    'Sandwich Leave': 'leave',
+    'Annual Leave': 'leave',
+};
+
+function scheduleMonthTotal(rows, predicate) {
+    return money((Array.isArray(rows) ? rows : []).reduce((sum, row) => {
+        if (typeof predicate === 'function' && !predicate(row)) return sum;
+        return sum + money(row?.thisMonthAmount ?? row?.thisMonth);
+    }, 0));
+}
+
+/** Loan, fine, utility, and salary advance as shown on the salary slip deduction card. */
+function salarySlipScheduleDeductions(slip) {
+    const loans = Array.isArray(slip?.loanSchedule) ? slip.loanSchedule : [];
+    const advanceAmount = scheduleMonthTotal(
+        loans,
+        (row) => /advance/i.test(String(row?.type || '')),
+    );
+    const loanAmount = scheduleMonthTotal(
+        loans,
+        (row) => !/advance/i.test(String(row?.type || '')),
+    );
+    const fineAmount = scheduleMonthTotal(slip?.fines);
+    const utilityAmount = scheduleMonthTotal(slip?.utilities);
+    return {
+        fineAmount,
+        advanceAmount,
+        loanAmount,
+        utilityAmount,
+        total: money(fineAmount + advanceAmount + loanAmount + utilityAmount),
+    };
 }
 
 /** Loss of pay total on the salary slip card and the payroll sheet. */
 export function salarySlipLossOfPay(slip) {
-    return ZOHO_LOSS_OF_PAY.reduce(
-        (sum, name) => money(sum + namedAmount(slip?.deductions, name)),
-        0,
-    );
+    const excludeAttendance = Boolean(slip?.exclusions?.attendance);
+    const excludeLeave = Boolean(slip?.exclusions?.leave);
+    const annualDays = Number(slip?.summary?.lossOfPayDays?.annual) || 0;
+    return ZOHO_LOSS_OF_PAY.reduce((sum, name) => {
+        const group = LOSS_OF_PAY_GROUP[name];
+        if ((excludeLeave || excludeAttendance) && group === 'leave') return sum;
+        if (excludeAttendance && group === 'attendance') return sum;
+        if (name === 'Annual Leave' && !(annualDays > 0)) return sum;
+        return money(sum + namedAmount(slip?.deductions, name));
+    }, 0);
 }
 
 function sheetPresentDaysOf(slip) {
@@ -2029,74 +2243,99 @@ function sheetPresentDaysOf(slip) {
     return Number.isFinite(count) ? count : 0;
 }
 
+function cardBenefitAmount(slip, summaryAmount, yearlyName, earningName) {
+    const fromSummary = money(summaryAmount);
+    if (fromSummary > 0) return fromSummary;
+    const yearly = namedAmount(slip?.yearlyEarnings, yearlyName);
+    if (yearly > 0) return yearly;
+    return namedAmount(slip?.earnings, earningName);
+}
+
+/**
+ * The salary slip cards, read as displayed.
+ * Gross is the Zoho salary card. Net is the net salary payable card.
+ * Loss of pay is the slip's leave and attendance lines. Other deductions are
+ * this month's loan, fine, salary advance, and utility on the slip.
+ */
+function salarySlipCardPay(slip) {
+    const skipOvertime = Boolean(slip?.exclusions?.attendance);
+    const basicSalary = cardMonthlyEarning(slip, 'Basic Salary');
+    const contracted = money(CONTRACT_SALARY_NAMES.reduce(
+        (sum, name) => sum + cardMonthlyEarning(slip, name),
+        0,
+    ));
+    const phone = cardMonthlyEarning(slip, 'Phone Allowance');
+    const otHours = skipOvertime ? 0 : cardMonthlyEarning(slip, 'Overtime Hours');
+    const otDays = skipOvertime ? 0 : cardMonthlyEarning(slip, 'Overtime Days');
+    const reward = cardMonthlyEarning(slip, 'Reward');
+    const leave = cardBenefitAmount(
+        slip,
+        slip?.summary?.leaveSalary?.amount,
+        'Leave Salary',
+        'Leave Salary',
+    );
+    const ticket = cardBenefitAmount(
+        slip,
+        slip?.summary?.airTicket?.amount,
+        'Travel Allowance',
+        'Ticket',
+    );
+    const monthlySalary = contracted || money(slip?.summary?.monthlySalary);
+    const extra = money(phone + otHours + otDays + reward + leave + ticket);
+    const lossOfPay = salarySlipLossOfPay(slip);
+    const buckets = salarySlipScheduleDeductions(slip);
+    const zohoSalary = money(monthlySalary + extra - lossOfPay);
+    const netSalaryPayable = money(zohoSalary - buckets.total);
+    return {
+        basicSalary,
+        monthlySalary,
+        extra,
+        ot: money(otHours + otDays),
+        reward,
+        lossOfPay,
+        buckets,
+        zohoSalary,
+        netSalaryPayable,
+        deduction: money(lossOfPay + buckets.total),
+    };
+}
+
 /** Same figure as the salary slip Zoho salary card: monthly earnings + annual leave and ticket − loss of pay. */
 export function salarySlipZohoPay(slip) {
-    const monthly = ZOHO_MONTHLY_EARNINGS.reduce(
-        (sum, name) => money(sum + namedAmount(slip?.earnings, name)),
-        0,
-    );
-    const leave = money(slip?.summary?.leaveSalary?.amount)
-        || namedAmount(slip?.yearlyEarnings, 'Leave Salary')
-        || namedAmount(slip?.earnings, 'Leave Salary');
-    const ticket = money(slip?.summary?.airTicket?.amount)
-        || namedAmount(slip?.yearlyEarnings, 'Travel Allowance')
-        || namedAmount(slip?.earnings, 'Ticket');
-    return money(Math.max(0, monthly + leave + ticket - salarySlipLossOfPay(slip)));
+    return salarySlipCardPay(slip).zohoSalary;
 }
 
 /** Monthly pay, additions, deductions, and net taken from one salary slip. */
 export function salarySlipPayrollFigures(slip) {
-    const earnings = Array.isArray(slip?.earnings) ? slip.earnings : [];
-    let extra = 0;
-    let overtime = 0;
-    let structure = 0;
-    let basicSalary = 0;
-    for (const row of earnings) {
-        const name = String(row?.component || '');
-        const amount = money(row?.amount);
-        if (/basic salary/i.test(name)) basicSalary = amount;
-        if (ADDITION_EARNING.test(name)) {
-            extra = money(extra + amount);
-            if (/overtime/i.test(name)) overtime = money(overtime + amount);
-        } else {
-            structure = money(structure + amount);
-        }
-    }
+    const card = salarySlipCardPay(slip);
     const reconciliation = slip?.reconciliation || {};
     const netSalary = money(slip?.netSalary);
-    const monthlySalary = structure || money(slip?.summary?.monthlySalary);
-    const buckets = splitSheetDeductions(slip?.deductions);
-    const zohoSalary = salarySlipZohoPay(slip);
-    const cardLossOfPay = salarySlipLossOfPay(slip);
-    const utilityAmount = namedAmount(slip?.deductions, 'Utility Excess');
-    const cardOtherDeduction = money(
-        buckets.fineAmount + buckets.advanceAmount + buckets.loanAmount + utilityAmount,
-    );
-    // Same as the slip: Zoho salary minus loan, fine, utility, and salary advance.
-    const actualSalary = money(Math.max(0, zohoSalary - cardOtherDeduction));
+    const { buckets } = card;
+    const actualSalary = card.netSalaryPayable;
     return {
         monthKey: monthKeyOf(slip?.monthKey),
-        monthlySalary,
-        basicSalary,
-        otherAllowance: money(Math.max(0, monthlySalary - basicSalary)),
+        monthlySalary: card.monthlySalary,
+        basicSalary: card.basicSalary,
+        otherAllowance: money(Math.max(0, card.monthlySalary - card.basicSalary)),
         presentDays: labeledCount(slip?.attendance?.presentDays),
         sheetPresentDays: sheetPresentDaysOf(slip),
         leaveDays: labeledCount(slip?.attendance?.workingDayLeaves),
-        rewardAdditions: money(Math.max(0, extra - overtime)),
-        grossSalary: money(slip?.grossEarnings) || money(monthlySalary + extra),
+        rewardAdditions: card.reward,
+        grossSalary: card.zohoSalary,
         fineAmount: buckets.fineAmount,
         advanceAmount: buckets.advanceAmount,
         loanAmount: buckets.loanAmount,
-        sheetOtherDeduction: utilityAmount,
-        extra,
-        ot: overtime,
-        deduction: money(cardLossOfPay + cardOtherDeduction),
-        lossOfPay: cardLossOfPay,
-        sheetLossOfPay: cardLossOfPay,
-        otherDeduction: cardOtherDeduction,
+        sheetOtherDeduction: buckets.utilityAmount,
+        extra: card.extra,
+        ot: card.ot,
+        deduction: card.deduction,
+        lossOfPay: card.lossOfPay,
+        sheetLossOfPay: card.lossOfPay,
+        otherDeduction: buckets.total,
         actualSalary,
         netSalary,
-        zohoSalary,
+        netSalaryPayable: card.netSalaryPayable,
+        zohoSalary: card.zohoSalary,
         overtimeHours: money(slip?.summary?.overtimeHoursCount),
         grossEarnings: money(slip?.grossEarnings),
         attendance: money(reconciliation.attendance),

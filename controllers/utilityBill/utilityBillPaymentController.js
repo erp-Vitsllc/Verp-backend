@@ -23,6 +23,7 @@ import {
     lookupVendorBillDuplicates,
 } from '../../utils/utilityBillDuplicateCheck.js';
 import { attachZohoBillNumbers } from '../../utils/attachZohoDocumentNumbers.js';
+import { attachUtilityDifferencePaid } from '../../utils/utilityEmployeePortionStatus.js';
 
 const REQUEST_TYPE = 'Utility Bill Payment';
 
@@ -747,6 +748,14 @@ export async function listUtilityBillPayments(req, res) {
             const overviewBills = await UtilityBillPayment.find(overviewFilter)
                 .select(OVERVIEW_BILL_FIELDS)
                 .lean();
+            try {
+                await attachUtilityDifferencePaid(overviewBills);
+            } catch (portionErr) {
+                console.warn(
+                    '[listUtilityBillPayments] employee difference status failed:',
+                    portionErr?.message || portionErr,
+                );
+            }
             res.status(200).json({ bills: overviewBills });
             const approvedLinkedIds = overviewBills
                 .filter((bill) => bill?.status === 'Approved' && utilityBillHasZohoLink(bill))

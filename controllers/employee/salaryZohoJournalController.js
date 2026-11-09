@@ -8,6 +8,7 @@ import { isPlaceholderEmployeeId } from '../../utils/employeeIdPrefix.js';
 import { collectSalarySlipPayrollFigures } from '../../utils/buildSalarySlipPayload.js';
 import { enrollmentCoversSalaryMonth } from '../../utils/salaryEnrollmentStartMonth.js';
 import { buildDmfViewerContext } from '../../utils/salaryDmfApproval.js';
+import { closeSalaryDmfInbox } from '../../utils/salaryDmfNotify.js';
 import { getScheduledEmailTimeZone, getZonedParts } from '../../utils/scheduleDailyAtMidnight.js';
 import { createZohoJournal, getZohoConfig, uploadJournalAttachment } from '../../services/zohoService.js';
 import { withZohoOrganization } from '../../utils/zohoOrgContext.js';
@@ -315,6 +316,22 @@ export const postSalaryZohoJournal = async (req, res) => {
             return { journalId, journalNumber, attachmentErrors };
         });
 
+        const finalize = body.finalize === true || body.finalize === 'true';
+        if (status === 'published' && finalize) {
+            const saved = await SalaryMonthDmf.findOneAndUpdate(
+                { monthKey },
+                { $set: { zohoJournalUpdatedAt: new Date() } },
+                { new: true },
+            );
+            if (saved?._id) {
+                await closeSalaryDmfInbox({
+                    requestId: saved._id,
+                    status: 'Approved',
+                    comment: 'Zoho journal published',
+                });
+            }
+        }
+
         const label = String(body.organizationLabel || 'Zoho').trim() || 'Zoho';
         const message = result.attachmentErrors.length
             ? `${label} journal ${result.journalNumber || ''} saved. Some attachments failed: ${result.attachmentErrors.join('; ')}`
@@ -328,6 +345,7 @@ export const postSalaryZohoJournal = async (req, res) => {
             journalId: result.journalId,
             journalNumber: result.journalNumber,
             attachmentErrors: result.attachmentErrors,
+            zohoJournalUpdated: status === 'published' && finalize,
         });
     } catch (error) {
         console.error('[postSalaryZohoJournal]', error);

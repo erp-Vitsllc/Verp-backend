@@ -228,14 +228,19 @@ export const postSalarySlotExpense = async (req, res) => {
         await doc.save();
         await applySlotPaid(doc.employeeIds || [], monthKey);
         try {
-            const { markUtilityPortionsPaidFromPayrollZoho } = await import(
-                '../../utils/utilityEmployeePortionStatus.js'
+            const { applySalarySlotDeductionReceipts } = await import(
+                '../../utils/applySalarySlotDeductionReceipts.js'
             );
-            await markUtilityPortionsPaidFromPayrollZoho(doc.employeeIds || [], [monthKey]);
-        } catch (utilityErr) {
+            await applySalarySlotDeductionReceipts({
+                employeeIds: doc.employeeIds || [],
+                monthKey,
+                slotId: doc._id,
+                userId: req.user?._id || null,
+            });
+        } catch (deductionErr) {
             console.error(
-                '[salary slot expense] utility portion',
-                utilityErr?.message || utilityErr,
+                '[salary slot expense] deduction receipts',
+                deductionErr?.message || deductionErr,
             );
         }
         await closeAccountsSalarySlotInbox(doc._id);

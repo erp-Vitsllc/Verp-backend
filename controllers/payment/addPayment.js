@@ -1390,13 +1390,13 @@ export const addPayment = async (req, res) => {
         const zohoSync = loanRepaymentZoho || loanZoho || fineZoho || utilityZoho;
         let message = 'Payment created successfully';
         if (isEmployeeFinePay) {
-            message = 'Payment recorded. Invoice emailed to the fined employee.';
+            message = 'Payment recorded. Receipt emailed to the fined employee.';
         } else if (isEmployeeLoanRepayPay) {
             const kind =
                 employeePayEntityType === 'AdvanceRepayment' ? 'advance' : 'loan';
-            message = `Payment recorded. Invoice emailed for this ${kind} payment.`;
+            message = `Payment recorded. Receipt emailed for this ${kind} payment.`;
         } else if (isEmployeeUtilityPay) {
-            message = 'Payment recorded. Invoice emailed for this utility payment. No Zoho entry.';
+            message = 'Payment recorded. Receipt emailed for this utility payment. No Zoho entry.';
         }
         if (zohoSync) {
             if (zohoSync.ok && zohoSync.expenseId) {

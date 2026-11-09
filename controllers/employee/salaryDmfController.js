@@ -18,6 +18,7 @@ import {
 } from '../../utils/salaryDmfApproval.js';
 import {
     closeSalaryDmfInbox,
+    notifyAccountsPayrollBell,
     notifySalaryDmfStep,
     notifySalaryMonthRejected,
     notifySalaryMonthSlotReady,
@@ -97,6 +98,12 @@ async function persistAndNotify({
             void notifySalaryMonthSlotReady({ req, dmf, monthKey }).catch((err) => {
                 console.error('[notifySalaryMonthSlotReady]', err?.message || err);
             });
+            await notifyAccountsPayrollBell({
+                requestId,
+                dmf,
+                monthKey,
+                phase: 'zoho',
+            });
         }
         return;
     }
@@ -171,7 +178,11 @@ async function monthPayrollAmount(monthKey) {
 
 async function serializeMonthDmfRow(req, doc, monthKey) {
     const ctx = await buildDmfViewerContext(req, doc?.dmfApproval);
-    return serializeDmf(doc?.dmfApproval, { ready: true, ctx: { ...ctx, monthKey }, flow: 'month' });
+    const view = serializeDmf(doc?.dmfApproval, { ready: true, ctx: { ...ctx, monthKey }, flow: 'month' });
+    return {
+        ...view,
+        zohoJournalUpdated: Boolean(doc?.zohoJournalUpdatedAt),
+    };
 }
 
 export async function getMonthSalaryDmf(req, res) {
@@ -345,6 +356,12 @@ export async function recallMonthSalaryDmf(req, res) {
                 actionedBy: actor(req).id,
                 comment: 'Recalled to Accounts',
             });
+            await notifyAccountsPayrollBell({
+                requestId: doc._id,
+                dmf: doc.dmfApproval,
+                monthKey,
+                phase: 'accounts',
+            });
         }
         return res.status(200).json({
             message: result.returnedTo === 'hr'
@@ -416,6 +433,12 @@ export async function rejectMonthSalaryDmf(req, res) {
                 monthKey,
                 rejectedByName: who.name,
                 reason,
+            });
+            await notifyAccountsPayrollBell({
+                requestId: doc._id,
+                dmf: doc.dmfApproval,
+                monthKey,
+                phase: 'accounts',
             });
         }
 

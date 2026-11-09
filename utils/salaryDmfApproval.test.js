@@ -10,9 +10,11 @@ import {
     returnMonthPayrollToHr,
     salarySlipEditLockMessage,
     serializeDmf,
+    salaryMonthBellStillOpen,
     viewerCanCreateSalarySlot,
     viewerCanRecallMonthPayroll,
     viewerCanSubmitMonthPayroll,
+    viewerCanValidateMonthPayroll,
     viewerCanUpdateSalarySlip,
 } from './salaryDmfApproval.js';
 
@@ -80,30 +82,89 @@ describe('month payroll submit', () => {
 
         const view = serializeDmf(dmf, { ready: true, ctx: accounts, flow: 'month' });
         assert.equal(view.canStart, false);
+        assert.equal(view.canValidate, true);
+        assert.equal(serializeDmf(dmf, { ready: true, ctx: hr, flow: 'month' }).canValidate, true);
+        assert.equal(serializeDmf(dmf, { ready: true, ctx: management, flow: 'month' }).canValidate, false);
         assert.equal(view.canCreateSlot, true);
         assert.equal(serializeDmf(dmf, { ready: true, ctx: hr, flow: 'month' }).canCreateSlot, false);
     });
 
-    it('locks salary slip edits to the current approver, then to nobody', () => {
+    it('keeps the salary bell with the role that still has the payroll', () => {
+        assert.equal(
+            salaryMonthBellStillOpen({ kind: 'month', dmfStatus: 'pending' }),
+            true,
+        );
+        assert.equal(
+            salaryMonthBellStillOpen({ kind: 'salary-accounts', dmfStatus: 'rejected' }),
+            true,
+        );
+        assert.equal(
+            salaryMonthBellStillOpen({ kind: 'salary-accounts', dmfStatus: 'idle' }),
+            true,
+        );
+        assert.equal(
+            salaryMonthBellStillOpen({
+                kind: 'salary-zoho',
+                dmfStatus: 'approved',
+                zohoJournalUpdated: false,
+            }),
+            true,
+        );
+        assert.equal(
+            salaryMonthBellStillOpen({
+                kind: 'salary-zoho',
+                dmfStatus: 'approved',
+                zohoJournalUpdated: true,
+            }),
+            false,
+        );
+        assert.equal(
+            salaryMonthBellStillOpen({ kind: 'salary-zoho', dmfStatus: 'pending' }),
+            false,
+        );
+        assert.equal(
+            salaryMonthBellStillOpen({ kind: 'month', dmfStatus: 'approved' }),
+            false,
+        );
+    });
+
+    it('lets Accounts and HR validate while Management has the payroll', () => {
+        const dmf = monthDraft();
+        approveCurrentDmfStep(dmf, { actor: { name: 'Ada User' }, comment: 'Submitted' });
+        approveCurrentDmfStep(dmf, { actor: { name: 'Hana User' }, comment: '' });
+        assert.equal(dmf.currentStepKey, 'management');
+        assert.equal(viewerCanValidateMonthPayroll(accounts), true);
+        assert.equal(viewerCanValidateMonthPayroll(hr), true);
+        assert.equal(serializeDmf(dmf, { ready: true, ctx: accounts, flow: 'month' }).canValidate, true);
+        assert.equal(serializeDmf(dmf, { ready: true, ctx: hr, flow: 'month' }).canValidate, true);
+        assert.equal(serializeDmf(dmf, { ready: true, ctx: management, flow: 'month' }).canValidate, true);
+        assert.equal(serializeDmf(dmf, { ready: true, ctx: {}, flow: 'month' }).canValidate, false);
+    });
+
+    it('lets Accounts, HR, and Management edit the slip until the payroll is processed', () => {
         const idle = { status: 'idle' };
-        assert.equal(viewerCanUpdateSalarySlip(idle, accounts, { canEditSetup: true }), true);
-        assert.equal(viewerCanUpdateSalarySlip(idle, management, { canEditSetup: false }), false);
+        assert.equal(viewerCanUpdateSalarySlip(idle, accounts, { canEditSetup: false }), true);
+        assert.equal(viewerCanUpdateSalarySlip(idle, hr, { canEditSetup: false }), true);
+        assert.equal(viewerCanUpdateSalarySlip(idle, management, { canEditSetup: false }), true);
+        assert.equal(viewerCanUpdateSalarySlip(idle, {}, { canEditSetup: true }), true);
+        assert.equal(viewerCanUpdateSalarySlip(idle, {}, { canEditSetup: false }), false);
+        assert.equal(salarySlipEditLockMessage(idle), '');
 
         const dmf = monthDraft();
         approveCurrentDmfStep(dmf, { actor: { name: 'Ada User' }, comment: 'Submitted' });
         assert.equal(dmf.currentStepKey, 'hr');
         assert.equal(viewerCanUpdateSalarySlip(dmf, hr, { canEditSetup: false }), true);
-        assert.equal(viewerCanUpdateSalarySlip(dmf, accounts, { canEditSetup: true }), false);
-        assert.equal(salarySlipEditLockMessage(dmf), 'Only HR can edit this salary slip.');
+        assert.equal(viewerCanUpdateSalarySlip(dmf, accounts, { canEditSetup: false }), true);
+        assert.equal(salarySlipEditLockMessage(dmf), '');
         assert.equal(viewerCanRecallMonthPayroll(dmf, accounts), true);
         assert.equal(viewerCanRecallMonthPayroll(dmf, hr), false);
 
         approveCurrentDmfStep(dmf, { actor: { name: 'Hana User' }, comment: '' });
         assert.equal(dmf.currentStepKey, 'management');
         assert.equal(viewerCanUpdateSalarySlip(dmf, management, { canEditSetup: false }), true);
-        assert.equal(viewerCanUpdateSalarySlip(dmf, hr, { canEditSetup: true }), false);
-        assert.equal(viewerCanUpdateSalarySlip(dmf, accounts, { canEditSetup: true }), false);
-        assert.equal(salarySlipEditLockMessage(dmf), 'Only Management can edit this salary slip.');
+        assert.equal(viewerCanUpdateSalarySlip(dmf, hr, { canEditSetup: false }), true);
+        assert.equal(viewerCanUpdateSalarySlip(dmf, accounts, { canEditSetup: false }), true);
+        assert.equal(salarySlipEditLockMessage(dmf), '');
         assert.equal(viewerCanRecallMonthPayroll(dmf, hr), true);
         assert.equal(viewerCanRecallMonthPayroll(dmf, accounts), false);
 

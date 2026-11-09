@@ -5,6 +5,7 @@ const salaryMonthDmfSchema = new mongoose.Schema(
     {
         monthKey: { type: String, required: true, trim: true, unique: true },
         dmfApproval: { type: salaryDmfApprovalSchema, default: () => ({}) },
+        zohoJournalUpdatedAt: { type: Date, default: null },
     },
     { timestamps: true },
 );

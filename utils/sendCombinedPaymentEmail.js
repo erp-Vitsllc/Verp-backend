@@ -4,6 +4,7 @@ import EmployeeBasic from '../models/EmployeeBasic.js';
 import Fine from '../models/Fine.js';
 import Loan from '../models/Loan.js';
 import Payment from '../models/Payment.js';
+import UtilityBillPayment from '../models/UtilityBillPayment.js';
 import { resolveEmployeeEmail } from './resolveEmployeeEmail.js';
 import { resolveEmployeeFinePayableAmount } from './finePayableAmount.js';
 import { resolveZohoAttachmentUpload } from './resolveZohoAttachmentUpload.js';
@@ -31,6 +32,15 @@ const resolvePaymentRecipientEmail = (employee) => {
 
 const isLoanLikeType = (value) =>
     ['Loan', 'LoanRepayment', 'Advance', 'AdvanceRepayment'].includes(String(value || '').trim());
+
+function paidKindLabel(payment) {
+    const type = String(payment?.relatedEntityType || payment?.paymentType || '').trim();
+    if (type === 'Fine') return 'fine';
+    if (type === 'Advance' || type === 'AdvanceRepayment') return 'advance';
+    if (type === 'Loan' || type === 'LoanRepayment') return 'loan';
+    if (type === 'UtilityBill') return 'utility';
+    return 'payment';
+}
 
 async function buildSupportingEmailAttachments(payment) {
     const out = [];
@@ -341,10 +351,12 @@ export const sendPaymentNotificationEmail = async (payment, status, comment = ''
         const isLoanRepayNotice = ['LoanRepayment', 'AdvanceRepayment'].includes(
             String(payment.relatedEntityType || '').trim(),
         );
-        const repayKind =
-            String(payment.relatedEntityType || '').trim() === 'AdvanceRepayment'
-                ? 'advance'
-                : 'loan';
+        const kindLabel = paidKindLabel(payment);
+        const salaryDeduction = String(payment.paymentSource || '').trim() === 'Salary';
+        const amountLabel = parseFloat(payment.amount || 0).toLocaleString(undefined, {
+            minimumFractionDigits: 2,
+            maximumFractionDigits: 2,
+        });
 
         // FETCH OUTSTANDING DEBTS
         const otherDebts = [];
@@ -387,8 +399,10 @@ export const sendPaymentNotificationEmail = async (payment, status, comment = ''
 
         const statusColor = isApproved ? '#10b981' : '#ef4444';
         const statusText = isApproved ? 'Success' : 'Rejected';
-        const subject = isLoanRepayNotice && isApproved
-            ? `Your ${repayKind} payment is completed: ${payment.paymentId}`
+        const subject = isApproved
+            ? salaryDeduction
+                ? `Receipt: AED ${amountLabel} ${kindLabel} paid from salary`
+                : `Receipt: AED ${amountLabel} ${kindLabel} paid`
             : `Payment ${statusText}: ${payment.paymentId}`;
 
         let currentShare = 0;
@@ -423,6 +437,26 @@ export const sendPaymentNotificationEmail = async (payment, status, comment = ''
                         status: { $in: SUCCESS_STATUSES },
                         $or: [{ relatedEntityId: currentItem._id }, { referenceId: currentItem.loanId }]
                     }).lean();
+                }
+            } else if (String(payment.relatedEntityType || '') === 'UtilityBill') {
+                const bill = await UtilityBillPayment.findById(payment.relatedEntityId).lean();
+                currentItem = bill
+                    ? { ...bill, monthStart: bill.billMonth || bill.monthStart, duration: 1 }
+                    : null;
+                const { employeePortionAmount, countsTowardUtilityEmployeePortion } = await import(
+                    './utilityEmployeePortionStatus.js'
+                );
+                currentShare = currentItem
+                    ? employeePortionAmount(currentItem, [employee.employeeId, String(employee._id)])
+                    : 0;
+                if (!(currentShare > 0)) currentShare = parseFloat(payment.amount || 0);
+                if (currentItem) {
+                    const rows = await Payment.find({
+                        relatedEntityType: 'UtilityBill',
+                        relatedEntityId: currentItem._id,
+                        status: { $in: SUCCESS_STATUSES },
+                    }).lean();
+                    itemPayments = rows.filter((row) => countsTowardUtilityEmployeePortion(row));
                 }
             }
 
@@ -470,10 +504,10 @@ export const sendPaymentNotificationEmail = async (payment, status, comment = ''
                     <p>Dear <strong>${employee.firstName} ${employee.lastName}</strong>,</p>
                     <p style="line-height: 1.6; color: #475569;">
                         ${isApproved
-                            ? isLoanRepayNotice
-                                ? `Your payment of ${repayKind} has been completed. Please find your invoice${payment?.attachment || (Array.isArray(payment?.attachments) && payment.attachments.length) ? ' and supporting attachment' : ''} attached to this email.`
-                                : `Your payment of <strong>AED ${parseFloat(payment.amount).toLocaleString()}</strong> has been successfully processed. Please find your invoice${payment?.attachment || (Array.isArray(payment?.attachments) && payment.attachments.length) ? ' and supporting attachment' : ''} attached to this email.`
-                            : `Your payment request for <strong>AED ${parseFloat(payment.amount).toLocaleString()}</strong> has been rejected by the Accounts Department.`
+                            ? salaryDeduction
+                                ? `AED <strong>${amountLabel}</strong> of this ${kindLabel} was paid from salary. The receipt is attached to this email.`
+                                : `Your payment of <strong>AED ${amountLabel}</strong> for this ${kindLabel} is paid. The receipt is attached to this email.`
+                            : `Your payment request for <strong>AED ${amountLabel}</strong> has been rejected by the Accounts Department.`
                         }
                     </p>
 
@@ -488,7 +522,7 @@ export const sendPaymentNotificationEmail = async (payment, status, comment = ''
                         <h3 style="margin: 0 0 15px; font-size: 14px; color: #1e293b;">Financial Snapshot</h3>
                         <div style="display: flex; justify-content: space-between; margin-bottom: 8px; font-size: 13px;">
                             <span style="color: #64748b;">Paid Now:</span>
-                            <span style="font-weight: 700;">AED ${parseFloat(payment.amount).toLocaleString()}</span>
+                            <span style="font-weight: 700;">AED ${amountLabel}</span>
                         </div>
                         <div style="display: flex; justify-content: space-between; font-size: 13px;">
                             <span style="color: #64748b;">Total Remaining (All Items):</span>
@@ -506,7 +540,7 @@ export const sendPaymentNotificationEmail = async (payment, status, comment = ''
         const mailAttachments = [];
         if (pdfBuffer) {
             mailAttachments.push({
-                filename: `Invoice_${payment.paymentId}.pdf`,
+                filename: `Receipt_${payment.paymentId}.pdf`,
                 content: pdfBuffer,
                 contentType: 'application/pdf',
             });

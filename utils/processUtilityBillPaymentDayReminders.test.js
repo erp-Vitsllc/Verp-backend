@@ -1,6 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
+    dueUnpaidBillMonths,
+    previousCalendarMonthKey,
+    previousMonthPayReminderDue,
     utilityMonthBillIsInZoho,
     utilityMonthBillIsSettled,
 } from './processUtilityBillPaymentDayReminders.js';
@@ -9,11 +12,23 @@ test('a month with no bill is not settled', () => {
     assert.equal(utilityMonthBillIsSettled([]), false);
 });
 
-test('a saved bill of 0 closes the pay reminder', () => {
+test('a saved bill of 0 is not paid, so the reminder stays open', () => {
     assert.equal(
         utilityMonthBillIsSettled([{ status: 'Approved', amount: 0 }]),
-        true,
+        false,
     );
+    assert.equal(utilityMonthBillIsSettled([{ status: 'Pending', amount: 0 }]), false);
+});
+
+test('unpaid months through the previous month are the ones Accounts is notified for', () => {
+    assert.deepEqual(dueUnpaidBillMonths('2026-07', 2026, 11), [
+        '2026-07',
+        '2026-08',
+        '2026-09',
+        '2026-10',
+    ]);
+    assert.deepEqual(dueUnpaidBillMonths('2026-11', 2026, 11), []);
+    assert.deepEqual(dueUnpaidBillMonths('2026-10', 2026, 11), ['2026-10']);
 });
 
 test('a real unpaid bill with no Zoho link stays open', () => {
@@ -36,6 +51,27 @@ test('a paid bill is settled; a Zoho upload that is still open is not', () => {
             { status: 'Approved', amount: 50, zohoBillId: 'zb-1', zohoBillStatus: 'paid' },
         ]),
         true,
+    );
+});
+
+test('the 1st notifies Accounts for the previous month by name', () => {
+    assert.equal(previousCalendarMonthKey(2026, 11), '2026-10');
+    assert.equal(previousCalendarMonthKey(2026, 1), '2025-12');
+    assert.deepEqual(
+        previousMonthPayReminderDue('2026-10', { year: 2026, month: 11, day: 1, alreadySent: false }),
+        { open: true, send: true },
+    );
+    assert.deepEqual(
+        previousMonthPayReminderDue('2026-10', { year: 2026, month: 11, day: 7, alreadySent: false }),
+        { open: true, send: true },
+    );
+    assert.deepEqual(
+        previousMonthPayReminderDue('2026-10', { year: 2026, month: 11, day: 7, alreadySent: true }),
+        { open: true, send: false },
+    );
+    assert.deepEqual(
+        previousMonthPayReminderDue('2026-11', { year: 2026, month: 11, day: 1, alreadySent: false }),
+        { open: false, send: false },
     );
 });
 

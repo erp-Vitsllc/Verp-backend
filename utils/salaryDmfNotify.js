@@ -1,3 +1,6 @@
+import DashboardAction from '../models/DashboardAction.js';
+import SalaryMonthDmf from '../models/SalaryMonthDmf.js';
+import SalaryMonthPayment from '../models/SalaryMonthPayment.js';
 import { syncDashboardAction } from './syncDashboard.js';
 import { resolveFrontendBaseUrl } from './resolveFrontendBaseUrl.js';
 import { sendMailLater } from './salaryEnrollmentApprovalNotify.js';
@@ -189,6 +192,95 @@ async function payrollExcelAttachment(monthKey) {
     };
 }
 
+async function accountsAssigneeId(dmf) {
+    const step = (Array.isArray(dmf?.steps) ? dmf.steps : []).find((row) => row.key === 'accounts');
+    const id = step?.assignedTo?.employeeObjectId;
+    if (id) return String(id);
+    const accounts = await getDepartmentHOD('accounts');
+    return accounts?._id ? String(accounts._id) : '';
+}
+
+/** Bell only. Accounts sees this while the payroll is back with them, or while Update Zoho is still open. */
+export async function notifyAccountsPayrollBell({ requestId, dmf, monthKey, phase }) {
+    const assignedTo = await accountsAssigneeId(dmf);
+    if (!requestId || !assignedTo || !monthKey) return;
+    const zoho = phase === 'zoho';
+    const href = inboxHref({ kind: 'month', monthKey });
+    const label = payrollMonthLabel(monthKey);
+    await syncDashboardAction({
+        requestId,
+        requestType: SALARY_DMF_REQUEST_TYPE,
+        assignedTo,
+        status: 'Pending',
+        subjectEmployee: {
+            employeeId: monthKey,
+            firstName: label,
+            lastName: 'payroll',
+        },
+        requestedByName: 'Payroll',
+        extra1: zoho
+            ? `${label} payroll — update Zoho.`
+            : `${label} payroll waiting for Accounts.`,
+        extra2: zoho ? 'Update Zoho' : 'Pending for Accounts',
+        extra3: extraPayload({
+            kind: zoho ? 'salary-zoho' : 'salary-accounts',
+            monthKey,
+            href,
+        }),
+    });
+}
+
+/** Open bells for payroll already sitting with Accounts, without sending another email. */
+export async function syncSalaryMonthRoleBells() {
+    const [approved, rejected] = await Promise.all([
+        SalaryMonthDmf.find({ 'dmfApproval.status': 'approved' })
+            .select('monthKey dmfApproval zohoJournalUpdatedAt')
+            .lean(),
+        SalaryMonthDmf.find({ 'dmfApproval.status': 'rejected' })
+            .select('monthKey dmfApproval')
+            .lean(),
+    ]);
+    for (const doc of approved || []) {
+        if (!doc?.zohoJournalUpdatedAt) {
+            await notifyAccountsPayrollBell({
+                requestId: doc._id,
+                dmf: doc.dmfApproval,
+                monthKey: doc.monthKey,
+                phase: 'zoho',
+            });
+            continue;
+        }
+        const open = await DashboardAction.findOne({
+            requestId: doc._id,
+            requestType: SALARY_DMF_REQUEST_TYPE,
+            status: 'Pending',
+        })
+            .select('extra3')
+            .lean();
+        let kind = '';
+        try {
+            kind = JSON.parse(String(open?.extra3 || '{}'))?.kind || '';
+        } catch {
+            kind = '';
+        }
+        if (kind === 'salary-zoho') {
+            await closeSalaryDmfInbox({
+                requestId: doc._id,
+                status: 'Approved',
+                comment: 'Zoho journal published',
+            });
+        }
+    }
+    for (const doc of rejected || []) {
+        await notifyAccountsPayrollBell({
+            requestId: doc._id,
+            dmf: doc.dmfApproval,
+            monthKey: doc.monthKey,
+            phase: 'accounts',
+        });
+    }
+}
+
 export async function notifySalaryMonthSlotReady({ dmf, monthKey }) {
     const accountsStep = (Array.isArray(dmf?.steps) ? dmf.steps : []).find((step) => step.key === 'accounts');
     const to = String(accountsStep?.assignedTo?.companyEmail || '').trim();
@@ -239,6 +331,48 @@ export function sendSalarySlotMail({
         `,
         attachments,
     });
+}
+
+export async function notifyHrSalarySlot({ payment, monthKey }) {
+    const hr = await getDepartmentHOD('hr');
+    const assignedTo = hr?._id ? String(hr._id) : '';
+    if (!payment?._id || !assignedTo || !monthKey) return;
+    const slotNo = Number(payment.paymentNo) || 0;
+    const company = String(payment.companyName || '').trim();
+    const href = `${inboxHref({ kind: 'month', monthKey })}?slot=${encodeURIComponent(String(payment._id))}`;
+    await syncDashboardAction({
+        requestId: payment._id,
+        requestType: SALARY_DMF_REQUEST_TYPE,
+        assignedTo,
+        status: 'Pending',
+        subjectEmployee: {
+            employeeId: monthKey,
+            firstName: slotNo ? `Slot ${slotNo}` : 'Salary slot',
+            lastName: company,
+        },
+        requestedByName: 'Accounts',
+        extra1: company
+            ? `${monthKey} slot ${slotNo} (${company}) is waiting for HR.`
+            : `${monthKey} slot ${slotNo} is waiting for HR.`,
+        extra2: 'Pending for HR',
+        extra3: JSON.stringify({
+            kind: 'salary-slot',
+            monthKey,
+            href,
+            paymentId: String(payment._id),
+            slotNo,
+        }),
+    });
+}
+
+/** Bell for a slot already sitting with HR, including ones applied before this notice existed. */
+export async function syncPendingHrSalarySlotBells() {
+    const rows = await SalaryMonthPayment.find({ status: 'pending_hr' })
+        .select('_id monthKey paymentNo companyName')
+        .lean();
+    for (const payment of rows || []) {
+        await notifyHrSalarySlot({ payment, monthKey: payment.monthKey });
+    }
 }
 
 export async function notifyAccountsSalarySlot({ payment, monthKey, phase }) {
