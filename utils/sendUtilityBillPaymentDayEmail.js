@@ -50,16 +50,25 @@ export async function sendUtilityBillPaymentDayEmail({
 
         const frontendUrl = emailFrontendUrl();
         const ym = String(yearMonth || '').trim();
+        const utilityLevel = String(record.entryId || '').startsWith('utility-type:');
         const qs = new URLSearchParams({ addBill: '1' });
         if (/^\d{4}-\d{2}$/.test(ym)) qs.set('billMonth', ym);
-        const path = `/HRM/Asset/UtilityBills/details/${encodeURIComponent(String(record.entryId))}?${qs.toString()}`;
+        const path = utilityLevel
+            ? `/HRM/Asset/UtilityBills?${qs.toString()}`
+            : `/HRM/Asset/UtilityBills/details/${encodeURIComponent(String(record.entryId))}?${qs.toString()}`;
         const buttonUrl = `${frontendUrl}${path}`;
         const utilityType = String(record.utilityType || 'utility').trim() || 'utility';
-        const accountNo = String(record.accountNo || '').trim() || 'account';
+        const accountNo = String(record.accountNo || '').trim();
         const monthLine = String(message || '').trim()
-            || `${ym || 'This'} bill payment day on ${utilityType} on the ${accountNo}, please pay the bill`;
+            || (utilityLevel
+                ? `${ym || 'This'} bill payment — ${utilityType}, please pay the bill`
+                : `${ym || 'This'} bill payment day on ${utilityType} on the ${accountNo || 'account'}, please pay the bill`);
         const title = monthLine;
         const accent = '#1A2B48';
+        const accountLines = utilityLevel
+            ? ''
+            : `<p style="margin:0 0 8px;"><strong>Provider:</strong> ${record.provider || '—'}</p>
+                        <p style="margin:0 0 8px;"><strong>Account:</strong> ${accountNo || '—'}</p>`;
 
         const html = `
             <div style="font-family: Segoe UI, Tahoma, sans-serif; color: #1e293b; max-width: 600px; margin: 0 auto; border: 1px solid #e2e8f0; border-radius: 12px; overflow: hidden;">
@@ -73,9 +82,8 @@ export async function sendUtilityBillPaymentDayEmail({
                     </p>
                     <div style="background:#f8fafc; border:1px solid #e2e8f0; border-radius:10px; padding:18px;">
                         <p style="margin:0 0 8px;"><strong>Type:</strong> ${record.utilityType || '—'}</p>
-                        <p style="margin:0 0 8px;"><strong>Provider:</strong> ${record.provider || '—'}</p>
-                        <p style="margin:0 0 8px;"><strong>Account:</strong> ${record.accountNo || '—'}</p>
-                        <p style="margin:0 0 8px;"><strong>Payment day:</strong> Day ${record.paymentDay} of the month after the bill</p>
+                        ${accountLines}
+                        <p style="margin:0 0 8px;"><strong>Payment day:</strong> 1st of the month, for the previous month</p>
                         ${/^\d{4}-\d{2}$/.test(ym) ? `<p style="margin:0 0 8px;"><strong>Bill month:</strong> ${ym}</p>` : ''}
                         <p style="margin:0;"><strong>Payable date:</strong> ${dueDateLabel || '—'}</p>
                     </div>

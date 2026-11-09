@@ -2,6 +2,10 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
     dueUnpaidBillMonths,
+    simCreatedBeforeBillMonth,
+    unpaidMonthsSinceSimCreated,
+    utilityTypeNoticeId,
+    utilityTypePaymentMessage,
     previousCalendarMonthKey,
     previousMonthPayReminderDue,
     utilityMonthBillIsInZoho,
@@ -29,6 +33,31 @@ test('unpaid months through the previous month are the ones Accounts is notified
     ]);
     assert.deepEqual(dueUnpaidBillMonths('2026-11', 2026, 11), []);
     assert.deepEqual(dueUnpaidBillMonths('2026-10', 2026, 11), ['2026-10']);
+});
+
+test('the 1st notice is one per utility, not one per SIM number', () => {
+    assert.equal(utilityTypeNoticeId('SIM cards'), 'utility-type:sim cards');
+    assert.equal(utilityTypeNoticeId('SIM cards'), utilityTypeNoticeId('sim cards'));
+    assert.equal(
+        utilityTypePaymentMessage('Internet Bills', '2026-10'),
+        'October bill payment — Internet Bills, please pay the bill',
+    );
+    assert.match(utilityTypePaymentMessage('SIM cards', '2026-10'), /October/);
+    assert.doesNotMatch(utilityTypePaymentMessage('SIM cards', '2026-10'), /050/);
+});
+
+test('a newly added SIM is not checked for months before it existed', () => {
+    assert.equal(simCreatedBeforeBillMonth('2026-11', '2026-10'), false);
+    assert.equal(simCreatedBeforeBillMonth('2026-11', '2026-11'), false);
+    assert.equal(simCreatedBeforeBillMonth('2026-07', '2026-07'), false);
+    assert.equal(simCreatedBeforeBillMonth('2026-07', '2026-08'), true);
+    assert.deepEqual(unpaidMonthsSinceSimCreated('2026-11', 2026, 11), []);
+    assert.deepEqual(unpaidMonthsSinceSimCreated('2026-10', 2026, 11), []);
+    assert.deepEqual(unpaidMonthsSinceSimCreated('2026-07', 2026, 11), [
+        '2026-08',
+        '2026-09',
+        '2026-10',
+    ]);
 });
 
 test('a real unpaid bill with no Zoho link stays open', () => {

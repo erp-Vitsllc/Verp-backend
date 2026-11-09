@@ -166,7 +166,8 @@ export const addPayment = async (req, res) => {
             !hasAttachment &&
             !isFineCompanyZohoRefund &&
             !isUtilityCompanyZohoRefund &&
-            !isLoanRepaymentZohoRefund
+            !isLoanRepaymentZohoRefund &&
+            !isEmployeeUtilityPay
         ) {
             return res.status(400).json({
                 success: false,
@@ -193,7 +194,7 @@ export const addPayment = async (req, res) => {
                     message: 'Payment date is required.',
                 });
             }
-            if (!hasAttachment) {
+            if (!hasAttachment && !isEmployeeUtilityPay) {
                 return res.status(400).json({
                     success: false,
                     message: 'Attachment is required.',
