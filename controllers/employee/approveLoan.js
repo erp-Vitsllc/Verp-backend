@@ -15,6 +15,7 @@ import { rememberSentEmail } from "../../utils/emailDispatch.js";
 import { viewerInheritsRequestAction } from "../../utils/reassigneeTaskPower.js";
 import {
     assignLoanOpeningApproval,
+    isAccountsOpeningBeforeHr,
     stageAfterAccountsApproval,
     stageAfterHrApproval,
 } from "../../utils/loanAccountsGate.js";
@@ -114,7 +115,7 @@ export const approveLoan = async (req, res) => {
             nextApprover = opening.hod;
             emailSubject = opening.skip
                 ? "New Loan/Advance Request for Review"
-                : "Loan Pending Finance Approval";
+                : "Loan Pending Accounts Approval";
             emailType = opening.skip ? "HR" : "Accounts";
 
             console.log(`[ApproveLoan] Draft -> ${opening.stage}. Assigned to: ${opening.hod?.employeeId || 'unassigned'}`);
@@ -171,29 +172,32 @@ export const approveLoan = async (req, res) => {
                     const isAssignedFinance = loan.submittedTo && (String(loan.submittedTo) === String(requestingUserId) || String(loan.submittedTo) === String(approverBasic?._id));
 
                     if (isFinance || isAssignedFinance || isAdmin || inheritedAssignee) {
-                        if (!String(loan.expenseAccountId || '').trim()) {
-                            return res.status(400).json({
-                                message:
-                                    'Accounts cannot approve until Expense Account is set on the Loan/Advance Parties card.',
-                            });
-                        }
-                        if (!String(loan.paidThroughAccountId || '').trim()) {
-                            return res.status(400).json({
-                                message:
-                                    'Accounts cannot approve until Paid Through is set on the Loan/Advance Parties card.',
-                            });
-                        }
-                        if (
-                            String(loan.expenseAccountId).trim() ===
-                            String(loan.paidThroughAccountId).trim()
-                        ) {
-                            return res.status(400).json({
-                                message:
-                                    'Expense Account and Paid Through must be different Chart of Accounts.',
-                            });
-                        }
+                        const openingAccounts = isAccountsOpeningBeforeHr(loan);
+                        if (!openingAccounts) {
+                            if (!String(loan.expenseAccountId || '').trim()) {
+                                return res.status(400).json({
+                                    message:
+                                        'Accounts cannot approve until Expense Account is set on the Loan/Advance Parties card.',
+                                });
+                            }
+                            if (!String(loan.paidThroughAccountId || '').trim()) {
+                                return res.status(400).json({
+                                    message:
+                                        'Accounts cannot approve until Paid Through is set on the Loan/Advance Parties card.',
+                                });
+                            }
+                            if (
+                                String(loan.expenseAccountId).trim() ===
+                                String(loan.paidThroughAccountId).trim()
+                            ) {
+                                return res.status(400).json({
+                                    message:
+                                        'Expense Account and Paid Through must be different Chart of Accounts.',
+                                });
+                            }
 
-                        loan.accountsApprovedBy = approverBasic?._id || requestingUserId;
+                            loan.accountsApprovedBy = approverBasic?._id || requestingUserId;
+                        }
                         const afterAccounts = stageAfterAccountsApproval(loan);
                         if (afterAccounts === 'Pending HR') {
                             const hrHOD = await getDepartmentHOD('hr');

@@ -60,12 +60,18 @@ export async function loanCreatorSkipsAccountsApproval(userLike) {
     return false;
 }
 
-/** Next stage after HR approves. Existing loans keep Accounts in the middle. */
+/** Next stage after HR approves. */
 export function stageAfterHrApproval(loan) {
+    if (loan?.skipAccountsApproval === true) return 'Pending Authorization';
+    // The first Accounts action on an outside create is approve-only.
+    // Filling payment is a later Accounts step, marked by accountsApprovedBy.
+    if (loan?.accountsFirst === true && !loan?.accountsApprovedBy) {
+        return 'Pending Accounts';
+    }
     const accountsDone = (loan?.workflow || []).some(
         (step) => step.role === 'Accounts' && step.status === 'Approved',
     );
-    if (loan?.skipAccountsApproval === true || loan?.accountsApprovedBy || accountsDone) {
+    if (loan?.accountsApprovedBy || accountsDone) {
         return 'Pending Authorization';
     }
     return 'Pending Accounts';
@@ -81,9 +87,31 @@ async function assignmentUserId(hod) {
 }
 
 /**
+ * A loan is still at creation, not in the Accounts workflow, when a normal
+ * employee submit was parked on Accounts before HR has approved.
+ */
+export function isAccountsOpeningBeforeHr(loan) {
+    const status = String(loan?.approvalStatus || loan?.status || '').trim();
+    if (status !== 'Pending Accounts') return false;
+    if (loan?.accountsFirst !== true) return false;
+    if (loan?.skipAccountsApproval === true) return false;
+    if (loan?.hrApprovedBy || loan?.accountsApprovedBy) return false;
+    const workflow = Array.isArray(loan?.workflow) ? loan.workflow : [];
+    const hrDone = workflow.some(
+        (step) => (step?.role === 'HR' || step?.role === 'HR Admin') && step?.status === 'Approved',
+    );
+    if (hrDone) return false;
+    const accountsDone = workflow.some(
+        (step) => step?.role === 'Accounts' && step?.status === 'Approved',
+    );
+    return !accountsDone;
+}
+
+/**
  * Opening approval for a new submit.
- * HR, Accounts, or Admin Officer: HR first, no Accounts approval.
- * Anyone else: Accounts first, then the existing HR and Management steps.
+ * HR, Accounts, or Admin Officer: HR first, and Accounts is skipped.
+ * Anyone else: Accounts approves first (no payment fields), then HR,
+ * then Accounts fills payment and approves, then Management.
  */
 export async function assignLoanOpeningApproval(loanLike, creatorUser, comment = '') {
     const skip = await loanCreatorSkipsAccountsApproval(creatorUser);

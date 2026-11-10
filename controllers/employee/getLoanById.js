@@ -117,6 +117,8 @@ export const getLoanById = async (req, res) => {
             ceoName: ceoHOD ? `${ceoHOD.firstName} ${ceoHOD.lastName}` : 'Unknown',
             ceoEmployeeId: ceoHOD ? ceoHOD.employeeId : null,
             createdBy: loan.createdBy,
+            accountsFirst: loan.accountsFirst === true,
+            skipAccountsApproval: loan.skipAccountsApproval === true,
             workflow: loan.workflow || [],
             approvalAttachments: loan.approvalAttachments || [],
             approvalAttachmentHistory: loan.approvalAttachmentHistory || [],

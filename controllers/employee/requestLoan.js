@@ -338,7 +338,7 @@ export const requestLoan = async (req, res) => {
                     const reporteeName = `${notifyHod.firstName || ""} ${notifyHod.lastName || ""}`.trim() || 'Approver';
                     const pendingStep = opening.skip ? 'HR Verification (Pending)' : 'Accounts Approval (Pending)';
                     const followingStep = opening.skip ? 'Final Management Authorization' : 'HR Verification';
-                    const lastStep = opening.skip ? 'Paid to Employee' : 'Final Management Authorization';
+                    const lastStep = opening.skip ? 'Paid to Employee' : 'Accounts Payment, then Management';
                     const subject = `[NEW] ${type} Application: ${employeeName}`;
 
                     // Dynamic URL
