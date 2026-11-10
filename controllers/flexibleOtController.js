@@ -220,13 +220,6 @@ export async function approveFlexibleOvertimeRecord(record, { approvedHours, rea
     );
     record.flexibleOtNextDayDate = nextDate;
     await record.save();
-    await notifyEmployeeFlexibleOtWhatsApp({
-        record,
-        nextDayPresent: true,
-        approvedHours: approved,
-        remainderHours: split.remainderHours,
-        actor,
-    });
     await closeLeaveAttendanceRequest({
         requestId: record._id,
         requestType: 'Attendance Off Day Work',

@@ -4356,7 +4356,9 @@ export async function decideAttendanceChangeRequest(req, res) {
             }
             return finishApproved(
                 applied.body?.record || record,
-                'Overtime approved. The employee is notified on WhatsApp.',
+                applied.body?.nextDayPresent
+                    ? 'Overtime approved.'
+                    : 'Overtime approved. The employee is notified on WhatsApp.',
             );
         }
 

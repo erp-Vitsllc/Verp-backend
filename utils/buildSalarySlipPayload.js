@@ -804,6 +804,8 @@ export async function buildSalarySlipPayload({
     emp: preloadedEmp,
     salaryDoc: preloadedSalary,
     skipOverride = false,
+    includeApprovers = true,
+    forPdf = false,
 } = {}) {
     const code = String(employeeId || preloadedEmp?.employeeId || '').trim();
     const ym = monthKeyOf(monthKey) || defaultSalarySlipMonthKey();
@@ -1496,6 +1498,7 @@ export async function buildSalarySlipPayload({
         { component: 'Loan', basis: 'Monthly', amount: loanMonth },
         { component: 'Fine', basis: 'Installment', amount: fineMonth },
         { component: 'Utility Excess', basis: utilities[0]?.details || 'Mobile', amount: utilityMonth },
+        { component: 'Other deduction', basis: '', amount: 0 },
     ];
 
     const grossEarnings = money(earnings.reduce((sum, row) => sum + money(row.amount), 0));
@@ -1617,6 +1620,7 @@ export async function buildSalarySlipPayload({
         yearlyEarnings,
         yearlyGrossEarnings,
         deductions,
+        manualOtherDeduction: { description: '', amount: 0 },
         grossEarnings,
         totalDeductions,
         netSalary,
@@ -1700,7 +1704,13 @@ export async function buildSalarySlipPayload({
         fileName: `Salary-Slip-${ym}-${code}.pdf`,
     };
 
-    payload.approvers = await resolveSalarySlipApprovers({ monthKey: ym, employeeId: code });
+    if (includeApprovers) {
+        payload.approvers = await resolveSalarySlipApprovers({
+            monthKey: ym,
+            employeeId: code,
+            embedSignatures: Boolean(forPdf),
+        });
+    }
 
     if (!skipOverride) {
         try {
@@ -1709,7 +1719,7 @@ export async function buildSalarySlipPayload({
                 .lean();
             if (stored?.slip) {
                 const merged = mergeStoredSalarySlip(payload, stored.slip);
-                merged.approvers = payload.approvers;
+                if (includeApprovers) merged.approvers = payload.approvers;
                 return presentSalarySlipPolicyExclusions({ ...merged, exclusions });
             }
         } catch (error) {
@@ -1721,7 +1731,7 @@ export async function buildSalarySlipPayload({
 
 function presentSalarySlipPolicyExclusions(slip) {
     const exclusions = slip?.exclusions || {};
-    if (!exclusions.leave && !exclusions.attendance) return slip;
+    if (!exclusions.leave && !exclusions.attendance) return withZohoSalary(slip);
     const hideLeaveStats = Boolean(exclusions.leave || exclusions.attendance);
     const next = {
         ...slip,
@@ -1755,7 +1765,12 @@ function presentSalarySlipPolicyExclusions(slip) {
             },
         },
     };
-    return recalcSalarySlip(next);
+    return withZohoSalary(recalcSalarySlip(next));
+}
+
+function withZohoSalary(slip) {
+    if (!slip) return slip;
+    return { ...slip, zohoSalary: salarySlipZohoPay(slip) };
 }
 
 export function serializeSalarySlipForClient(slip) {
@@ -1950,6 +1965,31 @@ function setDeductionAmount(rows, name, amount) {
     return list;
 }
 
+function manualOtherDeductionOf(slip) {
+    const raw = slip?.manualOtherDeduction || {};
+    const description = String(raw.description || '')
+        .replace(/[\u0000-\u001F]/g, ' ')
+        .replace(/\s+/g, ' ')
+        .trim()
+        .slice(0, 120);
+    return { description, amount: Math.max(0, money(raw.amount)) };
+}
+
+function applyManualOtherDeduction(rows, manual) {
+    const list = (Array.isArray(rows) ? rows : [])
+        .map((row) => ({ ...row }))
+        .filter((row) => !deductionMatches(row.component, 'Other deduction'));
+    const line = {
+        component: 'Other deduction',
+        basis: manual.description,
+        amount: manual.amount,
+    };
+    const utilityIndex = list.findIndex((row) => deductionMatches(row.component, 'Utility Excess'));
+    if (utilityIndex >= 0) list.splice(utilityIndex + 1, 0, line);
+    else list.push(line);
+    return list;
+}
+
 function deductionLineOverridden(overrides, name) {
     if (!overrides || !name) return false;
     if (overrides[name]) return true;
@@ -1993,6 +2033,7 @@ function pushDetailsIntoDeductions(slip) {
         0,
     );
     deductions = setDeductionAmount(deductions, 'Utility Excess', utilTotal);
+    deductions = applyManualOtherDeduction(deductions, manualOtherDeductionOf(slip));
     return { ...slip, deductions };
 }
 
@@ -2006,7 +2047,11 @@ export function recalcSalarySlip(slip) {
         ...row,
         amount: money(row.amount),
     }));
-    const deductions = (slip.deductions || []).map((row) => ({ ...row, amount: money(row.amount) }));
+    const manualOtherDeduction = manualOtherDeductionOf(slip);
+    const deductions = applyManualOtherDeduction(
+        (slip.deductions || []).map((row) => ({ ...row, amount: money(row.amount) })),
+        manualOtherDeduction,
+    );
     const grossEarnings = money(earnings.reduce((sum, row) => sum + money(row.amount), 0));
     const yearlyGrossEarnings = money(yearlyEarnings.reduce((sum, row) => sum + money(row.amount), 0));
     const totalDeductions = money(deductions.reduce((sum, row) => sum + money(row.amount), 0));
@@ -2044,11 +2089,20 @@ export function recalcSalarySlip(slip) {
     const utilityExcess = money(
         utilities.reduce((sum, row) => sum + money(row.thisMonthAmount ?? row.thisMonth), 0),
     );
+    const card = salarySlipCardPay({
+        ...slip,
+        earnings,
+        yearlyEarnings,
+        deductions,
+        manualOtherDeduction,
+    });
     return {
         ...slip,
         earnings,
         yearlyEarnings,
         yearlyGrossEarnings,
+        manualOtherDeduction,
+        zohoSalary: card.zohoSalary,
         deductions,
         attendanceDeductions,
         attendanceDeductionTotal,
@@ -2065,6 +2119,7 @@ export function recalcSalarySlip(slip) {
             loan,
             fine,
             utilityExcess,
+            otherDeduction: manualOtherDeduction.amount,
             verifiedTotal: totalDeductions,
         },
     };
@@ -2232,12 +2287,14 @@ function salarySlipScheduleDeductions(slip) {
     );
     const fineAmount = scheduleMonthTotal(slip?.fines);
     const utilityAmount = scheduleMonthTotal(slip?.utilities);
+    const manualAmount = manualOtherDeductionOf(slip).amount;
     return {
         fineAmount,
         advanceAmount,
         loanAmount,
         utilityAmount,
-        total: money(fineAmount + advanceAmount + loanAmount + utilityAmount),
+        manualAmount,
+        total: money(fineAmount + advanceAmount + loanAmount + utilityAmount + manualAmount),
     };
 }
 
@@ -2274,7 +2331,7 @@ function cardBenefitAmount(slip, summaryAmount, yearlyName, earningName) {
  * The salary slip cards, read as displayed.
  * Gross is the Zoho salary card. Net is the net salary payable card.
  * Loss of pay is the slip's leave and attendance lines. Other deductions are
- * this month's loan, fine, salary advance, and utility on the slip.
+ * this month's loan, fine, salary advance, utility, and manual other deduction.
  */
 function salarySlipCardPay(slip) {
     const skipOvertime = Boolean(slip?.exclusions?.attendance);
@@ -2344,7 +2401,7 @@ export function salarySlipPayrollFigures(slip) {
         fineAmount: buckets.fineAmount,
         advanceAmount: buckets.advanceAmount,
         loanAmount: buckets.loanAmount,
-        sheetOtherDeduction: buckets.utilityAmount,
+        sheetOtherDeduction: money(buckets.utilityAmount + buckets.manualAmount),
         extra: card.extra,
         ot: card.ot,
         deduction: card.deduction,
@@ -2355,6 +2412,7 @@ export function salarySlipPayrollFigures(slip) {
         netSalary,
         netSalaryPayable: card.netSalaryPayable,
         zohoSalary: card.zohoSalary,
+        leaveSalaryBalance: money(slip?.summary?.leaveSalary?.remaining),
         overtimeHours: money(slip?.summary?.overtimeHoursCount),
         grossEarnings: money(slip?.grossEarnings),
         attendance: money(reconciliation.attendance),
@@ -2388,7 +2446,11 @@ export async function collectSalarySlipPayrollFigures(employeeIds, monthKey, { c
             const code = ids[cursor];
             cursor += 1;
             try {
-                const slip = await buildSalarySlipPayload({ employeeId: code, monthKey });
+                const slip = await buildSalarySlipPayload({
+                    employeeId: code,
+                    monthKey,
+                    includeApprovers: false,
+                });
                 const figures = salarySlipPayrollFigures(slip);
                 const key = payrollFigureKey(code);
                 if (key) map.set(key, figures);
@@ -2420,6 +2482,7 @@ export function applySalarySlipOverride(live, stored) {
         loanSchedule: Array.isArray(stored.loanSchedule) ? stored.loanSchedule : live.loanSchedule,
         fines: Array.isArray(stored.fines) ? stored.fines : live.fines,
         utilities: Array.isArray(stored.utilities) ? stored.utilities : live.utilities,
+        manualOtherDeduction: stored.manualOtherDeduction || live.manualOtherDeduction || { description: '', amount: 0 },
         thisMonthOverrides: stored.thisMonthOverrides || live.thisMonthOverrides || {},
     };
     return recalcSalarySlip(merged);

@@ -13,6 +13,11 @@ import { LOAN_PENDING_PAYMENT_STATUS } from "../../utils/loanStatusConstants.js"
 import { runAfterResponse } from "../../utils/runAfterResponse.js";
 import { rememberSentEmail } from "../../utils/emailDispatch.js";
 import { viewerInheritsRequestAction } from "../../utils/reassigneeTaskPower.js";
+import {
+    assignLoanOpeningApproval,
+    stageAfterAccountsApproval,
+    stageAfterHrApproval,
+} from "../../utils/loanAccountsGate.js";
 
 export const approveLoan = async (req, res) => {
     try {
@@ -103,28 +108,16 @@ export const approveLoan = async (req, res) => {
                 });
             }
 
-            publicStatus = 'Pending';
-            nextStage = 'Pending HR';
+            const opening = await assignLoanOpeningApproval(loan, loan.createdBy || requestingUserId);
+            publicStatus = opening.stage;
+            nextStage = opening.stage;
+            nextApprover = opening.hod;
+            emailSubject = opening.skip
+                ? "New Loan/Advance Request for Review"
+                : "Loan Pending Finance Approval";
+            emailType = opening.skip ? "HR" : "Accounts";
 
-            let hrUser = null;
-            if (hrHOD.employeeId) {
-                hrUser = await User.findOne({ employeeId: hrHOD.employeeId });
-            }
-            const nextAssignmentId = hrUser ? hrUser._id : hrHOD._id;
-            nextApprover = hrHOD;
-
-            emailSubject = "New Loan/Advance Request for Review";
-            emailType = "HR";
-
-            // Set initial workflow
-            loan.workflow = [{
-                role: 'HR Admin',
-                assignedTo: nextAssignmentId,
-                status: 'Pending',
-                assignedAt: new Date()
-            }];
-
-            console.log(`[ApproveLoan] Draft -> Pending HR transition. Assigned to: ${hrHOD.employeeId}`);
+            console.log(`[ApproveLoan] Draft -> ${opening.stage}. Assigned to: ${opening.hod?.employeeId || 'unassigned'}`);
         }
         else if (status === 'Approved') {
             // APPROVAL LOGIC — Admin can act at any stage; only Management finalizes payment
@@ -136,6 +129,22 @@ export const approveLoan = async (req, res) => {
                     const isAssignedHR = loan.submittedTo && (String(loan.submittedTo) === String(requestingUserId) || String(loan.submittedTo) === String(approverBasic?._id));
 
                     if (isHR || isAssignedHR || isAdmin || inheritedAssignee) {
+                        const afterHr = stageAfterHrApproval(loan);
+                        loan.hrApprovedBy = approverBasic?._id || requestingUserId;
+                        if (afterHr === 'Pending Authorization') {
+                            const managementHOD = await getManagementHOD();
+                            if (!managementHOD) {
+                                return res.status(400).json({
+                                    message: "Cannot proceed. Management/CEO designation is not assigned in Flowchart. Please assign Management designation in Settings > FlowChart before approving this loan."
+                                });
+                            }
+                            nextStage = 'Pending Authorization';
+                            publicStatus = 'Pending Authorization';
+                            nextApprover = managementHOD;
+                            emailSubject = "Loan Pending Final Authorization";
+                            emailType = "Management";
+                            console.log('[Loan]', loan.loanId, 'HR Approved. Accounts approval not required. Next Management:', nextApprover ? `${nextApprover.firstName} ${nextApprover.lastName}` : 'NOT FOUND');
+                        } else {
                         // VALIDATION: Check if Accounts HOD is assigned before proceeding
                         const accountsHOD = await getDepartmentHOD('finance');
                         if (!accountsHOD) {
@@ -147,11 +156,11 @@ export const approveLoan = async (req, res) => {
                         nextStage = 'Pending Accounts';
                         publicStatus = 'Pending Accounts';
 
-                        loan.hrApprovedBy = approverBasic?._id || requestingUserId;
                         nextApprover = accountsHOD;
                         console.log('[Loan]', loan.loanId, 'HR Approved. Next Finance Approver:', nextApprover ? `${nextApprover.firstName} ${nextApprover.lastName}` : 'NOT FOUND');
                         emailSubject = "Loan Pending Finance Approval";
                         emailType = "Accounts";
+                        }
                     } else {
                         return res.status(403).json({ message: "Only HR can approve at this stage" });
                     }
@@ -184,6 +193,22 @@ export const approveLoan = async (req, res) => {
                             });
                         }
 
+                        loan.accountsApprovedBy = approverBasic?._id || requestingUserId;
+                        const afterAccounts = stageAfterAccountsApproval(loan);
+                        if (afterAccounts === 'Pending HR') {
+                            const hrHOD = await getDepartmentHOD('hr');
+                            if (!hrHOD) {
+                                return res.status(400).json({
+                                    message: "Cannot proceed. HR Admin designation is not assigned in Flowchart. Please assign HR Admin designation in Settings > FlowChart before approving this loan."
+                                });
+                            }
+                            nextStage = 'Pending HR';
+                            publicStatus = 'Pending HR';
+                            nextApprover = hrHOD;
+                            emailSubject = "Loan Pending HR Approval";
+                            emailType = "HR";
+                            console.log('[Loan]', loan.loanId, 'Finance Approved first. Next HR:', nextApprover ? `${nextApprover.firstName} ${nextApprover.lastName}` : 'NOT FOUND');
+                        } else {
                         // VALIDATION: Check if Management HOD is assigned before proceeding
                         const managementHOD = await getManagementHOD();
                         if (!managementHOD) {
@@ -195,11 +220,11 @@ export const approveLoan = async (req, res) => {
                         nextStage = 'Pending Authorization';
                         publicStatus = 'Pending Authorization';
 
-                        loan.accountsApprovedBy = approverBasic?._id || requestingUserId;
                         nextApprover = managementHOD;
                         console.log('[Loan]', loan.loanId, 'Finance Approved. Next Management:', nextApprover ? `${nextApprover.firstName} ${nextApprover.lastName}` : 'NOT FOUND');
                         emailSubject = "Loan Pending Final Authorization";
                         emailType = "Management";
+                        }
                     } else {
                         return res.status(403).json({ message: "Only Finance/Accounts can approve at this stage" });
                     }
@@ -243,7 +268,7 @@ export const approveLoan = async (req, res) => {
             loan.cancelledDate = new Date();
         }
 
-        if (nextApprover) {
+        if (nextApprover && currentStage !== 'Draft') {
             // Find User ID for next approver to ensure dashboard visibility
             const nextUser = await User.findOne({ employeeId: nextApprover.employeeId });
             const nextAssignmentId = nextUser ? nextUser._id : nextApprover._id;
@@ -252,6 +277,13 @@ export const approveLoan = async (req, res) => {
 
             // WORKFLOW UPDATES
             if (nextStage === 'Pending HR') {
+                if (currentStage === 'Pending Accounts') {
+                    const accEntry = loan.workflow ? loan.workflow.find(w => w.role === 'Accounts' && w.status === 'Pending') : null;
+                    if (accEntry) {
+                        accEntry.status = 'Approved';
+                        accEntry.actionedAt = new Date();
+                    }
+                }
                 // If it got pushed to Pending HR, it means it was a Draft submission
                 loan.workflow.push({
                     role: 'HR',
@@ -292,7 +324,7 @@ export const approveLoan = async (req, res) => {
                 if (accEntry) {
                     accEntry.status = 'Approved';
                     accEntry.actionedAt = new Date();
-                } else {
+                } else if (!loan.skipAccountsApproval && !loan.accountsFirst) {
                     if (!loan.workflow) loan.workflow = [];
                     const accUser = await User.findOne({ employeeId: approverBasic?.employeeId });
                     loan.workflow.push({
@@ -302,6 +334,14 @@ export const approveLoan = async (req, res) => {
                         assignedAt: new Date(),
                         actionedAt: new Date()
                     });
+                }
+                if (loan.skipAccountsApproval || loan.accountsFirst) {
+                    for (const step of loan.workflow || []) {
+                        if ((step.role === 'HR' || step.role === 'HR Admin') && step.status === 'Pending') {
+                            step.status = 'Approved';
+                            step.actionedAt = new Date();
+                        }
+                    }
                 }
 
                 // 2. Push Management (Pending)

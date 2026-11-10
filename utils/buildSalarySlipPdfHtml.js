@@ -44,6 +44,26 @@ export function getVegaLogoDataUrl() {
     return `data:image/png;base64,${b64}`;
 }
 
+function otherDeductionLine(slip) {
+    const row = (Array.isArray(slip?.deductions) ? slip.deductions : []).find(
+        (item) => String(item?.component || '').trim().toLowerCase() === 'other deduction',
+    );
+    const amount = Number(row?.amount);
+    return {
+        description: String(row?.basis || '').trim(),
+        amount: Number.isFinite(amount) ? amount : 0,
+    };
+}
+
+function grossSalaryOf(slip) {
+    if (slip?.zohoSalary != null && slip.zohoSalary !== '') {
+        const amount = Number(slip.zohoSalary);
+        return Number.isFinite(amount) ? amount : 0;
+    }
+    const fallback = Number(slip?.grossEarnings);
+    return Number.isFinite(fallback) ? fallback : 0;
+}
+
 function padRows(left, right, min = 9) {
     const a = Array.isArray(left) ? [...left] : [];
     const b = Array.isArray(right) ? [...right] : [];
@@ -116,15 +136,15 @@ function approvalBox(row = {}) {
     const date = String(row.date || '').trim();
     const url = String(row.signatureUrl || '').trim();
     const signature = url
-        ? `<img src="${esc(url)}" alt="" style="display:block;height:28px;max-width:100%;width:auto;object-fit:contain;margin:8px 0 6px;" />`
-        : `<div style="height:28px;margin:8px 0 6px;"></div>`;
+        ? `<img src="${esc(url)}" alt="" style="display:block;height:36px;max-width:100%;width:auto;object-fit:contain;margin:8px 0 6px;" />`
+        : `<div style="height:36px;margin:8px 0 6px;"></div>`;
     return `
       <td width="25%" valign="top" style="padding:6px 8px;border:1px solid ${LINE};">
         <div style="font-size:8.5px;font-weight:700;letter-spacing:0.08em;color:${MUTED};">${esc(role)}</div>
         <div style="font-size:11.5px;font-weight:700;color:${NAVY};margin:4px 0 0;">${esc(title)}</div>
         ${signature}
         <div style="font-size:9.5px;color:${MUTED};border-top:1px solid ${LINE};padding-top:6px;">Signature</div>
-        ${name ? `<div style="font-size:8.5px;font-weight:600;color:${NAVY};margin-top:4px;">${esc(name)}</div>` : ''}
+        <div style="font-size:9px;font-weight:700;color:${NAVY};margin-top:4px;">${name ? esc(name) : '&nbsp;'}</div>
         <div style="font-size:9.5px;color:${MUTED};margin-top:8px;">Date: ${date ? esc(date) : '__________________'}</div>
       </td>`;
 }
@@ -171,7 +191,16 @@ export function buildSalarySlipPdfHtml(slip = {}) {
             summaryRight.slice(summaryLeft.length).map((right) => summaryRow('', '', right[0], right[1])),
         )
         .join('');
-    const { left: earnRows, right: dedRows } = padRows(slip.earnings, slip.deductions, 9);
+    const otherDeduction = otherDeductionLine(slip);
+    const grossSalary = grossSalaryOf(slip);
+    const netPay = Number(slip.netSalary);
+    const netAmount = Number.isFinite(netPay) ? netPay : 0;
+    const deductedFromGross = Math.max(0, Math.round((grossSalary - netAmount) * 100) / 100);
+    const pdfDeductions = (Array.isArray(slip.deductions) ? slip.deductions : []).filter((row) => {
+        if (String(row?.component || '').trim().toLowerCase() !== 'other deduction') return true;
+        return Number(row?.amount) > 0;
+    });
+    const { left: earnRows, right: dedRows } = padRows(slip.earnings, pdfDeductions, 9);
     const calcRows = earnRows
         .map((earn, i) => {
             const ded = dedRows[i] || {};
@@ -396,7 +425,7 @@ export function buildSalarySlipPdfHtml(slip = {}) {
         </tr>
         ${calcRows}
         <tr>
-          <td colspan="2" style="padding:6px 8px;border:0.6pt solid ${LINE};background:${EARN_TINT};font-size:9.5px;font-weight:700;letter-spacing:0.06em;color:${TEAL};">GROSS EARNINGS</td>
+          <td colspan="2" style="padding:6px 8px;border:0.6pt solid ${LINE};background:${EARN_TINT};font-size:9.5px;font-weight:700;letter-spacing:0.06em;color:${TEAL};">TOTAL EARNINGS</td>
           <td style="padding:6px 8px;border:0.6pt solid ${LINE};background:${EARN_TINT};font-size:10px;font-weight:700;color:${TEAL};text-align:right;">${esc(money(slip.grossEarnings))}</td>
           <td colspan="2" style="padding:6px 8px;border:0.6pt solid ${LINE};background:${DED_TINT};font-size:9.5px;font-weight:700;letter-spacing:0.06em;color:${NAVY};">TOTAL DEDUCTIONS</td>
           <td style="padding:6px 8px;border:0.6pt solid ${LINE};background:${DED_TINT};font-size:10px;font-weight:700;color:${NAVY};text-align:right;">${esc(money(slip.totalDeductions))}</td>
@@ -404,16 +433,16 @@ export function buildSalarySlipPdfHtml(slip = {}) {
       </table>
       <table width="100%" cellpadding="0" cellspacing="0" style="border-collapse:collapse;margin-top:8px;">
         <tr>
-          <td class="p1-box-h" style="background:${TEAL};border:0.6pt solid ${LINE};width:33.33%;">GROSS EARNINGS</td>
-          <td class="p1-box-h" style="background:${NAVY};border:0.6pt solid ${LINE};width:33.33%;">TOTAL DEDUCTIONS</td>
+          <td class="p1-box-h" style="background:${TEAL};border:0.6pt solid ${LINE};width:33.33%;">GROSS SALARY</td>
+          <td class="p1-box-h" style="background:${NAVY};border:0.6pt solid ${LINE};width:33.33%;">DEDUCTIONS</td>
           <td class="p1-box-h" style="background:${TEAL};border:0.6pt solid ${LINE};width:33.34%;">NET SALARY</td>
         </tr>
         <tr>
           <td class="p1-box-b" style="border:0.6pt solid ${LINE};">
-            <div style="font-size:15px;font-weight:700;color:${TEAL};letter-spacing:0.01em;">${esc(moneyAed(slip.grossEarnings))}</div>
+            <div style="font-size:15px;font-weight:700;color:${TEAL};letter-spacing:0.01em;">${esc(moneyAed(grossSalary))}</div>
           </td>
           <td class="p1-box-b" style="border:0.6pt solid ${LINE};">
-            <div style="font-size:15px;font-weight:700;color:${NAVY};letter-spacing:0.01em;">${esc(moneyAed(slip.totalDeductions))}</div>
+            <div style="font-size:15px;font-weight:700;color:${NAVY};letter-spacing:0.01em;">${esc(moneyAed(deductedFromGross))}</div>
           </td>
           <td class="p1-box-b" style="border:0.6pt solid ${LINE};">
             <div style="font-size:17px;font-weight:700;color:${TEAL};letter-spacing:0.01em;">${esc(moneyAed(slip.netSalary))}</div>
@@ -467,7 +496,7 @@ export function buildSalarySlipPdfHtml(slip = {}) {
       <div style="font-size:10px;font-weight:700;color:${NAVY};margin:12px 0 4px;">E. DEDUCTION RECONCILIATION</div>
       <table width="100%" cellpadding="0" cellspacing="0" style="border-collapse:collapse;">
         <tr>
-          ${th('Attendance')}${th('Salary Advance')}${th('Loan')}${th('Fine')}${th('Utility Excess')}
+          ${th('Attendance')}${th('Salary Advance')}${th('Loan')}${th('Fine')}${th('Utility Excess')}${otherDeduction.amount > 0 ? th('Other deduction') : ''}
         </tr>
         <tr>
           ${td(moneyAed(recon.attendance), { align: 'center', bold: true })}
@@ -475,6 +504,7 @@ export function buildSalarySlipPdfHtml(slip = {}) {
           ${td(moneyAed(recon.loan), { align: 'center', bold: true })}
           ${td(moneyAed(recon.fine), { align: 'center', bold: true })}
           ${td(moneyAed(recon.utilityExcess), { align: 'center', bold: true })}
+          ${otherDeduction.amount > 0 ? td(moneyAed(otherDeduction.amount), { align: 'center', bold: true }) : ''}
         </tr>
       </table>
       <p style="margin:8px 0 0;font-size:10px;font-weight:700;color:${NAVY};">

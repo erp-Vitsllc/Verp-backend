@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
+import { buildSalarySlipPdfHtml } from './buildSalarySlipPdfHtml.js';
 import {
     amountInWordsAed,
     attendanceDayHasPunch,
@@ -251,6 +252,58 @@ describe('salary slip edits drive pay figures', () => {
         assert.equal(figures.grossSalary, figures.zohoSalary);
         assert.equal(figures.extra, 309.68);
         assert.equal(figures.deduction, 153);
+    });
+
+    it('adds a manual other deduction under utility without changing zoho salary', () => {
+        const withUtility = {
+            deductions: [
+                { component: 'Authorized Leave', basis: '1 day', amount: 48 },
+                { component: 'Fine', basis: 'Installment', amount: 20 },
+                { component: 'Loan', basis: 'Monthly', amount: 30 },
+                { component: 'Utility Excess', basis: 'SIM cards', amount: 15 },
+            ],
+            utilities: [{ sourceId: 'util-1', thisMonthAmount: 15 }],
+        };
+        const plain = mergeStoredSalarySlip(sampleSlip(withUtility), sampleSlip(withUtility));
+        const withOther = mergeStoredSalarySlip(
+            sampleSlip(withUtility),
+            sampleSlip({
+                ...withUtility,
+                manualOtherDeduction: { description: '  Uniform  ', amount: 25.5 },
+            }),
+        );
+        const plainPay = salarySlipPayrollFigures(plain);
+        const otherPay = salarySlipPayrollFigures(withOther);
+        assert.equal(otherPay.zohoSalary, plainPay.zohoSalary);
+        assert.equal(otherPay.grossSalary, otherPay.zohoSalary);
+        assert.equal(otherPay.lossOfPay, plainPay.lossOfPay);
+        assert.equal(otherPay.fineAmount, plainPay.fineAmount);
+        assert.equal(otherPay.loanAmount, plainPay.loanAmount);
+        assert.equal(Math.round((plainPay.netSalaryPayable - otherPay.netSalaryPayable) * 100) / 100, 25.5);
+        assert.equal(Math.round((otherPay.deduction - plainPay.deduction) * 100) / 100, 25.5);
+        assert.equal(Math.round((otherPay.sheetOtherDeduction - plainPay.sheetOtherDeduction) * 100) / 100, 25.5);
+        const names = withOther.deductions.map((row) => row.component);
+        const utilityIndex = names.indexOf('Utility Excess');
+        assert.equal(names[utilityIndex + 1], 'Other deduction');
+        const line = withOther.deductions[utilityIndex + 1];
+        assert.equal(line.amount, 25.5);
+        assert.equal(line.basis, 'Uniform');
+        const html = buildSalarySlipPdfHtml(withOther);
+        const pdfMoney = (value) => Number(value).toLocaleString('en-US', {
+            minimumFractionDigits: 2,
+            maximumFractionDigits: 2,
+        });
+        const zohoText = pdfMoney(otherPay.zohoSalary);
+        const deductedFromGross = Math.round((otherPay.zohoSalary - withOther.netSalary) * 100) / 100;
+        assert.match(html, /GROSS SALARY/);
+        assert.match(html, new RegExp(`AED ${zohoText.replace('.', '\\.')}`));
+        assert.match(html, new RegExp(`AED ${pdfMoney(deductedFromGross).replace('.', '\\.')}`));
+        assert.match(html, new RegExp(`AED ${pdfMoney(withOther.netSalary).replace('.', '\\.')}`));
+        assert.match(html, /Other deduction/);
+        assert.match(html, /Uniform/);
+        const plainHtml = buildSalarySlipPdfHtml(plain);
+        assert.equal(plainHtml.includes('Other deduction'), false);
+        assert.match(plainHtml, /GROSS SALARY/);
     });
 });
 

@@ -5,6 +5,7 @@ import User from '../models/User.js';
 import { resolveHandoverSignatureUrl } from './buildAssignmentHandoverEmailAttachments.js';
 import { emailFrontendUrl } from './resolveFrontendBaseUrl.js';
 import { personDisplayName } from './salaryDmfApproval.js';
+import { downloadS3ObjectBytes } from './s3Upload.js';
 
 const DEFAULT_APPROVERS = [
     { role: 'CREATED BY', title: 'Payroll Officer' },
@@ -19,16 +20,54 @@ const STEP_BOXES = [
     { key: 'management', role: 'AUTHORIZED BY', title: 'General Manager' },
 ];
 
-function formatSlipDate(value) {
+const signatureCache = new Map();
+const SIGNATURE_CACHE_MS = 2 * 60 * 1000;
+
+export function formatSalarySlipApprovalDate(value) {
     if (!value) return '';
     const date = value instanceof Date ? value : new Date(value);
     if (Number.isNaN(date.getTime())) return '';
     return date.toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' });
 }
 
+/**
+ * Payroll Officer uses the Accounts step date (that month's process completed).
+ * HR and General Manager use the date each of them approved.
+ * The employee box is filled only after the month payroll is approved, dated
+ * with the General Manager's approval (the date the slip is issued).
+ */
+export function salarySlipApprovalRows({ steps = [], processed = false, people = {} } = {}) {
+    const rows = STEP_BOXES.map((box) => {
+        const step = (steps || []).find((row) => String(row?.key || '') === box.key);
+        if (String(step?.status || '') !== 'approved') return { ...box };
+        const person = people[box.key] || {};
+        return {
+            ...box,
+            name: String(person.name || step.actionedByName || step.assignedTo?.name || '').trim(),
+            date: formatSalarySlipApprovalDate(step.actionedAt),
+            signatureUrl: String(person.signatureUrl || '').trim(),
+        };
+    });
+
+    const employeeBox = { ...DEFAULT_APPROVERS[3] };
+    if (!processed) return [...rows, employeeBox];
+
+    const management = (steps || []).find((row) => String(row?.key || '') === 'management');
+    const employee = people.employee || {};
+    return [
+        ...rows,
+        {
+            ...employeeBox,
+            name: String(employee.name || '').trim(),
+            date: formatSalarySlipApprovalDate(management?.actionedAt),
+            signatureUrl: String(employee.signatureUrl || '').trim(),
+        },
+    ];
+}
+
 async function loadEmployee(ref) {
     if (!ref) return null;
-    if (typeof ref === 'object' && ref.signature && (ref.signature.url || ref.signature.data)) {
+    if (typeof ref === 'object' && ref.signature && (ref.signature.url || ref.signature.publicId || ref.signature.data)) {
         return ref;
     }
     const objectId = typeof ref === 'object' ? ref._id || ref.employeeObjectId : null;
@@ -45,36 +84,57 @@ async function loadEmployee(ref) {
         .lean();
 }
 
-async function loadSigner(step) {
-    if (step?.actionedByUserId) {
-        const user = await User.findById(step.actionedByUserId)
-            .select('employeeId employeeObjectId empObjectId')
-            .lean();
-        const emp = await loadEmployee({
-            _id: user?.employeeObjectId || user?.empObjectId || null,
-            employeeId: user?.employeeId || '',
-        });
-        if (emp) return emp;
+async function employeeForStep(step) {
+    if (step?.actionedByUserId && mongoose.Types.ObjectId.isValid(String(step.actionedByUserId))) {
+        const user = await User.findById(step.actionedByUserId).select('employeeId').lean();
+        const linked = await loadEmployee(user?.employeeId);
+        if (linked) return linked;
     }
     return loadEmployee(step?.assignedTo);
 }
 
-async function withSignature(box, emp, date, fallbackName = '') {
-    const fe = emailFrontendUrl();
-    const signatureUrl = emp?.signature ? await resolveHandoverSignatureUrl(emp.signature, fe) : '';
+async function signatureDataUrl(emp) {
+    const sig = emp?.signature;
+    if (!sig) return '';
+    if (typeof sig === 'string' && sig.startsWith('data:')) return sig;
+    const keyOrUrl = sig.publicId || sig.url || sig.data || sig.path;
+    if (!keyOrUrl) return '';
+    if (String(keyOrUrl).startsWith('data:')) return String(keyOrUrl);
+    const bytes = await downloadS3ObjectBytes(keyOrUrl);
+    if (bytes?.length) {
+        const mime = sig.mimeType || 'image/png';
+        return `data:${mime};base64,${bytes.toString('base64')}`;
+    }
+    const signed = await resolveHandoverSignatureUrl(sig, emailFrontendUrl());
+    return signed || '';
+}
+
+async function cachedSignatureUrl(emp) {
+    const key = String(emp?._id || emp?.employeeId || '').trim();
+    if (!key) return signatureDataUrl(emp);
+    const hit = signatureCache.get(key);
+    if (hit && Date.now() - hit.at < SIGNATURE_CACHE_MS) return hit.url;
+    const url = await signatureDataUrl(emp);
+    signatureCache.set(key, { at: Date.now(), url });
+    return url;
+}
+
+async function personFields(emp, embedSignatures) {
     return {
-        ...box,
-        name: personDisplayName(emp) || fallbackName,
-        date: formatSlipDate(date),
-        signatureUrl: signatureUrl || '',
+        name: personDisplayName(emp),
+        signatureUrl: embedSignatures && emp ? await cachedSignatureUrl(emp) : '',
     };
 }
 
 /**
- * Fill salary-slip APPROVAL & ACKNOWLEDGEMENT boxes from Process salary
- * (Accounts → HR → Management) plus the employee when the month is Processed.
+ * Fill salary-slip APPROVAL & ACKNOWLEDGEMENT from the month payroll
+ * (Accounts → HR → General Manager) and the employee.
  */
-export async function resolveSalarySlipApprovers({ monthKey, employeeId } = {}) {
+export async function resolveSalarySlipApprovers({
+    monthKey,
+    employeeId,
+    embedSignatures = false,
+} = {}) {
     try {
         const ym = String(monthKey || '').trim();
         if (!ym) return DEFAULT_APPROVERS.map((row) => ({ ...row }));
@@ -84,35 +144,22 @@ export async function resolveSalarySlipApprovers({ monthKey, employeeId } = {}) 
         const steps = Array.isArray(dmf?.steps) ? dmf.steps : [];
         const processed = String(dmf?.status || '') === 'approved';
 
-        const signed = await Promise.all(
+        const people = {};
+        await Promise.all(
             STEP_BOXES.map(async (box) => {
-                const step = steps.find((row) => String(row.key || '') === box.key);
-                if (String(step?.status || '') !== 'approved') {
-                    return { ...box };
-                }
-                const emp = await loadSigner(step);
-                return withSignature(
-                    box,
-                    emp,
-                    step.actionedAt,
-                    step.actionedByName || step.assignedTo?.name || '',
-                );
+                const step = steps.find((row) => String(row?.key || '') === box.key);
+                if (String(step?.status || '') !== 'approved') return;
+                const emp = await employeeForStep(step);
+                people[box.key] = await personFields(emp, embedSignatures);
             }),
         );
 
-        let employeeBox = { ...DEFAULT_APPROVERS[3] };
         if (processed && employeeId) {
             const emp = await loadEmployee({ employeeId });
-            const management = steps.find((row) => row.key === 'management');
-            employeeBox = await withSignature(
-                employeeBox,
-                emp,
-                management?.actionedAt || dmf?.submittedAt,
-                personDisplayName(emp),
-            );
+            people.employee = await personFields(emp, embedSignatures);
         }
 
-        return [...signed, employeeBox];
+        return salarySlipApprovalRows({ steps, processed, people });
     } catch (error) {
         console.error('[resolveSalarySlipApprovers]', error?.message || error);
         return DEFAULT_APPROVERS.map((row) => ({ ...row }));

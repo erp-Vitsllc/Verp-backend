@@ -1,8 +1,7 @@
+import Attendance from '../models/Attendance.js';
 import EmployeeBasic from '../models/EmployeeBasic.js';
 import { isWhatsAppEnabled } from '../config/whatsapp.js';
 import { resolveEmployeeWhatsAppPhone } from './sendToolsAssetWhatsAppReport.js';
-
-const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 
 function safeName(value) {
     return String(value || '')
@@ -13,79 +12,60 @@ function safeName(value) {
         .slice(0, 40);
 }
 
-/** Dates stay as calendar days. A Date object would shift them across time zones. */
-export function formatAttendanceNoticeDate(value) {
-    const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(value || '').trim());
-    if (!match) return '';
-    const year = Number(match[1]);
-    const month = MONTHS[Number(match[2]) - 1];
-    const day = Number(match[3]);
-    if (!month || year < 2000 || day < 1 || day > 31) return '';
-    return `${day} ${month} ${year}`;
-}
-
-function hoursLabel(value) {
-    const hours = Number(value);
-    if (!Number.isFinite(hours) || hours <= 0) return '';
-    const rounded = Math.round(hours * 100) / 100;
-    const shown = Number.isInteger(rounded) ? String(rounded) : String(rounded);
-    return shown === '1' ? '1 hour' : `${shown} hours`;
-}
-
 function greeting(firstName) {
     const name = safeName(firstName);
     return name ? `Hello ${name},` : 'Hello,';
 }
 
-function safeDescription(value) {
-    return String(value || '')
-        .replace(/[\r\n\t]+/g, ' ')
-        .replace(/[<>]/g, '')
-        .replace(/\s+/g, ' ')
-        .trim()
-        .slice(0, 180);
-}
-
 function approvedOtHrsLabel(value) {
     const hours = Number(value);
-    if (!Number.isFinite(hours) || hours <= 0) return '';
+    if (!Number.isFinite(hours) || hours <= 0) return '0 hrs';
     const rounded = Math.round(hours * 100) / 100;
     const shown = Number.isInteger(rounded) ? String(rounded) : String(rounded);
     return shown === '1' ? '1 hr' : `${shown} hrs`;
 }
 
 /**
- * Short notice only. No phone, employee code, or salary.
- * After HR approves the hours, the apply-OT description is included.
+ * Sent only when HR approves overtime that stays as OT.
+ * Hours used to mark another day Present do not send a message.
  */
 export function buildFlexibleOtWhatsAppText({
     firstName = '',
-    sourceDate = '',
-    nextDayPresent = false,
-    nextDayDate = '',
     approvedHours = 0,
-    remainderHours = 0,
-    description = '',
+    monthTotalHours = 0,
 } = {}) {
     const hello = greeting(firstName);
-    const workedOn = formatAttendanceNoticeDate(sourceDate);
-    if (nextDayPresent) {
-        const presentOn = formatAttendanceNoticeDate(nextDayDate);
-        const fromOvertime = workedOn ? ` from your overtime on ${workedOn}` : '';
-        const presentLine = presentOn
-            ? `${hello} you got OT. ${presentOn} is Present${fromOvertime}.`
-            : `${hello} you got OT. An authorized leave day is Present${fromOvertime}.`;
-        const left = hoursLabel(remainderHours);
-        return left ? `${presentLine} Remaining overtime on that day: ${left}.` : presentLine;
+    const approved = approvedOtHrsLabel(approvedHours);
+    const total = approvedOtHrsLabel(monthTotalHours);
+    return `${hello} you have approved ${approved} OT. Total OT is ${total}.`;
+}
+
+function monthBounds(dateKey) {
+    const match = /^(\d{4})-(\d{2})-\d{2}$/.exec(String(dateKey || '').trim());
+    if (!match) return null;
+    const last = new Date(Number(match[1]), Number(match[2]), 0).getDate();
+    const prefix = `${match[1]}-${match[2]}`;
+    return { from: `${prefix}-01`, to: `${prefix}-${String(last).padStart(2, '0')}` };
+}
+
+/** Approved OT still kept as overtime. Hours used for a Present day are not included. */
+export async function approvedOtHoursForMonth(record) {
+    const bounds = monthBounds(record?.date);
+    if (!bounds || !record?.employeeMongoId) return 0;
+    const rows = await Attendance.find({
+        employeeMongoId: record.employeeMongoId,
+        date: { $gte: bounds.from, $lte: bounds.to },
+        flexibleOtStatus: 'approved',
+    })
+        .select('flexibleOtApprovedHours flexibleOtNextDayDate')
+        .lean();
+    let total = 0;
+    for (const row of rows) {
+        if (String(row?.flexibleOtNextDayDate || '').trim()) continue;
+        const hours = Number(row?.flexibleOtApprovedHours) || 0;
+        if (hours > 0) total += hours;
     }
-    const earned = approvedOtHrsLabel(approvedHours);
-    const when = workedOn ? ` on ${workedOn}` : '';
-    const earnedLine = earned
-        ? `${hello} you have earned ${earned} of OT${when}.`
-        : `${hello} you have earned OT${when}.`;
-    const note = safeDescription(description);
-    const detail = note ? ` ${note}.` : '';
-    return `${earnedLine}${detail} Your OT will be adjusted as per your worked hours.`;
+    return Math.round(total * 100) / 100;
 }
 
 function safeLogError(error) {
@@ -121,10 +101,10 @@ export async function notifyEmployeeFlexibleOtWhatsApp({
     record,
     nextDayPresent = false,
     approvedHours = 0,
-    remainderHours = 0,
     actor = null,
 } = {}) {
     try {
+        if (nextDayPresent === true) return { sent: false, reason: 'present_day' };
         if (!isWhatsAppEnabled()) return { sent: false, reason: 'disabled' };
 
         const employee = await resolveNoticeEmployee(record);
@@ -134,14 +114,11 @@ export async function notifyEmployeeFlexibleOtWhatsApp({
         const phone = await resolveEmployeeWhatsAppPhone(employeeId);
         if (!phone) return { sent: false, reason: 'no_whatsapp' };
 
+        const monthTotalHours = await approvedOtHoursForMonth(record);
         const text = buildFlexibleOtWhatsAppText({
             firstName: employee?.firstName,
-            sourceDate: record?.date,
-            nextDayPresent: nextDayPresent === true,
-            nextDayDate: record?.flexibleOtNextDayDate,
             approvedHours,
-            remainderHours,
-            description: record?.flexibleOtReason,
+            monthTotalHours,
         });
 
         const { sendTextMessage } = await import('../services/whatsappService.js');

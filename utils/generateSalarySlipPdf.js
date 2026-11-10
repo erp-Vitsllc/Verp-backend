@@ -6,7 +6,7 @@ import {
 import { buildSalarySlipPayload } from './buildSalarySlipPayload.js';
 
 export async function generateSalarySlipPdfBuffer(options = {}) {
-    const slip = await buildSalarySlipPayload(options);
+    const slip = await buildSalarySlipPayload({ ...options, forPdf: true, includeApprovers: true });
     const html = buildSalarySlipPdfHtml(slip);
     const raw = await generatePdfFromHtml(html, SALARY_SLIP_PDF_SELECTOR);
     const buf = pdfOutputToBuffer(raw);

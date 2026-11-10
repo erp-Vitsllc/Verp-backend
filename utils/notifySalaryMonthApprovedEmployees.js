@@ -6,6 +6,7 @@ import SalaryHistoricalProfile from '../models/SalaryHistoricalProfile.js';
 import { isCompanyShellEmployee, REAL_EMPLOYEE_MONGO_FILTER } from './attendanceEmployeeFilters.js';
 import { isPlaceholderEmployeeId } from './employeeIdPrefix.js';
 import { generateSalarySlipPdfBuffer } from './generateSalarySlipPdf.js';
+import { sendSalarySlipWhatsApp } from './sendSalarySlipWhatsApp.js';
 import { buildEmailDedupeKey, sendErpEmail } from './emailDispatch.js';
 
 const MONTH_FULL = [
@@ -177,7 +178,27 @@ export async function notifySalaryMonthApprovedEmployees({ monthKey } = {}) {
     for (const emp of employees || []) {
         if (isCompanyShellEmployee(emp) || isPlaceholderEmployeeId(emp.employeeId)) continue;
         const to = String(emp.companyEmail || '').trim();
-        if (!to) continue;
+        if (!to) {
+            if (!attachSlip) continue;
+            try {
+                const pdf = await buildSlipPdf({ emp, salaryDoc: salaryByCode.get(code), monthKey: ym });
+                if (pdf) {
+                    await sendSalarySlipWhatsApp({
+                        employeeId: code,
+                        monthKey: ym,
+                        monthLabel: month,
+                        pdfBuffer: pdf,
+                        filename: `Salary-Slip-${ym}-${code}.pdf`,
+                    });
+                }
+            } catch (err) {
+                console.error(
+                    `[notifySalaryMonthApprovedEmployees] WhatsApp failed for ${code}:`,
+                    err?.message || err,
+                );
+            }
+            continue;
+        }
 
         const code = String(emp.employeeId || '').trim();
         const attachSlip = Boolean(slipByCode.get(code));

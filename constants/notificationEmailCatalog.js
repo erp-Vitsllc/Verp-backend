@@ -207,6 +207,14 @@ export const NOTIFICATION_EMAIL_CATALOG = [
                         types: [],
                         emailTypes: ['SalaryProcessReminder', 'SalaryMonthApproved'],
                     }),
+                    row({
+                        key: 'hrm.salary.slip',
+                        label: 'Salary slip',
+                        hint: 'Company email gets the payslip. WhatsApp is used only when there is no company email.',
+                        detail: 'When a month payroll is approved, or the payslip is opened from enroll or download: if Salary slip is checked and the employee has a company email, the PDF is emailed. If they have no company email and this is on, the PDF is sent once on WhatsApp.',
+                        types: [],
+                        emailTypes: ['SalarySlip'],
+                    }),
                 ],
             },
             {
@@ -719,6 +727,7 @@ export const WHATSAPP_PERMISSION_PAGE_KEYS = [
     'hrm.tools.handover_report',
     'hrm.tools.monthly_report',
     'hrm.vehicle.handover',
+    'hrm.salary.slip',
 ];
 
 export function flattenWhatsAppPermissionPageCatalog() {

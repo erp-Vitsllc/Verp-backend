@@ -1392,8 +1392,9 @@ function sumSalaryLines(lines) {
         sum.ot += Number(row.ot) || 0;
         sum.deduction += Number(row.deduction) || 0;
         sum.actualSalary += Number(row.actualSalary) || 0;
+        sum.leaveSalaryBalance += Number(row.leaveSalaryBalance) || 0;
         return sum;
-    }, { monthlySalary: 0, grossSalary: 0, basicSalary: 0, ot: 0, deduction: 0, actualSalary: 0 });
+    }, { monthlySalary: 0, grossSalary: 0, basicSalary: 0, ot: 0, deduction: 0, actualSalary: 0, leaveSalaryBalance: 0 });
     return {
         monthlySalary: roundMoney(total.monthlySalary),
         grossSalary: roundMoney(total.grossSalary),
@@ -1401,6 +1402,7 @@ function sumSalaryLines(lines) {
         ot: roundMoney(total.ot),
         deduction: roundMoney(total.deduction),
         actualSalary: roundMoney(total.actualSalary),
+        leaveSalaryBalance: roundMoney(total.leaveSalaryBalance),
     };
 }
 
@@ -1428,6 +1430,7 @@ function applySlipFigure(row, figures) {
     row.ot = figures.ot;
     row.actualSalary = figures.actualSalary;
     row.netSalaryPayable = figures.netSalaryPayable ?? figures.actualSalary;
+    row.leaveSalaryBalance = roundMoney(figures.leaveSalaryBalance);
 }
 
 function listMonthsInclusive(fromYm, toYm) {
@@ -2130,6 +2133,7 @@ export const getSalaryRegister = async (req, res) => {
                     ot: roundMoney(empOt),
                     extra: roundMoney(empOt),
                     deduction: roundMoney(empDeduction),
+                    leaveSalaryBalance: 0,
                     paymentType: paymentTypeFromMol(getByEmployeeCode(molByCode, code)),
                     enrolled: true,
                     enrolledForMonth: true,

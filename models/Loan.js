@@ -58,6 +58,10 @@ const loanSchema = new mongoose.Schema({
     /** Set when the employee continues past an eligibility block. HR still receives the request. */
     eligibilityOverride: { type: Boolean, default: false },
     eligibilityNotes: { type: String, default: '' },
+    /** Creator is not HR, Accounts, or Admin Officer. Accounts approves before HR. */
+    accountsFirst: { type: Boolean, default: false },
+    /** Creator is HR, Accounts, or Admin Officer. The Accounts approval step is left out. */
+    skipAccountsApproval: { type: Boolean, default: false },
     status: {
         type: String,
         enum: [

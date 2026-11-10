@@ -3,59 +3,28 @@ import { describe, it } from 'node:test';
 import { buildFlexibleOtWhatsAppText } from './sendFlexibleOtWhatsApp.js';
 
 describe('buildFlexibleOtWhatsAppText', () => {
-    it('tells the employee which day HR set as Present', () => {
+    it('tells the employee the hours HR approved and the month total', () => {
         const text = buildFlexibleOtWhatsAppText({
             firstName: 'Ahmed',
-            sourceDate: '2026-10-11',
-            nextDayPresent: true,
-            nextDayDate: '2026-10-13',
-            remainderHours: 0,
-        });
-        assert.equal(
-            text,
-            'Hello Ahmed, you got OT. 13 Oct 2026 is Present from your overtime on 11 Oct 2026.',
-        );
-    });
-
-    it('includes leftover overtime when the present day does not use every hour', () => {
-        const text = buildFlexibleOtWhatsAppText({
-            firstName: 'Ahmed',
-            sourceDate: '2026-10-11',
-            nextDayPresent: true,
-            nextDayDate: '2026-10-13',
-            remainderHours: 2,
-        });
-        assert.equal(
-            text,
-            'Hello Ahmed, you got OT. 13 Oct 2026 is Present from your overtime on 11 Oct 2026. Remaining overtime on that day: 2 hours.',
-        );
-    });
-
-    it('tells the employee the overtime hours HR set', () => {
-        const text = buildFlexibleOtWhatsAppText({
-            firstName: 'Ahmed',
-            sourceDate: '2026-10-11',
-            nextDayPresent: false,
             approvedHours: 4,
-            description: 'Night shift cover',
+            monthTotalHours: 10,
         });
         assert.equal(
             text,
-            'Hello Ahmed, you have earned 4 hrs of OT on 11 Oct 2026. Night shift cover. Your OT will be adjusted as per your worked hours.',
+            'Hello Ahmed, you have approved 4 hrs OT. Total OT is 10 hrs.',
         );
     });
 
-    it('keeps the notice to the decision and leaves out employee codes', () => {
+    it('uses the singular hour label and keeps the name on one line', () => {
         const text = buildFlexibleOtWhatsAppText({
             firstName: 'Sara\nAli <tag>',
-            sourceDate: '2026-10-01',
             approvedHours: 1,
-            description: 'Store\nclosing <note>',
+            monthTotalHours: 1,
         });
         assert.equal(
             text,
-            'Hello Sara Ali tag, you have earned 1 hr of OT on 1 Oct 2026. Store closing note. Your OT will be adjusted as per your worked hours.',
+            'Hello Sara Ali tag, you have approved 1 hr OT. Total OT is 1 hr.',
         );
-        assert.doesNotMatch(text, /VITS|971|\d{8,}/);
+        assert.doesNotMatch(text, /Present|comp off|leave|VITS|971|\d{8,}/i);
     });
 });

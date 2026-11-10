@@ -3,7 +3,6 @@ import { resolveFrontendBaseUrl, emailFrontendUrl } from '../../utils/resolveFro
 import EmployeeBasic from "../../models/EmployeeBasic.js";
 import Loan from "../../models/Loan.js";
 import EmployeeSalary from "../../models/EmployeeSalary.js";
-import User from "../../models/User.js";
 import { getCompleteEmployee } from "../../services/employeeService.js";
 import { getDepartmentHOD } from "../../utils/getDepartmentHOD.js";
 import { getManagementHOD } from "../../utils/getManagementHOD.js";
@@ -16,6 +15,7 @@ import {
 } from "../../utils/loanEligibilityValidation.js";
 import { assertSameTypeRequestAllowed } from "../../utils/loanRepaymentGate.js";
 import { rememberSentEmail } from "../../utils/emailDispatch.js";
+import { assignLoanOpeningApproval } from "../../utils/loanAccountsGate.js";
 
 
 /**
@@ -280,41 +280,27 @@ export const requestLoan = async (req, res) => {
             }
         }
 
+        let opening = null;
         if (targetStatus === 'Pending HR') {
-            let hrUser = null;
-
-            if (hrHOD && hrHOD.employeeId) {
-                hrUser = await User.findOne({ employeeId: hrHOD.employeeId });
-            }
-
-            const assignmentId = hrUser ? hrUser._id : (hrHOD ? hrHOD._id : null);
-
-            if (assignmentId) {
-                loanData.submittedTo = assignmentId;
-                loanData.workflow = [{
-                    role: 'HR Admin',
-                    assignedTo: assignmentId,
-                    status: 'Pending',
-                    assignedAt: new Date(),
-                    comment: continuedNotes.length
-                        ? `Employee continued. ${continuedNotes.join(' ')}`
-                        : '',
-                }];
-
-                console.log(`[RequestLoan] Loan Pushed for HR: ${hrHOD.employeeId} (Account: ${hrUser ? 'Found' : 'Missing'})`);
-            }
+            opening = await assignLoanOpeningApproval(
+                loanData,
+                req.user,
+                continuedNotes.length ? `Employee continued. ${continuedNotes.join(' ')}` : '',
+            );
+            console.log(`[RequestLoan] Opening stage ${opening.stage} for ${opening.hod?.employeeId || 'unassigned'}`);
         }
 
         const newLoan = new Loan(loanData);
         const savedLoan = await newLoan.save();
 
         // 3. Sync with Dashboard Action Table
-        if (targetStatus === 'Pending HR' && hrHOD) {
+        const notifyHod = opening?.hod || null;
+        if (notifyHod) {
             const { syncDashboardAction } = await import("../../utils/syncDashboard.js");
             await syncDashboardAction({
                 requestId: savedLoan._id,
                 requestType: 'Loan',
-                assignedTo: hrHOD._id, // Use Employee Object ID for assignment
+                assignedTo: notifyHod._id, // Use Employee Object ID for assignment
                 status: 'Pending',
                 subjectEmployee: employeeBasic,
                 requestedByName: req.user.name || '',
@@ -324,9 +310,9 @@ export const requestLoan = async (req, res) => {
         }
 
         // 4. Send Email ONLY if Submit for Approval
-        if (targetStatus === 'Pending HR' && hrHOD) {
-            // Get HR email from HOD object
-            const reporteeEmail = hrHOD.companyEmail || hrHOD.email || hrHOD.workEmail || 'hr@vitsllc.com';
+        if (notifyHod) {
+            // Get the first approver email from the flowchart person
+            const reporteeEmail = notifyHod.companyEmail || notifyHod.email || notifyHod.workEmail || 'hr@vitsllc.com';
 
             if (reporteeEmail) {
                 const emailUser = process.env.EMAIL_USER?.trim();
@@ -341,7 +327,10 @@ export const requestLoan = async (req, res) => {
                     });
 
                     const employeeName = `${employeeBasic.firstName || ""} ${employeeBasic.lastName || ""}`.trim();
-                    const reporteeName = hrHOD ? `${hrHOD.firstName || ""} ${hrHOD.lastName || ""}`.trim() : 'HR Administrator';
+                    const reporteeName = `${notifyHod.firstName || ""} ${notifyHod.lastName || ""}`.trim() || 'Approver';
+                    const pendingStep = opening.skip ? 'HR Verification (Pending)' : 'Accounts Approval (Pending)';
+                    const followingStep = opening.skip ? 'Final Management Authorization' : 'HR Verification';
+                    const lastStep = opening.skip ? 'Paid to Employee' : 'Final Management Authorization';
                     const subject = `[NEW] ${type} Application: ${employeeName}`;
 
                     // Dynamic URL
@@ -371,7 +360,7 @@ export const requestLoan = async (req, res) => {
                                         </tr>
                                         <tr>
                                             <td style="padding: 8px 0; color: #64748b; font-size: 13px;"><strong>Current Status:</strong></td>
-                                            <td style="padding: 8px 0;"><span style="background-color: #fef3c7; color: #92400e; padding: 4px 10px; border-radius: 9999px; font-size: 11px; font-weight: 800; text-transform: uppercase;">${targetStatus}</span></td>
+                                            <td style="padding: 8px 0;"><span style="background-color: #fef3c7; color: #92400e; padding: 4px 10px; border-radius: 9999px; font-size: 11px; font-weight: 800; text-transform: uppercase;">${opening.stage}</span></td>
                                         </tr>
                                         <tr>
                                             <td style="padding: 8px 0; color: #64748b; font-size: 13px;"><strong>Created On:</strong></td>
@@ -392,9 +381,9 @@ export const requestLoan = async (req, res) => {
                                     <h4 style="margin: 0 0 10px 0; font-size: 14px; color: #1e293b; text-transform: uppercase; letter-spacing: 0.05em;">Initial Workflow Steps:</h4>
                                     <div style="font-size: 12px; color: #64748b;">
                                         <div style="margin-bottom: 5px;">✅ 1. Submission (Completed)</div>
-                                        <div style="margin-bottom: 5px;">⏳ 2. HR Verification (Pending)</div>
-                                        <div style="margin-bottom: 5px;">◽ 3. Finance Approval</div>
-                                        <div style="margin-bottom: 5px;">◽ 4. Final Management Authorization</div>
+                                        <div style="margin-bottom: 5px;">⏳ 2. ${pendingStep}</div>
+                                        <div style="margin-bottom: 5px;">◽ 3. ${followingStep}</div>
+                                        <div style="margin-bottom: 5px;">◽ 4. ${lastStep}</div>
                                     </div>
                                 </div>
                                 
@@ -440,7 +429,7 @@ export const requestLoan = async (req, res) => {
         }
 
         res.status(201).json(withChecks({
-            message: `${type} application ${targetStatus === 'Draft' ? 'saved as draft' : 'submitted for HR approval'}.`,
+            message: `${type} application ${opening ? (opening.skip ? 'submitted for HR approval' : 'submitted for Accounts approval') : 'saved as draft'}.`,
             loan: savedLoan,
         }));
 

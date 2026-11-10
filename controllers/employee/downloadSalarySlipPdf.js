@@ -9,6 +9,7 @@ import SalarySlipMonth from '../../models/SalarySlipMonth.js';
 import { buildDmfViewerContext, salarySlipEditLockMessage, viewerCanUpdateSalarySlip } from '../../utils/salaryDmfApproval.js';
 import { hasPermission, isUserAdministrator } from '../../services/permissionService.js';
 import { generateSalarySlipPdfBuffer } from '../../utils/generateSalarySlipPdf.js';
+import { sendSalarySlipWhatsApp } from '../../utils/sendSalarySlipWhatsApp.js';
 import {
     applySalarySlipOverride,
     buildSalarySlipPayload,
@@ -110,7 +111,17 @@ export async function downloadSalarySlipPdf(req, res) {
             `inline; filename="${slip.fileName || `Salary-Slip-${employeeId}.pdf`}"`,
         );
         res.setHeader('Cache-Control', 'private, no-store');
-        return res.send(buffer);
+        res.send(buffer);
+        void sendSalarySlipWhatsApp({
+            employeeId,
+            monthKey,
+            monthLabel: slip.monthLabel,
+            pdfBuffer: buffer,
+            filename: slip.fileName,
+        }).catch((err) => {
+            console.error('[downloadSalarySlipPdf] WhatsApp', err?.message || err);
+        });
+        return;
     } catch (error) {
         const status = error instanceof SalarySlipError ? error.statusCode : 500;
         console.error('[downloadSalarySlipPdf]', error?.message || error);
