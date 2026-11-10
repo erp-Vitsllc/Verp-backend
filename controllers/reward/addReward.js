@@ -8,6 +8,7 @@ import nodemailer from "nodemailer";
 import { getDepartmentHOD } from "../../utils/getDepartmentHOD.js";
 import { getManagementHOD } from "../../utils/getManagementHOD.js";
 import { rememberRewardEmail } from "../../utils/emailDispatch.js";
+import { isAttendanceAccountSuspended } from "../../utils/attendanceSuspension.js";
 
 /**
  * Generate auto-incrementing reward ID in format: re1322, re1323, etc.
@@ -110,12 +111,18 @@ export const addReward = async (req, res) => {
         console.log('Looking up employee:', employeeId);
         // Verify employee exists
         const employee = await EmployeeBasic.findOne({ employeeId })
-            .select('firstName lastName employeeId company primaryReportee')
+            .select('firstName lastName employeeId company primaryReportee attendanceAccountStatus')
             .lean();
 
         if (!employee) {
             console.log('Employee not found');
             return res.status(404).json({ message: "Employee not found" });
+        }
+
+        if (isAttendanceAccountSuspended(employee)) {
+            return res.status(400).json({
+                message: 'This employee is suspended and cannot apply for a reward.',
+            });
         }
 
         // Rule: If no reportee (manager), cannot create a reward

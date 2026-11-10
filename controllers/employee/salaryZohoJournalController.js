@@ -64,15 +64,24 @@ function employeeWorkedInMonth(emp, ym) {
 }
 
 function activeZohoAccount(salary) {
-    const directId = String(salary?.zohoAccountId || '').trim();
-    if (directId) {
-        return { zohoAccountId: directId, zohoAccountName: String(salary?.zohoAccountName || '').trim() };
-    }
     const history = Array.isArray(salary?.salaryHistory) ? salary.salaryHistory : [];
     const active = history.find((row) => !row?.toDate) || history[history.length - 1];
+    const directId = String(salary?.zohoAccountId || '').trim();
+    if (directId) {
+        return {
+            zohoAccountId: directId,
+            zohoAccountName: String(salary?.zohoAccountName || '').trim(),
+            zohoAccountOrganizationId: String(
+                salary?.zohoAccountOrganizationId || active?.zohoAccountOrganizationId || '',
+            ).trim(),
+        };
+    }
     return {
         zohoAccountId: String(active?.zohoAccountId || '').trim(),
         zohoAccountName: String(active?.zohoAccountName || '').trim(),
+        zohoAccountOrganizationId: String(
+            active?.zohoAccountOrganizationId || salary?.zohoAccountOrganizationId || '',
+        ).trim(),
     };
 }
 
@@ -123,11 +132,11 @@ async function payrollPeople(monthKey) {
 
     const [people, salaries] = await Promise.all([
         EmployeeBasic.find({ employeeId: { $in: ids }, ...REAL_EMPLOYEE_MONGO_FILTER })
-            .select('employeeId firstName lastName status profileStatus dateOfJoining noticeRequest.exitDate company zohoCategoryAccountId zohoCategoryAccountName')
+            .select('employeeId firstName lastName status profileStatus dateOfJoining noticeRequest.exitDate company zohoCategoryOrganizationId zohoCategoryAccountId zohoCategoryAccountName')
             .populate('company', 'name nickName zohoOrganizationId zohoOrganizationLabel')
             .lean(),
         EmployeeSalary.find({ employeeId: { $in: ids } })
-            .select('employeeId zohoAccountId zohoAccountName salaryHistory.zohoAccountId salaryHistory.zohoAccountName salaryHistory.toDate')
+            .select('employeeId zohoAccountOrganizationId zohoAccountId zohoAccountName salaryHistory.zohoAccountOrganizationId salaryHistory.zohoAccountId salaryHistory.zohoAccountName salaryHistory.toDate')
             .lean(),
     ]);
     const salaryById = new Map((salaries || []).map((row) => [personKey(row.employeeId), row]));
@@ -148,6 +157,8 @@ async function payrollPeople(monthKey) {
             zohoSalary: Number(pay.zohoSalary) || 0,
             zohoAccountId: account.zohoAccountId,
             zohoAccountName: account.zohoAccountName,
+            zohoAccountOrganizationId: account.zohoAccountOrganizationId,
+            zohoCategoryOrganizationId: String(emp.zohoCategoryOrganizationId || '').trim(),
             zohoCategoryAccountId: String(emp.zohoCategoryAccountId || '').trim(),
             zohoCategoryAccountName: String(emp.zohoCategoryAccountName || '').trim(),
             company: emp.company || null,

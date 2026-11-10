@@ -7,6 +7,11 @@ function shiftDateKey(dateKey, deltaDays) {
     return `${y}-${m}-${d}`;
 }
 
+/** Attendance account stage. A suspended employee cannot apply for a loan, advance, or reward. */
+export function isAttendanceAccountSuspended(employee) {
+    return String(employee?.attendanceAccountStatus || '').trim().toLowerCase() === 'suspended';
+}
+
 export function suspensionWindow(employee) {
     if (String(employee?.attendanceAccountStatus || 'active').trim().toLowerCase() !== 'suspended') {
         return null;

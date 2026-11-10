@@ -422,6 +422,20 @@ export const approveProfile = async (req, res) => {
                     );
                 }
                 await saveEmployeeData(employeeId, proposedData);
+                if (section === "workdetails") {
+                    for (const key of [
+                        "zohoCategoryOrganizationId",
+                        "zohoCategoryAccountId",
+                        "zohoCategoryAccountName",
+                        "contractExpiryDate",
+                    ]) {
+                        if (!Object.prototype.hasOwnProperty.call(proposedData, key)) continue;
+                        const value = key.startsWith("zohoCategory")
+                            ? String(proposedData[key] ?? "").trim()
+                            : proposedData[key];
+                        updated.set(key, value);
+                    }
+                }
                 if (
                     section === "basicdetails" &&
                     (Object.prototype.hasOwnProperty.call(proposedData, "salaryHistory") ||

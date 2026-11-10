@@ -78,7 +78,7 @@ export const updateBasicDetails = async (req, res) => {
             EmployeeBank.findOne({ employeeId }).select("bankName accountName accountNumber ibanNumber swiftCode bankAttachment").lean(),
             EmployeeSalary.findOne({ employeeId })
                 .select(
-                    "offerLetter salaryHistory basic houseRentAllowance otherAllowance additionalAllowances monthlySalary totalSalary basicPercentage houseRentPercentage otherAllowancePercentage zohoAccountId zohoAccountName",
+                    "offerLetter salaryHistory basic houseRentAllowance otherAllowance additionalAllowances monthlySalary totalSalary basicPercentage houseRentPercentage otherAllowancePercentage zohoAccountOrganizationId zohoAccountId zohoAccountName",
                 )
                 .lean(),
             EmployeeBasic.findOne({ employeeId }).select(employeeBasicSnapSelect).lean(),
@@ -138,6 +138,7 @@ export const updateBasicDetails = async (req, res) => {
             "additionalAllowances",
             "salaryHistory",
             "offerLetter",
+            "zohoAccountOrganizationId",
             "zohoAccountId",
             "zohoAccountName",
             "profilePicture",
@@ -640,6 +641,7 @@ export const updateBasicDetails = async (req, res) => {
             "additionalAllowances",
             "salaryHistory",
             "offerLetter",
+            "zohoAccountOrganizationId",
             "zohoAccountId",
             "zohoAccountName",
             "monthlySalary",

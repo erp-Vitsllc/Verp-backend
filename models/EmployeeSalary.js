@@ -23,6 +23,8 @@ const salaryHistorySchema = new mongoose.Schema(
         otherAllowance: { type: Number, default: 0 },
         vehicleAllowance: { type: Number, default: 0 },
         fuelAllowance: { type: Number, default: 0 },
+        /** Zoho Books organization (VEGA or NNIT) for this salary period's account. */
+        zohoAccountOrganizationId: { type: String, default: "", trim: true },
         /** Zoho Chart of Accounts row used as this employee's salary account. */
         zohoAccountId: { type: String, default: "", trim: true },
         zohoAccountName: { type: String, default: "", trim: true },
@@ -67,6 +69,8 @@ const employeeSalarySchema = new mongoose.Schema(
         houseRentPercentage: { type: Number, default: 20 },
         otherAllowance: { type: Number, default: 0 },
         otherAllowancePercentage: { type: Number, default: 20 },
+        /** Active salary period's Zoho Books organization (VEGA or NNIT). */
+        zohoAccountOrganizationId: { type: String, default: "", trim: true },
         /** Active salary period's Zoho Chart of Accounts row. */
         zohoAccountId: { type: String, default: "", trim: true },
         zohoAccountName: { type: String, default: "", trim: true },

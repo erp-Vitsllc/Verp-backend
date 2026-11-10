@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
+    isAttendanceAccountSuspended,
     isAttendanceSuspendedOn,
     overlaySuspendedAttendance,
     suspendedAttendanceView,
@@ -18,6 +19,12 @@ const employee = {
         description: 'Hold',
     },
 };
+
+test('attendance account stage is suspended only when that status is set', () => {
+    assert.equal(isAttendanceAccountSuspended(employee), true);
+    assert.equal(isAttendanceAccountSuspended({ attendanceAccountStatus: 'active' }), false);
+    assert.equal(isAttendanceAccountSuspended({}), false);
+});
 
 test('default active employees are not suspended', () => {
     assert.equal(isAttendanceSuspendedOn({ attendanceAccountStatus: 'active' }, '2026-10-17'), false);

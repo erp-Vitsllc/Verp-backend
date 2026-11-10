@@ -30,19 +30,20 @@ function toEligibleEmployee(emp, salary = 0, visaInfo = null) {
         salary: Number(salary) || 0,
         visaExpiry: visaInfo?.expiry || null,
         visaType: visaInfo?.type || null,
+        attendanceAccountStatus: emp.attendanceAccountStatus || 'active',
     };
 }
 
 async function resolveSelfBasic(req) {
     if (req.user?.employeeObjectId) {
         const byOid = await EmployeeBasic.findById(req.user.employeeObjectId)
-            .select('_id employeeId firstName lastName status')
+            .select('_id employeeId firstName lastName status attendanceAccountStatus')
             .lean();
         if (byOid) return byOid;
     }
     if (req.user?.employeeId) {
         return EmployeeBasic.findOne({ employeeId: req.user.employeeId })
-            .select('_id employeeId firstName lastName status')
+            .select('_id employeeId firstName lastName status attendanceAccountStatus')
             .lean();
     }
     return null;
@@ -52,7 +53,7 @@ export const getLoanEligibleEmployees = async (req, res) => {
     try {
         const employees = await EmployeeBasic.find(
             { profileStatus: 'active', status: { $ne: 'Left User' } },
-            'employeeId firstName lastName status'
+            'employeeId firstName lastName status attendanceAccountStatus'
         ).lean();
 
         if (!employees.length) {

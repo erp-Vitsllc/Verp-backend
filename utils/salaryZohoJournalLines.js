@@ -150,9 +150,13 @@ function orgRecord(org) {
     };
 }
 
-export function resolveEmployeeZohoOrg(company, organizations) {
+function explicitEmployeeOrgId(person) {
+    return text(person?.zohoAccountOrganizationId) || text(person?.zohoCategoryOrganizationId);
+}
+
+export function resolveEmployeeZohoOrg(company, organizations, explicitOrganizationId = '') {
     const orgs = (organizations || []).map(orgRecord).filter(Boolean);
-    const explicit = text(company?.zohoOrganizationId);
+    const explicit = text(explicitOrganizationId) || text(company?.zohoOrganizationId);
     if (explicit) {
         return orgs.find((org) => org.organizationId === explicit) || orgRecord({
             organizationId: explicit,
@@ -180,7 +184,9 @@ export function groupSalaryZohoJournals({ employees, organizations, note = '' })
     }
 
     for (const org of organizations || []) add(org);
-    for (const person of employees || []) add(resolveEmployeeZohoOrg(person.company, organizations));
+    for (const person of employees || []) {
+        add(resolveEmployeeZohoOrg(person.company, organizations, explicitEmployeeOrgId(person)));
+    }
 
     orgs.sort((a, b) => {
         const rank = (brand) => (brand === 'VEGA' ? 0 : brand === 'NNIT' ? 1 : 2);
@@ -189,7 +195,7 @@ export function groupSalaryZohoJournals({ employees, organizations, note = '' })
 
     return orgs.map((org) => {
         const people = (employees || []).filter((person) => {
-            const match = resolveEmployeeZohoOrg(person.company, orgs);
+            const match = resolveEmployeeZohoOrg(person.company, orgs, explicitEmployeeOrgId(person));
             return match?.organizationId === org.organizationId;
         });
         return {

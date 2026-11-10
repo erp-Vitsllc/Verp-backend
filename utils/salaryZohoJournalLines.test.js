@@ -154,3 +154,27 @@ test('employees land on the Zoho company linked to their company', () => {
     assert.equal(journals[1].lines.some((line) => line.personName === 'Nnit Person'), true);
     assert.equal(journals[0].lines.some((line) => line.personName === 'Nnit Person'), false);
 });
+
+test('a saved VEGA or NNIT choice overrides the company link', () => {
+    const journals = groupSalaryZohoJournals({
+        organizations: [
+            { organizationId: 'vega-org', name: 'VEGADIGITAL IT SOLUTIONS LLC', brand: 'VEGA' },
+            { organizationId: 'nnit-org', name: 'NEURON NEXUS INFORMATION TECHNOLOGY L.L.C', brand: 'NNIT' },
+        ],
+        employees: [
+            {
+                employeeId: 'V1',
+                name: 'Vega Person',
+                zohoSalary: 10,
+                zohoAccountId: 'n-acc',
+                zohoAccountOrganizationId: 'nnit-org',
+                zohoCategoryAccountId: 'n-cat',
+                zohoCategoryOrganizationId: 'nnit-org',
+                company: { nickName: 'VEGA DxB', name: 'Vega Dubai' },
+            },
+        ],
+    });
+
+    assert.equal(journals[0].lines.some((line) => line.personName === 'Vega Person'), false);
+    assert.equal(journals[1].lines.some((line) => line.personName === 'Vega Person'), true);
+});

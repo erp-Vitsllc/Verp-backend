@@ -11,6 +11,7 @@ import {
 import { assertLoanEmployeeEligibility } from "../../utils/loanEligibilityValidation.js";
 import { assertSameTypeRequestAllowed } from "../../utils/loanRepaymentGate.js";
 import { rememberSentEmail } from "../../utils/emailDispatch.js";
+import { isAttendanceAccountSuspended } from "../../utils/attendanceSuspension.js";
 
 export const updateLoanDetails = async (req, res) => {
     const { id } = req.params;
@@ -280,6 +281,12 @@ export const updateLoanDetails = async (req, res) => {
                 }
             }
         } else if (req.body.resubmit && oldStatus === 'Rejected') {
+            if (isAttendanceAccountSuspended(employeeForEligibility)) {
+                const kind = String(type || loan.type || '').toLowerCase().includes('advance') ? 'an advance' : 'a loan';
+                return res.status(400).json({
+                    message: `This employee is suspended and cannot apply for ${kind}.`,
+                });
+            }
             const sameTypeGate = await assertSameTypeRequestAllowed(req, {
                 employeeId: loan.employeeId,
                 type: type || loan.type,

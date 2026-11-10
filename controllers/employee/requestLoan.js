@@ -16,6 +16,7 @@ import {
 import { assertSameTypeRequestAllowed } from "../../utils/loanRepaymentGate.js";
 import { rememberSentEmail } from "../../utils/emailDispatch.js";
 import { assignLoanOpeningApproval } from "../../utils/loanAccountsGate.js";
+import { isAttendanceAccountSuspended } from "../../utils/attendanceSuspension.js";
 
 
 /**
@@ -90,6 +91,13 @@ export const requestLoan = async (req, res) => {
 
         if (!employeeBasic) {
             return res.status(404).json({ message: "Employee details not found." });
+        }
+
+        if (isAttendanceAccountSuspended(employeeBasic)) {
+            const kind = String(type || '').toLowerCase().includes('advance') ? 'an advance' : 'a loan';
+            return res.status(400).json(validationBlock({
+                message: `This employee is suspended and cannot apply for ${kind}.`,
+            }));
         }
 
         if (!employeeBasic.company) {

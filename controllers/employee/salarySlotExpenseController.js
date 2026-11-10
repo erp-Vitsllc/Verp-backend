@@ -35,15 +35,24 @@ function money(value) {
 }
 
 function activeZohoAccount(salary) {
-    const directId = String(salary?.zohoAccountId || '').trim();
-    if (directId) {
-        return { zohoAccountId: directId, zohoAccountName: String(salary?.zohoAccountName || '').trim() };
-    }
     const history = Array.isArray(salary?.salaryHistory) ? salary.salaryHistory : [];
     const active = history.find((row) => !row?.toDate) || history[history.length - 1];
+    const directId = String(salary?.zohoAccountId || '').trim();
+    if (directId) {
+        return {
+            zohoAccountId: directId,
+            zohoAccountName: String(salary?.zohoAccountName || '').trim(),
+            zohoAccountOrganizationId: String(
+                salary?.zohoAccountOrganizationId || active?.zohoAccountOrganizationId || '',
+            ).trim(),
+        };
+    }
     return {
         zohoAccountId: String(active?.zohoAccountId || '').trim(),
         zohoAccountName: String(active?.zohoAccountName || '').trim(),
+        zohoAccountOrganizationId: String(
+            active?.zohoAccountOrganizationId || salary?.zohoAccountOrganizationId || '',
+        ).trim(),
     };
 }
 
@@ -82,11 +91,11 @@ async function slotExpenseLines(doc, monthKey) {
     if (!ids.length) return [];
     const [people, salaries, figures] = await Promise.all([
         EmployeeBasic.find({ employeeId: { $in: ids } })
-            .select('employeeId firstName lastName company zohoCategoryAccountId zohoCategoryAccountName')
+            .select('employeeId firstName lastName company zohoCategoryOrganizationId zohoCategoryAccountId zohoCategoryAccountName')
             .populate('company', 'name nickName zohoOrganizationId zohoOrganizationLabel')
             .lean(),
         EmployeeSalary.find({ employeeId: { $in: ids } })
-            .select('employeeId zohoAccountId zohoAccountName salaryHistory.zohoAccountId salaryHistory.zohoAccountName salaryHistory.toDate')
+            .select('employeeId zohoAccountOrganizationId zohoAccountId zohoAccountName salaryHistory.zohoAccountOrganizationId salaryHistory.zohoAccountId salaryHistory.zohoAccountName salaryHistory.toDate')
             .lean(),
         collectSalarySlipPayrollFigures(ids, monthKey),
     ]);
@@ -103,8 +112,10 @@ async function slotExpenseLines(doc, monthKey) {
             name,
             accountId: String(emp?.zohoCategoryAccountId || '').trim(),
             accountName: String(emp?.zohoCategoryAccountName || '').trim(),
+            zohoCategoryOrganizationId: String(emp?.zohoCategoryOrganizationId || '').trim(),
             employeeAccountId: account.zohoAccountId,
             employeeAccountName: account.zohoAccountName,
+            zohoAccountOrganizationId: account.zohoAccountOrganizationId,
             notes: `${name} (${String(emp?.employeeId || employeeId).trim()})`,
             amount: amount > 0 ? amount.toFixed(2) : '',
             company: emp?.company || null,
@@ -158,7 +169,14 @@ export const getSalarySlotExpense = async (req, res) => {
         const organizations = configuredOrganizations();
         const lines = await slotExpenseLines(doc, monthKey);
         const company = { nickName: doc.companyName, name: doc.companyName };
-        const matched = resolveEmployeeZohoOrg(lines.find((line) => line.company)?.company || company, organizations);
+        const explicitOrg = lines
+            .map((line) => line.zohoAccountOrganizationId || line.zohoCategoryOrganizationId)
+            .find(Boolean) || '';
+        const matched = resolveEmployeeZohoOrg(
+            lines.find((line) => line.company)?.company || company,
+            organizations,
+            explicitOrg,
+        );
         return res.status(200).json({
             organizations,
             organizationId: matched?.organizationId || organizations[0]?.organizationId || '',

@@ -519,6 +519,7 @@ export const getCompleteEmployee = async (id) => {
                 otherAllowance: salary.otherAllowance || 0,
                 otherAllowancePercentage: salary.otherAllowancePercentage || 20,
                 additionalAllowances: salary.additionalAllowances || [],
+                zohoAccountOrganizationId: salary.zohoAccountOrganizationId || '',
                 zohoAccountId: salary.zohoAccountId || '',
                 zohoAccountName: salary.zohoAccountName || '',
                 // Exclude large attachment/offerLetter.data from salary history (but include URLs)
@@ -902,7 +903,10 @@ export const saveEmployeeData = async (employeeId, updatePayload) => {
             'employeeId', 'firstName', 'lastName', 'role', 'department', 'designation', 'company',
             'status', 'probationPeriod', 'reportingAuthority', 'primaryReportee', 'secondaryReportee', 'overtime',
             'profileApprovalStatus', 'profileStatus', 'email', 'companyEmail', 'password',
-            'enablePortalAccess', 'loginThrough', 'dateOfJoining', 'contractJoiningDate', 'staffType',
+            'enablePortalAccess', 'loginThrough', 'dateOfJoining', 'contractJoiningDate', 'contractExpiryDate', 'staffType',
+            // Work Details → Category. HR approval applies the queued work-details payload through
+            // this allowlist; omitting these left Category unchanged while Salary payable still saved.
+            'zohoCategoryOrganizationId', 'zohoCategoryAccountId', 'zohoCategoryAccountName',
             'workLocation', 'workingFromCountry', 'workingFromCountryCode', 'salaryCurrency', 'workTimeZone',
             'profilePicture', 'documents', 'oldDocuments', 'trainingDetails'
         ];
@@ -925,7 +929,7 @@ export const saveEmployeeData = async (employeeId, updatePayload) => {
             'monthlySalary', 'basic', 'basicPercentage', 'houseRentAllowance',
             'houseRentPercentage', 'otherAllowance', 'otherAllowancePercentage',
             'additionalAllowances', 'salaryHistory', 'offerLetter',
-            'zohoAccountId', 'zohoAccountName',
+            'zohoAccountOrganizationId', 'zohoAccountId', 'zohoAccountName',
         ];
 
         const bankFields = [
@@ -967,6 +971,12 @@ export const saveEmployeeData = async (employeeId, updatePayload) => {
         if (Object.prototype.hasOwnProperty.call(basicUpdate, 'staffType')) {
             const next = await resolveStoredStaffType(basicUpdate.staffType);
             basicUpdate.staffType = next || 'office';
+        }
+
+        for (const field of ['zohoCategoryOrganizationId', 'zohoCategoryAccountId', 'zohoCategoryAccountName']) {
+            if (Object.prototype.hasOwnProperty.call(basicUpdate, field)) {
+                basicUpdate[field] = String(basicUpdate[field] || '').trim();
+            }
         }
 
         // Update collections in parallel
@@ -1039,6 +1049,7 @@ export const saveEmployeeData = async (employeeId, updatePayload) => {
                         houseRentAllowance: houseRentAllowance,
                         vehicleAllowance: vehicleAllowance,
                         fuelAllowance: fuelAllowance,
+                        zohoAccountOrganizationId: String(entry.zohoAccountOrganizationId || '').trim(),
                         zohoAccountId: String(entry.zohoAccountId || '').trim(),
                         zohoAccountName: String(entry.zohoAccountName || '').trim(),
                         additionalAllowances: entry.additionalAllowances || []
@@ -1047,8 +1058,18 @@ export const saveEmployeeData = async (employeeId, updatePayload) => {
                 const openEntry = salaryUpdate.salaryHistory.find((entry) => !entry?.toDate)
                     || salaryUpdate.salaryHistory[0];
                 if (openEntry) {
-                    salaryUpdate.zohoAccountId = String(openEntry.zohoAccountId || '').trim();
-                    salaryUpdate.zohoAccountName = String(openEntry.zohoAccountName || '').trim();
+                    const historyAccountId = String(openEntry.zohoAccountId || '').trim();
+                    const payloadAccountId = String(salaryUpdate.zohoAccountId || '').trim();
+                    const accountId = historyAccountId || payloadAccountId;
+                    if (accountId) {
+                        salaryUpdate.zohoAccountId = accountId;
+                        salaryUpdate.zohoAccountOrganizationId = String(
+                            openEntry.zohoAccountOrganizationId || salaryUpdate.zohoAccountOrganizationId || '',
+                        ).trim();
+                        salaryUpdate.zohoAccountName = String(
+                            openEntry.zohoAccountName || salaryUpdate.zohoAccountName || '',
+                        ).trim();
+                    }
                 }
             }
 
@@ -1224,19 +1245,29 @@ export const syncSalaryTopLevelFromHistory = async (employeeId) => {
             ? active.offerLetter
             : null;
 
+    const salaryTopLevel = {
+        basic,
+        houseRentAllowance,
+        otherAllowance,
+        additionalAllowances,
+        monthlySalary: totalSalary,
+        totalSalary,
+        offerLetter: offerLetterFromHistory || salaryDoc.offerLetter || null,
+    };
+
+    // Salary payable (Employee Zoho Account) lives on the active period. Keep the
+    // top-level account aligned when that period has one, so HR approval of a
+    // salary edit and a category edit both land on the live profile.
+    const activeZohoAccountId = String(active.zohoAccountId || '').trim();
+    if (activeZohoAccountId) {
+        salaryTopLevel.zohoAccountOrganizationId = String(active.zohoAccountOrganizationId || '').trim();
+        salaryTopLevel.zohoAccountId = activeZohoAccountId;
+        salaryTopLevel.zohoAccountName = String(active.zohoAccountName || '').trim();
+    }
+
     await EmployeeSalary.updateOne(
         { employeeId },
-        {
-            $set: {
-                basic,
-                houseRentAllowance,
-                otherAllowance,
-                additionalAllowances,
-                monthlySalary: totalSalary,
-                totalSalary,
-                offerLetter: offerLetterFromHistory || salaryDoc.offerLetter || null,
-            },
-        },
+        { $set: salaryTopLevel },
     );
 };
 

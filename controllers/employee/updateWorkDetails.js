@@ -35,6 +35,7 @@ export const updateWorkDetails = async (req, res) => {
             "companyEmail",
             "enablePortalAccess",
             "staffType",
+            "zohoCategoryOrganizationId",
             "zohoCategoryAccountId",
             "zohoCategoryAccountName",
         ];
@@ -180,6 +181,9 @@ export const updateWorkDetails = async (req, res) => {
                 .toLowerCase();
         }
 
+        if (updatePayload.zohoCategoryOrganizationId !== undefined) {
+            updatePayload.zohoCategoryOrganizationId = String(updatePayload.zohoCategoryOrganizationId || "").trim();
+        }
         if (updatePayload.zohoCategoryAccountId !== undefined) {
             updatePayload.zohoCategoryAccountId = String(updatePayload.zohoCategoryAccountId || "").trim();
         }
@@ -245,6 +249,7 @@ export const updateWorkDetails = async (req, res) => {
                 companyEmail: employee.companyEmail || "",
                 enablePortalAccess: employee.enablePortalAccess,
                 staffType: employee.staffType || "office",
+                zohoCategoryOrganizationId: employee.zohoCategoryOrganizationId || "",
                 zohoCategoryAccountId: employee.zohoCategoryAccountId || "",
                 zohoCategoryAccountName: employee.zohoCategoryAccountName || "",
                 profileStatus: employee.profileStatus,

@@ -1,6 +1,15 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { stageAfterAccountsApproval, stageAfterHrApproval } from './loanAccountsGate.js';
+import mongoose from 'mongoose';
+import { stageAfterAccountsApproval, stageAfterHrApproval, storedUserId } from './loanAccountsGate.js';
+
+test('a stored loan creator id stays a 24-character id, not the raw byte buffer', () => {
+    const id = new mongoose.Types.ObjectId();
+    assert.equal(storedUserId(id), id.toString());
+    assert.equal(storedUserId(id.toString()), id.toString());
+    assert.equal(storedUserId({ _id: id, employeeId: 'VEGA-HR-0001' }), id.toString());
+    assert.equal(storedUserId(id.id), null);
+});
 
 test('an outside creator still goes to Accounts after HR when Accounts has not approved', () => {
     assert.equal(stageAfterHrApproval({ accountsFirst: true, workflow: [] }), 'Pending Accounts');

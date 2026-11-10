@@ -1,19 +1,40 @@
+import mongoose from 'mongoose';
 import User from '../models/User.js';
 import EmployeeBasic from '../models/EmployeeBasic.js';
 import { getDepartmentHOD, isUserActiveInFlowchart } from './getDepartmentHOD.js';
+
+/** Mongo id string. ObjectId.id is a 12-byte buffer and must not be sent to findById. */
+export function storedUserId(value) {
+    if (value == null || value === '') return null;
+    if (value instanceof mongoose.Types.ObjectId) return value.toString();
+    if (typeof value === 'string') {
+        const text = value.trim();
+        if (mongoose.Types.ObjectId.isValid(text) && text.length === 24) return text;
+        return null;
+    }
+    if (typeof value === 'object') {
+        if (value._id != null && value._id !== value) return storedUserId(value._id);
+        if (typeof value.id === 'string') return storedUserId(value.id);
+    }
+    return null;
+}
 
 const FLOWCHART_ROLES = ['hr', 'accounts', 'admincontroller'];
 
 async function resolveCreatorUser(userLike) {
     if (!userLike) return null;
-    if (userLike.employeeId || userLike.employeeObjectId) {
+    if (
+        typeof userLike === 'object'
+        && !(userLike instanceof mongoose.Types.ObjectId)
+        && (userLike.employeeId || userLike.employeeObjectId)
+    ) {
         return {
-            _id: userLike.id || userLike._id || null,
+            _id: storedUserId(userLike._id) || storedUserId(userLike.id),
             employeeId: userLike.employeeId || '',
             employeeObjectId: userLike.employeeObjectId || null,
         };
     }
-    const id = userLike.id || userLike._id || userLike;
+    const id = storedUserId(userLike);
     if (!id) return null;
     const doc = await User.findById(id).select('_id employeeId').lean();
     if (!doc) return null;

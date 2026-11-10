@@ -13,6 +13,7 @@ import { resolveEmployeeEmail, addEmployeeEmailToSet } from "../../utils/resolve
 import { buildRewardApprovedEmailHtml } from "../../utils/buildRewardApprovedEmailHtml.js";
 import { isUsernameSystemSuperUser, isReqUserSystemSuperUser } from "../../utils/systemSuperUser.js";
 import { runAfterResponse } from "../../utils/runAfterResponse.js";
+import { isAttendanceAccountSuspended } from "../../utils/attendanceSuspension.js";
 
 export const updateReward = async (req, res) => {
     try {
@@ -132,6 +133,14 @@ export const updateReward = async (req, res) => {
 
             // === RESUBMIT LOGIC ===
             if (req.body.resubmit && currentStatus === 'Rejected') {
+                const suspendedEmployee = await EmployeeBasic.findOne({ employeeId: reward.employeeId })
+                    .select('attendanceAccountStatus')
+                    .lean();
+                if (isAttendanceAccountSuspended(suspendedEmployee)) {
+                    return res.status(400).json({
+                        message: 'This employee is suspended and cannot apply for a reward.',
+                    });
+                }
                 console.log("[UpdateReward] Resubmitting previously rejected reward.");
                 const rejectedStep = (reward.workflow || []).find(w => w.status === 'Rejected');
                 if (rejectedStep) {

@@ -21,7 +21,8 @@ const employeeBasicSchema = new mongoose.Schema(
             lowercase: true,
         },
         company: { type: mongoose.Schema.Types.ObjectId, ref: "Company", default: null },
-        /** Zoho Chart of Accounts row for this employee's company (Work Details → Category). */
+        /** Zoho Chart of Accounts row for Work Details → Category. */
+        zohoCategoryOrganizationId: { type: String, default: "", trim: true },
         zohoCategoryAccountId: { type: String, default: "", trim: true },
         zohoCategoryAccountName: { type: String, default: "", trim: true },
         status: {
