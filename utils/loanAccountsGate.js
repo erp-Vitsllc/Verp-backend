@@ -126,6 +126,7 @@ export async function assignLoanOpeningApproval(loanLike, creatorUser, comment =
     loanLike.workflow = assignedTo
         ? [{
             role: skip ? 'HR Admin' : 'Accounts',
+            phase: skip ? 'hr' : 'opening',
             assignedTo,
             status: 'Pending',
             assignedAt: new Date(),

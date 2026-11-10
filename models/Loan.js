@@ -136,6 +136,8 @@ const loanSchema = new mongoose.Schema({
     // NEW: Workflow Array for detailed tracking
     workflow: [{
         role: { type: String, required: true },
+        /** opening = Accounts before HR. payment = Accounts fills payment after HR. */
+        phase: { type: String, default: '' },
         assignedTo: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
         status: { type: String, enum: ['Pending', 'Approved', 'Rejected'], default: 'Pending' },
         assignedAt: { type: Date, default: Date.now },

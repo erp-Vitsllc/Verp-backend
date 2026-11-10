@@ -5,6 +5,21 @@ import { getManagementHOD } from "../../utils/getManagementHOD.js";
 import { refreshStoredAttachmentUrls } from "../../utils/s3Upload.js";
 import { attachZohoExpenseNumber } from "../../utils/attachZohoDocumentNumbers.js";
 
+const whatsAppCatchupAt = new Map();
+
+function loanNeedsEmployeePdfCatchup(loan) {
+    const stage = String(loan?.approvalStatus || loan?.status || '');
+    if (!['Approved', 'Paid', 'Pending Payment to Employee'].includes(stage)) return false;
+    const touched = new Date(loan?.updatedAt || loan?.zohoSyncedAt || loan?.approvedDate || 0).getTime();
+    if (!Number.isFinite(touched) || Date.now() - touched > 2 * 24 * 60 * 60 * 1000) return false;
+    const key = String(loan?.loanId || loan?._id || '');
+    if (!key) return false;
+    const last = whatsAppCatchupAt.get(key) || 0;
+    if (Date.now() - last < 10 * 60 * 1000) return false;
+    whatsAppCatchupAt.set(key, Date.now());
+    return true;
+}
+
 export const getLoanById = async (req, res) => {
     try {
         const { id } = req.params;
@@ -137,6 +152,49 @@ export const getLoanById = async (req, res) => {
             zohoSyncedAt: loan.zohoSyncedAt || null,
             zohoSyncError: loan.zohoSyncError || '',
         };
+
+        if (loanNeedsEmployeePdfCatchup(loan)) {
+            const employeeId = loan.employeeId || employee.employeeId;
+            const { recentLoanPdfDelivery } = await import('../../utils/sendLoanApprovalWhatsApp.js');
+            if (!recentLoanPdfDelivery(loan)) {
+                try {
+                    const basic = await EmployeeBasic.findOne({ employeeId })
+                        .select('employeeId firstName lastName companyEmail')
+                        .lean();
+                    if (basic?.employeeId && !String(basic.companyEmail || '').trim()) {
+                        const { deliverLoanEmployeeWhatsApp } = await import(
+                            '../../utils/sendLoanApprovalWhatsApp.js'
+                        );
+                        const delivery = await deliverLoanEmployeeWhatsApp({ loan, employee: basic });
+                        if (delivery?.note && delivery.reason !== 'already_sent') {
+                            data.employeePdfNote = delivery.note;
+                            data.employeePdfSent = delivery.sent === true;
+                        }
+                        if (delivery?.note) {
+                            console.log(`[LoanWhatsApp] ${loan.loanId || loan._id}: ${delivery.note}`);
+                        }
+                    }
+                } catch (waErr) {
+                    console.error('[LoanWhatsApp] catch-up failed:', waErr?.message || waErr);
+                    data.employeePdfNote = `The PDF was not sent to the employee on WhatsApp: ${waErr?.message || 'send failed'}`;
+                    data.employeePdfSent = false;
+                }
+            }
+            if (/could not be read|attachment not uploaded/i.test(String(loan.zohoSyncError || ''))) {
+                try {
+                    const { uploadMissingLoanFormToZohoExpense } = await import(
+                        '../../utils/syncLoanPaymentToZohoExpense.js'
+                    );
+                    const uploaded = await uploadMissingLoanFormToZohoExpense(loan);
+                    if (uploaded?.ok) {
+                        await Loan.updateOne({ _id: loan._id }, { $set: { zohoSyncError: '' } });
+                        data.zohoSyncError = '';
+                    }
+                } catch (zohoErr) {
+                    console.error('[LoanZohoExpense] existing expense attach failed:', zohoErr?.message || zohoErr);
+                }
+            }
+        }
 
         res.status(200).json(
             await attachZohoExpenseNumber(data, { persistModel: Loan, fetchLive: false }),

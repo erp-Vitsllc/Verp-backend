@@ -976,6 +976,31 @@ export const addPayment = async (req, res) => {
                         );
                     }
 
+                    // No company email: the employee gets the acknowledgment PDF on WhatsApp.
+                    // The toast must say whether that send happened.
+                    try {
+                        const { withLoanEmployeeWhatsAppMessage } = await import(
+                            '../../utils/sendLoanApprovalWhatsApp.js'
+                        );
+                        const applicant =
+                            String(employee?.employeeId || '') === String(loan.employeeId || '')
+                                ? employee
+                                : await EmployeeBasic.findOne({ employeeId: loan.employeeId });
+                        const delivered = await withLoanEmployeeWhatsAppMessage(zohoResult.message, {
+                            loan,
+                            employee: applicant,
+                        });
+                        if (delivered?.message) zohoResult.message = delivered.message;
+                    } catch (waErr) {
+                        console.error('[AddPayment] Employee WhatsApp failed:', waErr?.message || waErr);
+                        zohoResult.message = [
+                            zohoResult.message,
+                            `The PDF was not sent to the employee on WhatsApp: ${waErr?.message || 'send failed'}`,
+                        ]
+                            .filter(Boolean)
+                            .join(' ');
+                    }
+
                     // Zoho accepted — now record ERP paid amount and complete Paid to Employee.
                     payment.zohoExpenseId = zohoResult.expenseId || payment.zohoExpenseId || '';
                     payment.zohoJournalId = zohoResult.journalId || payment.zohoJournalId || '';

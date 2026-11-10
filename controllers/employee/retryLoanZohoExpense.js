@@ -33,10 +33,18 @@ export const retryLoanZohoExpense = async (req, res) => {
         }
 
         if (String(loan.zohoExpenseId || '').trim()) {
+            const employee = await getCompleteEmployee(loan.employeeId);
+            const { withLoanEmployeeWhatsAppMessage } = await import(
+                '../../utils/sendLoanApprovalWhatsApp.js'
+            );
+            const delivered = await withLoanEmployeeWhatsAppMessage(
+                'Zoho Expense already exists for this loan/advance.',
+                { loan, employee },
+            );
             return res.status(200).json({
                 success: true,
                 skipped: true,
-                message: 'Zoho Expense already exists for this loan/advance.',
+                message: delivered.message,
                 loan,
                 expenseId: loan.zohoExpenseId,
                 expenseNumber: loan.zohoExpenseNumber || '',
@@ -214,13 +222,20 @@ export const retryLoanZohoExpense = async (req, res) => {
                 );
             }
 
-            return res.status(200).json({
-                success: true,
-                message:
-                    zohoResult.message ||
+            const { withLoanEmployeeWhatsAppMessage } = await import(
+                '../../utils/sendLoanApprovalWhatsApp.js'
+            );
+            const delivered = await withLoanEmployeeWhatsAppMessage(
+                zohoResult.message ||
                     (wasFailedPayment || createdPaymentForRetry
                         ? 'Zoho Expense created. Paid to Employee completed.'
                         : 'Zoho Expense created.'),
+                { loan, employee },
+            );
+
+            return res.status(200).json({
+                success: true,
+                message: delivered.message,
                 loan,
                 expenseId: zohoResult.expenseId,
                 expenseNumber: zohoResult.expenseNumber || '',

@@ -284,16 +284,28 @@ async function streamToBuffer(body) {
 export async function downloadS3ObjectBytes(keyOrUrl) {
     const key = normalizeS3Key(keyOrUrl);
     if (!key) return null;
+
+    const buckets = [];
     try {
-        const response = await s3Client.send(
-            new GetObjectCommand({ Bucket: bucketName, Key: key }),
-        );
-        const buffer = await streamToBuffer(response.Body);
-        return buffer?.length ? buffer : null;
+        const resolved = await resolveBucketForKey(key);
+        if (resolved) buckets.push(resolved);
     } catch (error) {
-        console.warn('[downloadS3ObjectBytes]', key, error?.message || error);
-        return null;
+        console.warn('[downloadS3ObjectBytes] bucket lookup failed', key, error?.message || error);
     }
+    if (bucketName && !buckets.includes(bucketName)) buckets.push(bucketName);
+
+    for (const bucket of buckets) {
+        try {
+            const response = await s3Client.send(
+                new GetObjectCommand({ Bucket: bucket, Key: key }),
+            );
+            const buffer = await streamToBuffer(response.Body);
+            if (buffer?.length) return buffer;
+        } catch (error) {
+            console.warn('[downloadS3ObjectBytes]', bucket, key, error?.message || error);
+        }
+    }
+    return null;
 }
 
 /** Copy object into archive folder; falls back to download+upload if server-side copy fails. */

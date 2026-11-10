@@ -137,6 +137,25 @@ async function resolveAttachmentFile(attachment = {}) {
     };
 }
 
+async function generatedLoanFormFile(loan) {
+    if (!loan || loan.type === 'Reward') return null;
+    if (loan.type && loan.type !== 'Loan' && loan.type !== 'Advance') return null;
+    try {
+        const { getLoanAcknowledgmentPdfBuffer } = await import('./persistLoanApprovalAttachments.js');
+        const buffer = await getLoanAcknowledgmentPdfBuffer(loan);
+        if (!buffer || buffer.length < 500) return null;
+        const typeSlug = loan.type === 'Advance' ? 'Advance' : 'Loan';
+        return {
+            buffer,
+            filename: `${typeSlug}_Form_${clean(loan.loanId || loan._id)}.pdf`,
+            mimeType: 'application/pdf',
+        };
+    } catch (err) {
+        console.warn('[LoanZohoExpense] Could not build acknowledgment PDF:', err?.message || err);
+        return null;
+    }
+}
+
 /**
  * Zoho Expense "Upload your Files" / receipts area.
  * Order: system-generated form (acknowledgment / certificate) first, then
@@ -247,6 +266,28 @@ async function resolveHeadOfficeLocationId() {
         locationId: clean(match?.location_id || match?.locationId || match?.id),
         locationName: clean(match?.location_name || match?.name, DEFAULT_LOCATION_NAME),
     };
+}
+
+/**
+ * Expense already exists, but its file was never uploaded.
+ * Builds the acknowledgment PDF and attaches it. Does not create another expense.
+ */
+export async function uploadMissingLoanFormToZohoExpense(loan) {
+    const expenseId = clean(loan?.zohoExpenseId);
+    const syncError = String(loan?.zohoSyncError || '');
+    if (!expenseId) return { ok: false, reason: 'no_expense' };
+    if (!/could not be read|attachment not uploaded/i.test(syncError)) {
+        return { ok: false, reason: 'not_needed' };
+    }
+    const orgId = clean(loan?.zohoOrganizationId);
+    if (!orgId) return { ok: false, reason: 'no_org' };
+
+    return withZohoOrganization(orgId, async () => {
+        const generated = await generatedLoanFormFile(loan);
+        if (!generated) return { ok: false, reason: 'no_pdf' };
+        await uploadExpenseAttachment(expenseId, generated);
+        return { ok: true, filename: generated.filename };
+    });
 }
 
 /**
@@ -379,6 +420,23 @@ export async function syncLoanPaymentToZohoExpense({
                     const msg = attachErr?.message || 'Attachment upload failed';
                     failedMessages.push(`${file.filename}: ${msg}`);
                     console.warn('[LoanZohoExpense] Attachment failed:', msg);
+                }
+            }
+
+            // Stored file missing or unreadable (expired link, storage miss).
+            // Build the acknowledgment PDF and upload that instead of stopping.
+            if (uploadedNames.length === 0) {
+                const generated = await generatedLoanFormFile(loan);
+                if (generated) {
+                    try {
+                        await uploadExpenseAttachment(expenseId, generated);
+                        uploadedNames.push(generated.filename);
+                        console.log(`[LoanZohoExpense] Attached generated form: ${generated.filename}`);
+                    } catch (attachErr) {
+                        const msg = attachErr?.message || 'Attachment upload failed';
+                        failedMessages.push(`${generated.filename}: ${msg}`);
+                        console.warn('[LoanZohoExpense] Generated form upload failed:', msg);
+                    }
                 }
             }
 

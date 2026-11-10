@@ -709,6 +709,96 @@ export async function sendDocumentMessage(to, { buffer, filename, caption = '', 
     }
 }
 
+function templateParameterText(value, fallback = '-') {
+    const text = String(value ?? '')
+        .replace(/[\r\n\t]+/g, ' ')
+        .replace(/ {5,}/g, '    ')
+        .trim();
+    return (text || fallback).slice(0, 900);
+}
+
+/**
+ * Approved template with a document header. A normal document message is
+ * blocked unless the employee messaged the company number in the last 24 hours.
+ */
+export async function sendDocumentTemplateMessage(
+    to,
+    {
+        buffer,
+        filename = 'document.pdf',
+        templateName,
+        bodyParams = [],
+        languageCode = 'en',
+        mimeType = 'application/pdf',
+    } = {},
+    extras = {},
+) {
+    try {
+        if (!isWhatsAppEnabled()) {
+            return fail('WhatsApp is disabled. Set WHATSAPP_ENABLED=true after credentials are filled.');
+        }
+        const phone = normalizeWhatsAppPhone(to);
+        if (!isValidWhatsAppPhone(phone)) {
+            return fail('A valid destination phone number is required.');
+        }
+        const name = String(templateName || '').trim();
+        if (!name) return fail('Template name is required.');
+        if (!buffer?.length) return fail('Document file is required.');
+        if (String(mimeType || '').toLowerCase() === 'application/pdf') {
+            const bytes = Buffer.isBuffer(buffer) ? buffer : Buffer.from(buffer);
+            if (bytes.subarray(0, 5).toString('latin1') !== '%PDF-') {
+                return fail('Attachment is not a valid PDF, so it was not sent.');
+            }
+        }
+
+        const safeName = String(filename || 'document.pdf').replace(/[^\w.\-]+/g, '_') || 'document.pdf';
+        const uploaded = await uploadWhatsAppMedia(buffer, { mimeType, filename: safeName });
+        if (!uploaded.success || !uploaded.mediaId) {
+            const { logOutboundWhatsAppMessage } = await import('../utils/whatsappMessageLog.js');
+            await logOutboundWhatsAppMessage({
+                phone,
+                body: extras.logBody || `Document: ${safeName}`,
+                messageType: 'template',
+                mediaFileName: safeName,
+                templateName: name,
+                source: extras.source || 'auto',
+                result: uploaded,
+                actor: extras.actor || null,
+                employeeId: extras.employeeId || '',
+                contactName: extras.contactName || '',
+            });
+            return uploaded;
+        }
+
+        const components = [
+            {
+                type: 'header',
+                parameters: [
+                    {
+                        type: 'document',
+                        document: { id: uploaded.mediaId, filename: safeName },
+                    },
+                ],
+            },
+        ];
+        if (bodyParams.length) {
+            components.push({
+                type: 'body',
+                parameters: bodyParams.map((value, index) => ({
+                    type: 'text',
+                    text: templateParameterText(value, index === 0 ? 'record' : '0'),
+                })),
+            });
+        }
+        return sendTemplateMessage(to, name, languageCode, components, {
+            ...extras,
+            mediaFileName: safeName,
+        });
+    } catch (error) {
+        return fail(error);
+    }
+}
+
 export async function sendTemplateMessage(to, templateName, languageCode, components = [], extras = {}) {
     try {
         if (!isWhatsAppEnabled()) {
@@ -745,6 +835,7 @@ export async function sendTemplateMessage(to, templateName, languageCode, compon
                 ? String(extras.logBody)
                 : templateMessagePreview(name, components, templateText),
             messageType: 'template',
+            mediaFileName: extras.mediaFileName || '',
             source: extras.source || 'template',
             templateName: name,
             result,

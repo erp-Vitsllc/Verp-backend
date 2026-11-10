@@ -291,6 +291,7 @@ export const approveLoan = async (req, res) => {
                 // If it got pushed to Pending HR, it means it was a Draft submission
                 loan.workflow.push({
                     role: 'HR',
+                    phase: 'hr',
                     assignedTo: nextAssignmentId,
                     status: 'Pending',
                     assignedAt: new Date()
@@ -307,6 +308,7 @@ export const approveLoan = async (req, res) => {
                     const hrUser = await User.findOne({ employeeId: approverBasic?.employeeId });
                     loan.workflow.push({
                         role: 'HR',
+                        phase: 'hr',
                         assignedTo: hrUser ? hrUser._id : (approverBasic ? approverBasic._id : requestingUserId),
                         status: 'Approved',
                         assignedAt: new Date(),
@@ -317,6 +319,7 @@ export const approveLoan = async (req, res) => {
                 // 2. Push Accounts (Pending)
                 loan.workflow.push({
                     role: 'Accounts',
+                    phase: 'payment',
                     assignedTo: nextAssignmentId,
                     status: 'Pending',
                     assignedAt: new Date()
@@ -333,6 +336,7 @@ export const approveLoan = async (req, res) => {
                     const accUser = await User.findOne({ employeeId: approverBasic?.employeeId });
                     loan.workflow.push({
                         role: 'Accounts',
+                        phase: 'payment',
                         assignedTo: accUser ? accUser._id : (approverBasic ? approverBasic._id : requestingUserId),
                         status: 'Approved',
                         assignedAt: new Date(),
@@ -351,6 +355,7 @@ export const approveLoan = async (req, res) => {
                 // 2. Push Management (Pending)
                 loan.workflow.push({
                     role: 'Management',
+                    phase: 'management',
                     assignedTo: nextAssignmentId,
                     status: 'Pending',
                     assignedAt: new Date()
@@ -390,6 +395,7 @@ export const approveLoan = async (req, res) => {
                     const managementUser = await User.findOne({ employeeId: approverBasic?.employeeId });
                     loan.workflow.push({
                         role: 'Management',
+                        phase: 'management',
                         assignedTo: managementUser ? managementUser._id : (approverBasic ? approverBasic._id : requestingUserId),
                         status: 'Approved',
                         assignedAt: new Date(),
@@ -513,12 +519,11 @@ export const approveLoan = async (req, res) => {
                         pdfBuffer: approvalPdfBuffer,
                         filename: approvalAckFilename,
                     });
-                    employeeGotWhatsApp = waResult?.sent === true;
-                    if (employeeGotWhatsApp) {
-                        console.log(`[ApproveLoan] Approval document sent on WhatsApp to ${applicant?.employeeId}.`);
-                    } else {
-                        console.log(`[ApproveLoan] WhatsApp approval skipped (${waResult?.reason || 'unknown'}).`);
-                    }
+                    employeeGotWhatsApp = waResult?.sent === true && waResult?.reason !== 'already_sent';
+                    const { loanEmployeeWhatsAppNote } = await import('../../utils/sendLoanApprovalWhatsApp.js');
+                    console.log(
+                        `[ApproveLoan] ${applicant?.employeeId}: ${loanEmployeeWhatsAppNote(waResult) || waResult?.reason || 'unknown'}`,
+                    );
                 }
             } catch (waErr) {
                 console.error('[ApproveLoan] WhatsApp approval document failed:', waErr?.message || waErr);
