@@ -264,10 +264,10 @@ function journalForOrg(org, people, { note, kind }) {
 }
 
 /**
- * A salary journal and a leave-salary journal for each connected Zoho company.
+ * A salary journal for each connected Zoho company, plus a leave-salary journal only when
+ * that company has an employee with leave salary or an air ticket this month.
  * Vega Digital and Neuron Nexus stay in the list even when that company has no payroll employees.
- * Leave salary and air ticket are posted on the leave-salary journal. The company journal keeps
- * Zoho salary without those amounts.
+ * The company journal keeps Zoho salary without those amounts.
  */
 export function groupSalaryZohoJournals({ employees, organizations, note = '' }) {
     const orgs = [];
@@ -292,8 +292,8 @@ export function groupSalaryZohoJournals({ employees, organizations, note = '' })
     const salaryJournals = orgs.map((org) => (
         journalForOrg(org, peopleForOrg(org, employees, orgs), { note, kind: 'salary' })
     ));
-    const leaveJournals = orgs.map((org) => (
-        journalForOrg(org, peopleForOrg(org, employees, orgs), { note, kind: 'leave' })
-    ));
+    const leaveJournals = orgs
+        .map((org) => journalForOrg(org, peopleForOrg(org, employees, orgs), { note, kind: 'leave' }))
+        .filter((journal) => journal.employeeCount > 0);
     return [...salaryJournals, ...leaveJournals];
 }

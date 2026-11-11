@@ -149,14 +149,7 @@ test('employees land on the Zoho company linked to their company', () => {
         ],
     });
 
-    assert.deepEqual(journals.map((org) => org.label), [
-        'Vega Digital',
-        'Neuron Nexus',
-        'Leave Salary (Vega Digital)',
-        'Leave Salary (Neuron Nexus)',
-    ]);
-    assert.equal(journals[2].lines.length, 0);
-    assert.equal(journals[3].lines.length, 0);
+    assert.deepEqual(journals.map((org) => org.label), ['Vega Digital', 'Neuron Nexus']);
     assert.equal(journals[0].lines.some((line) => line.personName === 'Vega Person'), true);
     assert.equal(journals[1].lines.some((line) => line.personName === 'Nnit Person'), true);
     assert.equal(journals[0].lines.some((line) => line.personName === 'Nnit Person'), false);
