@@ -10,7 +10,7 @@ import { enrollmentCoversSalaryMonth } from '../../utils/salaryEnrollmentStartMo
 import { buildDmfViewerContext } from '../../utils/salaryDmfApproval.js';
 import { closeSalaryDmfInbox } from '../../utils/salaryDmfNotify.js';
 import { getScheduledEmailTimeZone, getZonedParts } from '../../utils/scheduleDailyAtMidnight.js';
-import { createZohoJournal, getZohoConfig, uploadJournalAttachment } from '../../services/zohoService.js';
+import { createZohoJournal, getZohoConfig, updateZohoJournal, uploadJournalAttachment } from '../../services/zohoService.js';
 import { withZohoOrganization } from '../../utils/zohoOrgContext.js';
 import { groupSalaryZohoJournals } from '../../utils/salaryZohoJournalLines.js';
 
@@ -264,6 +264,69 @@ function buildJournalPayload(body) {
     return { payload, status };
 }
 
+function journalLineRecord(line) {
+    const debit = Number(line?.debit || 0) || 0;
+    const credit = Number(line?.credit || 0) || 0;
+    return {
+        accountId: String(line?.accountId || '').trim(),
+        accountName: String(line?.accountName || '').trim(),
+        description: String(line?.description || '').trim(),
+        contactId: String(line?.contactId || '').trim(),
+        debit,
+        credit,
+        kind: String(line?.kind || '').trim(),
+        personName: String(line?.personName || '').trim(),
+    };
+}
+
+function journalRecord(body, extra = {}) {
+    return {
+        tabId: String(body.tabId || body.organizationId || '').trim(),
+        organizationId: String(body.organizationId || '').trim(),
+        organizationLabel: String(body.organizationLabel || '').trim(),
+        journalDate: String(body.journalDate || '').trim(),
+        reverseJournalDate: String(body.reverseJournalDate || '').trim(),
+        publishReverseOnly: body.publishReverseOnly === true || body.publishReverseOnly === 'true',
+        referenceNumber: String(body.referenceNumber || '').trim(),
+        notes: String(body.notes || '').trim(),
+        reportingMethod: String(body.reportingMethod || 'both').trim(),
+        currencyId: String(body.currencyId || '').trim(),
+        locationId: String(body.locationId || '').trim(),
+        lineItems: (Array.isArray(body.lineItems) ? body.lineItems : []).map(journalLineRecord),
+        ...extra,
+    };
+}
+
+async function rememberSalaryJournal(monthKey, record) {
+    const tabId = String(record?.tabId || '').trim();
+    if (!tabId) return;
+    const doc = await SalaryMonthDmf.findOne({ monthKey }).select('zohoJournals').lean();
+    const current = Array.isArray(doc?.zohoJournals) ? doc.zohoJournals : [];
+    const next = current.filter((row) => String(row?.tabId || '') !== tabId);
+    next.push(record);
+    await SalaryMonthDmf.updateOne({ monthKey }, { $set: { zohoJournals: next } });
+}
+
+function publicSalaryJournal(row) {
+    return {
+        tabId: String(row?.tabId || '').trim(),
+        organizationId: String(row?.organizationId || '').trim(),
+        organizationLabel: String(row?.organizationLabel || '').trim(),
+        status: String(row?.status || '').trim(),
+        journalId: String(row?.journalId || '').trim(),
+        journalNumber: String(row?.journalNumber || '').trim(),
+        journalDate: String(row?.journalDate || '').trim(),
+        reverseJournalDate: String(row?.reverseJournalDate || '').trim(),
+        publishReverseOnly: Boolean(row?.publishReverseOnly),
+        referenceNumber: String(row?.referenceNumber || '').trim(),
+        notes: String(row?.notes || '').trim(),
+        reportingMethod: String(row?.reportingMethod || '').trim(),
+        currencyId: String(row?.currencyId || '').trim(),
+        locationId: String(row?.locationId || '').trim(),
+        lineItems: Array.isArray(row?.lineItems) ? row.lineItems : [],
+    };
+}
+
 export const getSalaryZohoJournal = async (req, res) => {
     try {
         const monthKey = toYearMonth(req.params.monthKey);
@@ -276,10 +339,12 @@ export const getSalaryZohoJournal = async (req, res) => {
             organizations: configuredOrganizations(),
             note: label ? `Salary payroll ${label}` : 'Salary payroll',
         });
+        const month = await SalaryMonthDmf.findOne({ monthKey }).select('zohoJournals').lean();
         return res.status(200).json({
             monthKey,
             monthLabel: monthLabel(monthKey),
             organizations,
+            savedJournals: (Array.isArray(month?.zohoJournals) ? month.zohoJournals : []).map(publicSalaryJournal),
         });
     } catch (error) {
         console.error('[getSalaryZohoJournal]', error);
@@ -305,13 +370,41 @@ export const postSalaryZohoJournal = async (req, res) => {
         }
         const organizationId = String(body.organizationId || '').trim();
         if (!organizationId) return res.status(400).json({ message: 'Choose a Zoho company.' });
+        const label = String(body.organizationLabel || 'Zoho').trim() || 'Zoho';
+        const requestedStatus = String(body.status || 'published').trim().toLowerCase() === 'draft'
+            ? 'draft'
+            : 'published';
+
+        if (requestedStatus === 'draft') {
+            await rememberSalaryJournal(monthKey, journalRecord(body, {
+                status: 'draft',
+                journalId: '',
+                journalNumber: '',
+            }));
+            return res.status(200).json({
+                message: `${label} draft saved in this system.`,
+                organizationId,
+                status: 'draft',
+                journalId: '',
+                journalNumber: '',
+                attachmentErrors: [],
+                zohoJournalUpdated: false,
+            });
+        }
 
         const { payload, status } = buildJournalPayload(body);
         const files = Array.isArray(req.files) ? req.files.slice(0, 5) : [];
+        const existingId = String(body.journalId || '').trim();
         const result = await withZohoOrganization(organizationId, async () => {
-            const journal = await createZohoJournal(payload);
-            const journalId = String(journal?.journal_id || journal?.journalId || '').trim();
-            const journalNumber = String(journal?.entry_number || journal?.journal_number || '').trim();
+            const zohoPayload = { ...payload };
+            if (existingId) delete zohoPayload.entry_number;
+            const journal = existingId
+                ? await updateZohoJournal(existingId, zohoPayload)
+                : await createZohoJournal(zohoPayload);
+            const journalId = String(journal?.journal_id || journal?.journalId || existingId || '').trim();
+            const journalNumber = String(
+                journal?.entry_number || journal?.journal_number || body.journalNumber || '',
+            ).trim();
             const attachmentErrors = [];
             if (journalId && files.length) {
                 for (const file of files) {
@@ -329,6 +422,12 @@ export const postSalaryZohoJournal = async (req, res) => {
             return { journalId, journalNumber, attachmentErrors };
         });
 
+        await rememberSalaryJournal(monthKey, journalRecord(body, {
+            status: 'published',
+            journalId: result.journalId,
+            journalNumber: result.journalNumber,
+        }));
+
         const finalize = body.finalize === true || body.finalize === 'true';
         if (status === 'published' && finalize) {
             const saved = await SalaryMonthDmf.findOneAndUpdate(
@@ -345,12 +444,11 @@ export const postSalaryZohoJournal = async (req, res) => {
             }
         }
 
-        const label = String(body.organizationLabel || 'Zoho').trim() || 'Zoho';
         const message = result.attachmentErrors.length
             ? `${label} journal ${result.journalNumber || ''} saved. Some attachments failed: ${result.attachmentErrors.join('; ')}`
-            : status === 'published'
-                ? `${label} journal ${result.journalNumber || ''} published in Zoho.`
-                : `${label} journal ${result.journalNumber || ''} saved as draft in Zoho.`;
+            : existingId
+                ? `${label} journal ${result.journalNumber || ''} updated in Zoho.`
+                : `${label} journal ${result.journalNumber || ''} published in Zoho.`;
         return res.status(200).json({
             message,
             organizationId,

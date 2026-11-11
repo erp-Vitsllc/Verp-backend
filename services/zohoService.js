@@ -24,6 +24,7 @@ const DEFAULT_OAUTH_SCOPES = [
     'ZohoBooks.expenses.CREATE',
     'ZohoBooks.accountants.READ',
     'ZohoBooks.accountants.CREATE',
+    'ZohoBooks.accountants.UPDATE',
     'ZohoBooks.settings.READ',
     // Banking list + Expense Refund (Money In) bank transactions
     'ZohoBooks.banking.READ',
@@ -988,6 +989,27 @@ export async function createZohoJournal(payload = {}) {
         if (/scope|permission|not authorized|access denied|oauth/i.test(msg)) {
             throw new Error(
                 `${msg} Re-connect Zoho Books with ZohoBooks.accountants.CREATE (Chart of Accounts journals).`,
+            );
+        }
+        throw err;
+    }
+}
+
+export async function updateZohoJournal(journalId, payload = {}) {
+    const id = String(journalId || '').trim();
+    if (!id) throw new Error('Journal id is required.');
+    try {
+        const response = await requestZohoBooks(`/journals/${encodeURIComponent(id)}`, {
+            method: 'put',
+            data: payload,
+            timeout: 30000,
+        });
+        return response.journal || response;
+    } catch (err) {
+        const msg = String(err?.message || '');
+        if (/scope|permission|not authorized|access denied|oauth/i.test(msg)) {
+            throw new Error(
+                `${msg} Re-connect Zoho Books with ZohoBooks.accountants.UPDATE (Chart of Accounts journals).`,
             );
         }
         throw err;

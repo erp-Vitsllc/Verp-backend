@@ -572,6 +572,67 @@ function cycleBelongsToSlipMonth(cycle, ym) {
     };
 }
 
+const MONTH_SHORT = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+
+function slipDayLabel(value) {
+    const key = dateKeyOf(value);
+    if (!key) return '';
+    const [, month, day] = key.split('-');
+    const name = MONTH_SHORT[Number(month) - 1];
+    if (!name) return '';
+    return `${Number(day)} ${name} ${key.slice(0, 4)}`;
+}
+
+function entitlementMatch(cycle, entitlements) {
+    const list = Array.isArray(entitlements?.entitlements)
+        ? entitlements.entitlements
+        : (Array.isArray(entitlements) ? entitlements : []);
+    const no = Number(cycle?.entitlementNo) || 0;
+    const date = String(cycle?.entitlementDate || '').trim();
+    return list.find((row) => (
+        (no > 0 && Number(row?.entitlementNo) === no)
+        || (date && String(row?.entitlementDate || '').trim() === date)
+    )) || null;
+}
+
+function cyclePeriodLabel(cycle, entitlements) {
+    const match = entitlementMatch(cycle, entitlements);
+    const start = dateKeyOf(cycle?.eligibilityStartDate)
+        || dateKeyOf(match?.eligibilityStartDate || match?.salaryPeriodStart);
+    const end = dateKeyOf(cycle?.eligibilityEndDate)
+        || dateKeyOf(match?.eligibilityEndDate || match?.salaryPeriodEnd);
+    const from = slipDayLabel(start);
+    const to = slipDayLabel(end);
+    if (from && to) return from === to ? from : `${from} – ${to}`;
+    return from || to || '';
+}
+
+/** Basis for leave salary or ticket: the entitlement period that was paid, not "Annual". */
+export function leaveTicketSlipBasis(cycles, ym, kind, entitlements) {
+    const labels = [];
+    const seen = new Set();
+    for (const cycle of cycles || []) {
+        const status = String(cycle?.paymentStatus || cycle?.status || '').toLowerCase();
+        if (status === 'draft' || status === 'cancelled' || status === 'rejected') continue;
+        const inMonth = cycleBelongsToSlipMonth(cycle, ym);
+        if (kind === 'ticket' ? !inMonth.ticket : !inMonth.leave) continue;
+        const amount = kind === 'ticket'
+            ? money(cycle?.ticketAmount)
+            : money(cycle?.leaveSalaryAmount || cycle?.leaveSalary);
+        if (amount <= 0) continue;
+        const label = cyclePeriodLabel(cycle, entitlements);
+        if (!label || seen.has(label)) continue;
+        seen.add(label);
+        labels.push(label);
+    }
+    return labels.join(', ');
+}
+
+function genericBenefitBasis(value) {
+    const text = String(value || '').trim().toLowerCase();
+    return !text || text === 'annual' || text === 'yearly' || text === 'year';
+}
+
 function addMonthsYm(ym, count) {
     const match = String(ym || '').match(/^(\d{4})-(\d{2})$/);
     if (!match) return '';
@@ -1143,18 +1204,13 @@ export async function buildSalarySlipPayload({
     upsertEarning(earnings, 'Overtime Days', qtyLabel(otDays, 'day'), otDaysAmount);
 
     let leaveSalaryAmount = 0;
-    let leaveSalaryDays = 0;
     let ticketAmount = 0;
     for (const cycle of profile?.paymentCycles || []) {
         const status = String(cycle.paymentStatus || cycle.status || '').toLowerCase();
         if (status === 'draft' || status === 'cancelled' || status === 'rejected') continue;
         const inMonth = cycleBelongsToSlipMonth(cycle, ym);
         if (inMonth.leave) {
-            const cycleLeave = toAed(cycle.leaveSalaryAmount || cycle.leaveSalary);
-            leaveSalaryAmount = money(leaveSalaryAmount + cycleLeave);
-            if (daily > 0 && cycleLeave > 0) {
-                leaveSalaryDays += Math.round(cycleLeave / daily);
-            }
+            leaveSalaryAmount = money(leaveSalaryAmount + toAed(cycle.leaveSalaryAmount || cycle.leaveSalary));
         }
         if (inMonth.ticket) {
             ticketAmount = money(ticketAmount + money(cycle.ticketAmount));
@@ -1168,13 +1224,10 @@ export async function buildSalarySlipPayload({
     const ticketDue = money(leaveTicketState?.ticketDue || leaveTicketState?.entitlements?.totalTicketAmount);
     const leavePayMax = money(leaveRemaining + leaveFromCycles) || leaveDue;
     const ticketPayMax = money(ticketRemaining + ticketFromCycles) || ticketDue;
-    upsertEarning(
-        earnings,
-        'Leave Salary',
-        leaveSalaryDays > 0 ? qtyLabel(leaveSalaryDays, 'day') : 'Annual',
-        leaveSalaryAmount,
-    );
-    upsertEarning(earnings, 'Ticket', 'Annual', ticketAmount);
+    const leavePeriod = leaveTicketSlipBasis(profile?.paymentCycles, ym, 'leave', leaveTicketState?.entitlements);
+    const ticketPeriod = leaveTicketSlipBasis(profile?.paymentCycles, ym, 'ticket', leaveTicketState?.entitlements);
+    upsertEarning(earnings, 'Leave Salary', leavePeriod, leaveSalaryAmount);
+    upsertEarning(earnings, 'Ticket', ticketPeriod, ticketAmount);
 
     let rewardAmount = 0;
     let rewardCount = 0;
@@ -1259,8 +1312,8 @@ export async function buildSalarySlipPayload({
             basis: 'Yearly',
             amount: yearlyEndOfServiceBenefit(entry?.basic, emp.dateOfJoining, slipYear),
         },
-        { component: 'Leave Salary', basis: 'Yearly', amount: leaveSalaryAmount },
-        { component: 'Travel Allowance', basis: 'Yearly', amount: ticketAmount },
+        { component: 'Leave Salary', basis: leavePeriod, amount: leaveSalaryAmount },
+        { component: 'Travel Allowance', basis: ticketPeriod, amount: ticketAmount },
     ];
     const yearlyGrossEarnings = money(yearlyEarnings.reduce((sum, row) => sum + money(row.amount), 0));
 
@@ -1831,7 +1884,11 @@ function mergeAmountRows(stored, live, { overrides = {}, caps = {} } = {}) {
         return {
             ...storedRow,
             ...liveRow,
-            basis: liveRow.basis || storedRow.basis,
+            basis: benefitOverrideKey(key)
+                ? (genericBenefitBasis(liveRow.basis)
+                    ? (genericBenefitBasis(storedRow.basis) ? '' : storedRow.basis)
+                    : liveRow.basis)
+                : (liveRow.basis || storedRow.basis),
             amount,
         };
     });

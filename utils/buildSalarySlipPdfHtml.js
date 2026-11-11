@@ -207,12 +207,12 @@ export function buildSalarySlipPdfHtml(slip = {}) {
             const earnEmpty = !earn.component;
             const dedEmpty = !ded.component;
             return `<tr>
-              ${calcCell(earn.component, { empty: earnEmpty, width: '23%' })}
-              ${calcCell(earn.basis, { empty: earnEmpty, align: 'center', width: '9%' })}
-              ${calcCell(earnEmpty ? '' : money(earn.amount), { empty: earnEmpty, align: 'right', color: TEAL, bold: true, width: '18%' })}
-              ${calcCell(ded.component, { empty: dedEmpty, width: '23%' })}
-              ${calcCell(ded.basis, { empty: dedEmpty, align: 'center', width: '9%' })}
-              ${calcCell(dedEmpty ? '' : money(ded.amount), { empty: dedEmpty, align: 'right', color: NAVY, bold: true, width: '18%' })}
+              ${calcCell(earn.component, { empty: earnEmpty, width: '19%' })}
+              ${calcCell(earn.basis, { empty: earnEmpty, align: 'center', width: '16%' })}
+              ${calcCell(earnEmpty ? '' : money(earn.amount), { empty: earnEmpty, align: 'right', color: TEAL, bold: true, width: '15%' })}
+              ${calcCell(ded.component, { empty: dedEmpty, width: '19%' })}
+              ${calcCell(ded.basis, { empty: dedEmpty, align: 'center', width: '16%' })}
+              ${calcCell(dedEmpty ? '' : money(ded.amount), { empty: dedEmpty, align: 'right', color: NAVY, bold: true, width: '15%' })}
             </tr>`;
         })
         .join('');

@@ -4,6 +4,7 @@ import { buildSalarySlipPdfHtml } from './buildSalarySlipPdfHtml.js';
 import {
     amountInWordsAed,
     attendanceDayHasPunch,
+    leaveTicketSlipBasis,
     mergeStoredSalarySlip,
     monthKeyOf,
     salarySlipPayrollFigures,
@@ -29,6 +30,45 @@ describe('salary slip wording', () => {
         assert.equal(monthKeyOf('July 2026'), '2026-07');
         assert.equal(monthKeyOf('2026-07-31'), '2026-07');
         assert.equal(monthKeyOf('2026-07'), '2026-07');
+    });
+
+    it('shows the entitlement start and end instead of Annual when leave or ticket is paid', () => {
+        const cycles = [
+            {
+                paymentStatus: 'paid',
+                leaveSalaryPaymentDate: '2026-10-31',
+                leaveSalaryAmount: 2500,
+                ticketPaymentDate: '2026-10-31',
+                ticketAmount: 900,
+                eligibilityStartDate: '2025-01-15',
+                eligibilityEndDate: '2026-01-14',
+            },
+            {
+                paymentStatus: 'paid',
+                salarySlipMonthKey: '2026-10',
+                leaveSalaryAmount: 0,
+                ticketAmount: 400,
+                entitlementNo: 2,
+            },
+        ];
+        const entitlements = {
+            entitlements: [
+                {
+                    entitlementNo: 2,
+                    eligibilityStartDate: '2026-01-15',
+                    eligibilityEndDate: '2027-01-14',
+                },
+            ],
+        };
+        assert.equal(
+            leaveTicketSlipBasis(cycles, '2026-10', 'leave', entitlements),
+            '15 Jan 2025 – 14 Jan 2026',
+        );
+        assert.equal(
+            leaveTicketSlipBasis(cycles, '2026-10', 'ticket', entitlements),
+            '15 Jan 2025 – 14 Jan 2026, 15 Jan 2026 – 14 Jan 2027',
+        );
+        assert.equal(leaveTicketSlipBasis(cycles, '2026-09', 'leave', entitlements), '');
     });
 });
 
