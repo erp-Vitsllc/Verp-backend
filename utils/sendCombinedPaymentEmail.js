@@ -5,7 +5,7 @@ import Fine from '../models/Fine.js';
 import Loan from '../models/Loan.js';
 import Payment from '../models/Payment.js';
 import UtilityBillPayment from '../models/UtilityBillPayment.js';
-import { resolveEmployeeEmail } from './resolveEmployeeEmail.js';
+import { resolveEmployeeWhatsAppPhone } from './sendToolsAssetWhatsAppReport.js';
 import { resolveEmployeeFinePayableAmount } from './finePayableAmount.js';
 import { resolveZohoAttachmentUpload } from './resolveZohoAttachmentUpload.js';
 
@@ -19,16 +19,89 @@ const isUsableEmail = (value) => {
     return true;
 };
 
-/**
- * Fund settle emails (Expense Refund / Vendor Credit / Pay by employee):
- * prefer personal email, then company/work so mail still delivers.
- */
+/** Company email only. No company email means WhatsApp, never the HR reportee. */
 const resolvePaymentRecipientEmail = (employee) => {
-    const personal = String(employee?.personalEmail || '').trim();
-    if (isUsableEmail(personal)) return personal;
-    const { email } = resolveEmployeeEmail(employee);
-    return isUsableEmail(email) ? email : null;
+    const company = String(employee?.companyEmail || '').trim();
+    return isUsableEmail(company) ? company : null;
 };
+
+async function deliverPaymentReceiptWhatsApp({
+    employee,
+    payment,
+    isApproved,
+    kindLabel,
+    amountLabel,
+    mailAttachments,
+}) {
+    const code = String(employee?.employeeId || '').trim();
+    const paymentRef = String(payment?.paymentId || '').trim();
+    if (paymentRef) {
+        const WhatsAppMessage = (await import('../models/WhatsAppMessage.js')).default;
+        const already = await WhatsAppMessage.findOne({
+            employeeId: code,
+            direction: 'out',
+            status: { $in: ['queued', 'sent', 'delivered', 'read'] },
+            body: new RegExp(paymentRef.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i'),
+        })
+            .select('_id')
+            .lean();
+        if (already) return;
+    }
+    if (!isApproved) {
+        console.log(
+            `[PaymentNotification] ${code} has no company email. Payment result was not emailed to HR.`,
+        );
+        return;
+    }
+
+    const files = (mailAttachments || []).filter((file) => file?.content?.length);
+    if (!files.length) {
+        console.warn(`[PaymentNotification] ${code} has no company email and the receipt PDF was not created.`);
+        return;
+    }
+
+    const phone = await resolveEmployeeWhatsAppPhone(code);
+    if (!phone) {
+        console.warn(
+            `[PaymentNotification] ${code} has no company email and no WhatsApp number. Receipt was not sent.`,
+        );
+        return;
+    }
+
+    const isFine = String(payment?.relatedEntityType || '') === 'Fine';
+    const ref = String(payment?.referenceId || payment?.paymentId || kindLabel || 'payment').trim();
+    const { sendDocumentTemplateMessage } = await import('../services/whatsappService.js');
+    for (const file of files) {
+        const result = await sendDocumentTemplateMessage(
+            phone,
+            {
+                buffer: file.content,
+                filename: file.filename || `Receipt_${payment.paymentId}.pdf`,
+                mimeType: file.contentType || 'application/pdf',
+                templateName: isFine ? 'verp_fine_approved' : 'verp_payment_approved',
+                languageCode: 'en',
+                bodyParams: isFine
+                    ? [ref]
+                    : [`${kindLabel} ${ref}`.trim(), String(amountLabel || '0').replace(/,/g, '')],
+            },
+            {
+                source: 'auto',
+                employeeId: code,
+                contactName: `${employee.firstName || ''} ${employee.lastName || ''}`.trim(),
+                logBody: `Receipt ${payment.paymentId} for ${code} ${ref}`,
+            },
+        );
+        if (!result?.success) {
+            console.warn(
+                '[PaymentNotification] WhatsApp receipt failed',
+                code,
+                result?.error || '',
+            );
+        } else {
+            console.log(`[PaymentNotification] Receipt sent on WhatsApp to ${code}.`);
+        }
+    }
+}
 
 const isLoanLikeType = (value) =>
     ['Loan', 'LoanRepayment', 'Advance', 'AdvanceRepayment'].includes(String(value || '').trim());
@@ -346,7 +419,6 @@ export const sendPaymentNotificationEmail = async (payment, status, comment = ''
         }
 
         const toEmail = resolvePaymentRecipientEmail(employee);
-        if (!toEmail) return;
 
         const isLoanRepayNotice = ['LoanRepayment', 'AdvanceRepayment'].includes(
             String(payment.relatedEntityType || '').trim(),
@@ -550,6 +622,18 @@ export const sendPaymentNotificationEmail = async (payment, status, comment = ''
             mailAttachments.push(...supporting);
         }
 
+        if (!toEmail) {
+            await deliverPaymentReceiptWhatsApp({
+                employee,
+                payment,
+                isApproved,
+                kindLabel,
+                amountLabel,
+                mailAttachments,
+            });
+            return;
+        }
+
         const mailOptions = {
             fromName: "VeRP Accounts",
             to: toEmail,
@@ -560,7 +644,7 @@ export const sendPaymentNotificationEmail = async (payment, status, comment = ''
 
         await transporter.sendMail(mailOptions);
         console.log(
-            `[PaymentNotification] Email sent to personal/business ${toEmail} (attachments: ${mailAttachments.length})`,
+            `[PaymentNotification] Receipt emailed to company address ${toEmail} (attachments: ${mailAttachments.length})`,
         );
 
     } catch (error) {

@@ -169,9 +169,105 @@ export function resolveEmployeeZohoOrg(company, organizations, explicitOrganizat
     return orgs.find((org) => org.brand === brand) || null;
 }
 
+const LEAVE_PROVISION_ACCOUNT = 'Provision For Leave Salary';
+const AIR_TICKET_ACCOUNT = 'Staff Air Ticket';
+
+function benefitAmount(person) {
+    return money(money(person?.leaveSalary) + money(person?.airTicket));
+}
+
+function leaveDebitLine(accountName, amount, description) {
+    return {
+        key: lineKey(`leave-${accountName}`),
+        kind: 'category',
+        employeeId: '',
+        categoryName: accountName,
+        accountId: '',
+        accountName,
+        description,
+        contactId: '',
+        debit: money(amount).toFixed(2),
+        credit: '',
+    };
+}
+
 /**
- * One journal per connected Zoho company. Vega Digital and Neuron Nexus stay in the list
- * even when that company has no payroll employees this month.
+ * Leave-salary journal: two default debit accounts, then one credit per employee
+ * who has leave salary or an air ticket this month. Account names are filled from
+ * the Zoho chart and stay editable in the journal form.
+ */
+export function buildLeaveSalaryZohoLines(employees, { note = '' } = {}) {
+    const description = payrollDescription(note);
+    const people = (employees || []).filter((person) => benefitAmount(person) > 0);
+    const leaveTotal = money(people.reduce((sum, person) => sum + money(person?.leaveSalary), 0));
+    const ticketTotal = money(people.reduce((sum, person) => sum + money(person?.airTicket), 0));
+    const debits = [];
+    if (leaveTotal > 0) debits.push(leaveDebitLine(LEAVE_PROVISION_ACCOUNT, leaveTotal, description));
+    if (ticketTotal > 0) debits.push(leaveDebitLine(AIR_TICKET_ACCOUNT, ticketTotal, description));
+    const credits = people.map((person) => {
+        const personName = text(person.name) || text(person.employeeId);
+        return {
+            key: lineKey(`emp-${person.employeeId || 'row'}`),
+            kind: 'employee',
+            employeeId: text(person.employeeId),
+            personName,
+            accountId: text(person.zohoAccountId),
+            accountName: text(person.zohoAccountName),
+            description,
+            contactId: '',
+            debit: '',
+            credit: benefitAmount(person).toFixed(2),
+        };
+    });
+    return [...debits, ...credits];
+}
+
+/** Zoho salary on the company journal, with this month's leave salary and air ticket taken out. */
+function salaryOnlyAmount(person) {
+    return money(money(person?.zohoSalary) - benefitAmount(person));
+}
+
+function leavePayrollNote(note) {
+    const value = text(note);
+    if (!value) return 'Leave salary payroll';
+    if (/^salary payroll/i.test(value)) return value.replace(/^Salary payroll/i, 'Leave salary payroll');
+    return `Leave salary ${value}`;
+}
+
+function peopleForOrg(org, employees, orgs) {
+    return (employees || []).filter((person) => {
+        const match = resolveEmployeeZohoOrg(person.company, orgs, explicitEmployeeOrgId(person));
+        return match?.organizationId === org.organizationId;
+    });
+}
+
+function journalForOrg(org, people, { note, kind }) {
+    const payrollNote = kind === 'leave' ? leavePayrollNote(note) : text(note);
+    const lines = kind === 'leave'
+        ? buildLeaveSalaryZohoLines(people, { note: payrollNote })
+        : buildSalaryZohoLines(
+            people.map((person) => ({ ...person, zohoSalary: salaryOnlyAmount(person) })),
+            { note: payrollNote },
+        );
+    const employeeCount = kind === 'leave'
+        ? people.filter((person) => benefitAmount(person) > 0).length
+        : lines.filter((line) => line.kind === 'employee').length;
+    return {
+        ...org,
+        journalKind: kind,
+        tabId: kind === 'leave' ? `${org.organizationId}:leave` : org.organizationId,
+        label: kind === 'leave' ? `Leave Salary (${org.label})` : org.label,
+        notes: payrollNote,
+        employeeCount,
+        lines,
+    };
+}
+
+/**
+ * A salary journal and a leave-salary journal for each connected Zoho company.
+ * Vega Digital and Neuron Nexus stay in the list even when that company has no payroll employees.
+ * Leave salary and air ticket are posted on the leave-salary journal. The company journal keeps
+ * Zoho salary without those amounts.
  */
 export function groupSalaryZohoJournals({ employees, organizations, note = '' }) {
     const orgs = [];
@@ -193,15 +289,11 @@ export function groupSalaryZohoJournals({ employees, organizations, note = '' })
         return rank(a.brand) - rank(b.brand) || a.label.localeCompare(b.label);
     });
 
-    return orgs.map((org) => {
-        const people = (employees || []).filter((person) => {
-            const match = resolveEmployeeZohoOrg(person.company, orgs, explicitEmployeeOrgId(person));
-            return match?.organizationId === org.organizationId;
-        });
-        return {
-            ...org,
-            employeeCount: people.length,
-            lines: buildSalaryZohoLines(people, { note }),
-        };
-    });
+    const salaryJournals = orgs.map((org) => (
+        journalForOrg(org, peopleForOrg(org, employees, orgs), { note, kind: 'salary' })
+    ));
+    const leaveJournals = orgs.map((org) => (
+        journalForOrg(org, peopleForOrg(org, employees, orgs), { note, kind: 'leave' })
+    ));
+    return [...salaryJournals, ...leaveJournals];
 }

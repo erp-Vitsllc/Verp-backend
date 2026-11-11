@@ -247,6 +247,8 @@ describe('salary slip edits drive pay figures', () => {
         assert.equal(figures.sheetOtherDeduction, 15);
         assert.equal(figures.otherDeduction, 105);
         assert.equal(figures.zohoSalary, 1761.68);
+        assert.equal(figures.leaveSalary, 200);
+        assert.equal(figures.airTicket, 50);
         assert.equal(figures.netSalaryPayable, 1656.68);
         assert.equal(figures.actualSalary, figures.netSalaryPayable);
         assert.equal(figures.grossSalary, figures.zohoSalary);

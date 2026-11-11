@@ -155,6 +155,8 @@ async function payrollPeople(monthKey) {
             employeeId: code,
             name: `${emp.firstName || ''} ${emp.lastName || ''}`.trim() || code,
             zohoSalary: Number(pay.zohoSalary) || 0,
+            leaveSalary: Number(pay.leaveSalary) || 0,
+            airTicket: Number(pay.airTicket) || 0,
             zohoAccountId: account.zohoAccountId,
             zohoAccountName: account.zohoAccountName,
             zohoAccountOrganizationId: account.zohoAccountOrganizationId,

@@ -149,7 +149,14 @@ test('employees land on the Zoho company linked to their company', () => {
         ],
     });
 
-    assert.deepEqual(journals.map((org) => org.label), ['Vega Digital', 'Neuron Nexus']);
+    assert.deepEqual(journals.map((org) => org.label), [
+        'Vega Digital',
+        'Neuron Nexus',
+        'Leave Salary (Vega Digital)',
+        'Leave Salary (Neuron Nexus)',
+    ]);
+    assert.equal(journals[2].lines.length, 0);
+    assert.equal(journals[3].lines.length, 0);
     assert.equal(journals[0].lines.some((line) => line.personName === 'Vega Person'), true);
     assert.equal(journals[1].lines.some((line) => line.personName === 'Nnit Person'), true);
     assert.equal(journals[0].lines.some((line) => line.personName === 'Nnit Person'), false);
@@ -177,4 +184,102 @@ test('a saved VEGA or NNIT choice overrides the company link', () => {
 
     assert.equal(journals[0].lines.some((line) => line.personName === 'Vega Person'), false);
     assert.equal(journals[1].lines.some((line) => line.personName === 'Vega Person'), true);
+});
+
+test('leave salary and air ticket are journaled on the company leave tab', () => {
+    const journals = groupSalaryZohoJournals({
+        note: 'Salary payroll October 2026',
+        organizations: [
+            { organizationId: 'vega-org', name: 'VEGADIGITAL IT SOLUTIONS LLC', brand: 'VEGA' },
+            { organizationId: 'nnit-org', name: 'NEURON NEXUS INFORMATION TECHNOLOGY L.L.C', brand: 'NNIT' },
+        ],
+        employees: [
+            {
+                employeeId: 'V1',
+                name: 'Vega Person',
+                zohoSalary: 1000,
+                leaveSalary: 200,
+                airTicket: 0,
+                zohoAccountId: 'v-acc',
+                zohoCategoryAccountId: 'v-cat',
+                zohoCategoryAccountName: 'Vega salaries',
+                company: { nickName: 'VEGA DxB', name: 'Vega Dubai' },
+            },
+            {
+                employeeId: 'N1',
+                name: 'Nnit Person',
+                zohoSalary: 800,
+                leaveSalary: 0,
+                airTicket: 40,
+                zohoAccountId: 'n-acc',
+                zohoCategoryAccountId: 'n-cat',
+                zohoCategoryAccountName: 'NNIT salaries',
+                company: { nickName: 'NNT', zohoOrganizationId: 'nnit-org' },
+            },
+        ],
+    });
+
+    const vegaSalary = journals.find((org) => org.tabId === 'vega-org');
+    const nnitSalary = journals.find((org) => org.tabId === 'nnit-org');
+    const vegaLeave = journals.find((org) => org.tabId === 'vega-org:leave');
+    const nnitLeave = journals.find((org) => org.tabId === 'nnit-org:leave');
+
+    assert.equal(vegaSalary.lines.find((line) => line.personName === 'Vega Person').credit, '800.00');
+    assert.equal(vegaSalary.lines.find((line) => line.kind === 'category').debit, '800.00');
+    assert.equal(vegaSalary.lines.every((line) => line.description === 'Salary payroll October 2026'), true);
+    assert.equal(nnitSalary.lines.find((line) => line.personName === 'Nnit Person').credit, '760.00');
+
+    assert.equal(vegaLeave.organizationId, 'vega-org');
+    assert.equal(vegaLeave.label, 'Leave Salary (Vega Digital)');
+    assert.equal(vegaLeave.notes, 'Leave salary payroll October 2026');
+    assert.equal(vegaLeave.lines.find((line) => line.accountName === 'Provision For Leave Salary').debit, '200.00');
+    assert.equal(vegaLeave.lines.some((line) => line.accountName === 'Staff Air Ticket'), false);
+    assert.equal(vegaLeave.lines.find((line) => line.personName === 'Vega Person').credit, '200.00');
+    assert.equal(vegaLeave.lines.every((line) => line.description === 'Leave salary payroll October 2026'), true);
+    assert.equal(vegaLeave.lines.some((line) => line.personName === 'Nnit Person'), false);
+
+    assert.equal(nnitLeave.label, 'Leave Salary (Neuron Nexus)');
+    assert.equal(nnitLeave.lines.find((line) => line.accountName === 'Staff Air Ticket').debit, '40.00');
+    assert.equal(nnitLeave.lines.some((line) => line.accountName === 'Provision For Leave Salary'), false);
+    assert.equal(nnitLeave.lines.find((line) => line.personName === 'Nnit Person').credit, '40.00');
+    assert.equal(nnitLeave.lines.some((line) => line.personName === 'Vega Person'), false);
+});
+
+test('leave salary and air ticket use the default debit accounts and credit only that employee', () => {
+    const journals = groupSalaryZohoJournals({
+        note: 'Salary payroll October 2026',
+        organizations: [
+            { organizationId: 'vega-org', name: 'VEGADIGITAL IT SOLUTIONS LLC', brand: 'VEGA' },
+        ],
+        employees: [
+            {
+                employeeId: 'V1',
+                name: 'Vega Person',
+                zohoSalary: 1000,
+                leaveSalary: 200,
+                airTicket: 50,
+                zohoAccountId: 'v-acc',
+                zohoAccountName: 'Vega Person',
+                company: { nickName: 'VEGA DxB', name: 'Vega Dubai' },
+            },
+            {
+                employeeId: 'V2',
+                name: 'No Benefit',
+                zohoSalary: 400,
+                leaveSalary: 0,
+                airTicket: 0,
+                zohoAccountId: 'v2-acc',
+                company: { nickName: 'VEGA DxB', name: 'Vega Dubai' },
+            },
+        ],
+    });
+    const leave = journals.find((org) => org.tabId === 'vega-org:leave');
+    const debits = leave.lines.filter((line) => line.kind === 'category');
+    const credits = leave.lines.filter((line) => line.kind === 'employee');
+    assert.deepEqual(debits.map((line) => line.accountName), ['Provision For Leave Salary', 'Staff Air Ticket']);
+    assert.deepEqual(debits.map((line) => line.debit), ['200.00', '50.00']);
+    assert.equal(debits.every((line) => line.accountId === ''), true);
+    assert.deepEqual(credits.map((line) => line.personName), ['Vega Person']);
+    assert.deepEqual(credits.map((line) => line.credit), ['250.00']);
+    assert.equal(credits[0].accountId, 'v-acc');
 });
