@@ -419,6 +419,24 @@ export const sendPaymentNotificationEmail = async (payment, status, comment = ''
         }
 
         const toEmail = resolvePaymentRecipientEmail(employee);
+        const entityType = String(payment.relatedEntityType || '').trim();
+
+        // Loan/advance disbursement: one WhatsApp message, acknowledgment PDF only.
+        // The payment receipt and any extra copy stay off this chat.
+        if (!toEmail && (entityType === 'Loan' || entityType === 'Advance')) {
+            const loan =
+                (await Loan.findById(payment.relatedEntityId)) ||
+                (await Loan.findOne({ loanId: payment.referenceId }));
+            if (loan) {
+                const { deliverLoanEmployeeWhatsApp } = await import('./sendLoanApprovalWhatsApp.js');
+                await deliverLoanEmployeeWhatsApp({ loan, employee });
+            } else {
+                console.warn(
+                    '[PaymentNotification] Loan acknowledgment was not sent. Loan record was not found.',
+                );
+            }
+            return;
+        }
 
         const isLoanRepayNotice = ['LoanRepayment', 'AdvanceRepayment'].includes(
             String(payment.relatedEntityType || '').trim(),

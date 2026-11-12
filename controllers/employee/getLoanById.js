@@ -162,21 +162,6 @@ export const getLoanById = async (req, res) => {
                         .select('employeeId firstName lastName companyEmail')
                         .lean();
                     if (basic?.employeeId && !String(basic.companyEmail || '').trim()) {
-                        const Payment = (await import('../../models/Payment.js')).default;
-                        const paid = await Payment.findOne({
-                            status: 'Completed',
-                            relatedEntityType: { $in: ['Loan', 'Advance'] },
-                            $or: [
-                                { relatedEntityId: loan._id },
-                                { referenceId: loan.loanId },
-                            ],
-                        }).sort({ createdAt: -1 });
-                        if (paid) {
-                            const { sendPaymentNotificationEmail } = await import(
-                                '../../utils/sendCombinedPaymentEmail.js'
-                            );
-                            await sendPaymentNotificationEmail(paid, 'Completed');
-                        }
                         const { deliverLoanEmployeeWhatsApp } = await import(
                             '../../utils/sendLoanApprovalWhatsApp.js'
                         );

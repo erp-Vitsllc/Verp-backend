@@ -24,7 +24,7 @@ import {
     resolveTaskViewer,
     viewerCanReassign,
 } from "../../utils/taskManagerModule.js";
-import { viewerMayDeleteTask } from "../../utils/taskDeleteAccess.js";
+import { assigneeBlocksDelete, viewerMayDeleteTask } from "../../utils/taskDeleteAccess.js";
 import { listDeletedNoticeKeys, noticeKeysForRecord } from "../../utils/deletedTaskNotice.js";
 import { assignTaskNumbers, earlierTaskNumber, firstStoredTaskNumber } from "../../utils/taskNumber.js";
 import { claimTaskNumber, saveListedTaskNumbers } from "../../utils/taskNumberStore.js";
@@ -1444,7 +1444,11 @@ export const getTaskManagerNotifications = async (req, res) => {
             const assigneeId = String(overlay?.assignee || action.assignedTo || "");
             const assigneeEmpId = String(overlay?.assigneeEmpId || action.assignedToEmpId || "").trim();
             const assigneeRecord = byId.get(assigneeId) || byCode.get(assigneeEmpId) || assignee;
-            const assigneeName = personName(assigneeRecord) || overlay?.assigneeName || String(action.assignedToEmpId || "").trim() || "Unassigned";
+            const assigneeCleared = Boolean(overlay?.closeRequest?.assigneeCleared);
+            const heldAssigneeName = assigneeCleared ? "" : String(overlay?.closeRequest?.returnAssigneeName || "").trim();
+            const assigneeName = assigneeCleared
+                ? ""
+                : (heldAssigneeName || personName(assigneeRecord) || overlay?.assigneeName || String(action.assignedToEmpId || "").trim() || "Unassigned");
             const requesterBase = displayRequesterName(
                 preferRequesterName(overlay?.requestedByName, action.requestedByName),
                 action,
@@ -1455,12 +1459,19 @@ export const getTaskManagerNotifications = async (req, res) => {
             const requesterName = requesterBase;
             const assigneeClosed = String(overlay?.status || "") === "Completed"
                 || (Boolean(overlay?.closeRequest?.closedAt) && !overlay?.closeRequest?.reviewPending);
+            const blocksDelete = assigneeBlocksDelete({
+                assigneeId: assigneeCleared ? "" : (String(overlay?.closeRequest?.returnAssigneeId || "") || assigneeId),
+                assigneeEmpId: assigneeCleared ? "" : (String(overlay?.closeRequest?.returnAssigneeEmpId || "") || assigneeEmpId),
+                assigneeName,
+                requesterName: requesterBase,
+                assigneeCleared,
+            });
             const assigneeDisplay = assigneeColumns({
                 assigneeName,
-                assigneeId,
-                assigneePhoto: assigneeRecord?.profilePicture || "",
-                originalAssigneeName,
-                originalAssigneeId,
+                assigneeId: assigneeCleared ? "" : assigneeId,
+                assigneePhoto: assigneeCleared ? "" : (assigneeRecord?.profilePicture || ""),
+                originalAssigneeName: assigneeCleared ? "" : originalAssigneeName,
+                originalAssigneeId: assigneeCleared ? "" : originalAssigneeId,
                 byId,
                 photoForName,
                 closed: assigneeClosed || Boolean(overlay?.closeRequest?.reassignmentReleased),
@@ -1522,7 +1533,12 @@ export const getTaskManagerNotifications = async (req, res) => {
                 actionId: String(action._id),
                 manual: false,
                 workflowLocked: action.requestType !== "Task Manager",
-                canReassign: !actionsLocked && (viewerCanReassign(viewer, assigneeId, assigneeEmpId) || viewerOwnsOriginal(viewer, overlay)),
+                canReassign: !actionsLocked && (
+                    viewerCanReassign(viewer, assigneeCleared ? "" : assigneeId, assigneeCleared ? "" : assigneeEmpId)
+                    || viewerOwnsOriginal(viewer, overlay)
+                    || (overlay?.requestedByUserId && viewer?.userId && String(overlay.requestedByUserId) === String(viewer.userId))
+                    || personKey(cleanRequester(requesterBase)) === personKey(viewer?.name)
+                ),
                 canReturn: viewerCanReturnTask(viewer, overlay),
                 canDelete: status === "Rejected" || status === "Cancelled"
                     ? false
@@ -1531,6 +1547,26 @@ export const getTaskManagerNotifications = async (req, res) => {
                         requestedByName: requesterBase,
                         requestedByUserId: overlay?.requestedByUserId,
                         status,
+                        hasOtherAssignee: blocksDelete,
+                    }),
+                deleteBlockedByAssignee: blocksDelete
+                    && status !== "Rejected"
+                    && status !== "Cancelled"
+                    && status !== "Completed"
+                    && status !== "Closed"
+                    && canDeleteTask(viewer, {
+                        taskCategory: category,
+                        requestedByName: requesterBase,
+                        requestedByUserId: overlay?.requestedByUserId,
+                        status,
+                        hasOtherAssignee: false,
+                    })
+                    && !canDeleteTask(viewer, {
+                        taskCategory: category,
+                        requestedByName: requesterBase,
+                        requestedByUserId: overlay?.requestedByUserId,
+                        status,
+                        hasOtherAssignee: true,
                     }),
                 ...actionNumberState(action, savedByActivity, overlay),
                 alsoOwner: overlay?._id ? { kind: "manual", id: String(overlay._id) } : undefined,
@@ -1553,30 +1589,41 @@ export const getTaskManagerNotifications = async (req, res) => {
                 requesterPhoto: photoForName(requesterBase),
                 originalAssigneeName,
                 originalAssigneeId,
-                originalAssigneeEmpId: assigneeDisplay.originalAssigneeEmpId || String(overlay?.closeRequest?.originalAssigneeEmpId || "").trim(),
+                originalAssigneeEmpId: assigneeCleared ? "" : (assigneeDisplay.originalAssigneeEmpId || String(overlay?.closeRequest?.originalAssigneeEmpId || "").trim()),
                 ...assigneeDisplay,
-                assigneeId: assigneeDisplay.assigneeLockedToOriginal ? assigneeDisplay.listedAssigneeId : assigneeId,
-                assigneeName: assigneeDisplay.assigneeLockedToOriginal ? assigneeDisplay.listedAssigneeName : assigneeName,
-                assigneePhoto: assigneeDisplay.assigneeLockedToOriginal ? assigneeDisplay.listedAssigneePhoto : (assigneeRecord?.profilePicture || ""),
-                assigneeEmpId: assigneeDisplay.assigneeLockedToOriginal
-                    ? (assigneeDisplay.listedAssigneeEmpId || String(overlay?.closeRequest?.originalAssigneeEmpId || "").trim())
-                    : String(assigneeRecord?.employeeId || assigneeEmpId).trim(),
+                assigneeId: assigneeCleared
+                    ? ""
+                    : (assigneeDisplay.assigneeLockedToOriginal ? assigneeDisplay.listedAssigneeId : assigneeId),
+                assigneeName: assigneeCleared
+                    ? ""
+                    : (assigneeDisplay.assigneeLockedToOriginal ? assigneeDisplay.listedAssigneeName : assigneeName),
+                assigneePhoto: assigneeCleared
+                    ? ""
+                    : (assigneeDisplay.assigneeLockedToOriginal ? assigneeDisplay.listedAssigneePhoto : (assigneeRecord?.profilePicture || "")),
+                assigneeEmpId: assigneeCleared
+                    ? ""
+                    : assigneeDisplay.assigneeLockedToOriginal
+                        ? (assigneeDisplay.listedAssigneeEmpId || String(overlay?.closeRequest?.originalAssigneeEmpId || "").trim())
+                        : String(assigneeRecord?.employeeId || assigneeEmpId).trim(),
                 priority,
                 module: destination.module,
                 moduleLabel: destination.label,
                 modulePath: destination.path,
-                mine: taskMine(viewer, {
-                    assigneeId,
-                    assigneeEmpId,
-                    assigneeName,
-                    row: overlay,
-                    requesterName: requesterBase,
-                    requestedByUserId: overlay?.requestedByUserId,
-                    requestType: action.requestType,
-                    closed: assigneeClosed
-                        || Boolean(overlay?.closeRequest?.reassignmentReleased)
-                        || (isGeneralHubRequestType(action.requestType) && ["Approved", "Completed", "Closed"].includes(String(action.status || ""))),
-                }),
+                mine: assigneeCleared
+                    ? personKey(cleanRequester(requesterBase)) === personKey(viewer?.name)
+                        || (overlay?.requestedByUserId && viewer?.userId && String(overlay.requestedByUserId) === String(viewer.userId))
+                    : taskMine(viewer, {
+                        assigneeId,
+                        assigneeEmpId,
+                        assigneeName,
+                        row: overlay,
+                        requesterName: requesterBase,
+                        requestedByUserId: overlay?.requestedByUserId,
+                        requestType: action.requestType,
+                        closed: assigneeClosed
+                            || Boolean(overlay?.closeRequest?.reassignmentReleased)
+                            || (isGeneralHubRequestType(action.requestType) && ["Approved", "Completed", "Closed"].includes(String(action.status || ""))),
+                    }),
                 ...closeWaitFlags(overlay?.closeRequest, overlay?.status),
                 displayStatus: status,
                 rawStatus: action.status || "Pending",
@@ -1638,28 +1685,40 @@ export const getTaskManagerNotifications = async (req, res) => {
                                     ? "Pending Due"
                                     : "Pending";
             const actionsLocked = status === "Closed" || status === "Rejected" || status === "Cancelled";
-            const assignee = byId.get(String(row.assignee || "")) || null;
-            const heldAssignee = String(row.closeRequest?.returnAssigneeName || "").trim();
-            const rawAssigneeName = heldAssignee || personName(assignee) || row.assigneeName || row.assigneeEmpId || "Unassigned";
+            const assigneeCleared = Boolean(row.closeRequest?.assigneeCleared);
+            const assignee = assigneeCleared ? null : (byId.get(String(row.assignee || "")) || null);
+            const heldAssignee = assigneeCleared ? "" : String(row.closeRequest?.returnAssigneeName || "").trim();
+            const rawAssigneeName = assigneeCleared
+                ? ""
+                : (heldAssignee || personName(assignee) || row.assigneeName || row.assigneeEmpId || "Unassigned");
             const requesterPlain = String(row.requestedByName || "").trim().replace(/\s*\([^)]*\)\s*$/, "").trim();
-            const assigneeName = heldAssignee && requesterPlain && requesterPlain.toLowerCase() !== heldAssignee.toLowerCase()
-                ? `${heldAssignee} (${requesterPlain})`
-                : rawAssigneeName;
+            const assigneeName = assigneeCleared
+                ? ""
+                : heldAssignee && requesterPlain && requesterPlain.toLowerCase() !== heldAssignee.toLowerCase()
+                    ? `${heldAssignee} (${requesterPlain})`
+                    : rawAssigneeName;
             const requesterBase = String(row.requestedByName || "").trim() || "System";
             const originalAssigneeName = String(row.closeRequest?.originalAssigneeName || "").trim();
             const originalAssigneeId = String(row.closeRequest?.originalAssigneeId || "");
             const requesterName = requesterBase;
-            const assigneeId = String(row.assignee || "");
+            const assigneeId = assigneeCleared ? "" : String(row.assignee || "");
+            const blocksDelete = assigneeBlocksDelete({
+                assigneeId,
+                assigneeEmpId: assigneeCleared ? "" : row.assigneeEmpId,
+                assigneeName,
+                requesterName: requesterBase,
+                assigneeCleared,
+            });
             const assigneeClosed = status === "Completed" || status === "Closed";
             const assigneeDisplay = assigneeColumns({
                 assigneeName,
                 assigneeId,
-                assigneePhoto: assignee?.profilePicture || "",
-                originalAssigneeName,
-                originalAssigneeId,
+                assigneePhoto: assigneeCleared ? "" : (assignee?.profilePicture || ""),
+                originalAssigneeName: assigneeCleared ? "" : originalAssigneeName,
+                originalAssigneeId: assigneeCleared ? "" : originalAssigneeId,
                 byId,
                 photoForName,
-                closed: assigneeClosed || Boolean(row.closeRequest?.reassignmentReleased),
+                closed: assigneeCleared || assigneeClosed || Boolean(row.closeRequest?.reassignmentReleased),
             });
             const requestMonth = monthKeyFromDateKey(requestedKey);
             const completedMonth = monthKeyFromDateKey(dueKey);
@@ -1684,7 +1743,12 @@ export const getTaskManagerNotifications = async (req, res) => {
                 actionId: row.sourceDashboardActionId ? String(row.sourceDashboardActionId) : `manual-${row._id}`,
                 manual: true,
                 workflowLocked: false,
-                canReassign: !actionsLocked && (viewerCanReassign(viewer, assigneeId, row.assigneeEmpId) || viewerOwnsOriginal(viewer, row)),
+                canReassign: !actionsLocked && (
+                    viewerCanReassign(viewer, assigneeId, assigneeCleared ? "" : row.assigneeEmpId)
+                    || viewerOwnsOriginal(viewer, row)
+                    || (row.requestedByUserId && viewer?.userId && String(row.requestedByUserId) === String(viewer.userId))
+                    || personKey(cleanRequester(requesterBase)) === personKey(viewer?.name)
+                ),
                 canReturn: viewerCanReturnTask(viewer, row),
                 canDelete: status === "Rejected" || status === "Cancelled"
                     ? false
@@ -1693,6 +1757,26 @@ export const getTaskManagerNotifications = async (req, res) => {
                         requestedByName: requesterName,
                         requestedByUserId: row.requestedByUserId,
                         status,
+                        hasOtherAssignee: blocksDelete,
+                    }),
+                deleteBlockedByAssignee: blocksDelete
+                    && status !== "Rejected"
+                    && status !== "Cancelled"
+                    && status !== "Completed"
+                    && status !== "Closed"
+                    && canDeleteTask(viewer, {
+                        taskCategory: category,
+                        requestedByName: requesterName,
+                        requestedByUserId: row.requestedByUserId,
+                        status,
+                        hasOtherAssignee: false,
+                    })
+                    && !canDeleteTask(viewer, {
+                        taskCategory: category,
+                        requestedByName: requesterName,
+                        requestedByUserId: row.requestedByUserId,
+                        status,
+                        hasOtherAssignee: blocksDelete,
                     }),
                 ...manualNumberState(row, actionById, savedByActivity),
                 requestDate: requestedAt,
@@ -1709,28 +1793,39 @@ export const getTaskManagerNotifications = async (req, res) => {
                 requesterPhoto: photoForName(requesterBase),
                 originalAssigneeName,
                 originalAssigneeId,
-                originalAssigneeEmpId: assigneeDisplay.originalAssigneeEmpId || String(row.closeRequest?.originalAssigneeEmpId || "").trim(),
+                originalAssigneeEmpId: assigneeCleared ? "" : (assigneeDisplay.originalAssigneeEmpId || String(row.closeRequest?.originalAssigneeEmpId || "").trim()),
                 ...assigneeDisplay,
-                assigneeId: assigneeDisplay.assigneeLockedToOriginal ? assigneeDisplay.listedAssigneeId : assigneeId,
-                assigneeName: assigneeDisplay.assigneeLockedToOriginal ? assigneeDisplay.listedAssigneeName : assigneeName,
-                assigneePhoto: assigneeDisplay.assigneeLockedToOriginal ? assigneeDisplay.listedAssigneePhoto : (assignee?.profilePicture || ""),
-                assigneeEmpId: assigneeDisplay.assigneeLockedToOriginal
-                    ? (assigneeDisplay.listedAssigneeEmpId || String(row.closeRequest?.originalAssigneeEmpId || "").trim())
-                    : String(assignee?.employeeId || row.assigneeEmpId || "").trim(),
+                assigneeId: assigneeCleared
+                    ? ""
+                    : (assigneeDisplay.assigneeLockedToOriginal ? assigneeDisplay.listedAssigneeId : assigneeId),
+                assigneeName: assigneeCleared
+                    ? ""
+                    : (assigneeDisplay.assigneeLockedToOriginal ? assigneeDisplay.listedAssigneeName : assigneeName),
+                assigneePhoto: assigneeCleared
+                    ? ""
+                    : (assigneeDisplay.assigneeLockedToOriginal ? assigneeDisplay.listedAssigneePhoto : (assignee?.profilePicture || "")),
+                assigneeEmpId: assigneeCleared
+                    ? ""
+                    : assigneeDisplay.assigneeLockedToOriginal
+                        ? (assigneeDisplay.listedAssigneeEmpId || String(row.closeRequest?.originalAssigneeEmpId || "").trim())
+                        : String(assignee?.employeeId || row.assigneeEmpId || "").trim(),
                 priority: category === "System Task" ? "High" : (row.priority || "Medium"),
                 module: destination.module,
                 moduleLabel: destination.label,
                 modulePath: destination.path,
-                mine: taskMine(viewer, {
-                    assigneeId,
-                    assigneeEmpId: row.assigneeEmpId,
-                    assigneeName,
-                    row,
-                    requesterName: requesterBase,
-                    requestedByUserId: row.requestedByUserId,
-                    requestType: row.taskType,
-                    closed: assigneeClosed || Boolean(row.closeRequest?.reassignmentReleased),
-                }),
+                mine: assigneeCleared
+                    ? personKey(cleanRequester(requesterBase)) === personKey(viewer?.name)
+                        || (row.requestedByUserId && viewer?.userId && String(row.requestedByUserId) === String(viewer.userId))
+                    : taskMine(viewer, {
+                        assigneeId,
+                        assigneeEmpId: row.assigneeEmpId,
+                        assigneeName,
+                        row,
+                        requesterName: requesterBase,
+                        requestedByUserId: row.requestedByUserId,
+                        requestType: row.taskType,
+                        closed: assigneeClosed || Boolean(row.closeRequest?.reassignmentReleased),
+                    }),
                 ...closeWaitFlags(row.closeRequest, row.status),
                 displayStatus: status,
                 rawStatus: row.status || "Pending",

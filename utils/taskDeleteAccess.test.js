@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { recordIsFinishedForDelete, viewerMayDeleteTask } from "./taskDeleteAccess.js";
+import { assigneeBlocksDelete, recordIsFinishedForDelete, viewerMayDeleteTask } from "./taskDeleteAccess.js";
 import { noticeKeysForRecord } from "./deletedTaskNotice.js";
 
 const admin = { superUser: true, userId: "admin-1", name: "Admin", employeeId: "VITS000" };
@@ -39,6 +39,40 @@ test("an approved workflow and a completed general task are finished", () => {
     assert.equal(recordIsFinishedForDelete({ status: "Completed", taskType: "General Task" }, null), true);
     assert.equal(recordIsFinishedForDelete({ status: "Pending", closeRequest: { closedAt: "2026-10-30" } }, null), true);
     assert.equal(recordIsFinishedForDelete({ status: "Pending" }, { status: "Pending" }), false);
+});
+
+test("another assignee blocks delete, and a cleared assignee does not", () => {
+    assert.equal(assigneeBlocksDelete({
+        assigneeId: "64b000000000000000000002",
+        assigneeName: "Fidha Sherin",
+        requesterEmployeeId: "64b000000000000000000001",
+        requesterName: "Shameem Abdul Kareem",
+    }), true);
+    assert.equal(assigneeBlocksDelete({
+        assigneeId: "64b000000000000000000001",
+        assigneeName: "Shameem Abdul Kareem",
+        requesterEmployeeId: "64b000000000000000000001",
+        requesterName: "Shameem Abdul Kareem",
+    }), false);
+    assert.equal(assigneeBlocksDelete({
+        assigneeId: "64b000000000000000000002",
+        assigneeName: "Fidha Sherin",
+        requesterName: "Shameem Abdul Kareem",
+        assigneeCleared: true,
+    }), false);
+    assert.equal(assigneeBlocksDelete({
+        assigneeName: "Unassigned",
+        requesterName: "Shameem Abdul Kareem",
+    }), false);
+    assert.equal(viewerMayDeleteTask(requester, {
+        taskCategory: "General Task",
+        requestedByUserId: "user-9",
+        hasOtherAssignee: true,
+    }), false);
+    assert.equal(viewerMayDeleteTask(admin, {
+        taskCategory: "System Task",
+        hasOtherAssignee: true,
+    }), true);
 });
 
 test("the requester can delete a general, system, or workflow task", () => {

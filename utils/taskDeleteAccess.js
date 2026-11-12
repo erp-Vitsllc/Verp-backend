@@ -49,6 +49,34 @@ function viewerIsRequester(viewer, requestedByName, requestedByUserId) {
     return owner === baseName(viewer?.name);
 }
 
+/**
+ * An assignee who is not the requester blocks delete.
+ * A cleared assignee, or a task assigned to the requester, does not.
+ */
+export function assigneeBlocksDelete({
+    assigneeId = "",
+    assigneeEmpId = "",
+    assigneeName = "",
+    requesterEmployeeId = "",
+    requesterEmpCode = "",
+    requesterName = "",
+    assigneeCleared = false,
+} = {}) {
+    if (assigneeCleared) return false;
+    const id = String(assigneeId || "").trim();
+    const code = String(assigneeEmpId || "").trim().toLowerCase();
+    const named = baseName(assigneeName);
+    const name = named === "unassigned" ? "" : named;
+    if (!id && !code && !name) return false;
+    if (id && requesterEmployeeId && id === String(requesterEmployeeId)) return false;
+    if (code && requesterEmpCode && code === String(requesterEmpCode).trim().toLowerCase()) return false;
+    const requesterCode = employeeCode(requesterName);
+    if (code && requesterCode && code === requesterCode) return false;
+    const requester = baseName(requesterName);
+    if (name && requester && name === requester) return false;
+    return true;
+}
+
 /** Completed and closed tasks stay on the list, and only an admin can remove them. */
 export function statusAllowsOnlyAdminDelete(status) {
     const value = String(status || "").trim().toLowerCase();
@@ -67,7 +95,11 @@ export function viewerMayDeleteTask(viewer, {
     closed = false,
     finished = false,
     status = "",
+    hasOtherAssignee = false,
 } = {}) {
+    if (hasOtherAssignee) {
+        return Boolean(viewer?.superUser && adminMayDeleteCategory(taskCategory));
+    }
     if (finished || statusAllowsOnlyAdminDelete(status)) return Boolean(viewer?.superUser);
     if (closed) return false;
     if (viewer?.superUser && adminMayDeleteCategory(taskCategory)) return true;
