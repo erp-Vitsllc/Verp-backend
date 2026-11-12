@@ -37,6 +37,7 @@ import { composeTaskDescription } from "../../utils/taskDetailDescription.js";
 import { attendanceFactsByActionId } from "../../utils/loadAttendanceTaskFacts.js";
 import { attachHoldSteps } from "../../utils/taskWaitingSteps.js";
 import { syncPendingSalaryEnrollmentTasks } from "../../utils/syncPendingSalaryEnrollmentTasks.js";
+import { ensurePendingUtilityReminderTasks, UTILITY_PAYMENT_REMINDER } from "../../utils/utilityReminderTask.js";
 import { getDepartmentHOD } from "../../utils/getDepartmentHOD.js";
 import { getManagementHOD } from "../../utils/getManagementHOD.js";
 import {
@@ -1239,6 +1240,11 @@ export const getTaskManagerNotifications = async (req, res) => {
         }
         const viewer = await resolveTaskViewer(req);
         await syncPendingSalaryEnrollmentTasks();
+        try {
+            await ensurePendingUtilityReminderTasks();
+        } catch (error) {
+            console.error("Utility reminder tasks:", error?.message || error);
+        }
         const promotion = promoteDueTaskCompletions().catch((error) => {
             console.error("Promote due tasks failed:", error);
         });
@@ -1357,7 +1363,16 @@ export const getTaskManagerNotifications = async (req, res) => {
         const deletedNoticeSet = new Set(await listDeletedNoticeKeys());
         const suppressedActionIds = new Set(
             (actions || [])
-                .filter((action) => noticeKeysForRecord(action).some((key) => deletedNoticeSet.has(key)))
+                .filter((action) => {
+                    // The utility inbox does not use deleted-task notices. An unpaid month stays on the task list.
+                    if (
+                        String(action.requestType || "") === UTILITY_PAYMENT_REMINDER
+                        && ["Pending", "On Hold"].includes(String(action.status || "Pending"))
+                    ) {
+                        return false;
+                    }
+                    return noticeKeysForRecord(action).some((key) => deletedNoticeSet.has(key));
+                })
                 .map((action) => String(action._id)),
         );
         const listedTaskKeys = new Set();
@@ -1367,6 +1382,7 @@ export const getTaskManagerNotifications = async (req, res) => {
             if (taskInvolvesLeftUser(overlay?.assignee || action.assignedTo, overlay?.assigneeEmpId || action.assignedToEmpId)) {
                 return false;
             }
+            if (String(action.requestType || "") === UTILITY_PAYMENT_REMINDER) return true;
             if (taskInvolvesLeftUser(action.subjectEmployeeId, action.subjectEmployeeId)) return false;
             return true;
         });

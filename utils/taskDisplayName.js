@@ -186,6 +186,25 @@ function docLabel(body, meta) {
     return text(fromMeta || value);
 }
 
+function utilityMonthLine(meta, body) {
+    const key = text(meta?.billMonth || meta?.yearMonth);
+    if (/^\d{4}-\d{2}$/.test(key)) {
+        const [year, month] = key.split("-").map(Number);
+        if (year && month >= 1 && month <= 12) {
+            return new Date(Date.UTC(year, month - 1, 1)).toLocaleDateString("en-GB", {
+                month: "long",
+                year: "numeric",
+                timeZone: "UTC",
+            });
+        }
+    }
+    const named = text(body).match(
+        /\b(january|february|march|april|may|june|july|august|september|october|november|december)(?:\s+\d{4})?\b/i,
+    );
+    if (!named) return "";
+    return named[0].replace(/\b[a-z]/g, (letter) => letter.toUpperCase());
+}
+
 function utilityParts(body, meta) {
     const parts = text(body)
         .split(/\s*[·•|]\s*|\s+-\s+|\s+—\s+/)
@@ -398,11 +417,18 @@ export function formatTaskDisplayParts({
         return uniqueLines(`${utilityType} Contract Expiry`, [shortName(provider)]);
     }
 
-    if (
-        typeKey === "utility bill payment reminder"
-        || typeKey === "utility bill payment"
-        || typeKey === "utility entry status change"
-    ) {
+    if (typeKey === "utility bill payment reminder") {
+        const { type: utilityType, account } = utilityParts(body, meta);
+        const sentence = text(secondary);
+        const month = utilityMonthLine(meta, body);
+        const second = [utilityType, month].filter(Boolean).join(" · ");
+        if (/please pay the bill/i.test(sentence)) return uniqueLines(sentence, [second]);
+        const grouped = Number(meta.groupedBillCount) || 0;
+        if (grouped > 1) return uniqueLines(utilityType, [`${grouped} accounts`]);
+        return uniqueLines(utilityType, [account]);
+    }
+
+    if (typeKey === "utility bill payment" || typeKey === "utility entry status change") {
         const { type: utilityType, account } = utilityParts(body, meta);
         const grouped = Number(meta.groupedBillCount) || 0;
         if (grouped > 1) return uniqueLines(utilityType, [`${grouped} accounts`]);

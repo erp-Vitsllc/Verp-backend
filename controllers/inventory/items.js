@@ -62,14 +62,12 @@ async function nextItemCode() {
 async function assertLinks({ categoryId, subcategoryId, itemOptionId, brandId }) {
     const [category, subcategory, option, brand] = await Promise.all([
         ItemCategory.findById(categoryId).select('_id'),
-        ItemSubcategory.findById(subcategoryId).select('categoryId'),
+        ItemSubcategory.findById(subcategoryId).select('_id'),
         ItemOption.findById(itemOptionId).select('subcategoryId'),
         ItemBrand.findById(brandId).select('_id'),
     ]);
     if (!category) throw httpError(400, 'Category was not found.');
-    if (!subcategory || String(subcategory.categoryId) !== String(categoryId)) {
-        throw httpError(400, 'Subcategory does not belong to the selected category.');
-    }
+    if (!subcategory) throw httpError(400, 'Subcategory was not found.');
     if (!option || String(option.subcategoryId) !== String(subcategoryId)) {
         throw httpError(400, 'Item does not belong to the selected subcategory.');
     }

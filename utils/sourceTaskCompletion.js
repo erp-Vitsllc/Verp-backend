@@ -261,8 +261,12 @@ async function loadRecordStatus(action) {
         const payment = await Payment.findById(id).select("status").lean();
         return payment?.status || "";
     }
-    if (type === "Utility Bill Payment" || type === "Utility Bill Payment Reminder") {
-        const bill = id ? await UtilityBillPayment.findById(id).select("status").lean() : null;
+    if (type === "Utility Bill Payment Reminder") {
+        // The reminder id is a hash of utility type and month, not a bill id.
+        return "";
+    }
+    if (type === "Utility Bill Payment") {
+        const bill = id && isObjectId(id) ? await UtilityBillPayment.findById(id).select("status").lean() : null;
         return bill?.status || "";
     }
     return "";

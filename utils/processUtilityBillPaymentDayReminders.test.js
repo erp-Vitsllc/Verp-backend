@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { isUtilityTypePaymentNotice } from './utilityReminderTask.js';
 import {
     dueUnpaidBillMonths,
     simCreatedBeforeBillMonth,
@@ -33,6 +34,23 @@ test('unpaid months through the previous month are the ones Accounts is notified
     ]);
     assert.deepEqual(dueUnpaidBillMonths('2026-11', 2026, 11), []);
     assert.deepEqual(dueUnpaidBillMonths('2026-10', 2026, 11), ['2026-10']);
+});
+
+test('only the utility-type bell is a task, not each SIM or account', () => {
+    assert.equal(
+        isUtilityTypePaymentNotice({
+            requestType: 'Utility Bill Payment Reminder',
+            extra3: JSON.stringify({ entryId: 'utility-type:internet bills', utilityTypeNotice: true }),
+        }),
+        true,
+    );
+    assert.equal(
+        isUtilityTypePaymentNotice({
+            requestType: 'Utility Bill Payment Reminder',
+            extra3: JSON.stringify({ entryId: '507f1f77bcf86cd799439011' }),
+        }),
+        false,
+    );
 });
 
 test('the 1st notice is one per utility, not one per SIM number', () => {

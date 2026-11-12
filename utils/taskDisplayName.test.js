@@ -100,6 +100,25 @@ test("utility reminder lists the bill type, then the account", () => {
     );
 });
 
+test("a utility type payment notice uses the bell sentence, then the type and month", () => {
+    assert.deepEqual(
+        formatTaskDisplayParts({
+            requestType: "Utility Bill Payment Reminder",
+            extra1: "Electricity and Water Bills · October 2026",
+            extra2: "October bill payment — Electricity and Water Bills, please pay the bill",
+            extra3: JSON.stringify({
+                utilityType: "Electricity and Water Bills",
+                billMonth: "2026-10",
+                utilityTypeNotice: true,
+            }),
+        }),
+        {
+            title: "October bill payment — Electricity and Water Bills, please pay the bill",
+            subject: "Electricity and Water Bills · October 2026",
+        },
+    );
+});
+
 test("fine, not-renew, leave, and asset names list the task, then the person or record", () => {
     assert.deepEqual(
         formatTaskDisplayParts({ requestType: "Fine", extra1: "Other Fines" }),

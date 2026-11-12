@@ -7,6 +7,7 @@ import UtilityEntry from '../models/UtilityEntry.js';
 import DashboardAction from '../models/DashboardAction.js';
 import { getDepartmentHOD } from './getDepartmentHOD.js';
 import { sendUtilityBillPaymentDayEmail } from './sendUtilityBillPaymentDayEmail.js';
+import { completeUtilityReminderTasks, ensureUtilityReminderTask } from './utilityReminderTask.js';
 import { utilityBillHasZohoLink } from './markUtilityVendorBillsPaidFromZoho.js';
 import {
     getCalendarPartsInTz,
@@ -337,20 +338,24 @@ export async function clearUtilityBillPaymentDayReminderForMonth(
     const requestId = utilityBillPaymentDayRequestId(id, ym, DUE_TODAY_STAGE);
     const escape = (s) => String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
+    const filter = {
+        requestType: REQUEST_TYPE,
+        status: 'Pending',
+        $or: [
+            { requestId },
+            {
+                $and: [
+                    { extra3: { $regex: `"entryId"\\s*:\\s*"${escape(id)}"` } },
+                    { extra3: { $regex: `"yearMonth"\\s*:\\s*"${escape(ym)}"` } },
+                ],
+            },
+        ],
+    };
+    const matches = await DashboardAction.find(filter).select('_id').lean();
+    if (!matches.length) return 0;
+    const matchIds = matches.map((row) => row._id);
     const result = await DashboardAction.updateMany(
-        {
-            requestType: REQUEST_TYPE,
-            status: 'Pending',
-            $or: [
-                { requestId },
-                {
-                    $and: [
-                        { extra3: { $regex: `"entryId"\\s*:\\s*"${escape(id)}"` } },
-                        { extra3: { $regex: `"yearMonth"\\s*:\\s*"${escape(ym)}"` } },
-                    ],
-                },
-            ],
-        },
+        { _id: { $in: matchIds }, status: 'Pending' },
         {
             $set: {
                 status: 'Approved',
@@ -359,6 +364,7 @@ export async function clearUtilityBillPaymentDayReminderForMonth(
             },
         },
     );
+    if (result?.modifiedCount) await completeUtilityReminderTasks(matchIds);
 
     return result?.modifiedCount || 0;
 }
@@ -431,7 +437,7 @@ export async function clearSettledUtilityBillPaymentDayReminders() {
         }
 
         if (!reason) continue;
-        await DashboardAction.updateOne(
+        const closedRow = await DashboardAction.updateOne(
             { _id: row._id, status: 'Pending' },
             {
                 $set: {
@@ -441,6 +447,7 @@ export async function clearSettledUtilityBillPaymentDayReminders() {
                 },
             },
         );
+        if (closedRow?.modifiedCount) await completeUtilityReminderTasks([row._id]);
         closed += 1;
     }
     return closed;
@@ -455,12 +462,16 @@ export async function clearUtilityBillPaymentDayRemindersForEntry(
     if (!id) return 0;
     const escape = (s) => String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
+    const filter = {
+        requestType: REQUEST_TYPE,
+        status: 'Pending',
+        extra3: { $regex: `"entryId"\\s*:\\s*"${escape(id)}"` },
+    };
+    const matches = await DashboardAction.find(filter).select('_id').lean();
+    if (!matches.length) return 0;
+    const matchIds = matches.map((row) => row._id);
     const result = await DashboardAction.updateMany(
-        {
-            requestType: REQUEST_TYPE,
-            status: 'Pending',
-            extra3: { $regex: `"entryId"\\s*:\\s*"${escape(id)}"` },
-        },
+        { _id: { $in: matchIds }, status: 'Pending' },
         {
             $set: {
                 status: 'Approved',
@@ -469,6 +480,7 @@ export async function clearUtilityBillPaymentDayRemindersForEntry(
             },
         },
     );
+    if (result?.modifiedCount) await completeUtilityReminderTasks(matchIds);
 
     return result?.modifiedCount || 0;
 }
@@ -567,6 +579,7 @@ async function clearPerAccountUtilityReminders() {
             },
         },
     );
+    if (result?.modifiedCount) await completeUtilityReminderTasks(ids);
     return result?.modifiedCount || 0;
 }
 
@@ -580,36 +593,39 @@ async function createUtilityTypeBell({ utilityType, dueDate, accounts, yearMonth
     const dueDateKey = `${dueParts.year}-${String(dueParts.month).padStart(2, '0')}-${String(dueParts.day).padStart(2, '0')}`;
     const message = utilityTypePaymentMessage(type, yearMonth);
 
-    await DashboardAction.findOneAndUpdate(
+    const action = await DashboardAction.findOneAndUpdate(
         { requestId, requestType: REQUEST_TYPE },
         {
-            requestId,
-            requestType: REQUEST_TYPE,
-            assignedTo: accounts._id,
-            assignedToEmpId: accounts.employeeId || undefined,
-            status: 'Pending',
-            subjectEmployeeId: accounts.employeeId || undefined,
-            subjectName:
-                `${accounts.firstName || ''} ${accounts.lastName || ''}`.trim() || 'Accounts',
-            requestedByName: 'System',
-            requestedDate: new Date(),
-            extra1: `${type} · ${monthLabel}`,
-            extra2: message,
-            extra3: JSON.stringify({
-                entryId: noticeId,
-                daysBefore: DUE_TODAY_STAGE,
-                yearMonth,
-                billMonth: yearMonth,
-                accountNo: '',
-                utilityType: type,
-                dueDateKey,
-                utilityTypeNotice: true,
-                stickyUntilSettled: true,
-                detailsPath: '/HRM/Asset/UtilityBills',
-            }),
+            $set: {
+                requestId,
+                requestType: REQUEST_TYPE,
+                assignedTo: accounts._id,
+                assignedToEmpId: accounts.employeeId || undefined,
+                status: 'Pending',
+                subjectName:
+                    `${accounts.firstName || ''} ${accounts.lastName || ''}`.trim() || 'Accounts',
+                requestedByName: 'System',
+                requestedDate: new Date(),
+                extra1: `${type} · ${monthLabel}`,
+                extra2: message,
+                extra3: JSON.stringify({
+                    entryId: noticeId,
+                    daysBefore: DUE_TODAY_STAGE,
+                    yearMonth,
+                    billMonth: yearMonth,
+                    accountNo: '',
+                    utilityType: type,
+                    dueDateKey,
+                    utilityTypeNotice: true,
+                    stickyUntilSettled: true,
+                    detailsPath: '/HRM/Asset/UtilityBills',
+                }),
+            },
+            $unset: { subjectEmployeeId: '' },
         },
         { upsert: true, new: true, setDefaultsOnInsert: true },
     );
+    await ensureUtilityReminderTask(action);
 }
 
 /**
