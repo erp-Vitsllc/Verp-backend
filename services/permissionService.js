@@ -2,6 +2,7 @@ import User from "../models/User.js";
 import EmployeeBasic from "../models/EmployeeBasic.js";
 import Group from "../models/Group.js";
 import { HRM_MODULE } from "../constants/hrmModulePermissions.js";
+import { INVENTORY_MODULE } from "../constants/inventoryModulePermissions.js";
 
 /**
  * Get user permissions
@@ -215,6 +216,7 @@ const MODULES_STRUCTURE = [
     { id: 'login', label: 'Login', parent: null },
     { id: 'dashboard', label: 'Dashboard', parent: null },
     HRM_MODULE,
+    INVENTORY_MODULE,
     { id: 'crm', label: 'CRM', parent: null },
     { id: 'purchases', label: 'Purchases', parent: null },
     { id: 'sales', label: 'Sales', parent: null },

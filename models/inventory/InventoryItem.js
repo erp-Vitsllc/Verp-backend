@@ -11,7 +11,7 @@ const inventoryItemSchema = new mongoose.Schema(
         itemOptionId: { type: mongoose.Schema.Types.ObjectId, ref: 'InventoryItemOption', required: true },
         brandId: { type: mongoose.Schema.Types.ObjectId, ref: 'InventoryItemBrand', required: true },
         description: { type: String, required: true, trim: true },
-        modelNumber: { type: String, required: true, trim: true },
+        modelNumber: { type: String, default: '', trim: true },
         unitOfMeasure: { type: String, enum: UNITS, required: true },
         manufacturerPartNumber: { type: String, default: '', trim: true },
         reservationQuantity: { type: Number, default: 0, min: 0 },

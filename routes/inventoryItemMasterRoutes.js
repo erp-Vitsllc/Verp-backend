@@ -1,5 +1,6 @@
 import express from 'express';
 import { protect } from '../middleware/authMiddleware.js';
+import { checkPermission } from '../middleware/permissionMiddleware.js';
 import { listCategories, createCategory } from '../controllers/inventory/categories.js';
 import { listSubcategories, createSubcategory } from '../controllers/inventory/subcategories.js';
 import { listItemOptions, createItemOption } from '../controllers/inventory/itemOptions.js';
@@ -8,21 +9,25 @@ import { listItems, getItem, createItem, updateItem } from '../controllers/inven
 
 const router = express.Router();
 
-router.get('/categories', protect, listCategories);
-router.post('/categories', protect, createCategory);
+const viewItems = checkPermission('inventory_item_master', 'view');
+const createItems = checkPermission('inventory_item_master', 'create');
+const editItems = checkPermission('inventory_item_master', 'edit');
 
-router.get('/subcategories', protect, listSubcategories);
-router.post('/subcategories', protect, createSubcategory);
+router.get('/categories', protect, viewItems, listCategories);
+router.post('/categories', protect, checkPermission('inventory_item_master_category', 'create'), createCategory);
 
-router.get('/item-options', protect, listItemOptions);
-router.post('/item-options', protect, createItemOption);
+router.get('/subcategories', protect, viewItems, listSubcategories);
+router.post('/subcategories', protect, checkPermission('inventory_item_master_subcategory', 'create'), createSubcategory);
 
-router.get('/brands', protect, listBrands);
-router.post('/brands', protect, createBrand);
+router.get('/item-options', protect, viewItems, listItemOptions);
+router.post('/item-options', protect, createItems, createItemOption);
 
-router.get('/items', protect, listItems);
-router.post('/items', protect, createItem);
-router.get('/items/:id', protect, getItem);
-router.put('/items/:id', protect, updateItem);
+router.get('/brands', protect, viewItems, listBrands);
+router.post('/brands', protect, checkPermission('inventory_item_master_brand', 'create'), createBrand);
+
+router.get('/items', protect, viewItems, listItems);
+router.post('/items', protect, createItems, createItem);
+router.get('/items/:id', protect, viewItems, getItem);
+router.put('/items/:id', protect, editItems, updateItem);
 
 export default router;

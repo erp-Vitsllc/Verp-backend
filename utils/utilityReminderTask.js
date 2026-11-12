@@ -28,6 +28,25 @@ function accountsStoredAsSubject(action) {
     return Boolean(subject && code && subject === code);
 }
 
+function closeSnapshot(task) {
+    const saved = task?.closeRequest;
+    if (!saved) return {};
+    return typeof saved.toObject === "function" ? saved.toObject() : { ...saved };
+}
+
+/** A paid close must not keep an unpaid month off the Pending list. */
+function reopenUnpaidUtilityTask(task) {
+    const saved = closeSnapshot(task);
+    task.closeRequest = {
+        ...saved,
+        closedAt: null,
+        reviewPending: false,
+        assigneeCleared: false,
+        reopenedAt: null,
+    };
+    task.markModified?.("closeRequest");
+}
+
 /**
  * One open System Task for this utility payment bell.
  * A finished task is opened again while the same month is still unpaid.
@@ -54,7 +73,8 @@ export async function ensureUtilityReminderTask(action) {
         const assigneeChanged = String(keep.assignee || "") !== String(action.assignedTo);
         const finished = ["Completed", "Rejected"].includes(String(keep.status || ""));
         const nameChanged = String(keep.taskName || "") !== taskName;
-        if (assigneeChanged || finished || nameChanged || keep.taskType !== "System Task") {
+        const closedStamp = Boolean(closeSnapshot(keep).closedAt) || Boolean(closeSnapshot(keep).assigneeCleared);
+        if (assigneeChanged || finished || nameChanged || closedStamp || keep.taskType !== "System Task" || keep.priority !== "High") {
             keep.assignee = action.assignedTo;
             keep.assigneeEmpId = action.assignedToEmpId || keep.assigneeEmpId || "";
             if (assigneeName) keep.assigneeName = assigneeName;
@@ -63,6 +83,7 @@ export async function ensureUtilityReminderTask(action) {
             keep.taskName = taskName;
             keep.description = description;
             keep.status = "Pending";
+            if (finished || closedStamp) reopenUnpaidUtilityTask(keep);
             await keep.save();
         }
         return keep;

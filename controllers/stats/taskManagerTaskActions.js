@@ -1428,9 +1428,9 @@ async function buildDetail(target, viewer) {
     };
     const canDelete = !deleteSealed && (
         finishedForDelete
-            ? Boolean(viewer?.superUser) && !hasOtherAssignee
+            ? Boolean(viewer?.superUser)
             : !generalTaskClosed(task) && (
-                (requesterMayDelete && !hasOtherAssignee)
+                requesterMayDelete
                 || viewerMayDeleteTask(viewer, deleteFields)
             )
     );
@@ -4556,49 +4556,25 @@ export const deleteTaskManagerTask = async (req, res) => {
         if (deleteSealed) {
             return res.status(400).json({ message: "This task is closed. Delete is disabled." });
         }
-        const requesterLabel = preferRequesterName(target.task?.requestedByName, target.action?.requestedByName);
-        const requesterEmp = await findEmployeeByName(personBaseName(requesterLabel));
-        const clearedAssignee = Boolean(target.task?.closeRequest?.assigneeCleared);
-        const heldAssigneeId = clearedAssignee ? "" : String(target.task?.closeRequest?.returnAssigneeId || "").trim();
-        const heldAssigneeName = clearedAssignee ? "" : String(target.task?.closeRequest?.returnAssigneeName || "").trim();
-        const hasOtherAssignee = assigneeBlocksDelete({
-            assigneeId: heldAssigneeId || (clearedAssignee ? "" : String(target.task?.assignee || target.action?.assignedTo || "")),
-            assigneeEmpId: clearedAssignee
-                ? ""
-                : String(target.task?.closeRequest?.returnAssigneeEmpId || target.task?.assigneeEmpId || target.action?.assignedToEmpId || ""),
-            assigneeName: heldAssigneeName || (clearedAssignee ? "" : String(target.task?.assigneeName || "")),
-            requesterEmployeeId: requesterEmp?._id || "",
-            requesterEmpCode: requesterEmp?.employeeId || "",
-            requesterName: requesterLabel,
-            assigneeCleared: clearedAssignee,
-        });
         if (finished) {
-            if (!viewer.superUser || hasOtherAssignee) {
+            if (!viewer.superUser) {
                 return res.status(403).json({
-                    message: hasOtherAssignee
-                        ? "This task has an assignee. Delete is disabled."
-                        : "Only an admin super user can delete a completed or closed task.",
+                    message: "Only an admin super user can delete a completed or closed task.",
                 });
             }
         } else if (generalTaskClosed(target.task)) {
             return res.status(400).json({ message: "This task is closed. Delete is disabled." });
         } else {
             const requesterMayDelete = requesterMayDeleteCategory(deleteCategory)
-                && await viewerIsTaskRequester(target.task, viewer, target.action)
-                && !hasOtherAssignee;
+                && await viewerIsTaskRequester(target.task, viewer, target.action);
             const allowed = requesterMayDelete || viewerMayDeleteTask(viewer, {
                 taskCategory: deleteCategory,
                 requestedByName: target.task?.requestedByName || target.action?.requestedByName || "",
                 requestedByUserId: target.task?.requestedByUserId,
-                hasOtherAssignee,
             });
             if (!allowed) {
                 return res.status(403).json({
-                    message: hasOtherAssignee
-                        ? "This task has an assignee. Delete is disabled."
-                        : deleteCategory === "General Task"
-                            ? "Only the person who requested this task can delete it."
-                            : "Only the person who requested this task, or an admin super user, can delete it.",
+                    message: "Only the person who requested this task, or an admin super user, can delete it.",
                 });
             }
         }

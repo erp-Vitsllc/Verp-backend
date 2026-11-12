@@ -5,11 +5,12 @@ const itemSubcategorySchema = new mongoose.Schema(
         categoryId: {
             type: mongoose.Schema.Types.ObjectId,
             ref: 'InventoryItemCategory',
+            required: true,
             index: true,
         },
         name: { type: String, required: true, trim: true },
         nameKey: { type: String, required: true },
-        imageData: { type: String, required: true },
+        imageData: { type: String, default: '' },
         imageName: { type: String, default: '' },
     },
     { timestamps: true },

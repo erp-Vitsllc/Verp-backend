@@ -60,14 +60,21 @@ async function nextItemCode() {
 }
 
 async function assertLinks({ categoryId, subcategoryId, itemOptionId, brandId }) {
+    const ids = [categoryId, subcategoryId, itemOptionId, brandId];
+    if (!ids.every((id) => mongoose.isValidObjectId(id))) {
+        throw httpError(400, 'Category, subcategory, item, and brand are required.');
+    }
     const [category, subcategory, option, brand] = await Promise.all([
         ItemCategory.findById(categoryId).select('_id'),
-        ItemSubcategory.findById(subcategoryId).select('_id'),
+        ItemSubcategory.findById(subcategoryId).select('_id categoryId'),
         ItemOption.findById(itemOptionId).select('subcategoryId'),
         ItemBrand.findById(brandId).select('_id'),
     ]);
     if (!category) throw httpError(400, 'Category was not found.');
     if (!subcategory) throw httpError(400, 'Subcategory was not found.');
+    if (subcategory.categoryId && String(subcategory.categoryId) !== String(categoryId)) {
+        throw httpError(400, 'Subcategory does not belong to the selected category.');
+    }
     if (!option || String(option.subcategoryId) !== String(subcategoryId)) {
         throw httpError(400, 'Item does not belong to the selected subcategory.');
     }
@@ -84,7 +91,6 @@ function readItemBody(body) {
         throw httpError(400, 'Category, subcategory, item, and brand are required.');
     }
     if (!description) throw httpError(400, 'Description is required.');
-    if (!modelNumber) throw httpError(400, 'Model number is required.');
     if (!INVENTORY_UNITS.includes(unitOfMeasure)) throw httpError(400, 'Choose a unit of measure.');
     if (!INVENTORY_STATUSES.includes(status)) throw httpError(400, 'Choose a valid status.');
     if (!Number.isFinite(reservationQuantity) || reservationQuantity < 0) {

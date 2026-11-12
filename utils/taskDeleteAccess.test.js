@@ -11,7 +11,7 @@ test("admin super user can delete system and workflow tasks", () => {
     assert.equal(viewerMayDeleteTask(admin, { taskCategory: "Workflow Task" }), true);
     assert.equal(viewerMayDeleteTask(admin, { taskCategory: "Work Flow Task" }), true);
     assert.equal(viewerMayDeleteTask(admin, { taskCategory: "System Task" }), true);
-    assert.equal(viewerMayDeleteTask(admin, { taskCategory: "General Task" }), false);
+    assert.equal(viewerMayDeleteTask(admin, { taskCategory: "General Task" }), true);
     assert.equal(viewerMayDeleteTask(admin, { taskCategory: "General Task", requestedByUserId: "admin-1" }), true);
     assert.equal(viewerMayDeleteTask(admin, { taskCategory: "System Task", closed: true }), false);
 });
@@ -41,7 +41,7 @@ test("an approved workflow and a completed general task are finished", () => {
     assert.equal(recordIsFinishedForDelete({ status: "Pending" }, { status: "Pending" }), false);
 });
 
-test("another assignee blocks delete, and a cleared assignee does not", () => {
+test("assignment does not turn delete off for the requester or an admin", () => {
     assert.equal(assigneeBlocksDelete({
         assigneeId: "64b000000000000000000002",
         assigneeName: "Fidha Sherin",
@@ -68,11 +68,16 @@ test("another assignee blocks delete, and a cleared assignee does not", () => {
         taskCategory: "General Task",
         requestedByUserId: "user-9",
         hasOtherAssignee: true,
-    }), false);
+    }), true);
     assert.equal(viewerMayDeleteTask(admin, {
-        taskCategory: "System Task",
+        taskCategory: "General Task",
         hasOtherAssignee: true,
     }), true);
+    assert.equal(viewerMayDeleteTask(other, {
+        taskCategory: "General Task",
+        requestedByName: "Shameem Abdul Kareem",
+        hasOtherAssignee: true,
+    }), false);
 });
 
 test("the requester can delete a general, system, or workflow task", () => {

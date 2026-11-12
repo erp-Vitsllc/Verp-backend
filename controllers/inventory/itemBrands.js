@@ -1,10 +1,35 @@
 import ItemBrand from '../../models/inventory/ItemBrand.js';
-import { cleanName, nameKey, sendError, readImage, httpError } from './http.js';
+import InventoryItem from '../../models/inventory/InventoryItem.js';
+import { distinctCount, nameKey, readImage, requireName, sendError } from './http.js';
+
+function presentBrand(row, stats) {
+    return {
+        _id: row._id,
+        name: row.name,
+        imageName: row.imageName || '',
+        categoryCount: distinctCount(stats?.categoryIds),
+        subcategoryCount: distinctCount(stats?.subcategoryIds),
+        itemCount: stats?.itemCount || 0,
+    };
+}
 
 export async function listBrands(_req, res) {
     try {
-        const brands = await ItemBrand.find().select('-imageData').sort({ name: 1 }).lean();
-        res.json(brands);
+        const [brands, itemStats] = await Promise.all([
+            ItemBrand.find().select('name imageName').sort({ name: 1 }).lean(),
+            InventoryItem.aggregate([
+                {
+                    $group: {
+                        _id: '$brandId',
+                        itemCount: { $sum: 1 },
+                        categoryIds: { $addToSet: '$categoryId' },
+                        subcategoryIds: { $addToSet: '$subcategoryId' },
+                    },
+                },
+            ]),
+        ]);
+        const itemMap = new Map(itemStats.map((row) => [String(row._id), row]));
+        res.json(brands.map((row) => presentBrand(row, itemMap.get(String(row._id)))));
     } catch (error) {
         sendError(res, error);
     }
@@ -12,8 +37,7 @@ export async function listBrands(_req, res) {
 
 export async function createBrand(req, res) {
     try {
-        const name = cleanName(req.body?.name);
-        if (!name) throw httpError(400, 'Brand name is required.');
+        const name = requireName(req.body?.name, 'Brand name');
         const image = readImage(req.body?.image, { required: false });
         const brand = await ItemBrand.create({
             name,
@@ -21,11 +45,7 @@ export async function createBrand(req, res) {
             imageData: image.imageData,
             imageName: image.imageName,
         });
-        res.status(201).json({
-            _id: brand._id,
-            name: brand.name,
-            imageName: brand.imageName,
-        });
+        res.status(201).json(presentBrand(brand, null));
     } catch (error) {
         sendError(res, error);
     }

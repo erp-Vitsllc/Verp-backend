@@ -85,8 +85,8 @@ export function statusAllowsOnlyAdminDelete(status) {
 
 /**
  * A completed or closed task of any type can be deleted only by an admin super user.
- * An open system or workflow task can be deleted by an admin super user.
- * The requester can delete an open General Task, System Task, or Workflow Task.
+ * An open task can be deleted by the requester or an admin super user.
+ * An assignee who is not the requester cannot delete, and assignment does not turn delete off for the requester or an admin.
  */
 export function viewerMayDeleteTask(viewer, {
     taskCategory = "",
@@ -95,14 +95,10 @@ export function viewerMayDeleteTask(viewer, {
     closed = false,
     finished = false,
     status = "",
-    hasOtherAssignee = false,
 } = {}) {
-    if (hasOtherAssignee) {
-        return Boolean(viewer?.superUser && adminMayDeleteCategory(taskCategory));
-    }
     if (finished || statusAllowsOnlyAdminDelete(status)) return Boolean(viewer?.superUser);
     if (closed) return false;
-    if (viewer?.superUser && adminMayDeleteCategory(taskCategory)) return true;
+    if (viewer?.superUser) return true;
     if (!requesterMayDeleteCategory(taskCategory)) return false;
     return viewerIsRequester(viewer, requestedByName, requestedByUserId);
 }
