@@ -12,6 +12,7 @@ const itemSubcategorySchema = new mongoose.Schema(
         nameKey: { type: String, required: true },
         imageData: { type: String, default: '' },
         imageName: { type: String, default: '' },
+        reservationQuantity: { type: Number, default: null },
     },
     { timestamps: true },
 );

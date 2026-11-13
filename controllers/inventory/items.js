@@ -9,17 +9,36 @@ import { cleanName, httpError, sendError } from './http.js';
 
 const ITEM_POPULATE = [
     { path: 'categoryId', select: 'name' },
-    { path: 'subcategoryId', select: 'name' },
+    { path: 'subcategoryId', select: 'name reservationQuantity' },
     { path: 'itemOptionId', select: 'name' },
     { path: 'brandId', select: 'name' },
 ];
 
 const DETAIL_POPULATE = [
     { path: 'categoryId', select: 'name' },
-    { path: 'subcategoryId', select: 'name imageData' },
+    { path: 'subcategoryId', select: 'name imageData reservationQuantity' },
     { path: 'itemOptionId', select: 'name' },
     { path: 'brandId', select: 'name' },
 ];
+
+const DISPLAY_STATUSES = ['Stock In', 'Low Stock', 'Out of Stock'];
+const STATUS_ORDER = {
+    'Out of Stock': 0,
+    'Low Stock': 1,
+    'Stock In': 2,
+};
+
+/** Status comes from on-hand stock and the subcategory reservation rule. */
+export function stockStatus(availableQuantity, reservationQuantity) {
+    const stock = Number(availableQuantity);
+    const onHand = Number.isFinite(stock) ? stock : 0;
+    if (onHand === 0) return 'Out of Stock';
+    if (reservationQuantity == null || reservationQuantity === '') return 'Stock In';
+    const reserve = Number(reservationQuantity);
+    if (!Number.isFinite(reserve)) return 'Stock In';
+    if (onHand < reserve) return 'Low Stock';
+    return 'Stock In';
+}
 
 function refId(value) {
     if (!value) return '';
@@ -32,13 +51,15 @@ function presentItem(row) {
         _id: row._id,
         itemCode: row.itemCode,
         description: row.description,
+        moreDescription: row.moreDescription || '',
+        copyToDescription: Boolean(row.copyToDescription),
         modelNumber: row.modelNumber,
         unitOfMeasure: row.unitOfMeasure,
         manufacturerPartNumber: row.manufacturerPartNumber || '',
         reservationQuantity: row.reservationQuantity || 0,
         hsCode: row.hsCode || '',
         countryOfOrigin: row.countryOfOrigin || '',
-        status: row.status,
+        status: stockStatus(row.availableQuantity, row.subcategoryId?.reservationQuantity),
         availableQuantity: row.availableQuantity || 0,
         categoryId: refId(row.categoryId),
         subcategoryId: refId(row.subcategoryId),
@@ -60,14 +81,13 @@ async function nextItemCode() {
 }
 
 async function assertLinks({ categoryId, subcategoryId, itemOptionId, brandId }) {
-    const ids = [categoryId, subcategoryId, itemOptionId, brandId];
-    if (!ids.every((id) => mongoose.isValidObjectId(id))) {
-        throw httpError(400, 'Category, subcategory, item, and brand are required.');
+    if (![categoryId, subcategoryId, brandId].every((id) => mongoose.isValidObjectId(id))) {
+        throw httpError(400, 'Category, subcategory, and brand are required.');
     }
     const [category, subcategory, option, brand] = await Promise.all([
         ItemCategory.findById(categoryId).select('_id'),
         ItemSubcategory.findById(subcategoryId).select('_id categoryId'),
-        ItemOption.findById(itemOptionId).select('subcategoryId'),
+        itemOptionId ? ItemOption.findById(itemOptionId).select('subcategoryId') : null,
         ItemBrand.findById(brandId).select('_id'),
     ]);
     if (!category) throw httpError(400, 'Category was not found.');
@@ -75,7 +95,7 @@ async function assertLinks({ categoryId, subcategoryId, itemOptionId, brandId })
     if (subcategory.categoryId && String(subcategory.categoryId) !== String(categoryId)) {
         throw httpError(400, 'Subcategory does not belong to the selected category.');
     }
-    if (!option || String(option.subcategoryId) !== String(subcategoryId)) {
+    if (itemOptionId && (!option || String(option.subcategoryId) !== String(subcategoryId))) {
         throw httpError(400, 'Item does not belong to the selected subcategory.');
     }
     if (!brand) throw httpError(400, 'Brand was not found.');
@@ -87,11 +107,18 @@ function readItemBody(body) {
     const unitOfMeasure = cleanName(body?.unitOfMeasure);
     const status = cleanName(body?.status) || 'Active';
     const reservationQuantity = Number(body?.reservationQuantity ?? 0);
-    if (!body?.categoryId || !body?.subcategoryId || !body?.itemOptionId || !body?.brandId) {
-        throw httpError(400, 'Category, subcategory, item, and brand are required.');
+    const hasItemOption = body != null && Object.prototype.hasOwnProperty.call(body, 'itemOptionId');
+    const itemOptionId = hasItemOption ? (body.itemOptionId || null) : undefined;
+    if (!body?.categoryId || !body?.subcategoryId || !body?.brandId) {
+        throw httpError(400, 'Category, subcategory, and brand are required.');
+    }
+    if (hasItemOption && itemOptionId && !mongoose.isValidObjectId(itemOptionId)) {
+        throw httpError(400, 'Item was not found.');
     }
     if (!description) throw httpError(400, 'Description is required.');
-    if (!INVENTORY_UNITS.includes(unitOfMeasure)) throw httpError(400, 'Choose a unit of measure.');
+    if (!unitOfMeasure || unitOfMeasure === 'None' || !INVENTORY_UNITS.includes(unitOfMeasure)) {
+        throw httpError(400, 'Choose a unit of measure.');
+    }
     if (!INVENTORY_STATUSES.includes(status)) throw httpError(400, 'Choose a valid status.');
     if (!Number.isFinite(reservationQuantity) || reservationQuantity < 0) {
         throw httpError(400, 'Reservation quantity must be zero or more.');
@@ -99,9 +126,11 @@ function readItemBody(body) {
     return {
         categoryId: body.categoryId,
         subcategoryId: body.subcategoryId,
-        itemOptionId: body.itemOptionId,
+        ...(hasItemOption ? { itemOptionId } : {}),
         brandId: body.brandId,
         description,
+        moreDescription: cleanName(body?.moreDescription),
+        copyToDescription: body?.copyToDescription === true,
         modelNumber,
         unitOfMeasure,
         manufacturerPartNumber: cleanName(body?.manufacturerPartNumber),
@@ -120,10 +149,13 @@ export async function listItems(req, res) {
         if (req.query.categoryId && mongoose.isValidObjectId(req.query.categoryId)) {
             filter.categoryId = req.query.categoryId;
         }
+        if (req.query.subcategoryId && mongoose.isValidObjectId(req.query.subcategoryId)) {
+            filter.subcategoryId = req.query.subcategoryId;
+        }
         if (req.query.brandId && mongoose.isValidObjectId(req.query.brandId)) {
             filter.brandId = req.query.brandId;
         }
-        if (INVENTORY_STATUSES.includes(req.query.status)) filter.status = req.query.status;
+        const statusQuery = DISPLAY_STATUSES.includes(req.query.status) ? req.query.status : '';
         const search = cleanName(req.query.search);
         if (search) {
             const regex = new RegExp(escapeRegex(search), 'i');
@@ -142,18 +174,19 @@ export async function listItems(req, res) {
                 { itemOptionId: { $in: options.map((row) => row._id) } },
             ];
         }
-        const [total, rows] = await Promise.all([
-            InventoryItem.countDocuments(filter),
-            InventoryItem.find(filter)
-                .sort({ itemCode: 1 })
-                .skip((page - 1) * limit)
-                .limit(limit)
-                .populate(ITEM_POPULATE)
-                .lean(),
-        ]);
+        const rows = await InventoryItem.find(filter).populate(ITEM_POPULATE).lean();
+        const matched = rows
+            .map(presentItem)
+            .filter((row) => !statusQuery || row.status === statusQuery)
+            .sort((left, right) => {
+                const statusGap = (STATUS_ORDER[left.status] ?? 9) - (STATUS_ORDER[right.status] ?? 9);
+                if (statusGap) return statusGap;
+                return String(left.itemCode || '').localeCompare(String(right.itemCode || ''));
+            });
+        const start = (page - 1) * limit;
         res.json({
-            items: rows.map(presentItem),
-            total,
+            items: matched.slice(start, start + limit),
+            total: matched.length,
             page,
             limit,
         });

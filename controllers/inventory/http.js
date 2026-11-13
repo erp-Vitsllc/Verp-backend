@@ -38,12 +38,16 @@ export function requireName(value, label) {
     return name;
 }
 
-export function distinctCount(values) {
+export function idStrings(values) {
     const ids = new Set();
     (Array.isArray(values) ? values : []).forEach((value) => {
         if (value) ids.add(String(value));
     });
-    return ids.size;
+    return [...ids];
+}
+
+export function distinctCount(values) {
+    return idStrings(values).length;
 }
 
 export function readImage(image, { required }) {

@@ -1,15 +1,17 @@
 import ItemCategory from '../../models/inventory/ItemCategory.js';
 import ItemSubcategory from '../../models/inventory/ItemSubcategory.js';
 import InventoryItem from '../../models/inventory/InventoryItem.js';
-import { distinctCount, nameKey, readImage, requireName, sendError } from './http.js';
+import { idStrings, nameKey, readImage, requireName, sendError } from './http.js';
 
 function presentCategory(row, subcategoryCount, stats) {
+    const brandIds = idStrings(stats?.brandIds);
     return {
         _id: row._id,
         name: row.name,
         imageName: row.imageName || '',
         subcategoryCount: subcategoryCount || 0,
-        brandCount: distinctCount(stats?.brandIds),
+        brandIds,
+        brandCount: brandIds.length,
         itemCount: stats?.itemCount || 0,
     };
 }

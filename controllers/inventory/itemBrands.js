@@ -1,14 +1,18 @@
 import ItemBrand from '../../models/inventory/ItemBrand.js';
 import InventoryItem from '../../models/inventory/InventoryItem.js';
-import { distinctCount, nameKey, readImage, requireName, sendError } from './http.js';
+import { idStrings, nameKey, readImage, requireName, sendError } from './http.js';
 
 function presentBrand(row, stats) {
+    const categoryIds = idStrings(stats?.categoryIds);
+    const subcategoryIds = idStrings(stats?.subcategoryIds);
     return {
         _id: row._id,
         name: row.name,
         imageName: row.imageName || '',
-        categoryCount: distinctCount(stats?.categoryIds),
-        subcategoryCount: distinctCount(stats?.subcategoryIds),
+        categoryIds,
+        categoryCount: categoryIds.length,
+        subcategoryIds,
+        subcategoryCount: subcategoryIds.length,
         itemCount: stats?.itemCount || 0,
     };
 }

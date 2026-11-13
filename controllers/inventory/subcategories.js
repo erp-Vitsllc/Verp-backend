@@ -2,20 +2,33 @@ import mongoose from 'mongoose';
 import ItemCategory from '../../models/inventory/ItemCategory.js';
 import ItemSubcategory from '../../models/inventory/ItemSubcategory.js';
 import InventoryItem from '../../models/inventory/InventoryItem.js';
-import { distinctCount, httpError, nameKey, readImage, requireName, sendError } from './http.js';
+import { httpError, idStrings, nameKey, readImage, requireName, sendError } from './http.js';
+
+function readReservationQuantity(value) {
+    if (value == null || value === '') return null;
+    const count = Number(value);
+    if (!Number.isInteger(count) || count < 0) {
+        throw httpError(400, 'Enter a whole reservation count of zero or more.');
+    }
+    return count;
+}
 
 function presentSubcategory(row, stats) {
-    const categoryIds = [
+    const categoryIds = idStrings([
         ...(row.categoryId ? [row.categoryId] : []),
         ...(stats?.categoryIds || []),
-    ];
+    ]);
+    const brandIds = idStrings(stats?.brandIds);
     return {
         _id: row._id,
         name: row.name,
         categoryId: row.categoryId ? String(row.categoryId) : '',
         imageName: row.imageName || '',
-        categoryCount: distinctCount(categoryIds),
-        brandCount: distinctCount(stats?.brandIds),
+        reservationQuantity: row.reservationQuantity == null ? null : row.reservationQuantity,
+        categoryIds,
+        categoryCount: categoryIds.length,
+        brandIds,
+        brandCount: brandIds.length,
         itemCount: stats?.itemCount || 0,
     };
 }
@@ -30,7 +43,7 @@ export async function listSubcategories(req, res) {
             filter.categoryId = req.query.categoryId;
         }
         const rows = await ItemSubcategory.find(filter)
-            .select('name categoryId imageName')
+            .select('name categoryId imageName reservationQuantity')
             .sort({ name: 1 })
             .lean();
         const ids = rows.map((row) => row._id);
@@ -64,12 +77,14 @@ export async function createSubcategory(req, res) {
         const category = await ItemCategory.findById(categoryId).select('_id');
         if (!category) throw httpError(400, 'Category was not found.');
         const image = readImage(req.body?.image, { required: false });
+        const reservationQuantity = readReservationQuantity(req.body?.reservationQuantity);
         const row = await ItemSubcategory.create({
             categoryId,
             name,
             nameKey: nameKey(name),
             imageData: image.imageData,
             imageName: image.imageName,
+            reservationQuantity,
         });
         res.status(201).json(presentSubcategory(row, null));
     } catch (error) {
