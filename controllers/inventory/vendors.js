@@ -3,6 +3,7 @@ import ZohoVendor from '../../models/ZohoVendor.js';
 import InventoryVendor from '../../models/inventory/InventoryVendor.js';
 import InventoryVendorContact from '../../models/inventory/InventoryVendorContact.js';
 import { fetchVendorContact, getZohoOrganizationId } from '../../services/zohoService.js';
+import { isReqUserSystemSuperUser } from '../../utils/systemSuperUser.js';
 import { presentContact } from './vendorContacts.js';
 import { cleanName, httpError, nameKey, sendError } from './http.js';
 import { escapeRegex } from '../../utils/regexHelper.js';
@@ -144,7 +145,7 @@ function kept(next, previous) {
 }
 
 async function refreshVendorFromZoho(row) {
-    if (!row?.zohoContactId) return row;
+    if (!row?.zohoContactId) return { vendor: row, zohoRaw: {} };
     const source = await zohoSource({
         ...row,
         companyName: row.name,
@@ -171,7 +172,75 @@ async function refreshVendorFromZoho(row) {
         status: fresh.status || row.status || 'Active',
     };
     const updated = await InventoryVendor.findByIdAndUpdate(row._id, patch, { new: true }).lean();
-    return updated || { ...row, ...patch };
+    return {
+        vendor: updated || { ...row, ...patch },
+        zohoRaw: source.zohoRaw && typeof source.zohoRaw === 'object' ? source.zohoRaw : {},
+    };
+}
+
+function zohoContactRows(raw, vendor) {
+    const people = Array.isArray(raw?.contact_persons) ? raw.contact_persons : [];
+    const rows = people.map((person, index) => {
+        const name = personName(person);
+        const emails = [text(person?.email)].filter(Boolean);
+        const phones = [text(person?.phone), text(person?.mobile)].filter(Boolean);
+        if (!name && !emails.length && !phones.length) return null;
+        return {
+            id: `zoho-${person?.contact_person_id || index}`,
+            name: name || vendor.primaryContact || 'Contact',
+            designation: text(person?.designation || person?.department),
+            emails,
+            phones,
+            isPrimary: Boolean(person?.is_primary_contact),
+            brands: [],
+            lines: [],
+            source: 'zoho',
+        };
+    }).filter(Boolean);
+
+    if (!rows.some((row) => row.isPrimary) && rows.length) {
+        const match = vendor.primaryContact
+            ? rows.find((row) => row.name.toLowerCase() === vendor.primaryContact.toLowerCase())
+            : null;
+        (match || rows[0]).isPrimary = true;
+    }
+
+    if (!rows.length && (vendor.primaryContact || vendor.email || vendor.phone)) {
+        rows.push({
+            id: 'zoho-primary',
+            name: vendor.primaryContact || 'Contact',
+            designation: '',
+            emails: vendor.email ? [vendor.email] : [],
+            phones: vendor.phone ? [vendor.phone] : [],
+            isPrimary: true,
+            brands: [],
+            lines: [],
+            source: 'zoho',
+        });
+    }
+
+    const primary = rows.find((row) => row.isPrimary);
+    if (primary) {
+        if (!primary.emails.length && vendor.email) primary.emails = [vendor.email];
+        if (!primary.phones.length && vendor.phone) primary.phones = [vendor.phone];
+    }
+    return rows;
+}
+
+function mergeContacts(localRows, zohoRows) {
+    const extras = zohoRows.filter((zoho) => !localRows.some((local) => {
+        const zohoEmails = zoho.emails.map((email) => email.toLowerCase());
+        if (zohoEmails.length && local.emails.some((email) => zohoEmails.includes(email.toLowerCase()))) return true;
+        return zoho.name && local.name && zoho.name.toLowerCase() === local.name.toLowerCase();
+    }));
+    return [...localRows, ...extras].sort((left, right) => {
+        const rank = (row) => {
+            if (row.isPrimary && row.source !== 'zoho') return 0;
+            if (row.isPrimary) return 1;
+            return 2;
+        };
+        return rank(left) - rank(right);
+    });
 }
 
 function filled(values) {
@@ -269,15 +338,31 @@ export async function getVendor(req, res) {
         if (!mongoose.isValidObjectId(req.params.id)) throw httpError(404, 'Vendor was not found.');
         const row = await InventoryVendor.findById(req.params.id).lean();
         if (!row) throw httpError(404, 'Vendor was not found.');
-        const fresh = await refreshVendorFromZoho(row);
+        const { vendor: fresh, zohoRaw } = await refreshVendorFromZoho(row);
         const [contacts, primaryMap] = await Promise.all([
             InventoryVendorContact.find({ vendorId: fresh._id }).sort({ isPrimary: -1, createdAt: 1 }).lean(),
             primaryContactsFor([fresh._id]),
         ]);
+        const localContacts = contacts.map((contact) => ({ ...presentContact(contact), source: 'local' }));
         res.json({
             ...presentVendor(fresh, primaryMap.get(String(fresh._id))),
-            contacts: contacts.map(presentContact),
+            contacts: mergeContacts(localContacts, zohoContactRows(zohoRaw, fresh)),
         });
+    } catch (error) {
+        sendError(res, error);
+    }
+}
+
+export async function deleteVendor(req, res) {
+    try {
+        if (!(await isReqUserSystemSuperUser(req.user))) {
+            throw httpError(403, 'Only an admin super user can delete a vendor.');
+        }
+        if (!mongoose.isValidObjectId(req.params.id)) throw httpError(404, 'Vendor was not found.');
+        const row = await InventoryVendor.findByIdAndDelete(req.params.id).lean();
+        if (!row) throw httpError(404, 'Vendor was not found.');
+        await InventoryVendorContact.deleteMany({ vendorId: row._id });
+        res.json({ ok: true });
     } catch (error) {
         sendError(res, error);
     }

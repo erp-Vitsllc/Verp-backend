@@ -6,7 +6,7 @@ import { listSubcategories, createSubcategory } from '../controllers/inventory/s
 import { listItemOptions, createItemOption } from '../controllers/inventory/itemOptions.js';
 import { listBrands, createBrand } from '../controllers/inventory/itemBrands.js';
 import { listItems, getItem, createItem, updateItem } from '../controllers/inventory/items.js';
-import { createVendor, getVendor, listVendors, nextVendorCode, previewZohoVendor } from '../controllers/inventory/vendors.js';
+import { createVendor, deleteVendor, getVendor, listVendors, nextVendorCode, previewZohoVendor } from '../controllers/inventory/vendors.js';
 import { createVendorContact, updateVendorContact } from '../controllers/inventory/vendorContacts.js';
 
 const router = express.Router();
@@ -36,6 +36,7 @@ router.get('/vendors/zoho-preview', protect, viewVendors, previewZohoVendor);
 router.get('/vendors', protect, viewVendors, listVendors);
 router.post('/vendors', protect, createVendors, createVendor);
 router.get('/vendors/:id', protect, viewVendors, getVendor);
+router.delete('/vendors/:id', protect, deleteVendor);
 router.post('/vendors/:id/contacts', protect, createVendors, createVendorContact);
 router.put('/vendors/:id/contacts/:contactId', protect, editVendors, updateVendorContact);
 
