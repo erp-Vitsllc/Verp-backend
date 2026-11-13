@@ -1588,6 +1588,7 @@ export const getTaskManagerNotifications = async (req, res) => {
                 alsoOwner: overlay?._id ? { kind: "manual", id: String(overlay._id) } : undefined,
                 requestDate: requestedAt,
                 reassignedAt: latestReassignedAt(overlay),
+                reviewReceivedAt: overlay?.closeRequest?.completionRequestedAt || null,
                 completionDate: overlay?.completionDate || action.actionedDate || null,
                 taskCategory: category,
                 accessPath: accessPathFor(destination, action.requestId, action.subjectEmployeeId, {
@@ -1797,6 +1798,7 @@ export const getTaskManagerNotifications = async (req, res) => {
                 ...manualNumberState(row, actionById, savedByActivity),
                 requestDate: requestedAt,
                 reassignedAt: latestReassignedAt(row),
+                reviewReceivedAt: row?.closeRequest?.completionRequestedAt || null,
                 completionDate: row.completionDate || null,
                 taskCategory: category,
                 accessPath: accessPathFor(destination, "", ""),
