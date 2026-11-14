@@ -1,5 +1,6 @@
 import EmployeeContact from '../models/EmployeeContact.js';
 import { getEventChannels } from './notificationEmailPermission.js';
+import { AUTOMATED_WHATSAPP, sendAutomatedWhatsApp } from './whatsappAutomation.js';
 import { usableWhatsAppNumber } from './normalizeWhatsAppPhone.js';
 import { isFleetVehicleAsset } from './assetApprovalHelpers.js';
 import { buildEmailDedupeKey, sendErpEmail } from './emailDispatch.js';
@@ -67,7 +68,15 @@ async function sendPdfToCompanyEmail({ eventKey, employee, companyEmail, pdfBuff
     return { sent: result?.sent === true, reason: result?.sent ? 'email' : result?.reason || 'email_failed', channel: 'email' };
 }
 
-async function sendToolsWhatsAppPdf({ eventKey, employee, pdfBuffer, filename, caption }) {
+async function sendToolsWhatsAppPdf({
+    eventKey,
+    employee,
+    pdfBuffer,
+    filename,
+    caption,
+    templateName,
+    templateParams = [],
+}) {
     const emp = await resolveEmployeeRecord(employee);
     if (!emp?.employeeId) {
         return { sent: false, reason: 'no_employee', channel: 'whatsapp' };
@@ -88,18 +97,20 @@ async function sendToolsWhatsAppPdf({ eventKey, employee, pdfBuffer, filename, c
     }
 
     const name = [emp.firstName, emp.lastName].filter(Boolean).join(' ').trim();
-    const { sendDocumentMessage } = await import('../services/whatsappService.js');
-    const result = await sendDocumentMessage(
+    const result = await sendAutomatedWhatsApp({
         phone,
-        { buffer: pdfBuffer, filename, caption },
-        {
+        templateName,
+        bodyParams: templateParams,
+        document: { buffer: pdfBuffer, filename, mimeType: 'application/pdf' },
+        extras: {
             source: 'auto',
             eventKey,
             skipPaidChannelCheck: true,
             employeeId: emp.employeeId,
             contactName: name,
+            logBody: caption,
         },
-    );
+    });
     if (!result?.success) {
         console.warn('[ToolsWhatsApp] send failed', emp.employeeId, result?.error || '');
         return { sent: false, reason: result?.error || 'send_failed', channel: 'whatsapp' };
@@ -110,7 +121,17 @@ async function sendToolsWhatsAppPdf({ eventKey, employee, pdfBuffer, filename, c
 /**
  * Company email gets the PDF. WhatsApp is used only when there is no company email.
  */
-async function deliverToolsPdf({ eventKey, employee, pdfBuffer, filename, caption, subject, html }) {
+async function deliverToolsPdf({
+    eventKey,
+    employee,
+    pdfBuffer,
+    filename,
+    caption,
+    subject,
+    html,
+    templateName = '',
+    templateParams = [],
+}) {
     const emp = await resolveEmployeeRecord(employee);
     if (!emp?.employeeId) return { sent: false, reason: 'no_employee', channel: 'none' };
     if (!pdfBuffer?.length) return { sent: false, reason: 'no_pdf', channel: 'none' };
@@ -133,7 +154,15 @@ async function deliverToolsPdf({ eventKey, employee, pdfBuffer, filename, captio
         };
     }
 
-    return sendToolsWhatsAppPdf({ eventKey, employee: emp, pdfBuffer, filename, caption });
+    return sendToolsWhatsAppPdf({
+        eventKey,
+        employee: emp,
+        pdfBuffer,
+        filename,
+        caption,
+        templateName,
+        templateParams,
+    });
 }
 
 export async function sendToolsHandoverReportWhatsApp({
@@ -155,6 +184,8 @@ export async function sendToolsHandoverReportWhatsApp({
         caption: assetLabel,
         subject: assetLabel,
         html: `<p>Please find the asset assignment handover PDF attached.</p><p>${assetLabel}</p>`,
+        templateName: AUTOMATED_WHATSAPP.toolsHandover,
+        templateParams: [],
     });
 }
 
@@ -163,8 +194,12 @@ export async function sendToolsMonthlyReportWhatsApp({
     pdfBuffer,
     filename = 'tools-monthly-report.pdf',
     caption = '',
+    monthLabel = '',
+    reportedBy = '',
 } = {}) {
     const label = String(caption || '').trim() || 'Tools monthly report — assigned assets';
+    const month = String(monthLabel || '').trim() || 'this month';
+    const reporter = String(reportedBy || '').trim() || 'Asset Controller';
     return deliverToolsPdf({
         eventKey: TOOLS_MONTHLY_REPORT_EVENT,
         employee,
@@ -173,5 +208,7 @@ export async function sendToolsMonthlyReportWhatsApp({
         caption: label,
         subject: label,
         html: `<p>Please find the monthly assigned-asset PDF attached.</p><p>${label}</p>`,
+        templateName: AUTOMATED_WHATSAPP.toolsMonthly,
+        templateParams: [month, reporter],
     });
 }

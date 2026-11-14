@@ -18,6 +18,7 @@ const inventoryVendorSchema = new mongoose.Schema(
         vendorType: { type: String, default: '', trim: true },
         paymentTerms: { type: String, default: '', trim: true },
         status: { type: String, enum: ['Active', 'Inactive'], default: 'Active' },
+        suppressedZohoContactIds: { type: [String], default: [] },
     },
     { timestamps: true },
 );

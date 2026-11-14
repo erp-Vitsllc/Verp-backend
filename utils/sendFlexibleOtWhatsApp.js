@@ -2,6 +2,7 @@ import Attendance from '../models/Attendance.js';
 import EmployeeBasic from '../models/EmployeeBasic.js';
 import { isWhatsAppEnabled } from '../config/whatsapp.js';
 import { resolveEmployeeWhatsAppPhone } from './sendToolsAssetWhatsAppReport.js';
+import { AUTOMATED_WHATSAPP, sendAutomatedWhatsApp } from './whatsappAutomation.js';
 
 function safeName(value) {
     return String(value || '')
@@ -38,6 +39,12 @@ export function buildFlexibleOtWhatsAppText({
     const approved = approvedOtHrsLabel(approvedHours);
     const total = approvedOtHrsLabel(monthTotalHours);
     return `${hello} you have approved ${approved} OT. Total OT is ${total}.`;
+}
+
+function displayDate(dateKey) {
+    const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(dateKey || '').trim());
+    if (!match) return 'this date';
+    return `${match[3]}/${match[2]}/${match[1]}`;
 }
 
 function monthBounds(dateKey) {
@@ -121,13 +128,24 @@ export async function notifyEmployeeFlexibleOtWhatsApp({
             monthTotalHours,
         });
 
-        const { sendTextMessage } = await import('../services/whatsappService.js');
-        const result = await sendTextMessage(phone, text, {
-            source: 'auto',
-            skipPaidChannelCheck: true,
-            actor: noticeActor(actor),
-            employeeId,
-            contactName: [employee?.firstName, employee?.lastName].filter(Boolean).join(' ').trim(),
+        const result = await sendAutomatedWhatsApp({
+            phone,
+            templateName: AUTOMATED_WHATSAPP.otEarned,
+            bodyParams: [
+                safeName(employee?.firstName) || 'there',
+                approvedOtHrsLabel(approvedHours),
+                displayDate(record?.date),
+                approvedOtHrsLabel(monthTotalHours),
+            ],
+            extras: {
+                source: 'auto',
+                skipPaidChannelCheck: true,
+                actor: noticeActor(actor),
+                employeeId,
+                contactName: [employee?.firstName, employee?.lastName].filter(Boolean).join(' ').trim(),
+                logBody: text,
+            },
+            session: { text },
         });
         if (!result?.success) {
             console.warn('[FlexibleOtWhatsApp] send failed', employeeId, safeLogError(result?.error));

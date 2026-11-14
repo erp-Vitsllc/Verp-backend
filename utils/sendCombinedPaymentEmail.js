@@ -6,6 +6,7 @@ import Loan from '../models/Loan.js';
 import Payment from '../models/Payment.js';
 import UtilityBillPayment from '../models/UtilityBillPayment.js';
 import { resolveEmployeeWhatsAppPhone } from './sendToolsAssetWhatsAppReport.js';
+import { AUTOMATED_WHATSAPP, sendAutomatedWhatsApp } from './whatsappAutomation.js';
 import { resolveEmployeeFinePayableAmount } from './finePayableAmount.js';
 import { resolveZohoAttachmentUpload } from './resolveZohoAttachmentUpload.js';
 
@@ -70,27 +71,30 @@ async function deliverPaymentReceiptWhatsApp({
 
     const isFine = String(payment?.relatedEntityType || '') === 'Fine';
     const ref = String(payment?.referenceId || payment?.paymentId || kindLabel || 'payment').trim();
-    const { sendDocumentTemplateMessage } = await import('../services/whatsappService.js');
     for (const file of files) {
-        const result = await sendDocumentTemplateMessage(
+        const result = await sendAutomatedWhatsApp({
             phone,
-            {
+            templateName: isFine ? AUTOMATED_WHATSAPP.fineApproved : AUTOMATED_WHATSAPP.paymentApproved,
+            bodyParams: isFine
+                ? [ref]
+                : [`${kindLabel} ${ref}`.trim(), String(amountLabel || '0').replace(/,/g, '')],
+            document: {
                 buffer: file.content,
                 filename: file.filename || `Receipt_${payment.paymentId}.pdf`,
                 mimeType: file.contentType || 'application/pdf',
-                templateName: isFine ? 'verp_fine_approved' : 'verp_payment_approved',
-                languageCode: 'en',
-                bodyParams: isFine
-                    ? [ref]
-                    : [`${kindLabel} ${ref}`.trim(), String(amountLabel || '0').replace(/,/g, '')],
             },
-            {
+            extras: {
                 source: 'auto',
                 employeeId: code,
                 contactName: `${employee.firstName || ''} ${employee.lastName || ''}`.trim(),
                 logBody: `Receipt ${payment.paymentId} for ${code} ${ref}`,
             },
-        );
+            session: {
+                caption: `Receipt ${payment.paymentId} for ${ref}`,
+                filename: file.filename || `Receipt_${payment.paymentId}.pdf`,
+                mimeType: file.contentType || 'application/pdf',
+            },
+        });
         if (!result?.success) {
             console.warn(
                 '[PaymentNotification] WhatsApp receipt failed',

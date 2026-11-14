@@ -15,6 +15,7 @@ const handlingLineSchema = new mongoose.Schema(
 const inventoryVendorContactSchema = new mongoose.Schema(
     {
         vendorId: { type: mongoose.Schema.Types.ObjectId, ref: 'InventoryVendor', required: true, index: true },
+        zohoPersonId: { type: String, default: '', trim: true },
         name: { type: String, required: true, trim: true },
         designation: { type: String, default: '', trim: true },
         emails: { type: [String], default: [] },

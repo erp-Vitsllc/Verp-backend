@@ -67,3 +67,10 @@ export function readImage(image, { required }) {
         imageName: String(image.name || '').slice(0, 180),
     };
 }
+
+/** Keep the saved photo unless the request includes a replacement. */
+export function optionalImagePatch(body) {
+    if (!body?.image?.data) return {};
+    const image = readImage(body.image, { required: false });
+    return { imageData: image.imageData, imageName: image.imageName };
+}

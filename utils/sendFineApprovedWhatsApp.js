@@ -1,4 +1,5 @@
 import { getEventChannels } from './notificationEmailPermission.js';
+import { AUTOMATED_WHATSAPP, sendAutomatedWhatsApp } from './whatsappAutomation.js';
 import { resolveEmployeeWhatsAppPhone } from './sendToolsAssetWhatsAppReport.js';
 
 export const FINE_APPROVED_EVENT = 'hrm.fine.approved';
@@ -24,7 +25,7 @@ async function finePdfAlreadySent(employeeId, caption) {
     const existing = await WhatsAppMessage.findOne({
         employeeId: String(employeeId || '').trim(),
         direction: 'out',
-        messageType: 'document',
+        messageType: { $in: ['document', 'template'] },
         body: caption,
         status: { $in: ['queued', 'sent', 'delivered', 'read'] },
     })
@@ -68,19 +69,22 @@ export async function sendFineApprovedWhatsApp({
     if (!allowResend && await finePdfAlreadySent(employee.employeeId, caption)) {
         return { sent: false, reason: 'already_sent' };
     }
-    const { sendDocumentMessage } = await import('../services/whatsappService.js');
-    const result = await sendDocumentMessage(
+    const result = await sendAutomatedWhatsApp({
         phone,
-        { buffer: pdfBuffer, filename: safeName, caption },
-        {
+        templateName: AUTOMATED_WHATSAPP.fineApproved,
+        bodyParams: [String(fine?.fineId || 'fine').trim() || 'fine'],
+        document: { buffer: pdfBuffer, filename: safeName, mimeType: 'application/pdf' },
+        extras: {
             source: 'auto',
             eventKey: FINE_APPROVED_EVENT,
             skipPaidChannelCheck: true,
             employeeId: employee.employeeId,
             contactName: employeeDisplayName(employee),
             mediaUrl: approvalPdfUrl(fine),
+            logBody: caption,
         },
-    );
+        session: { caption, filename: safeName },
+    });
     if (!result?.success) {
         console.warn('[FineApprovedWhatsApp] send failed', employee.employeeId, result?.error || '');
         return { sent: false, reason: result?.error || 'send_failed' };

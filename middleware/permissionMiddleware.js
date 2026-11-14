@@ -41,6 +41,37 @@ export const checkPermissionAny = (moduleId, permissionTypes = ['view']) => {
     };
 };
 
+/**
+ * Use moduleId when the group has saved that row. Otherwise use parentModuleId,
+ * so older groups keep working until Contact is saved on the group.
+ */
+export const checkModuleOrParent = (moduleId, parentModuleId, permissionType = 'view') => {
+    return async (req, res, next) => {
+        try {
+            const userId = req.user?.id;
+            if (!userId) {
+                return res.status(401).json({ message: "Not authorized, no user found" });
+            }
+            if (await isPortalSuperUser(req)) {
+                return next();
+            }
+            const { getUserPermissions, hasPermission } = await import("../services/permissionService.js");
+            const userPermissions = await getUserPermissions(userId);
+            const stored = userPermissions?.permissions || {};
+            const target = Object.prototype.hasOwnProperty.call(stored, moduleId) ? moduleId : parentModuleId;
+            if (await hasPermission(userId, target, permissionType)) {
+                return next();
+            }
+            return res.status(403).json({
+                message: `Access denied. You don't have ${permissionType} permission for ${moduleId}`,
+            });
+        } catch (error) {
+            console.error('Error checking permission:', error);
+            return res.status(500).json({ message: "Error checking permissions" });
+        }
+    };
+};
+
 export const checkPermission = (moduleId, permissionType = 'view') => {
     return async (req, res, next) => {
         try {

@@ -63,38 +63,86 @@ function ok(data) {
     };
 }
 
-const templateTextCache = new Map();
+const TEMPLATE_SPEC_TTL_MS = 5 * 60 * 1000;
+const templateSpecCache = new Map();
 
-async function fetchTemplateBodyText(templateName) {
+function templateBodyParamCount(text) {
+    const numbers = [...String(text || '').matchAll(/\{\{(\d+)\}\}/g)].map((match) => Number(match[1]));
+    return numbers.length ? Math.max(...numbers) : 0;
+}
+
+function parseTemplateSpec(row) {
+    const components = Array.isArray(row?.components) ? row.components : [];
+    const header = components.find((item) => String(item?.type || '').toUpperCase() === 'HEADER');
+    const body = components.find((item) => String(item?.type || '').toUpperCase() === 'BODY');
+    const bodyText = String(body?.text || '').trim();
+    return {
+        name: String(row?.name || '').trim(),
+        status: String(row?.status || '').trim(),
+        approved: String(row?.status || '').toUpperCase() === 'APPROVED',
+        language: String(row?.language || 'en').trim() || 'en',
+        headerFormat: String(header?.format || '').toUpperCase(),
+        body: bodyText,
+        bodyParamCount: templateBodyParamCount(bodyText),
+    };
+}
+
+function pickTemplateRow(rows, name) {
+    const sameName = rows.filter((row) => String(row?.name || '').trim() === name);
+    return sameName.find((row) => row.language === 'en' && String(row.status || '').toUpperCase() === 'APPROVED')
+        || sameName.find((row) => String(row.status || '').toUpperCase() === 'APPROVED')
+        || sameName[0]
+        || null;
+}
+
+/** Approved template shape. Cached so automated sends do not look the template up on every call. */
+export async function loadWhatsAppTemplate(templateName) {
     const name = String(templateName || '').trim();
-    if (!name) return '';
-    if (templateTextCache.has(name)) return templateTextCache.get(name);
+    if (!name) return null;
+    const cached = templateSpecCache.get(name);
+    if (cached && Date.now() - cached.at < TEMPLATE_SPEC_TTL_MS) return cached.spec;
 
     const config = getWhatsAppConfig();
     if (!config.wabaId || !config.accessToken || !config.apiVersion) {
-        templateTextCache.set(name, '');
-        return '';
+        return null;
     }
 
     try {
-        const url = `${config.apiUrl}/${config.apiVersion}/${config.wabaId}/message_templates?name=${encodeURIComponent(name)}&fields=name,components,language`;
+        const url = `${config.apiUrl}/${config.apiVersion}/${config.wabaId}/message_templates?name=${encodeURIComponent(name)}&fields=name,status,language,components`;
         const response = await fetch(url, {
             headers: { Authorization: `Bearer ${config.accessToken}` },
             signal: AbortSignal.timeout(12000),
         });
         const payload = await response.json().catch(() => ({}));
+        if (!response.ok) return null;
         const rows = Array.isArray(payload?.data) ? payload.data : [];
-        const match = rows.find((row) => String(row?.name || '').trim() === name) || rows[0];
-        const bodyComponent = (Array.isArray(match?.components) ? match.components : []).find(
-            (row) => String(row?.type || '').toUpperCase() === 'BODY',
-        );
-        const text = String(bodyComponent?.text || '').trim();
-        templateTextCache.set(name, text);
-        return text;
+        const spec = parseTemplateSpec(pickTemplateRow(rows, name));
+        const stored = spec.name ? spec : { ...spec, name, approved: false };
+        templateSpecCache.set(name, { at: Date.now(), spec: stored });
+        return stored;
     } catch {
-        templateTextCache.set(name, '');
-        return '';
+        return null;
     }
+}
+
+async function fetchTemplateBodyText(templateName) {
+    const spec = await loadWhatsAppTemplate(templateName);
+    return String(spec?.body || '').trim();
+}
+
+export function bufferLooksLikePdf(buffer) {
+    const bytes = Buffer.isBuffer(buffer) ? buffer : Buffer.from(buffer || []);
+    if (bytes.length < 5) return false;
+    return bytes.subarray(0, Math.min(bytes.length, 1024)).toString('latin1').includes('%PDF-');
+}
+
+function resolveDocumentMime(mimeType, filename) {
+    const mime = String(mimeType || '').trim().toLowerCase();
+    const name = String(filename || '').trim().toLowerCase();
+    if ((!mime || mime === 'application/octet-stream') && name.endsWith('.pdf')) {
+        return 'application/pdf';
+    }
+    return mime || 'application/pdf';
 }
 
 let lastWabaSubscribe = {
@@ -645,12 +693,9 @@ export async function sendDocumentMessage(to, { buffer, filename, caption = '', 
         if (!buffer?.length) {
             return fail('Document file is required.');
         }
-        if (String(mimeType || '').toLowerCase() === 'application/pdf') {
-            const bytes = Buffer.isBuffer(buffer) ? buffer : Buffer.from(buffer);
-            const head = bytes.subarray(0, 5).toString('latin1');
-            if (head !== '%PDF-') {
-                return fail('Attachment is not a valid PDF, so it was not sent.');
-            }
+        const safeMime = resolveDocumentMime(mimeType, filename);
+        if (safeMime === 'application/pdf' && !bufferLooksLikePdf(buffer)) {
+            return fail('Attachment is not a valid PDF, so it was not sent.');
         }
 
         if (extras.eventKey && extras.skipPaidChannelCheck !== true) {
@@ -663,7 +708,7 @@ export async function sendDocumentMessage(to, { buffer, filename, caption = '', 
 
         const safeName = String(filename || 'document.pdf').replace(/[^\w.\-]+/g, '_') || 'document.pdf';
         const note = String(caption || '').trim();
-        const uploaded = await uploadWhatsAppMedia(buffer, { mimeType, filename: safeName });
+        const uploaded = await uploadWhatsAppMedia(buffer, { mimeType: safeMime, filename: safeName });
         if (!uploaded.success || !uploaded.mediaId) {
             const { logOutboundWhatsAppMessage } = await import('../utils/whatsappMessageLog.js');
             await logOutboundWhatsAppMessage({
@@ -744,15 +789,13 @@ export async function sendDocumentTemplateMessage(
         const name = String(templateName || '').trim();
         if (!name) return fail('Template name is required.');
         if (!buffer?.length) return fail('Document file is required.');
-        if (String(mimeType || '').toLowerCase() === 'application/pdf') {
-            const bytes = Buffer.isBuffer(buffer) ? buffer : Buffer.from(buffer);
-            if (bytes.subarray(0, 5).toString('latin1') !== '%PDF-') {
-                return fail('Attachment is not a valid PDF, so it was not sent.');
-            }
+        const safeMime = resolveDocumentMime(mimeType, filename);
+        if (safeMime === 'application/pdf' && !bufferLooksLikePdf(buffer)) {
+            return fail('Attachment is not a valid PDF, so it was not sent.');
         }
 
         const safeName = String(filename || 'document.pdf').replace(/[^\w.\-]+/g, '_') || 'document.pdf';
-        const uploaded = await uploadWhatsAppMedia(buffer, { mimeType, filename: safeName });
+        const uploaded = await uploadWhatsAppMedia(buffer, { mimeType: safeMime, filename: safeName });
         if (!uploaded.success || !uploaded.mediaId) {
             const { logOutboundWhatsAppMessage } = await import('../utils/whatsappMessageLog.js');
             await logOutboundWhatsAppMessage({

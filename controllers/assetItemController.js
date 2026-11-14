@@ -12137,16 +12137,26 @@ export const returnAssetItem = async (req, res) => {
                 const directNote = 'The Asset Controller unassigned this asset. It is no longer assigned to you.';
                 if (employee && acDirectUnassign && !companyMail) {
                     const EmployeeContact = (await import('../models/EmployeeContact.js')).default;
-                    const { sendTextMessage } = await import('../services/whatsappService.js');
+                    const { sendAutomatedWhatsApp, AUTOMATED_WHATSAPP } = await import('../utils/whatsappAutomation.js');
                     const contact = await EmployeeContact.findOne({ employeeId: employee.employeeId })
                         .select('whatsappNumber')
                         .lean();
                     const phone = String(contact?.whatsappNumber || '').trim();
                     if (phone) {
-                        await sendTextMessage(
+                        const assetLabel = `${item.assetId || ''} ${item.name || ''}`.trim() || 'asset';
+                        await sendAutomatedWhatsApp({
                             phone,
-                            `${employee.firstName || 'Hello'}, ${directNote} Asset ${item.assetId || ''} ${item.name || ''}.`.trim(),
-                        );
+                            templateName: AUTOMATED_WHATSAPP.assetUnassigned,
+                            bodyParams: [employee.firstName || 'there', assetLabel],
+                            extras: {
+                                source: 'auto',
+                                employeeId: employee.employeeId,
+                                contactName: `${employee.firstName || ''} ${employee.lastName || ''}`.trim(),
+                            },
+                            session: {
+                                text: `${employee.firstName || 'Hello'}, ${directNote} Asset ${assetLabel}.`.trim(),
+                            },
+                        });
                     }
                 } else if (employee) {
                     await sendAssignedEmployeeActionEmail({

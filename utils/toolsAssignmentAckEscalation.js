@@ -11,7 +11,7 @@ import { closeCompletedAssignmentNotificationsForAssets } from './closeCompleted
 import { sendErpEmail } from './emailDispatch.js';
 import { emailFrontendUrl } from './resolveFrontendBaseUrl.js';
 import { isValidWhatsAppPhone, normalizeWhatsAppPhone } from './normalizeWhatsAppPhone.js';
-import { sendTextMessage } from '../services/whatsappService.js';
+import { AUTOMATED_WHATSAPP, sendAutomatedWhatsApp } from './whatsappAutomation.js';
 
 export const TOOLS_ACK_ESCALATION_DAYS = 3;
 export const TOOLS_ACK_ESCALATION_TYPE = 'Asset Assignment Escalation';
@@ -312,10 +312,17 @@ export async function notifyForceAssignedEmployee(asset) {
     if (!isValidWhatsAppPhone(phone)) {
         return { channel: 'whatsapp', sent: false, reason: 'no_company_email_or_whatsapp' };
     }
-    const result = await sendTextMessage(phone, text, {
-        source: 'auto',
-        employeeId: assignee.employeeId,
-        contactName: `${assignee.firstName || ''} ${assignee.lastName || ''}`.trim(),
+    const result = await sendAutomatedWhatsApp({
+        phone,
+        templateName: AUTOMATED_WHATSAPP.assetForce,
+        bodyParams: [assetName],
+        extras: {
+            source: 'auto',
+            employeeId: assignee.employeeId,
+            contactName: `${assignee.firstName || ''} ${assignee.lastName || ''}`.trim(),
+            logBody: text,
+        },
+        session: { text },
     });
     return { channel: 'whatsapp', sent: result?.success !== false && !result?.error, reason: result?.error || '' };
 }

@@ -1,7 +1,9 @@
+import mongoose from 'mongoose';
 import ItemCategory from '../../models/inventory/ItemCategory.js';
 import ItemSubcategory from '../../models/inventory/ItemSubcategory.js';
 import InventoryItem from '../../models/inventory/InventoryItem.js';
-import { idStrings, nameKey, readImage, requireName, sendError } from './http.js';
+import InventoryVendorContact from '../../models/inventory/InventoryVendorContact.js';
+import { httpError, idStrings, nameKey, optionalImagePatch, readImage, requireName, sendError } from './http.js';
 
 function presentCategory(row, subcategoryCount, stats) {
     const brandIds = idStrings(stats?.brandIds);
@@ -57,6 +59,43 @@ export async function createCategory(req, res) {
             imageName: image.imageName,
         });
         res.status(201).json(presentCategory(category, 0, null));
+    } catch (error) {
+        sendError(res, error);
+    }
+}
+
+export async function updateCategory(req, res) {
+    try {
+        if (!mongoose.isValidObjectId(req.params.id)) throw httpError(404, 'Category was not found.');
+        const name = requireName(req.body?.name, 'Category name');
+        const category = await ItemCategory.findByIdAndUpdate(req.params.id, {
+            name,
+            nameKey: nameKey(name),
+            ...optionalImagePatch(req.body),
+        }, { new: true, runValidators: true });
+        if (!category) throw httpError(404, 'Category was not found.');
+        res.json(presentCategory(category, 0, null));
+    } catch (error) {
+        sendError(res, error);
+    }
+}
+
+export async function deleteCategory(req, res) {
+    try {
+        if (!mongoose.isValidObjectId(req.params.id)) throw httpError(404, 'Category was not found.');
+        const category = await ItemCategory.findById(req.params.id).select('_id');
+        if (!category) throw httpError(404, 'Category was not found.');
+        if (await ItemSubcategory.exists({ categoryId: req.params.id })) {
+            throw httpError(400, 'Delete the subcategories in this category first.');
+        }
+        if (await InventoryItem.exists({ categoryId: req.params.id })) {
+            throw httpError(400, 'Delete the items in this category first.');
+        }
+        if (await InventoryVendorContact.exists({ 'lines.categoryId': req.params.id })) {
+            throw httpError(400, 'This category is used by a vendor. Remove it there first.');
+        }
+        await ItemCategory.deleteOne({ _id: req.params.id });
+        res.json({ ok: true });
     } catch (error) {
         sendError(res, error);
     }

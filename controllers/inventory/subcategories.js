@@ -1,8 +1,9 @@
 import mongoose from 'mongoose';
 import ItemCategory from '../../models/inventory/ItemCategory.js';
 import ItemSubcategory from '../../models/inventory/ItemSubcategory.js';
+import ItemOption from '../../models/inventory/ItemOption.js';
 import InventoryItem from '../../models/inventory/InventoryItem.js';
-import { httpError, idStrings, nameKey, readImage, requireName, sendError } from './http.js';
+import { httpError, idStrings, nameKey, optionalImagePatch, readImage, requireName, sendError } from './http.js';
 
 function readReservationQuantity(value) {
     if (value == null || value === '') return null;
@@ -87,6 +88,47 @@ export async function createSubcategory(req, res) {
             reservationQuantity,
         });
         res.status(201).json(presentSubcategory(row, null));
+    } catch (error) {
+        sendError(res, error);
+    }
+}
+
+export async function updateSubcategory(req, res) {
+    try {
+        if (!mongoose.isValidObjectId(req.params.id)) throw httpError(404, 'Subcategory was not found.');
+        const name = requireName(req.body?.name, 'Subcategory name');
+        const categoryId = req.body?.categoryId;
+        if (!categoryId || !mongoose.isValidObjectId(categoryId)) {
+            throw httpError(400, 'Category is required.');
+        }
+        const category = await ItemCategory.findById(categoryId).select('_id');
+        if (!category) throw httpError(400, 'Category was not found.');
+        const reservationQuantity = readReservationQuantity(req.body?.reservationQuantity);
+        const row = await ItemSubcategory.findByIdAndUpdate(req.params.id, {
+            categoryId,
+            name,
+            nameKey: nameKey(name),
+            reservationQuantity,
+            ...optionalImagePatch(req.body),
+        }, { new: true, runValidators: true });
+        if (!row) throw httpError(404, 'Subcategory was not found.');
+        res.json(presentSubcategory(row, null));
+    } catch (error) {
+        sendError(res, error);
+    }
+}
+
+export async function deleteSubcategory(req, res) {
+    try {
+        if (!mongoose.isValidObjectId(req.params.id)) throw httpError(404, 'Subcategory was not found.');
+        const row = await ItemSubcategory.findById(req.params.id).select('_id');
+        if (!row) throw httpError(404, 'Subcategory was not found.');
+        if (await InventoryItem.exists({ subcategoryId: req.params.id })) {
+            throw httpError(400, 'Delete the items in this subcategory first.');
+        }
+        await ItemOption.deleteMany({ subcategoryId: req.params.id });
+        await ItemSubcategory.deleteOne({ _id: req.params.id });
+        res.json({ ok: true });
     } catch (error) {
         sendError(res, error);
     }

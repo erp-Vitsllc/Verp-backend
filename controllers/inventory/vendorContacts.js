@@ -6,6 +6,31 @@ import ItemCategory from '../../models/inventory/ItemCategory.js';
 import ItemBrand from '../../models/inventory/ItemBrand.js';
 import { cleanName, httpError, requireName, sendError } from './http.js';
 
+const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/;
+
+function assertContactChannels(entries) {
+    let hasEmail = false;
+    let hasPhone = false;
+    entries.forEach((entry) => {
+        const email = cleanName(entry?.email);
+        if (email) {
+            hasEmail = true;
+            if (email.length > 120 || !EMAIL_PATTERN.test(email)) {
+                throw httpError(400, 'Enter a valid email address.');
+            }
+        }
+        const phone = cleanName(entry?.phone).replace(/[\s()-]/g, '');
+        if (phone) {
+            hasPhone = true;
+            if (!/^\+[1-9]\d{6,14}$/.test(phone)) {
+                throw httpError(400, 'Enter a valid phone number with a country code.');
+            }
+        }
+    });
+    if (!hasEmail) throw httpError(400, 'Email is required.');
+    if (!hasPhone) throw httpError(400, 'Phone number is required.');
+}
+
 function textList(entries, key) {
     const seen = new Set();
     const values = [];
@@ -89,12 +114,12 @@ async function readLines(entries) {
 async function readContactBody(body) {
     const name = requireName(body?.name, 'Name');
     const entries = Array.isArray(body?.entries) ? body.entries.slice(0, 20) : [];
+    assertContactChannels(entries);
     return {
         name,
         designation: cleanName(body?.designation).slice(0, 120),
         emails: textList(entries, 'email'),
         phones: textList(entries, 'phone'),
-        isPrimary: body?.isPrimary === true,
         lines: await readLines(entries),
     };
 }
@@ -106,20 +131,46 @@ async function requireVendor(id) {
     return vendor;
 }
 
-async function applyPrimary(vendorId, contactId, isPrimary) {
-    if (!isPrimary) return;
+async function makeOnlyPrimary(vendorId, contactId) {
     await InventoryVendorContact.updateMany(
         { vendorId, _id: { $ne: contactId } },
         { $set: { isPrimary: false } },
     );
+    await InventoryVendorContact.updateOne(
+        { _id: contactId, vendorId },
+        { $set: { isPrimary: true } },
+    );
+}
+
+async function localCopyOfZoho(vendorId, zohoId) {
+    const existing = await InventoryVendorContact.findOne({ vendorId, zohoPersonId: zohoId }).lean();
+    if (existing) return existing;
+    const { findVisibleZohoContact, suppressZohoContactId } = await import('./vendors.js');
+    const snapshot = await findVisibleZohoContact(vendorId, zohoId);
+    if (!snapshot) throw httpError(404, 'Contact was not found.');
+    const saved = await InventoryVendorContact.create({
+        vendorId,
+        zohoPersonId: zohoId,
+        name: snapshot.name || 'Contact',
+        designation: snapshot.designation || '',
+        emails: snapshot.emails || [],
+        phones: snapshot.phones || [],
+        isPrimary: false,
+        lines: [],
+    });
+    await suppressZohoContactId(vendorId, zohoId);
+    return saved.toObject();
+}
+
+function isZohoContactId(value) {
+    return String(value || '').startsWith('zoho-');
 }
 
 export async function createVendorContact(req, res) {
     try {
         const vendor = await requireVendor(req.params.id);
         const payload = await readContactBody(req.body);
-        const saved = await InventoryVendorContact.create({ ...payload, vendorId: vendor._id });
-        await applyPrimary(vendor._id, saved._id, payload.isPrimary);
+        const saved = await InventoryVendorContact.create({ ...payload, vendorId: vendor._id, isPrimary: false });
         const row = await InventoryVendorContact.findById(saved._id).lean();
         res.status(201).json(presentContact(row));
     } catch (error) {
@@ -130,15 +181,59 @@ export async function createVendorContact(req, res) {
 export async function updateVendorContact(req, res) {
     try {
         const vendor = await requireVendor(req.params.id);
-        if (!mongoose.isValidObjectId(req.params.contactId)) throw httpError(404, 'Contact was not found.');
+        let contactId = req.params.contactId;
+        if (isZohoContactId(contactId)) {
+            const copied = await localCopyOfZoho(vendor._id, contactId);
+            contactId = copied._id;
+        } else if (!mongoose.isValidObjectId(contactId)) {
+            throw httpError(404, 'Contact was not found.');
+        }
         const payload = await readContactBody(req.body);
         const row = await InventoryVendorContact.findOneAndUpdate(
-            { _id: req.params.contactId, vendorId: vendor._id },
+            { _id: contactId, vendorId: vendor._id },
             payload,
             { new: true },
         ).lean();
         if (!row) throw httpError(404, 'Contact was not found.');
-        await applyPrimary(vendor._id, row._id, payload.isPrimary);
+        res.json(presentContact(row));
+    } catch (error) {
+        sendError(res, error);
+    }
+}
+
+export async function deleteVendorContact(req, res) {
+    try {
+        const vendor = await requireVendor(req.params.id);
+        const contactId = req.params.contactId;
+        if (isZohoContactId(contactId)) {
+            const { suppressZohoContactId } = await import('./vendors.js');
+            await InventoryVendorContact.deleteOne({ vendorId: vendor._id, zohoPersonId: contactId });
+            await suppressZohoContactId(vendor._id, contactId);
+            res.json({ ok: true });
+            return;
+        }
+        if (!mongoose.isValidObjectId(contactId)) throw httpError(404, 'Contact was not found.');
+        const row = await InventoryVendorContact.findOneAndDelete({ _id: contactId, vendorId: vendor._id }).lean();
+        if (!row) throw httpError(404, 'Contact was not found.');
+        res.json({ ok: true });
+    } catch (error) {
+        sendError(res, error);
+    }
+}
+
+export async function markVendorContactPrimary(req, res) {
+    try {
+        const vendor = await requireVendor(req.params.id);
+        let contactId = req.params.contactId;
+        if (isZohoContactId(contactId)) {
+            const copied = await localCopyOfZoho(vendor._id, contactId);
+            contactId = copied._id;
+        } else if (!mongoose.isValidObjectId(contactId)) {
+            throw httpError(404, 'Contact was not found.');
+        }
+        const row = await InventoryVendorContact.findOne({ _id: contactId, vendorId: vendor._id }).select('_id').lean();
+        if (!row) throw httpError(404, 'Contact was not found.');
+        await makeOnlyPrimary(vendor._id, row._id);
         const fresh = await InventoryVendorContact.findById(row._id).lean();
         res.json(presentContact(fresh));
     } catch (error) {

@@ -1,6 +1,8 @@
+import mongoose from 'mongoose';
 import ItemBrand from '../../models/inventory/ItemBrand.js';
 import InventoryItem from '../../models/inventory/InventoryItem.js';
-import { idStrings, nameKey, readImage, requireName, sendError } from './http.js';
+import InventoryVendorContact from '../../models/inventory/InventoryVendorContact.js';
+import { httpError, idStrings, nameKey, optionalImagePatch, readImage, requireName, sendError } from './http.js';
 
 function presentBrand(row, stats) {
     const categoryIds = idStrings(stats?.categoryIds);
@@ -50,6 +52,40 @@ export async function createBrand(req, res) {
             imageName: image.imageName,
         });
         res.status(201).json(presentBrand(brand, null));
+    } catch (error) {
+        sendError(res, error);
+    }
+}
+
+export async function updateBrand(req, res) {
+    try {
+        if (!mongoose.isValidObjectId(req.params.id)) throw httpError(404, 'Brand was not found.');
+        const name = requireName(req.body?.name, 'Brand name');
+        const brand = await ItemBrand.findByIdAndUpdate(req.params.id, {
+            name,
+            nameKey: nameKey(name),
+            ...optionalImagePatch(req.body),
+        }, { new: true, runValidators: true });
+        if (!brand) throw httpError(404, 'Brand was not found.');
+        res.json(presentBrand(brand, null));
+    } catch (error) {
+        sendError(res, error);
+    }
+}
+
+export async function deleteBrand(req, res) {
+    try {
+        if (!mongoose.isValidObjectId(req.params.id)) throw httpError(404, 'Brand was not found.');
+        const brand = await ItemBrand.findById(req.params.id).select('_id');
+        if (!brand) throw httpError(404, 'Brand was not found.');
+        if (await InventoryItem.exists({ brandId: req.params.id })) {
+            throw httpError(400, 'Delete the items that use this brand first.');
+        }
+        if (await InventoryVendorContact.exists({ 'lines.brandId': req.params.id })) {
+            throw httpError(400, 'This brand is used by a vendor. Remove it there first.');
+        }
+        await ItemBrand.deleteOne({ _id: req.params.id });
+        res.json({ ok: true });
     } catch (error) {
         sendError(res, error);
     }

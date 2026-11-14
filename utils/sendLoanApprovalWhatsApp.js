@@ -1,5 +1,6 @@
 import { getEventChannels } from './notificationEmailPermission.js';
 import { resolveEmployeeWhatsAppPhone } from './sendToolsAssetWhatsAppReport.js';
+import { AUTOMATED_WHATSAPP, sendAutomatedWhatsApp } from './whatsappAutomation.js';
 
 export const LOAN_APPROVED_EVENT = 'hrm.loan.approved';
 export const ADVANCE_APPROVED_EVENT = 'hrm.loan.advance_approved';
@@ -49,7 +50,7 @@ export function loanEmployeeWhatsAppNote(result) {
         return 'Employee record was not found, so the PDF was not sent.';
     }
     if (/131047|re-engagement|24 hours|24-hour/i.test(reason)) {
-        return 'WhatsApp did not deliver the PDF. This number has not messaged the company WhatsApp in the last 24 hours, so WhatsApp blocks the document.';
+        return 'WhatsApp did not deliver the PDF. Send it again from the loan.';
     }
     if (reason) {
         return `The PDF was not sent to the employee on WhatsApp: ${reason}`;
@@ -146,24 +147,20 @@ export async function sendLoanApprovalWhatsApp({
     const loanRef = String(loan?.loanId || '').trim();
     const typeLabel = loanRef ? `${typeSlug} ${loanRef}` : typeSlug;
     const amountText = formatAmount(loan?.amount).replace(/\s/g, '') || '0';
-    const { sendDocumentTemplateMessage } = await import('../services/whatsappService.js');
-    const result = await sendDocumentTemplateMessage(
+    const result = await sendAutomatedWhatsApp({
         phone,
-        {
-            buffer: pdfBuffer,
-            filename: safeName,
-            templateName: 'verp_payment_approved',
-            languageCode: 'en',
-            bodyParams: [typeLabel, amountText],
-        },
-        {
+        templateName: AUTOMATED_WHATSAPP.paymentApproved,
+        bodyParams: [typeLabel, amountText],
+        document: { buffer: pdfBuffer, filename: safeName, mimeType: 'application/pdf' },
+        extras: {
             source: 'auto',
             eventKey,
             employeeId: emp.employeeId,
             contactName: employeeDisplayName(emp),
             logBody: caption,
         },
-    );
+        session: { caption, filename: safeName },
+    });
     if (!result?.success) {
         console.warn('[LoanApprovalWhatsApp] send failed', emp.employeeId, result?.error || '');
         return { sent: false, reason: result?.error || 'send_failed' };

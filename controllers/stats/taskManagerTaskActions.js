@@ -24,7 +24,7 @@ import { withdrawPendingSalaryEnrollment } from "../../utils/salaryEnrollmentApp
 import { getDepartmentHOD } from "../../utils/getDepartmentHOD.js";
 import { getSignedFileUrl, uploadDocumentToS3 } from "../../utils/s3Upload.js";
 import { emailFrontendUrl } from "../../utils/resolveFrontendBaseUrl.js";
-import { sendTextMessage } from "../../services/whatsappService.js";
+import { AUTOMATED_WHATSAPP, sendAutomatedWhatsApp } from "../../utils/whatsappAutomation.js";
 import { resolveEmployeeWhatsAppPhone } from "../../utils/sendToolsAssetWhatsAppReport.js";
 import {
     docTypeFromLabel,
@@ -874,16 +874,18 @@ async function notifyRequesterTaskClosed(task, target) {
     } else if (requester?.employeeId) {
         const phone = await resolveEmployeeWhatsAppPhone(requester.employeeId);
         if (phone) {
-            const result = await sendTextMessage(
+            const result = await sendAutomatedWhatsApp({
                 phone,
-                `${sentence} ${task.taskName || "Task"}. ${link}`,
-                {
+                templateName: AUTOMATED_WHATSAPP.taskClosed,
+                bodyParams: [task.taskName || "Task"],
+                extras: {
                     source: "auto",
                     skipPaidChannelCheck: true,
                     employeeId: requester.employeeId || "",
                     contactName: requesterName,
                 },
-            );
+                session: { text: `${sentence} ${task.taskName || "Task"}. ${link}` },
+            });
             if (result?.success === true) channel = "whatsapp";
         }
     }
@@ -3302,16 +3304,20 @@ export const closeTaskManagerRequest = async (req, res) => {
             if (!phone) {
                 return res.status(400).json({ message: "The requester has no company email and no WhatsApp number." });
             }
-            const result = await sendTextMessage(
+            const result = await sendAutomatedWhatsApp({
                 phone,
-                `Your task is closed. After 2 days the status becomes Completed. An admin super user can reopen it. If this is a general task, you can reopen it with a reason. ${task.taskName || "Task"}. ${link}`,
-                {
+                templateName: AUTOMATED_WHATSAPP.taskClosed,
+                bodyParams: [task.taskName || "Task"],
+                extras: {
                     source: "auto",
                     skipPaidChannelCheck: true,
                     employeeId: requester?.employeeId || "",
                     contactName: requesterName,
                 },
-            );
+                session: {
+                    text: `Your task is closed. After 2 days the status becomes Completed. An admin super user can reopen it. If this is a general task, you can reopen it with a reason. ${task.taskName || "Task"}. ${link}`,
+                },
+            });
             if (result?.success !== true) {
                 return res.status(500).json({ message: result?.error || "The WhatsApp message could not be sent." });
             }

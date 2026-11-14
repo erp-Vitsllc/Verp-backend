@@ -547,17 +547,11 @@ function rememberedWebDevices(user) {
     return rows;
 }
 
-export function isWebDeviceTrusted(user, deviceId, os) {
+export function isWebDeviceTrusted(user, deviceId) {
     expireWebDevicesIfNeeded(user);
     const nextId = String(deviceId || '').trim();
     if (!nextId) return false;
-    const nextOs = String(os || '').trim().toLowerCase();
-    return rememberedWebDevices(user).some((row) => {
-        if (rememberedWebDeviceId(row) !== nextId) return false;
-        const rowOs = String(row.os || osFromUserAgent(row.userAgent) || '').trim().toLowerCase();
-        if (rowOs && nextOs && rowOs !== nextOs) return false;
-        return true;
-    });
+    return rememberedWebDevices(user).some((row) => rememberedWebDeviceId(row) === nextId);
 }
 
 export function applyWebDeviceTrust(user, enabled) {

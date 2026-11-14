@@ -103,6 +103,8 @@ export async function processToolsMonthlyAssetReports(now = new Date()) {
             pdfBuffer,
             filename: `tools-monthly-report-${employee.employeeId}-${monthKey}.pdf`,
             caption: `Tools monthly report (${monthLabel}) — ${assets.length} assigned asset${assets.length === 1 ? '' : 's'}. Reported by: ${reportedBy}`,
+            monthLabel,
+            reportedBy,
         });
 
         if (!result.sent) {

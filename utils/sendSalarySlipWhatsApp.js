@@ -3,6 +3,7 @@ import SalaryHistoricalProfile from '../models/SalaryHistoricalProfile.js';
 import SalaryMonthDmf from '../models/SalaryMonthDmf.js';
 import { getEventChannels } from './notificationEmailPermission.js';
 import { resolveEmployeeWhatsAppPhone } from './sendToolsAssetWhatsAppReport.js';
+import { AUTOMATED_WHATSAPP, sendAutomatedWhatsApp } from './whatsappAutomation.js';
 
 export const SALARY_SLIP_WHATSAPP_EVENT = 'hrm.salary.slip';
 
@@ -20,7 +21,7 @@ async function alreadySent(employeeId, caption) {
     const existing = await WhatsAppMessage.findOne({
         employeeId: String(employeeId || '').trim(),
         direction: 'out',
-        messageType: 'document',
+        messageType: { $in: ['document', 'template'] },
         body: caption,
         status: { $in: ['queued', 'sent', 'delivered', 'read'] },
     })
@@ -70,22 +71,22 @@ export async function sendSalarySlipWhatsApp({
     const caption = salarySlipWhatsAppCaption(monthLabel);
     if (await alreadySent(code, caption)) return { sent: false, reason: 'already_sent' };
 
-    const { sendDocumentMessage } = await import('../services/whatsappService.js');
-    const result = await sendDocumentMessage(
+    const safeName = String(filename || '').trim() || `Salary-Slip-${ym}-${code}.pdf`;
+    const result = await sendAutomatedWhatsApp({
         phone,
-        {
-            buffer: pdfBuffer,
-            filename: String(filename || '').trim() || `Salary-Slip-${ym}-${code}.pdf`,
-            caption,
-        },
-        {
+        templateName: AUTOMATED_WHATSAPP.salarySlip,
+        bodyParams: [personName(emp) || code, String(monthLabel || ym).trim() || ym],
+        document: { buffer: pdfBuffer, filename: safeName, mimeType: 'application/pdf' },
+        extras: {
             source: 'auto',
             eventKey: SALARY_SLIP_WHATSAPP_EVENT,
             skipPaidChannelCheck: true,
             employeeId: code,
             contactName: personName(emp),
+            logBody: caption,
         },
-    );
+        session: { caption, filename: safeName },
+    });
     if (!result?.success) {
         console.warn('[SalarySlipWhatsApp] send failed', code, result?.error || '');
         return { sent: false, reason: result?.error || 'send_failed' };

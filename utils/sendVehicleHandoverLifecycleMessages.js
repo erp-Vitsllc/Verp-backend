@@ -6,6 +6,7 @@ import AssetHistory from '../models/AssetHistory.js';
 import User from '../models/User.js';
 import { isFleetVehicleAsset, getResolvedFleetHrEmployee } from './assetApprovalHelpers.js';
 import { getEventChannels } from './notificationEmailPermission.js';
+import { AUTOMATED_WHATSAPP, sendAutomatedWhatsApp } from './whatsappAutomation.js';
 import { isValidWhatsAppPhone, normalizeWhatsAppPhone } from './normalizeWhatsAppPhone.js';
 import { sendErpEmail, buildEmailDedupeKey } from './emailDispatch.js';
 import { resolveFrontendBaseUrl } from './resolveFrontendBaseUrl.js';
@@ -134,6 +135,8 @@ async function deliverVehicleHandoverMessage({
     pdfBuffer = null,
     pdfFilename = '',
     attachDocument = false,
+    templateName = '',
+    templateParams = [],
 }) {
     if (!employee) {
         const result = { sent: false, step, reason: 'no_employee' };
@@ -173,45 +176,29 @@ async function deliverVehicleHandoverMessage({
 
     if (picked.channel === 'whatsapp') {
         const caption = String(text || subject || '').trim();
-        if (attachDocument && pdfBuffer?.length) {
-            const { sendDocumentMessage } = await import('../services/whatsappService.js');
-            const result = await sendDocumentMessage(
-                picked.phone,
-                {
+        const withPdf = attachDocument && pdfBuffer?.length;
+        const result = await sendAutomatedWhatsApp({
+            phone: picked.phone,
+            templateName,
+            bodyParams: templateParams,
+            document: withPdf
+                ? {
                     buffer: pdfBuffer,
                     filename: pdfFilename || 'vehicle-handover.pdf',
-                    caption,
-                },
-                {
-                    source: 'auto',
-                    eventKey: VEHICLE_HANDOVER_EVENT,
-                    skipPaidChannelCheck: true,
-                    employeeId: employee.employeeId,
-                    contactName: employeeName(employee),
-                },
-            );
-            if (!result?.success) {
-                const out = {
-                    sent: false,
-                    step,
-                    channel: 'whatsapp',
-                    employeeId: employee.employeeId || '',
-                    reason: result?.error || 'whatsapp_failed',
-                };
-                logFail(step, `${out.employeeId} ${out.reason}`);
-                return out;
-            }
-            logOk(step, `whatsapp document ${employee.employeeId}`);
-            return { sent: true, step, channel: 'whatsapp', employeeId: employee.employeeId || '' };
-        }
-
-        const { sendTextMessage } = await import('../services/whatsappService.js');
-        const result = await sendTextMessage(picked.phone, caption, {
-            source: 'auto',
-            eventKey: VEHICLE_HANDOVER_EVENT,
-            skipPaidChannelCheck: true,
-            employeeId: employee.employeeId,
-            contactName: employeeName(employee),
+                    mimeType: 'application/pdf',
+                }
+                : null,
+            extras: {
+                source: 'auto',
+                eventKey: VEHICLE_HANDOVER_EVENT,
+                skipPaidChannelCheck: true,
+                employeeId: employee.employeeId,
+                contactName: employeeName(employee),
+                logBody: caption,
+            },
+            session: withPdf
+                ? { caption, filename: pdfFilename || 'vehicle-handover.pdf' }
+                : { text: caption },
         });
         if (!result?.success) {
             const out = {
@@ -224,7 +211,7 @@ async function deliverVehicleHandoverMessage({
             logFail(step, `${out.employeeId} ${out.reason}`);
             return out;
         }
-        logOk(step, `whatsapp text ${employee.employeeId}`);
+        logOk(step, `whatsapp ${withPdf ? 'document' : 'text'} ${employee.employeeId}`);
         return { sent: true, step, channel: 'whatsapp', employeeId: employee.employeeId || '' };
     }
 
@@ -348,6 +335,8 @@ export async function maybeNotifyVehicleHandoverReportsReady(req, historyRecord)
             `<p>${text}</p>${recipient.viaReportee ? '<p>You are receiving this as the primary reportee.</p>' : ''}`,
         ),
         recordId: String(historyId),
+        templateName: AUTOMATED_WHATSAPP.vehicleReview,
+        templateParams: [label],
     });
 
     await AssetHistory.updateOne(
@@ -396,6 +385,8 @@ export async function notifyVehicleHandoverAfterTargetApprove({
             pdfBuffer: pdf,
             pdfFilename: `vehicle-handover-${asset.assetId || 'vehicle'}.pdf`,
             attachDocument: true,
+            templateName: AUTOMATED_WHATSAPP.vehicleAssigned,
+            templateParams: [plateName],
         }),
     );
     if (!pdf) {
@@ -420,6 +411,8 @@ export async function notifyVehicleHandoverAfterTargetApprove({
                 text: removedText,
                 html: wrapHtml('Vehicle removed', `<p>${removedText}</p>`),
                 recordId: String(historyId),
+                templateName: AUTOMATED_WHATSAPP.vehicleRemoved,
+                templateParams: [plateName, requiresHr ? 'waiting for HR review' : 'removed'],
             }),
         );
     }
@@ -436,6 +429,8 @@ export async function notifyVehicleHandoverAfterTargetApprove({
                 text: hrText,
                 html: wrapHtml('Handover damage review', `<p>${hrText}</p>`),
                 recordId: String(historyId),
+                templateName: AUTOMATED_WHATSAPP.vehicleHr,
+                templateParams: [plateName],
             }),
         );
     }
@@ -487,6 +482,8 @@ export async function notifyVehicleHandoverAfterHrDecision({
         text,
         html: wrapHtml('HR handover decision', `<p>${text}</p>`),
         recordId: String(historyId),
+        templateName: AUTOMATED_WHATSAPP.vehicleHrResult,
+        templateParams: [label, hasFine ? 'a fine may be recorded' : 'no fine'],
     });
     if (historyId) {
         await AssetHistory.updateOne(

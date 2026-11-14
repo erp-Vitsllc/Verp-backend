@@ -4,6 +4,7 @@ import ItemCategory from '../../models/inventory/ItemCategory.js';
 import ItemSubcategory from '../../models/inventory/ItemSubcategory.js';
 import ItemOption from '../../models/inventory/ItemOption.js';
 import ItemBrand from '../../models/inventory/ItemBrand.js';
+import InventoryVendorContact from '../../models/inventory/InventoryVendorContact.js';
 import { escapeRegex } from '../../utils/regexHelper.js';
 import { cleanName, httpError, sendError } from './http.js';
 
@@ -177,7 +178,7 @@ export async function listItems(req, res) {
         const rows = await InventoryItem.find(filter).populate(ITEM_POPULATE).lean();
         const matched = rows
             .map(presentItem)
-            .filter((row) => !statusQuery || row.status === statusQuery)
+            .filter((row) => (statusQuery ? row.status === statusQuery : row.status !== 'Out of Stock'))
             .sort((left, right) => {
                 const statusGap = (STATUS_ORDER[left.status] ?? 9) - (STATUS_ORDER[right.status] ?? 9);
                 if (statusGap) return statusGap;
@@ -232,6 +233,21 @@ export async function updateItem(req, res) {
         }).populate(ITEM_POPULATE).lean();
         if (!saved) throw httpError(404, 'Item was not found.');
         res.json(presentItem(saved));
+    } catch (error) {
+        sendError(res, error);
+    }
+}
+
+export async function deleteItem(req, res) {
+    try {
+        if (!mongoose.isValidObjectId(req.params.id)) throw httpError(404, 'Item was not found.');
+        const item = await InventoryItem.findById(req.params.id).select('_id');
+        if (!item) throw httpError(404, 'Item was not found.');
+        if (await InventoryVendorContact.exists({ 'lines.itemId': req.params.id })) {
+            throw httpError(400, 'This item is used by a vendor. Remove it there first.');
+        }
+        await InventoryItem.deleteOne({ _id: req.params.id });
+        res.json({ ok: true });
     } catch (error) {
         sendError(res, error);
     }
