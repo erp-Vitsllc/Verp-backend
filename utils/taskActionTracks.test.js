@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { buildActionTracks } from "./taskActionTracks.js";
+import { buildActionTracks, markReassignmentEmails, parseReassignment, reassignmentWorkText } from "./taskActionTracks.js";
 
 function titles(steps) {
     return steps.map((step) => [step.title, step.status, step.detail]);
@@ -178,5 +178,57 @@ describe("task action history", () => {
             ["Assigned to Sara Ali", "Completed"],
             ["Rejected by Sara Ali", "Rejected"],
         ]);
+    });
+});
+
+describe("reassignment wording", () => {
+    it("says sent back when the task stays with the same employee", () => {
+        assert.equal(
+            reassignmentWorkText("FIDHA SHERIN", "FIDHA SHERIN", "please check"),
+            "Sent back to FIDHA SHERIN. please check",
+        );
+    });
+
+    it("names both people when the assignee changes", () => {
+        assert.equal(
+            reassignmentWorkText("FIDHA SHERIN", "Raseel Muhammad", "please check"),
+            "Reassigned from FIDHA SHERIN to Raseel Muhammad. please check",
+        );
+    });
+
+    it("does not invent a person called the previous assignee", () => {
+        assert.equal(
+            reassignmentWorkText("", "FIDHA SHERIN", "please check"),
+            "Reassigned to FIDHA SHERIN. please check",
+        );
+        assert.deepEqual(parseReassignment("Reassigned from the previous assignee to FIDHA SHERIN. please check", "SHAMEEM"), {
+            from: "",
+            to: "FIDHA SHERIN",
+        });
+        assert.deepEqual(parseReassignment("Sent back to FIDHA SHERIN. please check", "SHAMEEM"), {
+            from: "FIDHA SHERIN",
+            to: "FIDHA SHERIN",
+        });
+    });
+
+    it("marks the work update sent when the reassignment email went out", () => {
+        const at = "2026-11-14T10:39:00.000Z";
+        const [row] = markReassignmentEmails(
+            [{
+                kind: "Reassigned",
+                badge: "Reassigned",
+                text: "Reassigned from FIDHA SHERIN to FIDHA SHERIN. please check",
+                emailSent: false,
+                assigneeName: "",
+                createdAt: at,
+            }],
+            [{
+                emailType: "Task reassigned",
+                subject: "Task reassigned to you: BILL UPDATION",
+                sentAt: "2026-11-14T10:39:20.000Z",
+            }],
+        );
+        assert.equal(row.emailSent, true);
+        assert.equal(row.assigneeName, "FIDHA SHERIN");
     });
 });

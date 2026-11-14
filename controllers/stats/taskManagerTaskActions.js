@@ -79,7 +79,7 @@ import { adminDeletedTaskEmail } from "../../utils/adminDeletedTaskEmail.js";
 import { isSystemOrWorkflowTask, superUserRejectsImmediately } from "../../utils/taskRejectAccess.js";
 import { purgePendingCopiesOf } from "../../utils/deletedTaskNotice.js";
 import { attachHoldSteps } from "../../utils/taskWaitingSteps.js";
-import { buildActionTracks, parseReassignment } from "../../utils/taskActionTracks.js";
+import { buildActionTracks, markReassignmentEmails, parseReassignment, reassignmentWorkText } from "../../utils/taskActionTracks.js";
 
 const DUBAI_DATE = new Intl.DateTimeFormat("en-CA", {
     timeZone: "Asia/Dubai",
@@ -513,6 +513,52 @@ function clearPendingCompletion(task) {
         completesAt: null,
     };
     task.markModified("closeRequest");
+}
+
+/** Reassignment takes the task off the requester's review and puts it on the selected employee. */
+function giveTaskToAssignee(task) {
+    if (!task) return;
+    const saved = closeSnapshot(task);
+    task.closeRequest = {
+        ...saved,
+        assigneeCleared: false,
+        reassignmentReleased: false,
+        reviewPending: false,
+        reviewReturned: false,
+        reviewNote: "",
+        completionRequestedAt: null,
+        completionRequestedById: null,
+        completionRequestedByName: "",
+        completionNote: "",
+        completionConfirmedAt: null,
+        completesAt: null,
+        returnAssigneeId: null,
+        returnAssigneeEmpId: "",
+        returnAssigneeName: "",
+    };
+    task.markModified("closeRequest");
+}
+
+/**
+ * Older reassignments emailed the employee but left reviewPending set,
+ * so the page still said "Waiting for" the requester and hid the assignee.
+ */
+async function releaseReviewLeftByReassignment(task) {
+    if (!task?.save || !task.closeRequest?.reviewPending) return false;
+    if (["Completed", "Cancelled", "Rejected"].includes(String(task.status || ""))) return false;
+    const reviewAt = new Date(task.closeRequest.completionRequestedAt || 0).getTime();
+    if (!reviewAt) return false;
+    const later = [...(task.history || []), ...(task.updates || [])].some((item) => {
+        const kind = String(item?.event || item?.kind || item?.badge || "");
+        if (kind !== "Reassigned") return false;
+        const at = new Date(item.createdAt || 0).getTime();
+        return at >= reviewAt;
+    });
+    if (!later) return false;
+    if (!task.assignee && !String(task.assigneeName || "").trim()) return false;
+    giveTaskToAssignee(task);
+    await task.save();
+    return true;
 }
 
 /** Super-user reject on a system or workflow task. The status becomes Rejected. */
@@ -1213,6 +1259,13 @@ async function alignTaskWithAttendanceRequest(target) {
 
 async function buildDetail(target, viewer) {
     await alignTaskWithAttendanceRequest(target);
+    if (target?.task) {
+        try {
+            await releaseReviewLeftByReassignment(target.task);
+        } catch (releaseError) {
+            console.error("Reassignment review release failed:", releaseError);
+        }
+    }
     const manual = target.kind === "manual";
     const task = target.task;
     const action = target.action;
@@ -1583,7 +1636,8 @@ async function buildDetail(target, viewer) {
         requesterPhoto: await signedProfilePhoto(cardRequester.photo),
         attachments: task?.attachments || [],
         comments: [...(task?.comments || [])].sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt)),
-        updates: [...(task?.updates || [])].sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt)),
+        updates: markReassignmentEmails(task?.updates, emails)
+            .sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt)),
         history: task?.history || [],
         emails,
         reminders: task?.reminders || { dueDate: true, overdue: false },
@@ -1709,7 +1763,10 @@ export const updateTaskManagerTask = async (req, res) => {
         let saved;
         if (target.kind === "manual") {
             const task = target.task;
-            if (assigneeChanged) rememberOriginalAssignee(task, previous, previousAssigneeName);
+            if (assigneeChanged) {
+                rememberOriginalAssignee(task, previous, previousAssigneeName);
+                giveTaskToAssignee(task);
+            }
             task.taskType = taskType;
             task.priority = priority;
             task.taskName = taskName;
@@ -1737,7 +1794,10 @@ export const updateTaskManagerTask = async (req, res) => {
             const action = target.action;
             let overlay = target.task;
             if (!overlay) overlay = await ensureOverlay(action);
-            if (assigneeChanged) rememberOriginalAssignee(overlay, previous, previousAssigneeName);
+            if (assigneeChanged) {
+                rememberOriginalAssignee(overlay, previous, previousAssigneeName);
+                giveTaskToAssignee(overlay);
+            }
             overlay.taskType = taskType;
             overlay.priority = priority;
             overlay.taskName = taskName;
@@ -1841,11 +1901,23 @@ export const reassignTaskManagerTask = async (req, res) => {
         const assignee = await findAssignee(assigneeId);
         if (!assignee) return res.status(400).json({ message: "Selected assignee was not found." });
         const assigneeName = personName(assignee) || assignee.employeeId || "Unassigned";
+        const savedClose = closeSnapshot(target.task);
+        const inReview = Boolean(savedClose.reviewPending);
+        const assigneeWasCleared = Boolean(savedClose.assigneeCleared);
+        const sameAssignee = String(current.assigneeId || "") === String(assignee._id)
+            || Boolean(
+                current.assigneeEmpId
+                && assignee.employeeId
+                && String(current.assigneeEmpId).trim().toLowerCase() === String(assignee.employeeId).trim().toLowerCase(),
+            );
+        if (sameAssignee && !inReview && !assigneeWasCleared) {
+            return res.status(400).json({ message: "This task is already assigned to that employee." });
+        }
         const previousName = await nameOfAssignee(
             current,
-            target.kind === "manual" ? target.task?.assigneeName : target.task?.assigneeName || "",
+            savedClose.returnAssigneeName || (target.kind === "manual" ? target.task?.assigneeName : target.task?.assigneeName || ""),
         );
-        const detail = `Reassigned from ${previousName || "the previous assignee"} to ${assigneeName}. ${reason}`;
+        const detail = reassignmentWorkText(previousName, assigneeName, reason);
 
         let taskName = "";
         let requesterName = "";
@@ -1856,12 +1928,7 @@ export const reassignTaskManagerTask = async (req, res) => {
         if (target.kind === "manual") {
             const task = target.task;
             rememberOriginalAssignee(task, current, previousName);
-            clearPendingCompletion(task);
-            const released = closeSnapshot(task);
-            if (released.assigneeCleared) {
-                task.closeRequest = { ...released, assigneeCleared: false, reassignmentReleased: false };
-                task.markModified("closeRequest");
-            }
+            giveTaskToAssignee(task);
             task.assignee = assignee._id;
             task.assigneeEmpId = assignee.employeeId || "";
             task.assigneeName = assigneeName;
@@ -1890,12 +1957,7 @@ export const reassignTaskManagerTask = async (req, res) => {
             let overlay = target.task;
             if (!overlay) overlay = await ensureOverlay(action);
             rememberOriginalAssignee(overlay, current, previousName);
-            clearPendingCompletion(overlay);
-            const releasedOverlay = closeSnapshot(overlay);
-            if (releasedOverlay.assigneeCleared) {
-                overlay.closeRequest = { ...releasedOverlay, assigneeCleared: false, reassignmentReleased: false };
-                overlay.markModified("closeRequest");
-            }
+            giveTaskToAssignee(overlay);
             overlay.assignee = assignee._id;
             overlay.assigneeEmpId = assignee.employeeId || "";
             overlay.assigneeName = assigneeName;
@@ -1952,12 +2014,28 @@ export const reassignTaskManagerTask = async (req, res) => {
         } catch (mailError) {
             console.error("Reassignment email failed:", mailError);
         }
+        if (emailSent && noticeTask?.updates?.length) {
+            const last = noticeTask.updates[noticeTask.updates.length - 1];
+            const kind = String(last?.kind || last?.badge || "");
+            if (kind === "Reassigned") {
+                last.emailSent = true;
+                last.assigneeNotified = true;
+                last.assigneeName = assigneeName;
+                noticeTask.markModified("updates");
+                await noticeTask.save();
+            }
+        }
 
         const fresh = await loadTarget(req.params.taskKey);
+        const sentBack = personBaseName(previousName).toLowerCase() === personBaseName(assigneeName).toLowerCase();
         return res.status(200).json({
-            message: emailSent
-                ? "Task reassigned. It stays with the original assignee and the new assignee. The new assignee was emailed."
-                : "Task reassigned. It stays with both assignees. The new assignee email could not be sent.",
+            message: sentBack
+                ? (emailSent
+                    ? `Task sent back to ${assigneeName}. They were emailed.`
+                    : `Task sent back to ${assigneeName}. The email could not be sent.`)
+                : (emailSent
+                    ? "Task reassigned. It stays with the original assignee and the new assignee. The new assignee was emailed."
+                    : "Task reassigned. It stays with both assignees. The new assignee email could not be sent."),
             emailSent,
             task: await buildDetail(fresh, viewer),
         });
@@ -3583,7 +3661,7 @@ async function handoffPeople(history, currentName) {
     const rows = [];
     const push = (name, role, at) => {
         const clean = personBaseName(name);
-        if (!clean || clean.toLowerCase() === "system") return;
+        if (!clean || ["system", "unassigned", "the previous assignee", "another employee"].includes(clean.toLowerCase())) return;
         const previous = rows[rows.length - 1];
         if (previous && previous.name.toLowerCase() === clean.toLowerCase()) return;
         rows.push({ name: clean, role, at: at || null });

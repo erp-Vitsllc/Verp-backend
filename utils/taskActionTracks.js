@@ -11,8 +11,58 @@ function clean(value) {
 
 function named(value) {
     const text = clean(value);
-    if (!text || text.toLowerCase() === "unassigned") return "";
+    if (!text) return "";
+    const lower = text.toLowerCase();
+    if (lower === "unassigned" || lower === "the previous assignee" || lower === "another employee") return "";
     return text;
+}
+
+/** Work-update sentence for a reassignment. Same person is a send-back, not "from X to X". */
+export function reassignmentWorkText(previousName, nextName, reason) {
+    const from = named(previousName);
+    const to = named(nextName) || "the new assignee";
+    const same = Boolean(from && from.toLowerCase() === to.toLowerCase());
+    const sentence = same
+        ? `Sent back to ${to}.`
+        : from
+            ? `Reassigned from ${from} to ${to}.`
+            : `Reassigned to ${to}.`;
+    const note = String(reason || "").trim();
+    return note ? `${sentence} ${note}` : sentence;
+}
+
+/**
+ * A reassignment email is stored separately from the work update.
+ * Match each "Reassigned" update to the email sent at the same time.
+ */
+export function markReassignmentEmails(updates, emails) {
+    const mails = (Array.isArray(emails) ? emails : [])
+        .filter((row) => /reassign/i.test(`${row?.emailType || ""} ${row?.subject || ""}`))
+        .map((row) => ({ at: new Date(row.sentAt || 0).getTime(), used: false }))
+        .filter((row) => row.at);
+    return (Array.isArray(updates) ? updates : []).map((item) => {
+        const plain = item?.toObject ? item.toObject() : { ...item };
+        const kind = String(plain.kind || plain.badge || "");
+        if (plain.emailSent || kind !== "Reassigned") return plain;
+        const at = new Date(plain.createdAt || 0).getTime();
+        if (!at) return plain;
+        let best = null;
+        for (const mail of mails) {
+            if (mail.used) continue;
+            const gap = Math.abs(mail.at - at);
+            if (gap > 3 * 60 * 1000) continue;
+            if (!best || gap < best.gap) best = { mail, gap };
+        }
+        if (!best) return plain;
+        best.mail.used = true;
+        const parsed = parseReassignment(plain.text || "", "");
+        return {
+            ...plain,
+            emailSent: true,
+            assigneeNotified: true,
+            assigneeName: plain.assigneeName || parsed.to || "",
+        };
+    });
 }
 
 function same(left, right) {
@@ -31,11 +81,18 @@ function isOpen(status) {
 }
 
 export function parseReassignment(detail, actorName) {
-    const text = String(detail || "");
-    const fromTo = text.match(/reassigned from\s+(.+?)\s+to\s+(.+?)(?:\.|$)/i);
-    if (fromTo) return { from: clean(fromTo[1]), to: clean(fromTo[2]) };
-    const toOnly = text.match(/(?:reassigned to|assignee changed to|assigned to)\s+(.+?)(?:\.|$)/i);
-    return { from: clean(actorName), to: toOnly ? clean(toOnly[1]) : "" };
+    const text = String(detail || "").trim();
+    const sentBack = text.match(/^sent back to\s+([^.,\n]+)/i);
+    if (sentBack) {
+        const person = named(sentBack[1]);
+        return { from: person, to: person };
+    }
+    const reassignedTo = text.match(/^reassigned to\s+([^.,\n]+)/i);
+    if (reassignedTo) return { from: "", to: named(reassignedTo[1]) };
+    const fromTo = text.match(/reassigned from\s+(.+?)\s+to\s+([^.,\n]+)/i);
+    if (fromTo) return { from: named(fromTo[1]), to: named(fromTo[2]) };
+    const toOnly = text.match(/(?:assignee changed to|assigned to)\s+([^.,\n]+)/i);
+    return { from: named(actorName), to: toOnly ? named(toOnly[1]) : "" };
 }
 
 function parseSentTo(detail) {

@@ -131,15 +131,26 @@ async function requireVendor(id) {
     return vendor;
 }
 
+export function withSinglePrimary(contacts) {
+    const rows = Array.isArray(contacts) ? contacts : [];
+    const chosen = rows.find((row) => row.isPrimary && row.source !== 'zoho')
+        || rows.find((row) => row.isPrimary);
+    const id = chosen ? String(chosen.id) : '';
+    return rows
+        .map((row) => ({ ...row, isPrimary: Boolean(id) && String(row.id) === id }))
+        .sort((left, right) => Number(right.isPrimary) - Number(left.isPrimary));
+}
+
 async function makeOnlyPrimary(vendorId, contactId) {
     await InventoryVendorContact.updateMany(
-        { vendorId, _id: { $ne: contactId } },
+        { vendorId },
         { $set: { isPrimary: false } },
     );
-    await InventoryVendorContact.updateOne(
+    const updated = await InventoryVendorContact.updateOne(
         { _id: contactId, vendorId },
         { $set: { isPrimary: true } },
     );
+    if (!updated.matchedCount) throw httpError(404, 'Contact was not found.');
 }
 
 async function localCopyOfZoho(vendorId, zohoId) {
@@ -231,11 +242,16 @@ export async function markVendorContactPrimary(req, res) {
         } else if (!mongoose.isValidObjectId(contactId)) {
             throw httpError(404, 'Contact was not found.');
         }
-        const row = await InventoryVendorContact.findOne({ _id: contactId, vendorId: vendor._id }).select('_id').lean();
+        const row = await InventoryVendorContact.findOne({ _id: contactId, vendorId: vendor._id }).lean();
         if (!row) throw httpError(404, 'Contact was not found.');
         await makeOnlyPrimary(vendor._id, row._id);
-        const fresh = await InventoryVendorContact.findById(row._id).lean();
-        res.json(presentContact(fresh));
+        await InventoryVendor.updateOne(
+            { _id: vendor._id },
+            { $set: { primaryContact: row.name || '' } },
+        );
+        const { loadVendorDetail } = await import('./vendors.js');
+        const savedVendor = await InventoryVendor.findById(vendor._id).lean();
+        res.json(await loadVendorDetail(savedVendor));
     } catch (error) {
         sendError(res, error);
     }

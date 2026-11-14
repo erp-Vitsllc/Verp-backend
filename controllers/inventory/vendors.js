@@ -6,7 +6,7 @@ import ItemBrand from '../../models/inventory/ItemBrand.js';
 import { fetchBillsChunk, fetchVendorContact, getZohoOrganizationId } from '../../services/zohoService.js';
 import ZohoBill from '../../models/ZohoBill.js';
 import { mapZohoBillToDoc, toZohoBillApiShape } from '../../utils/zohoPurchaseMappers.js';
-import { presentContact } from './vendorContacts.js';
+import { presentContact, withSinglePrimary } from './vendorContacts.js';
 import { cleanName, httpError, nameKey, sendError } from './http.js';
 import { escapeRegex } from '../../utils/regexHelper.js';
 
@@ -249,12 +249,19 @@ function zohoContactRows(raw, vendor) {
             designation: text(person?.designation || person?.department),
             emails,
             phones,
-            isPrimary: false,
+            isPrimary: Boolean(person?.is_primary_contact),
             brands: [],
             lines: [],
             source: 'zoho',
         };
     }).filter(Boolean);
+
+    if (!rows.some((row) => row.isPrimary) && rows.length) {
+        const match = vendor.primaryContact
+            ? rows.find((row) => row.name.toLowerCase() === vendor.primaryContact.toLowerCase())
+            : null;
+        (match || rows[0]).isPrimary = true;
+    }
 
     if (!rows.length && (vendor.primaryContact || vendor.email || vendor.phone)) {
         rows.push({
@@ -263,7 +270,7 @@ function zohoContactRows(raw, vendor) {
             designation: '',
             emails: vendor.email ? [vendor.email] : [],
             phones: vendor.phone ? [vendor.phone] : [],
-            isPrimary: false,
+            isPrimary: true,
             brands: [],
             lines: [],
             source: 'zoho',
@@ -452,7 +459,7 @@ export async function suppressZohoContactId(vendorId, zohoId) {
     );
 }
 
-async function loadVendorDetail(row) {
+export async function loadVendorDetail(row) {
     const { vendor: fresh, zohoRaw } = await refreshVendorFromZoho(row);
     const zohoDoc = fresh.zohoContactId
         ? await ZohoVendor.findOne({ zohoContactId: String(fresh.zohoContactId) })
@@ -466,14 +473,21 @@ async function loadVendorDetail(row) {
     ]);
     const localContacts = contacts.map((contact) => ({ ...presentContact(contact), source: 'local' }));
     const hidden = new Set([
-        ...(row.suppressedZohoContactIds || []),
+        ...(fresh.suppressedZohoContactIds || []),
         ...contacts.map((contact) => contact.zohoPersonId).filter(Boolean),
     ]);
     const zohoContacts = zohoContactRows(zohoRaw, fresh).filter((contact) => !hidden.has(contact.id));
+    const merged = withSinglePrimary(mergeContacts(localContacts, zohoContacts));
+    const chosen = merged.find((contact) => contact.isPrimary) || null;
+    const presented = presentVendor(fresh, chosen || primaryMap.get(String(fresh._id)));
+    const channel = (contact, key) => (Array.isArray(contact?.[key]) ? contact[key].find(Boolean) : '') || '';
     return {
-        ...presentVendor(fresh, primaryMap.get(String(fresh._id))),
+        ...presented,
         ...outstanding,
-        contacts: await withBrandImages(mergeContacts(localContacts, zohoContacts)),
+        contact: chosen?.name || presented.contact,
+        phone: chosen ? channel(chosen, 'phones') : presented.phone,
+        email: chosen ? channel(chosen, 'emails') : presented.email,
+        contacts: await withBrandImages(merged),
     };
 }
 
