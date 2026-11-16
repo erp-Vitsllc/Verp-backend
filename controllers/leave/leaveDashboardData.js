@@ -59,6 +59,10 @@ import {
     TWO_STEP_LEAVE_KINDS,
 } from '../../utils/leaveRequestApproval.js';
 import { isRequestUserDesignatedFlowchartHr } from '../../utils/isDesignatedFlowchartHr.js';
+import {
+    flowchartHrMayOverrideLeaveRules,
+    leaveGroupIsApproved,
+} from '../../utils/flowchartHrLeaveOverride.js';
 import { findInheritedTaskActions, viewerInheritsRequestAction } from '../../utils/reassigneeTaskPower.js';
 import { calcWorkingDays, dateEmployeeReachesWorkingDays, dubaiDateKey, loadCurrentLeaveCycleEligibility } from '../../utils/loadLeaveTicketEntitlement.js';
 import { loadGroupAnnualLeaveCap } from '../../utils/groupAnnualLeaveCap.js';
@@ -961,6 +965,7 @@ export async function getLeavePendingRequests(req, res) {
                     canEdit: hrFlags.canReviseLeave,
                     canMaintain: hrFlags.canReviseLeave,
                     canDelete: hrFlags.canDeleteLeave,
+                    viewerIsFlowchartHr: hrFlags.isFlowchartHr,
                 };
             })
             .sort((a, b) => {
@@ -1631,6 +1636,7 @@ async function writePendingLeaveDay({
     annualLeaveNotEligible = false,
     leaveApprovalStage = '',
     approvedNow = false,
+    decidedBy = null,
 }) {
     const employeeName = employeeDisplayName(employee) || 'Employee';
     let record = await Attendance.findOne({
@@ -1669,8 +1675,8 @@ async function writePendingLeaveDay({
     record.leaveRequestToDate = to;
     record.leaveRequestGroupId = groupId;
     record.leaveRequestedAt = requestedAt;
-    record.leaveDecidedAt = approvedNow ? requestedAt : null;
-    record.leaveDecidedBy = null;
+    record.leaveDecidedAt = approvedNow ? record.leaveDecidedAt || new Date() : null;
+    record.leaveDecidedBy = approvedNow ? decidedBy || record.leaveDecidedBy || null : null;
     record.leaveRequestReason = reason;
     record.annualLeaveNotEligible = Boolean(annualLeaveNotEligible);
     record.approvalStatus = '';
@@ -1870,11 +1876,6 @@ export async function applyLeaveRange(req, res) {
 
         const visibility = await loadEnrolledLeaveVisibilityByMongoId([employee]);
         const processingStart = visibility.get(String(employee._id)) || '';
-        if (!hrOverride && processingStart && from < processingStart) {
-            return res.status(400).json({
-                message: `Leave cannot start before this employee's salary processing date (${processingStart}).`,
-            });
-        }
 
         const dayCount = countInclusiveDays(from, to);
         if (dayCount < 1) {
@@ -1884,12 +1885,6 @@ export async function applyLeaveRange(req, res) {
         const spec = resolveLeaveApplySpec(req.body?.leaveType || req.body?.leaveMode, dayCount, {
             restrictToApplyTypes: !attendanceId,
         });
-        if (!hrOverride && spec?.leaveType === 'authorized' && dayCount > 3) {
-            return res.status(400).json({
-                message:
-                    'Maximum 3 days of authorized leave are allowed. For more information, please contact your HOD.',
-            });
-        }
         if (!spec) {
             return res.status(400).json({
                 message: 'Leave type must be Annual Leave or Authorized Leave.',
@@ -1931,8 +1926,6 @@ export async function applyLeaveRange(req, res) {
                 annualEligibility?.notEligible &&
                 !hrOverride,
         );
-        const hrApprovesAnnual = Boolean(hrOverride && spec.requestedStatusKey === 'on_leave');
-        const approveNow = (shouldApprove && !escalateIneligibleAnnual) || hrApprovesAnnual;
         const existingGroup = attendanceId ? await loadEditableLeaveGroup(attendanceId) : null;
         if (attendanceId && !existingGroup) {
             return res.status(400).json({ message: 'No leave request found to update.' });
@@ -1987,9 +1980,35 @@ export async function applyLeaveRange(req, res) {
             }
         }
 
+        const revisingApprovedLeave = leaveGroupIsApproved(existingGroup?.records);
+        const hrMayOverride = flowchartHrMayOverrideLeaveRules({
+            hrOverride,
+            designatedHr,
+            revisingApprovedLeave,
+        });
+        if (!hrMayOverride && processingStart && from < processingStart) {
+            return res.status(400).json({
+                message: `Leave cannot start before this employee's salary processing date (${processingStart}).`,
+            });
+        }
+        if (!hrMayOverride && spec.leaveType === 'authorized' && dayCount > 3) {
+            return res.status(400).json({
+                message:
+                    'Maximum 3 days of authorized leave are allowed. For more information, please contact your HOD.',
+            });
+        }
+        // An approved leave edited by flowchart HR stays approved. The employee
+        // calendar, coworker, and balance checks do not send it back to pending.
+        const directApprove = Boolean(
+            (hrOverride && spec.requestedStatusKey === 'on_leave' && !escalateIneligibleAnnual) ||
+                (hrMayOverride && revisingApprovedLeave),
+        );
+        const approveNow = (shouldApprove && !escalateIneligibleAnnual) || directApprove;
+        const noteIneligible = escalateIneligibleAnnual && !directApprove;
+
         const excludeGroupId = existingGroup?.groupId || '';
         const excludeRecordIds = (existingGroup?.records || []).map((row) => String(row._id));
-        const conflict = hrOverride
+        const conflict = hrMayOverride
             ? ''
             : await findLeaveApplyConflict(
                   String(employee._id),
@@ -2002,7 +2021,7 @@ export async function applyLeaveRange(req, res) {
             return res.status(400).json({ message: conflict });
         }
 
-        const allowanceError = hrOverride || escalateIneligibleAnnual
+        const allowanceError = hrMayOverride || noteIneligible
             ? ''
             : await checkEmployeeLeaveAllowance(employee, {
                   statusKey: spec.requestedStatusKey,
@@ -2031,14 +2050,18 @@ export async function applyLeaveRange(req, res) {
                 ? existingGroup.groupId
                 : new mongoose.Types.ObjectId().toString();
         const markedBy = req.user?.id || null;
-        const requestedAt = new Date();
+        const priorRequestedAt = revisingApprovedLeave
+            ? (existingGroup?.records || []).map((row) => row.leaveRequestedAt).find(Boolean)
+            : null;
+        const requestedAt = priorRequestedAt || new Date();
+        const editor = directApprove && revisingApprovedLeave ? await resolveActorEmployee(req) : null;
         const ineligibleNotes = [];
-        if (escalateIneligibleAnnual && annualEligibility?.cycleNotEligible) {
+        if (noteIneligible && annualEligibility?.cycleNotEligible) {
             ineligibleNotes.push(
                 `Not eligible for leave (${annualEligibility.eligibleDays}/${annualEligibility.requiredDays})`,
             );
         }
-        if (escalateIneligibleAnnual && annualEligibility?.groupCap?.over) {
+        if (noteIneligible && annualEligibility?.groupCap?.over) {
             const cap = annualEligibility.groupCap;
             ineligibleNotes.push(
                 `Group annual leave cap ${cap.taken}/${cap.maxAllowed} in ${cap.groupLabel || 'group'}`,
@@ -2047,7 +2070,7 @@ export async function applyLeaveRange(req, res) {
         const reason = `${spec.requestedStatusLabel} request (${dayCount} day${dayCount === 1 ? '' : 's'})${
             ineligibleNotes.length
                 ? ` · ${ineligibleNotes.join(' · ')}`
-                : hrOverride
+                : hrMayOverride
                   ? ' · HR override'
                   : ''
         }`;
@@ -2093,18 +2116,22 @@ export async function applyLeaveRange(req, res) {
                     dayStatus === 'authorized_leave'
                         ? `${reason} · Sick allowance used`
                         : reason,
-                annualLeaveNotEligible: escalateIneligibleAnnual,
+                annualLeaveNotEligible: noteIneligible,
                 leaveApprovalStage: approvalStage,
-                approvedNow: hrApprovesAnnual,
+                approvedNow: directApprove,
+                decidedBy: editor?._id || null,
             });
             saved.push(record);
         }
 
-        if (hrApprovesAnnual) {
+        if (directApprove) {
+            const dayWord = dayCount === 1 ? 'day' : 'days';
             return res.status(200).json({
-                message: ineligibleNotes.length
-                    ? `Annual leave approved. ${ineligibleNotes.join(' ')}`
-                    : `Annual leave approved for ${dayCount} day${dayCount === 1 ? '' : 's'}.`,
+                message: revisingApprovedLeave
+                    ? `${spec.requestedStatusLabel} updated for ${dayCount} ${dayWord}.`
+                    : ineligibleNotes.length
+                      ? `Annual leave approved. ${ineligibleNotes.join(' ')}`
+                      : `Annual leave approved for ${dayCount} ${dayWord}.`,
                 from,
                 to,
                 dayCount,

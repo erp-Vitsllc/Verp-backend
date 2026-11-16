@@ -31,7 +31,7 @@ function isAdminTrack(row) {
 
 /** Reminders can have several open tasks on one record, one per document or bill. */
 function sharesOneTask(requestType) {
-    return !/expiry|not renew|card deleted|value missing|asset overdue|profile incomplete|payment reminder|fuel reminder/i.test(
+    return !/expiry|not renew|card deleted|value missing|asset overdue|profile incomplete|payment reminder|fuel reminder|submit reminder/i.test(
         String(requestType || ""),
     );
 }

@@ -2709,3 +2709,111 @@ export async function fetchNextBillNumber() {
     const nextNumber = best.number + 1;
     return `${best.prefix}${String(nextNumber).padStart(best.width, '0')}`;
 }
+
+function zohoMoney(value) {
+    const amount = Number(value);
+    if (!Number.isFinite(amount)) return 0;
+    return Math.round(amount * 100) / 100;
+}
+
+function mapZohoEstimate(row) {
+    const total = zohoMoney(row?.total);
+    const listedExcl = zohoMoney(row?.sub_total ?? row?.bcy_sub_total);
+    const valueExclVat = listedExcl || (total ? Math.round((total / 1.05) * 100) / 100 : 0);
+    const listedVat = zohoMoney(row?.tax_total);
+    const vatAmount = listedVat || Math.round((total - valueExclVat) * 100) / 100;
+    return {
+        id: String(row?.estimate_id || '').trim(),
+        number: String(row?.estimate_number || '').trim(),
+        date: String(row?.date || '').slice(0, 10),
+        customerId: String(row?.customer_id || '').trim(),
+        customerName: String(row?.customer_name || '').trim(),
+        valueExclVat,
+        vatAmount,
+        total,
+        status: String(row?.status || '').trim(),
+    };
+}
+
+function normalizeQuoteNumber(value) {
+    return String(value || '').trim().toLowerCase().replace(/\s+/g, '');
+}
+
+function quoteLookupError(message, statusCode) {
+    const error = new Error(message);
+    error.statusCode = statusCode;
+    return error;
+}
+
+function pickZohoEstimate(rows, number) {
+    const wanted = normalizeQuoteNumber(number);
+    const exact = (Array.isArray(rows) ? rows : []).filter(
+        (row) => normalizeQuoteNumber(row?.estimate_number) === wanted,
+    );
+    return exact[0] || null;
+}
+
+/** Find one Zoho Books estimate by the quotation number the user typed. */
+export async function fetchZohoEstimateByNumber(number) {
+    const needle = String(number || '').trim();
+    if (!needle) throw quoteLookupError('Enter a Zoho quotation number.', 400);
+
+    let match = null;
+    try {
+        const exact = await requestZohoBooks('/estimates', {
+            params: { estimate_number: needle, per_page: 200 },
+            timeout: 20000,
+        });
+        match = pickZohoEstimate(exact?.estimates, needle);
+    } catch (error) {
+        console.error('[ZohoEstimates] Number filter failed:', error?.message || error);
+    }
+
+    if (!match) {
+        const searched = await requestZohoBooks('/estimates', {
+            params: { search_text: needle, per_page: 200 },
+            timeout: 20000,
+        });
+        match = pickZohoEstimate(searched?.estimates, needle);
+    }
+
+    if (!match?.estimate_id) {
+        throw quoteLookupError('No Zoho quotation found for that number.', 404);
+    }
+    if (/void|declined/i.test(String(match.status || ''))) {
+        throw quoteLookupError('That Zoho quotation is void or declined.', 400);
+    }
+
+    try {
+        const detail = await requestZohoBooks(`/estimates/${match.estimate_id}`, { timeout: 20000 });
+        if (detail?.estimate) match = { ...match, ...detail.estimate };
+    } catch (error) {
+        console.error('[ZohoEstimates] Detail lookup failed, using the list row:', error?.message || error);
+    }
+
+    const mapped = mapZohoEstimate(match);
+    if (!mapped.id || !mapped.number) {
+        throw quoteLookupError('No Zoho quotation found for that number.', 404);
+    }
+    return mapped;
+}
+
+/** Zoho Books estimates are the quotations imported onto a work order. */
+export async function fetchZohoEstimates() {
+    const estimates = [];
+    let page = 1;
+    let hasMore = true;
+    while (hasMore && page <= 3) {
+        const data = await requestZohoBooks('/estimates', {
+            params: { page, per_page: 200, sort_column: 'date' },
+            timeout: 20000,
+        });
+        const rows = Array.isArray(data?.estimates) ? data.estimates : [];
+        estimates.push(...rows);
+        hasMore = Boolean(data?.page_context?.has_more_page) && rows.length > 0;
+        page += 1;
+    }
+    return estimates
+        .map(mapZohoEstimate)
+        .filter((row) => row.id && row.number && !/void|declined/i.test(row.status));
+}

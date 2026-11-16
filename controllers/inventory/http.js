@@ -1,3 +1,5 @@
+import mongoose from 'mongoose';
+
 const MAX_IMAGE_CHARS = 2_000_000;
 
 export function cleanName(value) {
@@ -75,6 +77,24 @@ export function readImage(image, { required }) {
         imageData: data,
         imageName: String(image.name || '').slice(0, 180),
     };
+}
+
+export function imageIdsFromQuery(query) {
+    return [...new Set(String(query || '').split(',').map((id) => id.trim()))]
+        .filter((id) => mongoose.isValidObjectId(id))
+        .slice(0, 60);
+}
+
+export async function sendStoredImages(res, model, ids) {
+    if (!ids.length) {
+        res.json([]);
+        return;
+    }
+    const rows = await model.find({ _id: { $in: ids } }).select('imageData').lean();
+    res.json(rows.map((row) => ({
+        _id: row._id,
+        image: row.imageData || '',
+    })));
 }
 
 /** Keep the saved photo unless the request includes a replacement. */

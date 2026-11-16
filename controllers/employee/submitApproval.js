@@ -99,6 +99,8 @@ export const submitApproval = async (req, res) => {
                 extra3: JSON.stringify({ activationSubject: "employee", activationViewerRole: "hr" }),
             });
             await clearProfileActivationHoldDashboardRows(updated._id);
+            const { clearProfileHrSubmitReminders } = await import("../../utils/notifyProfileHrSubmitReminder.js");
+            await clearProfileHrSubmitReminders(updated._id);
         } catch (syncErr) {
             console.error("[SubmitApproval] Dashboard Sync Error:", syncErr);
         }

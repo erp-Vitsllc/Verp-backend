@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { buildSlotWorkbookBytes } from './salarySlotWorkbook.js';
+import { buildSlotWorkbookBytes, wpsAmountsFromSlipPay } from './salarySlotWorkbook.js';
 
 function workbookText(bytes) {
     return Buffer.from(bytes).toString('utf8');
@@ -21,6 +21,7 @@ test('puts each company on its own WPS sheet', () => {
                 incomeVar: 150,
                 leaveDays: 2,
                 accountNumber: '123456',
+                iban: 'AE111111111111111111111',
                 bankName: 'Emirates NBD',
             },
             {
@@ -33,6 +34,7 @@ test('puts each company on its own WPS sheet', () => {
                 incomeVar: 0,
                 leaveDays: 0,
                 accountNumber: '998877',
+                iban: 'AE222222222222222222222',
                 bankName: 'ADCB',
             },
         ],
@@ -45,6 +47,10 @@ test('puts each company on its own WPS sheet', () => {
     assert.match(text, /COMPMOLCODE/);
     assert.match(text, /EMPNAME/);
     assert.match(text, /BANKACCNO/);
+    assert.match(text, /AE111111111111111111111/);
+    assert.match(text, /AE222222222222222222222/);
+    assert.equal(text.includes('123456'), false);
+    assert.equal(text.includes('998877'), false);
     assert.match(text, /ABBAS RAZA/);
     assert.match(text, /NNT PERSON/);
     assert.match(text, /<v>1500<\/v>/);
@@ -75,7 +81,37 @@ test('builds one Cash Salary sheet', () => {
     assert.match(text, /Employee Name/);
     assert.match(text, /October 2026/);
     assert.match(text, /CASH PERSON/);
+    assert.match(text, /555/);
+    assert.match(text, /AE070331234567890123456/);
     assert.match(text, /<v>2200.5<\/v>/);
     assert.match(text, /<t>Cash<\/t>/);
     assert.equal(text.includes('WPS -'), false);
+});
+
+test('WPS income is the salary slip net payable, after deductions', () => {
+    const razan = wpsAmountsFromSlipPay({
+        monthlySalary: 2650,
+        ot: 0,
+        rewardAdditions: 0,
+        zohoSalary: 2650,
+        netSalaryPayable: 2150,
+    });
+    assert.equal(razan.incomeFix, 2150);
+    assert.equal(razan.incomeVar, 0);
+    assert.equal(razan.net, 2150);
+
+    const withExtra = wpsAmountsFromSlipPay({
+        monthlySalary: 2000,
+        ot: 200,
+        rewardAdditions: 50,
+        zohoSalary: 2250,
+        netSalaryPayable: 1700,
+    });
+    assert.equal(withExtra.incomeFix, 1700);
+    assert.equal(withExtra.incomeVar, 0);
+    assert.equal(withExtra.incomeFix + withExtra.incomeVar, 1700);
+
+    const fallback = wpsAmountsFromSlipPay({ monthlySalary: 2650, actualSalary: 2150 });
+    assert.equal(fallback.incomeFix, 2150);
+    assert.equal(fallback.net, 2150);
 });

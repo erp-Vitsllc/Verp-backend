@@ -312,7 +312,7 @@ function wpsRows(people, month) {
         Number(person.leaveDays) || 0,
         month.month,
         month.year,
-        person.accountNumber || '',
+        person.iban || '',
         person.bankName || '',
     ]);
 }
@@ -414,6 +414,21 @@ function personName(emp, employeeId) {
     return name || employeeId;
 }
 
+/**
+ * The bank pays INCOMEFIX + INCOMEVAR.
+ * That total is the salary slip net payable card: monthly earnings and extras,
+ * minus loss of pay and this month's loan, fine, advance, utility, and other deduction.
+ * Variable stays at 0 because those extras are already inside the net payable.
+ */
+export function wpsAmountsFromSlipPay(pay) {
+    const net = money(
+        pay?.netSalaryPayable != null && pay.netSalaryPayable !== ''
+            ? pay.netSalaryPayable
+            : (pay?.actualSalary != null && pay.actualSalary !== '' ? pay.actualSalary : pay?.netSalary),
+    );
+    return { incomeFix: net, incomeVar: 0, net };
+}
+
 export async function buildSalarySlotFile(payment) {
     const monthKey = String(payment?.monthKey || '').trim();
     const ids = [...new Set((payment?.employeeIds || payment?.selectedIds || []).map((id) => String(id || '').trim()).filter(Boolean))];
@@ -441,25 +456,22 @@ export async function buildSalarySlotFile(payment) {
         const profile = profileByCode.get(key);
         const bank = bankByCode.get(key);
         const pay = figures.get(key) || {};
+        const paid = wpsAmountsFromSlipPay(pay);
         const companyName = String(
             emp?.company?.nickName || emp?.company?.name || slotCompany || 'Company',
         ).trim() || 'Company';
         const accountNumber = String(bank?.accountNumber || '').trim();
-        const iban = String(bank?.ibanNumber || '').replace(/\s+/g, '');
+        const iban = String(bank?.ibanNumber || '').replace(/\s+/g, '').toUpperCase();
         return {
             employeeId: String(emp?.employeeId || employeeId).trim(),
             name: personName(emp, employeeId),
             companyName,
             companyMolCode: String(profile?.companyMolCode || '').trim(),
             employeeMolId: String(profile?.employeeMolId || '').trim(),
-            incomeFix: money(pay.monthlySalary),
-            incomeVar: money(money(pay.ot) + money(pay.rewardAdditions)),
+            incomeFix: paid.incomeFix,
+            incomeVar: paid.incomeVar,
             leaveDays: Number(pay.leaveDays) || 0,
-            net: money(
-                pay.netSalaryPayable != null && pay.netSalaryPayable !== ''
-                    ? pay.netSalaryPayable
-                    : (pay.actualSalary != null && pay.actualSalary !== '' ? pay.actualSalary : pay.netSalary),
-            ),
+            net: paid.net,
             bankName: String(bank?.bankName || '').trim(),
             accountNumber: accountNumber || iban,
             iban,

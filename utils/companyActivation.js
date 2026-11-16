@@ -653,18 +653,38 @@ export const submitCompanyActivation = async ({
 };
 
 /**
- * When company is Active, only these cards use the HR approval queue.
- * Other cards (address, ejari, memo, certificate, owner visas, etc.) apply immediately.
+ * When company is Active, these cards use the HR approval queue.
+ * Memo, certificate, and other generic documents still apply immediately.
  */
 export const ACTIVE_COMPANY_HR_QUEUE_CARD_LABELS = [
     "Basic Details",
+    "Company Address",
     "Trade License",
     "Establishment Card",
     "MOA",
+    "Ejari",
+    "Insurance",
     "Owner Details",
     "Owner Passport",
     "Owner Emirates ID",
+    "Owner Visit Visa",
+    "Owner Employment Visa",
+    "Owner Spouse Visa",
+    "Owner Labour Card",
+    "Owner Medical",
+    "Owner Driving License",
 ];
+
+const OWNER_HR_QUEUE_DOCS = [
+    ["visitVisa", "Owner Visit Visa"],
+    ["employmentVisa", "Owner Employment Visa"],
+    ["spouseVisa", "Owner Spouse Visa"],
+    ["labourCard", "Owner Labour Card"],
+    ["medical", "Owner Medical"],
+    ["drivingLicense", "Owner Driving License"],
+];
+
+const ADDRESS_HR_KEYS = ["address", "country", "state", "city", "postalCode"];
 
 /**
  * Human-readable labels for HR-queued changes on an active company (pending queue + hold UI).
@@ -809,7 +829,27 @@ export const collectCompanyReactivationChangeLabels = (updateData = {}, beforeCo
             if (isOwnersBasicDetailsModified(beforeOwners, updateData.owners)) {
                 changes.push("Owner Details");
             }
+            for (const [docKey, label] of OWNER_HR_QUEUE_DOCS) {
+                if (isOwnersNestedDocModified(beforeOwners, updateData.owners, docKey)) {
+                    changes.push(label);
+                }
+            }
         }
+    }
+    if (payloadKeysDiffer(beforeCompany, updateData, ADDRESS_HR_KEYS)) {
+        changes.push("Company Address");
+    }
+    if (
+        Object.prototype.hasOwnProperty.call(updateData, "ejari") &&
+        payloadKeysDiffer(beforeCompany, updateData, ["ejari"])
+    ) {
+        changes.push("Ejari");
+    }
+    if (
+        Object.prototype.hasOwnProperty.call(updateData, "insurance") &&
+        payloadKeysDiffer(beforeCompany, updateData, ["insurance"])
+    ) {
+        changes.push("Insurance");
     }
 
     return [...new Set(changes)].filter((label) => ACTIVE_COMPANY_HR_QUEUE_CARD_LABELS.includes(label));
@@ -918,6 +958,19 @@ const sliceOwnersEmiratesIdOnly = (owners = []) =>
             if (o.id != null) row.id = o.id;
             if (o.name) row.name = o.name;
             row.emiratesId = o.emiratesId;
+            return row;
+        })
+        .filter(Boolean);
+
+const sliceOwnersNestedDocOnly = (owners = [], docKey) =>
+    (Array.isArray(owners) ? owners : [])
+        .map((o) => {
+            if (!o || typeof o !== "object" || !o[docKey]) return null;
+            const row = {};
+            if (o._id != null) row._id = o._id;
+            if (o.id != null) row.id = o.id;
+            if (o.name) row.name = o.name;
+            row[docKey] = o[docKey];
             return row;
         })
         .filter(Boolean);
@@ -1066,6 +1119,39 @@ const slicePendingEntryForCard = (entry, cardLabel) => {
                 proposed,
             ),
             previousData: { owners: sliceOwnersEmiratesIdOnly(previous.owners) },
+        };
+    }
+    const ownerDoc = OWNER_HR_QUEUE_DOCS.find(([, docLabel]) => normCardLabel(docLabel) === label);
+    if (ownerDoc) {
+        const [docKey] = ownerDoc;
+        return {
+            ...entry,
+            isRenewal: isCompanyPendingChangeRenewal({ ...entry, proposedData: proposed }),
+            card: cardLabel,
+            reason: cardLabel,
+            proposedData: copyCompanyRenewalMeta(
+                { owners: sliceOwnersNestedDocOnly(proposed.owners, docKey) },
+                proposed,
+            ),
+            previousData: { owners: sliceOwnersNestedDocOnly(previous.owners, docKey) },
+        };
+    }
+    if (label === "company address" || label === "ejari" || label === "insurance") {
+        const keys = label === "company address" ? ADDRESS_HR_KEYS : label === "ejari" ? ["ejari"] : ["insurance"];
+        const pick = (src) => {
+            const out = {};
+            for (const k of keys) {
+                if (Object.prototype.hasOwnProperty.call(src, k)) out[k] = src[k];
+            }
+            return out;
+        };
+        return {
+            ...entry,
+            isRenewal: isCompanyPendingChangeRenewal({ ...entry, proposedData: proposed }),
+            card: cardLabel,
+            reason: cardLabel,
+            proposedData: copyCompanyRenewalMeta(pick(proposed), proposed),
+            previousData: pick(previous),
         };
     }
     if (label === "owner details") {
@@ -1342,6 +1428,16 @@ const ESTABLISHMENT_HR_KEYS = [
 const hasPayloadKey = (updateData, keys) =>
     keys.some((k) => Object.prototype.hasOwnProperty.call(updateData, k));
 
+const payloadKeysDiffer = (beforeCompany = {}, updateData = {}, keys = []) =>
+    keys.some((key) => {
+        if (!Object.prototype.hasOwnProperty.call(updateData, key)) return false;
+        try {
+            return JSON.stringify(beforeCompany?.[key] ?? null) !== JSON.stringify(updateData[key] ?? null);
+        } catch {
+            return true;
+        }
+    });
+
 /**
  * True when a PATCH body changes Basic Details, Trade License, Establishment Card, or MOA
  * (add / edit / renew / not-renew via documents payload). Used for HR queue on active profiles.
@@ -1554,6 +1650,48 @@ export const isOwnersEmiratesIdModified = (beforeOwners = [], nextOwners = []) =
     return false;
 };
 
+const serializeOwnerNestedDoc = (owner, docKey) => {
+    if (!owner || typeof owner !== "object") return "";
+    const doc = owner[docKey];
+    if (!doc || typeof doc !== "object") return "";
+    try {
+        return JSON.stringify(doc);
+    } catch {
+        return "";
+    }
+};
+
+const ownerNestedDocHasContent = (doc) => {
+    if (!doc || typeof doc !== "object") return false;
+    return Boolean(
+        String(doc.number || doc.provider || "").trim() ||
+            doc.attachment ||
+            doc.document,
+    );
+};
+
+export const isOwnersNestedDocModified = (beforeOwners = [], nextOwners = [], docKey) => {
+    const prev = Array.isArray(beforeOwners) ? beforeOwners : [];
+    const next = Array.isArray(nextOwners) ? nextOwners : [];
+    for (let i = 0; i < next.length; i++) {
+        const nextOwner = next[i];
+        const nextId = nextOwner?._id || nextOwner?.id;
+        let prevOwner = null;
+        if (nextId) {
+            prevOwner = prev.find((o) => String(o?._id || o?.id || "") === String(nextId));
+        }
+        if (!prevOwner) prevOwner = prev[i] || null;
+        if (!prevOwner) {
+            if (ownerNestedDocHasContent(nextOwner?.[docKey])) return true;
+            continue;
+        }
+        if (serializeOwnerNestedDoc(prevOwner, docKey) !== serializeOwnerNestedDoc(nextOwner, docKey)) {
+            return true;
+        }
+    }
+    return false;
+};
+
 export const updateDataTouchesHrApprovalCards = (beforeCompany = {}, updateData = {}) => {
     if (hasPayloadKey(updateData, BASIC_DETAILS_HR_KEYS)) {
         return true;
@@ -1575,11 +1713,17 @@ export const updateDataTouchesHrApprovalCards = (beforeCompany = {}, updateData 
         if (
             isOwnersBasicDetailsModified(beforeOwners, updateData.owners) ||
             isOwnersPassportModified(beforeOwners, updateData.owners) ||
-            isOwnersEmiratesIdModified(beforeOwners, updateData.owners)
+            isOwnersEmiratesIdModified(beforeOwners, updateData.owners) ||
+            OWNER_HR_QUEUE_DOCS.some(([docKey]) =>
+                isOwnersNestedDocModified(beforeOwners, updateData.owners, docKey),
+            )
         ) {
             return true;
         }
     }
+    if (payloadKeysDiffer(beforeCompany, updateData, ADDRESS_HR_KEYS)) return true;
+    if (payloadKeysDiffer(beforeCompany, updateData, ["ejari"])) return true;
+    if (payloadKeysDiffer(beforeCompany, updateData, ["insurance"])) return true;
     return false;
 };
 

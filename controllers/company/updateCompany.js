@@ -15,6 +15,7 @@ import { scheduleCompanyCardDeletedNotification } from "../../utils/cardDeleteNo
 import { archiveSupersededCompanyDocuments } from "../../utils/archiveCompanyDocument.js";
 import { archiveSupersededCompanyOwners } from "../../utils/archiveCompanyOwners.js";
 import { syncDashboardAction } from "../../utils/syncDashboard.js";
+import { notifyProfileHrSubmitReminder } from "../../utils/notifyProfileHrSubmitReminder.js";
 import { sendResponsibilityApprovalEmail } from "../../utils/sendResponsibilityApprovalEmail.js";
 import { buildResponsibilityEmailData } from "../../utils/flowchartResponsibilityEmailData.js";
 import {
@@ -854,10 +855,12 @@ export const updateCompany = async (req, res) => {
 
         let updatedCompany = null;
         let responseMessage = "Company updated successfully";
+        let queuedCardLabel = "";
 
         if (queueForApproval) {
             const changedCards = collectCompanyReactivationChangeLabels(updateData, beforeCompany);
             const cardLabel = changedCards.length ? changedCards.join(", ") : "Company Profile";
+            queuedCardLabel = cardLabel;
             const proposedForQueue = toSerializable(updateData);
             if (ownersReplaceRosterFlag) {
                 proposedForQueue.__ownersReplaceRoster = true;
@@ -1095,6 +1098,24 @@ export const updateCompany = async (req, res) => {
                 : { ...refreshedCore });
 
         const signedCompany = await signCompanyProfileForResponse(mergedForResponse);
+
+        if (
+            queueForApproval &&
+            String(beforeCompany.activationStatus || "").toLowerCase() !== "submitted"
+        ) {
+            await notifyProfileHrSubmitReminder({
+                requestId: beforeCompany._id,
+                actor: req.user,
+                entityKind: "company",
+                subject: {
+                    name: beforeCompany.name,
+                    companyId: beforeCompany.companyId,
+                    employeeId: beforeCompany.companyId,
+                    firstName: beforeCompany.name || "",
+                },
+                cardLabel: queuedCardLabel,
+            });
+        }
 
         try {
             await closeCreatorNotRenewFollowUpsFromCompanyUpdate(updatedCompany._id, updateData);

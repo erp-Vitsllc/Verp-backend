@@ -96,6 +96,13 @@ export const rejectProfile = async (req, res) => {
             return res.status(404).json({ message: "Employee submission not found" });
         }
 
+        try {
+            const { clearProfileHrSubmitReminders } = await import("../../utils/notifyProfileHrSubmitReminder.js");
+            await clearProfileHrSubmitReminders(updated._id);
+        } catch (reminderErr) {
+            console.warn("[RejectProfile] clear submit reminder:", reminderErr?.message || reminderErr);
+        }
+
         const subjectLean = await EmployeeBasic.findOne({ employeeId })
             .select("_id employeeId firstName lastName designation companyEmail workEmail email personalEmail")
             .lean();

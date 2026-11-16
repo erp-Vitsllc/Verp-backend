@@ -26,6 +26,7 @@ import {
     holdCompanyActivationRequest,
     rejectCompanyActivationRequest,
     discardCompanyPendingActivationEntry,
+    cancelCompanyPendingEdits,
 } from "../controllers/company/activationController.js";
 import { syncCompanyExpiryNotifications, syncOneCompanyExpiryNotifications } from "../controllers/company/syncCompanyExpiryNotifications.js";
 
@@ -48,6 +49,7 @@ router.post("/:id/approve-activation", approveCompanyActivationRequest);
 router.post("/:id/hold-activation", holdCompanyActivationRequest);
 router.post("/:id/reject-activation", rejectCompanyActivationRequest);
 router.delete("/:id/pending-activation-entry/:entryId", discardCompanyPendingActivationEntry);
+router.post("/:id/cancel-pending-edits", cancelCompanyPendingEdits);
 router.put("/:id/respond-responsibility", respondToResponsibility);
 router.post("/:id/upload", uploadCompanyDocument);
 router.delete("/:id/document/:target", deleteDocument);

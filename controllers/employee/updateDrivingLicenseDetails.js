@@ -10,6 +10,11 @@ import {
     validateEmployeeDrivingLicensePayload,
 } from "../../utils/employeeDrivingLicenseValidation.js";
 import { scheduleEmployeeProfileFileChangeHrEmailForRequest } from "../../utils/employeeInformativeHrNotify.js";
+import {
+    queueOrTriggerProfileChange,
+    skipLiveProfileWritesPendingHrAsync,
+} from "../../utils/pushPendingReactivationChange.js";
+import { triggerProfileReactivationIfNeeded } from "../../utils/triggerProfileReactivation.js";
 
 const normalizeDocumentInput = (document) => {
     if (typeof document === "string") return document.trim();
@@ -78,13 +83,14 @@ export const updateDrivingLicenseDetails = async (req, res) => {
             return res.status(400).json({ message: "Invalid issue or expiry date provided." });
         }
 
+        const skipLive = await skipLiveProfileWritesPendingHrAsync(req, employeeBasic);
         const previousDrivingLicense = existingDrivingLicense?.drivingLicenceDetails;
         const isRenewal = req.body?.isRenewal === true;
         const hasExistingDocument = employeeRenewalHasExistingCard(previousDrivingLicense);
         const hasNewDocumentUpload = Boolean(normalizedDocument);
         const shouldArchivePrevious = await archiveAndClearLiveEmployeeRenewal({
             employeeId,
-            skipLive: false,
+            skipLive,
             isRenewal,
             hasExistingDocument,
             hasNewDocumentUpload,
@@ -116,6 +122,7 @@ export const updateDrivingLicenseDetails = async (req, res) => {
                 if (!shouldArchivePrevious && existingDrivingLicense?.drivingLicenceDetails?.document) {
                     await disposeEmployeeProfileAttachment(req, {
                         employeeBasic,
+                        isActivationDocumentChange: skipLive,
                         attachment: existingDrivingLicense.drivingLicenceDetails.document,
                         archive: {
                             moduleName: "Employee Driving License Attachment",
@@ -147,11 +154,42 @@ export const updateDrivingLicenseDetails = async (req, res) => {
             lastUpdated: new Date(),
         };
 
-        const updatedDrivingLicense = await EmployeeDrivingLicense.findOneAndUpdate(
-            { employeeId },
-            { $set: { drivingLicenceDetails: drivingLicensePayload } },
-            { upsert: true, new: true },
-        );
+        let updatedDrivingLicense = existingDrivingLicense;
+        if (!skipLive) {
+            updatedDrivingLicense = await EmployeeDrivingLicense.findOneAndUpdate(
+                { employeeId },
+                { $set: { drivingLicenceDetails: drivingLicensePayload } },
+                { upsert: true, new: true },
+            );
+        }
+
+        const drivingChangeEntry = {
+            card: "Driving License",
+            reason: "Driving License details updated",
+            section: "drivingLicense",
+            changeType: "update",
+            targetIndex: null,
+            isRenewal,
+            previousData: previousDrivingLicense || null,
+            proposedData: drivingLicensePayload,
+        };
+        if (skipLive) {
+            await queueOrTriggerProfileChange({
+                employeeId,
+                actor: req.user,
+                reason: "Driving License details updated",
+                employeeBasic,
+                changeEntry: drivingChangeEntry,
+            });
+        } else {
+            await triggerProfileReactivationIfNeeded({
+                employeeId,
+                actor: req.user,
+                reason: "Driving License details updated",
+                changeEntry: null,
+                trackDefaultChange: true,
+            });
+        }
 
         try {
             await markProfileActivationHoldResolvedForSection(employeeId, "drivingLicense");
@@ -161,16 +199,18 @@ export const updateDrivingLicenseDetails = async (req, res) => {
 
         const completeEmployee = await getCompleteEmployee(employeeId);
 
-        try {
-            const { reconcileEmployeeDocumentExpiryDashboard } = await import(
-                "../../utils/processDocumentExpiryReminders.js"
-            );
-            await reconcileEmployeeDocumentExpiryDashboard(employeeBasic?._id || employeeId);
-        } catch (reconcileErr) {
-            console.warn(
-                "[updateDrivingLicenseDetails] reconcileEmployeeDocumentExpiryDashboard:",
-                reconcileErr?.message || reconcileErr,
-            );
+        if (!skipLive) {
+            try {
+                const { reconcileEmployeeDocumentExpiryDashboard } = await import(
+                    "../../utils/processDocumentExpiryReminders.js"
+                );
+                await reconcileEmployeeDocumentExpiryDashboard(employeeBasic?._id || employeeId);
+            } catch (reconcileErr) {
+                console.warn(
+                    "[updateDrivingLicenseDetails] reconcileEmployeeDocumentExpiryDashboard:",
+                    reconcileErr?.message || reconcileErr,
+                );
+            }
         }
 
         scheduleEmployeeProfileFileChangeHrEmailForRequest({
@@ -182,12 +222,15 @@ export const updateDrivingLicenseDetails = async (req, res) => {
             action: hasNewDocumentUpload && hasExistingDocument ? "renewed" : "edited",
             attachments: drivingLicensePayload?.document,
             actor: req.user,
-            skipLive: false,
+            skipLive,
             isRenewal: req.body?.isRenewal === true,
         });
 
         return res.json({
-            message: "Driving License details updated successfully.",
+            message: skipLive
+                ? "Driving License change queued for HR activation approval."
+                : "Driving License details updated successfully.",
+            queuedForHrApproval: !!skipLive,
             drivingLicenceDetails: updatedDrivingLicense?.drivingLicenceDetails || completeEmployee?.drivingLicenceDetails,
             employee: completeEmployee,
         });

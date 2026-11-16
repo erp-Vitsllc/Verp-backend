@@ -74,6 +74,7 @@ const VEHICLE_ASSET_TITLES = {
 
 const PERSON_LABELS = {
     "profile activation": "Profile Activation",
+    "profile hr submit reminder": "HR Approval Not Submitted",
     "profile incomplete": "Profile Incomplete",
     "probation change": "Probation Change",
     "left user request": "Left User",

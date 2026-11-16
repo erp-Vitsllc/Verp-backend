@@ -131,6 +131,8 @@ export const approveProfile = async (req, res) => {
             await withdrawEmployeeActivationSubmissionIfQueueEmpty(basicDoc, {
                 actionedBy: req.user?.employeeObjectId || req.user?._id || null,
             });
+            const { clearProfileHrSubmitReminders } = await import("../../utils/notifyProfileHrSubmitReminder.js");
+            await clearProfileHrSubmitReminders(basicDoc._id);
 
             const completeEmployee = await getCompleteEmployee(employeeId);
             delete completeEmployee.password;
@@ -654,6 +656,15 @@ export const approveProfile = async (req, res) => {
             );
         } catch (syncErr) {
             console.error("[ApproveProfile] Dashboard Sync Error:", syncErr);
+        }
+
+        if (!Array.isArray(updated.pendingReactivationChanges) || updated.pendingReactivationChanges.length === 0) {
+            try {
+                const { clearProfileHrSubmitReminders } = await import("../../utils/notifyProfileHrSubmitReminder.js");
+                await clearProfileHrSubmitReminders(updated._id);
+            } catch (reminderErr) {
+                console.warn("[ApproveProfile] clear submit reminder:", reminderErr?.message || reminderErr);
+            }
         }
 
         // Get complete employee data for response

@@ -3,7 +3,7 @@ import ItemCategory from '../../models/inventory/ItemCategory.js';
 import ItemSubcategory from '../../models/inventory/ItemSubcategory.js';
 import InventoryItem from '../../models/inventory/InventoryItem.js';
 import InventoryVendorContact from '../../models/inventory/InventoryVendorContact.js';
-import { httpError, idStrings, nameKey, optionalImagePatch, readImage, requireName, sendError } from './http.js';
+import { httpError, idStrings, imageIdsFromQuery, nameKey, optionalImagePatch, readImage, requireName, sendError, sendStoredImages } from './http.js';
 
 function presentCategory(row, subcategoryCount, stats) {
     const brandIds = idStrings(stats?.brandIds);
@@ -16,6 +16,14 @@ function presentCategory(row, subcategoryCount, stats) {
         brandCount: brandIds.length,
         itemCount: stats?.itemCount || 0,
     };
+}
+
+export async function listCategoryImages(req, res) {
+    try {
+        await sendStoredImages(res, ItemCategory, imageIdsFromQuery(req.query.ids));
+    } catch (error) {
+        sendError(res, error);
+    }
 }
 
 export async function listCategories(_req, res) {

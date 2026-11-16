@@ -10,6 +10,11 @@ import {
     validateEmployeeMedicalInsurancePayload,
 } from "../../utils/employeeMedicalInsuranceValidation.js";
 import { scheduleEmployeeProfileFileChangeHrEmailForRequest } from "../../utils/employeeInformativeHrNotify.js";
+import {
+    queueOrTriggerProfileChange,
+    skipLiveProfileWritesPendingHrAsync,
+} from "../../utils/pushPendingReactivationChange.js";
+import { triggerProfileReactivationIfNeeded } from "../../utils/triggerProfileReactivation.js";
 
 const normalizeUploadInput = (upload) => {
     if (typeof upload === "string") return upload.trim();
@@ -77,13 +82,14 @@ export const updateMedicalInsuranceDetails = async (req, res) => {
             return res.status(400).json({ message: "Invalid issue or expiry date provided." });
         }
 
+        const skipLive = await skipLiveProfileWritesPendingHrAsync(req, employeeBasic);
         const previousMedicalInsurance = existingMedicalInsurance?.medicalInsurance;
         const isRenewal = req.body?.isRenewal === true;
         const hasExistingDocument = employeeRenewalHasExistingCard(previousMedicalInsurance);
         const hasNewDocumentUpload = Boolean(normalizedUpload);
         const shouldArchivePrevious = await archiveAndClearLiveEmployeeRenewal({
             employeeId,
-            skipLive: false,
+            skipLive,
             isRenewal,
             hasExistingDocument,
             hasNewDocumentUpload,
@@ -117,6 +123,7 @@ export const updateMedicalInsuranceDetails = async (req, res) => {
                 if (!shouldArchivePrevious && existingMedicalInsurance?.medicalInsurance?.document) {
                     await disposeEmployeeProfileAttachment(req, {
                         employeeBasic,
+                        isActivationDocumentChange: skipLive,
                         attachment: existingMedicalInsurance.medicalInsurance.document,
                         archive: {
                             moduleName: "Employee Medical Insurance Attachment",
@@ -149,11 +156,42 @@ export const updateMedicalInsuranceDetails = async (req, res) => {
             lastUpdated: new Date(),
         };
 
-        const updatedMedicalInsurance = await EmployeeMedicalInsurance.findOneAndUpdate(
-            { employeeId },
-            { $set: { medicalInsurance: medicalInsurancePayload } },
-            { upsert: true, new: true },
-        );
+        let updatedMedicalInsurance = existingMedicalInsurance;
+        if (!skipLive) {
+            updatedMedicalInsurance = await EmployeeMedicalInsurance.findOneAndUpdate(
+                { employeeId },
+                { $set: { medicalInsurance: medicalInsurancePayload } },
+                { upsert: true, new: true },
+            );
+        }
+
+        const medicalChangeEntry = {
+            card: "Medical Insurance",
+            reason: "Medical Insurance details updated",
+            section: "medicalInsurance",
+            changeType: "update",
+            targetIndex: null,
+            isRenewal,
+            previousData: previousMedicalInsurance || null,
+            proposedData: medicalInsurancePayload,
+        };
+        if (skipLive) {
+            await queueOrTriggerProfileChange({
+                employeeId,
+                actor: req.user,
+                reason: "Medical Insurance details updated",
+                employeeBasic,
+                changeEntry: medicalChangeEntry,
+            });
+        } else {
+            await triggerProfileReactivationIfNeeded({
+                employeeId,
+                actor: req.user,
+                reason: "Medical Insurance details updated",
+                changeEntry: null,
+                trackDefaultChange: true,
+            });
+        }
 
         try {
             await markProfileActivationHoldResolvedForSection(employeeId, "medicalInsurance");
@@ -163,16 +201,18 @@ export const updateMedicalInsuranceDetails = async (req, res) => {
 
         const completeEmployee = await getCompleteEmployee(employeeId);
 
-        try {
-            const { reconcileEmployeeDocumentExpiryDashboard } = await import(
-                "../../utils/processDocumentExpiryReminders.js"
-            );
-            await reconcileEmployeeDocumentExpiryDashboard(employeeBasic?._id || employeeId);
-        } catch (reconcileErr) {
-            console.warn(
-                "[updateMedicalInsuranceDetails] reconcileEmployeeDocumentExpiryDashboard:",
-                reconcileErr?.message || reconcileErr,
-            );
+        if (!skipLive) {
+            try {
+                const { reconcileEmployeeDocumentExpiryDashboard } = await import(
+                    "../../utils/processDocumentExpiryReminders.js"
+                );
+                await reconcileEmployeeDocumentExpiryDashboard(employeeBasic?._id || employeeId);
+            } catch (reconcileErr) {
+                console.warn(
+                    "[updateMedicalInsuranceDetails] reconcileEmployeeDocumentExpiryDashboard:",
+                    reconcileErr?.message || reconcileErr,
+                );
+            }
         }
 
         scheduleEmployeeProfileFileChangeHrEmailForRequest({
@@ -184,12 +224,15 @@ export const updateMedicalInsuranceDetails = async (req, res) => {
             action: hasNewDocumentUpload && hasExistingDocument ? "renewed" : "edited",
             attachments: medicalInsurancePayload?.document,
             actor: req.user,
-            skipLive: false,
+            skipLive,
             isRenewal: req.body?.isRenewal === true,
         });
 
         return res.json({
-            message: "Medical Insurance details updated successfully.",
+            message: skipLive
+                ? "Medical Insurance change queued for HR activation approval."
+                : "Medical Insurance details updated successfully.",
+            queuedForHrApproval: !!skipLive,
             medicalInsuranceDetails: updatedMedicalInsurance?.medicalInsurance || completeEmployee?.medicalInsuranceDetails,
             employee: completeEmployee,
         });

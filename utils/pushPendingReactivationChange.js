@@ -5,6 +5,7 @@ import { isRequestUserDesignatedFlowchartHr } from "./isDesignatedFlowchartHr.js
 import { EMPLOYEE_ACTIVATION_SECTION_KEYS } from "./profileFileChangeHrNotify.js";
 import { shouldQueueProfileChange, triggerProfileReactivationIfNeeded } from "./triggerProfileReactivation.js";
 import { resolvePortalActorId } from "./resolvePortalActorId.js";
+import { notifyProfileHrSubmitReminder } from "./notifyProfileHrSubmitReminder.js";
 import { isAccessControlOnlyPendingEntry } from "./loginThrough.js";
 
 const norm = (s) => String(s || "").toLowerCase().trim();
@@ -222,6 +223,31 @@ export async function dropAccessControlOnlyPendingChanges(employeeId) {
     await EmployeeBasic.updateOne({ employeeId }, { $set: { pendingReactivationChanges: next } });
 }
 
+async function remindEditorHrApprovalNotSent({ employeeId, actor, employeeBasic, changeEntry }) {
+    if (!changeEntry || awaitingSubmittedHrOnly(employeeBasic)) return;
+    let requestId = employeeBasic?._id;
+    let subject = employeeBasic;
+    if (!requestId && employeeId) {
+        const row = await EmployeeBasic.findOne({ employeeId })
+            .select("_id employeeId firstName lastName")
+            .lean();
+        requestId = row?._id;
+        subject = row || subject;
+    }
+    if (!requestId) return;
+    await notifyProfileHrSubmitReminder({
+        requestId,
+        actor,
+        entityKind: "employee",
+        subject: {
+            employeeId: subject?.employeeId || employeeId,
+            firstName: subject?.firstName || "",
+            lastName: subject?.lastName || "",
+        },
+        cardLabel: changeEntry.card || changeEntry.section || "",
+    });
+}
+
 export async function queueOrTriggerProfileChange({ employeeId, actor, reason, employeeBasic, changeEntry }) {
     // Check if profile is already active
     const isProfileActive = String(employeeBasic?.profileStatus || "").toLowerCase() === "active";
@@ -238,6 +264,7 @@ export async function queueOrTriggerProfileChange({ employeeId, actor, reason, e
                 { $set: { profileActivationDraftEditor: editorId } },
             );
         }
+        await remindEditorHrApprovalNotSent({ employeeId, actor, employeeBasic, changeEntry });
         return;
     }
 
@@ -249,19 +276,25 @@ export async function queueOrTriggerProfileChange({ employeeId, actor, reason, e
         return;
     }
     if (needsReactivationQueue) {
-        await triggerProfileReactivationIfNeeded({
+        const queued = await triggerProfileReactivationIfNeeded({
             employeeId,
             actor,
             reason,
             changeEntry: changeEntry || null,
         });
+        if (queued?.triggered) {
+            await remindEditorHrApprovalNotSent({ employeeId, actor, employeeBasic, changeEntry });
+        }
         return;
     }
-    await triggerProfileReactivationIfNeeded({
+    const queued = await triggerProfileReactivationIfNeeded({
         employeeId,
         actor,
         reason,
         changeEntry: changeEntry || null,
         trackDefaultChange: true,
     });
+    if (queued?.triggered) {
+        await remindEditorHrApprovalNotSent({ employeeId, actor, employeeBasic, changeEntry });
+    }
 }

@@ -2,7 +2,7 @@ import mongoose from 'mongoose';
 import ItemBrand from '../../models/inventory/ItemBrand.js';
 import InventoryItem from '../../models/inventory/InventoryItem.js';
 import InventoryVendorContact from '../../models/inventory/InventoryVendorContact.js';
-import { httpError, idStrings, nameKey, optionalImagePatch, readImage, requireName, sendError } from './http.js';
+import { httpError, idStrings, imageIdsFromQuery, nameKey, optionalImagePatch, readImage, requireName, sendError, sendStoredImages } from './http.js';
 
 function presentBrand(row, stats) {
     const categoryIds = idStrings(stats?.categoryIds);
@@ -17,6 +17,14 @@ function presentBrand(row, stats) {
         subcategoryCount: subcategoryIds.length,
         itemCount: stats?.itemCount || 0,
     };
+}
+
+export async function listBrandImages(req, res) {
+    try {
+        await sendStoredImages(res, ItemBrand, imageIdsFromQuery(req.query.ids));
+    } catch (error) {
+        sendError(res, error);
+    }
 }
 
 export async function listBrands(_req, res) {

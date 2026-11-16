@@ -11,7 +11,10 @@ import {
     pendingEntryIncludedInSubmittedCards,
     resolveLatestActivationSubmissionLabels,
     isCompanyPendingChangeRenewal,
+    shouldBypassCompanyActivationHrQueue,
 } from "../../utils/companyActivation.js";
+import { portalActorIdSet } from "../../utils/resolvePortalActorId.js";
+import { clearProfileHrSubmitReminders } from "../../utils/notifyProfileHrSubmitReminder.js";
 import { syncDashboardAction } from "../../utils/syncDashboard.js";
 import {
     clearAllCompanyActivationDashboardRows,
@@ -224,6 +227,8 @@ export const submitCompanyActivationRequest = async (req, res) => {
             });
         }
 
+        await clearProfileHrSubmitReminders(company._id, req.user);
+
         const refreshedCore = await Company.findById(company._id)
             .select(ACTIVATION_HEAVY_EXCLUSIONS)
             .maxTimeMS(15000);
@@ -328,6 +333,9 @@ export const approveCompanyActivationRequest = async (req, res) => {
             pendingReactivationChanges: remainingPending,
             activationWorkflow,
         });
+        if (remainingPending.length === 0) {
+            await clearProfileHrSubmitReminders(company._id);
+        }
         await clearCompanyWorkflowActivationHold(company._id);
 
         if (ownerArchivesToPush.length > 0) {
@@ -641,6 +649,7 @@ export const rejectCompanyActivationRequest = async (req, res) => {
         if (keepActiveProfile) {
             await upsertCompanyPartitions(company._id, { pendingReactivationChanges: [] });
         }
+        await clearProfileHrSubmitReminders(company._id);
         const activationWorkflow = Array.isArray(merged.activationWorkflow) ? [...merged.activationWorkflow] : [];
         activationWorkflow.push({
             role: "HR",
@@ -841,6 +850,9 @@ export const discardCompanyPendingActivationEntry = async (req, res) => {
         const queueEmpty =
             !Array.isArray(refreshed?.pendingReactivationChanges) ||
             refreshed.pendingReactivationChanges.length === 0;
+        if (queueEmpty) {
+            await clearProfileHrSubmitReminders(company._id);
+        }
 
         return res.status(200).json({
             message: queueEmpty
@@ -853,5 +865,101 @@ export const discardCompanyPendingActivationEntry = async (req, res) => {
     } catch (error) {
         console.error("discardCompanyPendingActivationEntry error:", error);
         return res.status(500).json({ message: error.message || "Failed to remove pending update" });
+    }
+};
+
+const actorOwnsCompanyPendingEntry = (req, entry) => {
+    const ids = new Set([...portalActorIdSet(req)].map((value) => String(value || "").trim().toLowerCase()));
+    const queuedIds = [entry?.queuedByUserId, entry?.queuedByEmployeeObjectId]
+        .map((value) => String(value || "").trim().toLowerCase())
+        .filter(Boolean);
+    if (queuedIds.some((id) => ids.has(id))) return true;
+    const code = String(req.user?.employeeId || "").trim().toLowerCase();
+    const queuedCode = String(entry?.queuedByEmployeeId || "").trim().toLowerCase();
+    if (code && queuedCode && code === queuedCode) return true;
+    return queuedIds.length === 0 && !queuedCode;
+};
+
+/** Non-HR editor drops their unsent company edits. Approved card data is left as it is. */
+export const cancelCompanyPendingEdits = async (req, res) => {
+    try {
+        const { id } = req.params;
+        if (await shouldBypassCompanyActivationHrQueue(req)) {
+            return res.status(403).json({
+                message: "HR applies company edits directly. There is no queued submit to cancel.",
+            });
+        }
+
+        const company = await resolveCompanyForActivation(id);
+        if (!company) return res.status(404).json({ message: "Company not found" });
+
+        const merged =
+            (await loadCompanyFullProfile(company)) ||
+            (typeof company.toObject === "function" ? company.toObject() : company);
+        const pending = Array.isArray(merged.pendingReactivationChanges)
+            ? merged.pendingReactivationChanges.map((entry) =>
+                  entry?.toObject ? entry.toObject() : { ...entry },
+              )
+            : [];
+        const activationStatus = String(merged.activationStatus || company.activationStatus || "").toLowerCase();
+        const submittedLabels =
+            activationStatus === "submitted"
+                ? resolveLatestActivationSubmissionLabels(merged.activationWorkflow)
+                : [];
+
+        const remaining = [];
+        let dropped = 0;
+        for (const entry of pending) {
+            const alreadyWithHr =
+                activationStatus === "submitted" &&
+                (submittedLabels.length === 0 || pendingEntryIncludedInSubmittedCards(entry, submittedLabels));
+            if (alreadyWithHr || !actorOwnsCompanyPendingEntry(req, entry)) {
+                remaining.push(entry);
+                continue;
+            }
+            dropped += 1;
+        }
+
+        if (dropped === 0) {
+            return res.status(400).json({
+                message:
+                    activationStatus === "submitted"
+                        ? "These edits are already with HR. Cancel submit is available before you send them."
+                        : "There are no pending edits to cancel.",
+            });
+        }
+
+        if (
+            remaining.length === 0 &&
+            String(company.status || "").toLowerCase() === "active" &&
+            activationStatus !== "submitted"
+        ) {
+            company.activationStatus = "active";
+            await company.save();
+            await clearCompanyWorkflowActivationHold(company._id);
+        }
+
+        await upsertCompanyPartitions(company._id, { pendingReactivationChanges: remaining });
+        if (remaining.length === 0) {
+            await clearProfileHrSubmitReminders(company._id);
+        } else {
+            await clearProfileHrSubmitReminders(company._id, req.user);
+        }
+
+        const refreshedCore = await Company.findById(company._id)
+            .select(ACTIVATION_HEAVY_EXCLUSIONS)
+            .maxTimeMS(15000);
+        const refreshed =
+            (await loadCompanyFullProfile(refreshedCore)) ||
+            (typeof refreshedCore?.toObject === "function" ? refreshedCore.toObject() : refreshedCore);
+
+        return res.status(200).json({
+            message: "Pending edits cancelled. The company profile stays on the current approved data.",
+            company: refreshed,
+            activationProgress: calculateCompanyActivationProgress(refreshed),
+        });
+    } catch (error) {
+        console.error("cancelCompanyPendingEdits:", error);
+        return res.status(500).json({ message: error.message || "Failed to cancel pending edits." });
     }
 };

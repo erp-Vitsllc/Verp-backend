@@ -60,11 +60,15 @@ export async function archiveAndClearLiveEmployeeRenewal({
     isRenewal,
     hasExistingDocument,
     hasNewDocumentUpload: _hasNewDocumentUpload,
-    section,
-    visaType,
+    section: _section,
+    visaType: _visaType,
     archiveParams,
     replaceExistingCard = false,
 }) {
+    if (skipLive) {
+        // Queued for HR: leave the live card exactly as it is until HR approves.
+        return false;
+    }
     const shouldArchive = shouldArchiveEmployeeDocumentOnRenewal({
         isRenewal,
         hasExistingDocument,
@@ -72,9 +76,6 @@ export async function archiveAndClearLiveEmployeeRenewal({
     });
     if (shouldArchive && archiveParams) {
         await archiveEmployeeDocument({ employeeId, ...archiveParams });
-    }
-    if (skipLive && isRenewal === true && hasExistingDocument) {
-        await clearLiveEmployeeDocumentSection({ employeeId, section, visaType });
     }
     return shouldArchive;
 }

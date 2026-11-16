@@ -210,7 +210,7 @@ export const updateLabourCardDetails = async (req, res) => {
                 document: previousLabourCard?.document,
             },
         });
-        const shouldArchivePreviousContract = shouldArchiveEmployeeDocumentOnRenewal({
+        const shouldArchivePreviousContract = !skipLive && shouldArchiveEmployeeDocumentOnRenewal({
             isRenewal,
             hasExistingDocument: hasExistingContractDocument,
         });

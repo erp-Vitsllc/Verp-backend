@@ -12,6 +12,7 @@ import { approveProfile } from "../controllers/employee/approveProfile.js";
 import { holdProfile } from "../controllers/employee/holdProfile.js";
 import { rejectProfile } from "../controllers/employee/rejectProfile.js";
 import { discardEmployeePendingActivationEntry } from "../controllers/employee/discardEmployeePendingActivationEntry.js";
+import { cancelEmployeePendingEdits } from "../controllers/employee/cancelEmployeePendingEdits.js";
 import { deleteEmployee } from "../controllers/employee/deleteEmployee.js";
 import { updateVisaDetails } from "../controllers/employee/updateVisaDetails.js";
 import { deleteVisaDetails } from "../controllers/employee/deleteVisaDetails.js";
@@ -820,6 +821,11 @@ router.delete(
     "/:id/pending-activation-entry/:entryId",
     checkPermission("hrm_employees_list", "edit"),
     discardEmployeePendingActivationEntry,
+);
+router.post(
+    "/:id/cancel-pending-edits",
+    checkPermission("hrm_employees_list", "edit"),
+    cancelEmployeePendingEdits,
 );
 
 router.patch("/:id/profile-status", checkEmployeeProfileActivationAction(), blockLeftUserWrites, updateProfileStatus);

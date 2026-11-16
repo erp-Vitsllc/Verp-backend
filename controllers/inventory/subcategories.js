@@ -3,7 +3,7 @@ import ItemCategory from '../../models/inventory/ItemCategory.js';
 import ItemSubcategory from '../../models/inventory/ItemSubcategory.js';
 import ItemOption from '../../models/inventory/ItemOption.js';
 import InventoryItem from '../../models/inventory/InventoryItem.js';
-import { httpError, idStrings, nameKey, optionalImagePatch, readImage, requireName, sendError } from './http.js';
+import { httpError, idStrings, imageIdsFromQuery, nameKey, optionalImagePatch, readImage, requireName, sendError, sendStoredImages } from './http.js';
 
 function readReservationQuantity(value) {
     if (value == null || value === '') return null;
@@ -32,6 +32,14 @@ function presentSubcategory(row, stats) {
         brandCount: brandIds.length,
         itemCount: stats?.itemCount || 0,
     };
+}
+
+export async function listSubcategoryImages(req, res) {
+    try {
+        await sendStoredImages(res, ItemSubcategory, imageIdsFromQuery(req.query.ids));
+    } catch (error) {
+        sendError(res, error);
+    }
 }
 
 export async function listSubcategories(req, res) {

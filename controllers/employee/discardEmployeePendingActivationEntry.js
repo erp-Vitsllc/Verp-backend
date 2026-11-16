@@ -121,6 +121,12 @@ export const discardEmployeePendingActivationEntry = async (req, res) => {
             await withdrawEmployeeActivationSubmissionIfQueueEmpty(doc, {
                 actionedBy: req.user?.employeeObjectId || req.user?._id || null,
             });
+            try {
+                const { clearProfileHrSubmitReminders } = await import("../../utils/notifyProfileHrSubmitReminder.js");
+                await clearProfileHrSubmitReminders(doc._id);
+            } catch (reminderErr) {
+                console.warn("[discardEmployeePendingActivationEntry] clear submit reminder:", reminderErr?.message || reminderErr);
+            }
         }
 
         let fresh = await getCompleteEmployee(employeeId);
