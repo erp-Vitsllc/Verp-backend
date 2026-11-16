@@ -6,7 +6,7 @@ import ItemOption from '../../models/inventory/ItemOption.js';
 import ItemBrand from '../../models/inventory/ItemBrand.js';
 import InventoryVendorContact from '../../models/inventory/InventoryVendorContact.js';
 import { escapeRegex } from '../../utils/regexHelper.js';
-import { cleanName, httpError, sendError } from './http.js';
+import { cleanName, httpError, listLimit, sendError } from './http.js';
 
 const ITEM_POPULATE = [
     { path: 'categoryId', select: 'name' },
@@ -145,7 +145,7 @@ function readItemBody(body) {
 export async function listItems(req, res) {
     try {
         const page = Math.max(1, Number(req.query.page) || 1);
-        const limit = Math.min(100, Math.max(1, Number(req.query.limit) || 6));
+        const limit = listLimit(req.query.limit);
         const filter = {};
         if (req.query.categoryId && mongoose.isValidObjectId(req.query.categoryId)) {
             filter.categoryId = req.query.categoryId;
@@ -184,9 +184,9 @@ export async function listItems(req, res) {
                 if (statusGap) return statusGap;
                 return String(left.itemCode || '').localeCompare(String(right.itemCode || ''));
             });
-        const start = (page - 1) * limit;
+        const start = limit > 0 ? (page - 1) * limit : 0;
         res.json({
-            items: matched.slice(start, start + limit),
+            items: limit > 0 ? matched.slice(start, start + limit) : matched,
             total: matched.length,
             page,
             limit,

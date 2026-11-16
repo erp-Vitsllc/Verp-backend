@@ -11,6 +11,7 @@ const zohoVendorSchema = new mongoose.Schema(
         phone: { type: String, default: '' },
         mobile: { type: String, default: '' },
         outstandingPayableAmount: { type: Number, default: 0 },
+        unusedCreditsPayableAmount: { type: Number, default: 0 },
         currencyCode: { type: String, default: 'AED' },
         locationId: { type: String, default: '' },
         locationName: { type: String, default: '' },

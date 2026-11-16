@@ -28,6 +28,15 @@ export function sendError(res, error) {
 }
 
 const MAX_NAME_LENGTH = 120;
+const MAX_LIST_LIMIT = 10000;
+
+export function listLimit(value) {
+    const raw = String(value ?? '').trim().toLowerCase();
+    if (raw === 'all' || raw === '0') return 0;
+    const number = Number(raw);
+    if (!Number.isFinite(number) || number < 1) return 10;
+    return Math.min(Math.floor(number), MAX_LIST_LIMIT);
+}
 
 export function requireName(value, label) {
     const name = cleanName(value);

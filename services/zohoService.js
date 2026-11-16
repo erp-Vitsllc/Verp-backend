@@ -1837,6 +1837,14 @@ export async function fetchExpensesChunk(query = {}, { startPage = 1, maxRows = 
     });
 }
 
+export async function fetchPurchaseOrdersByStatus(filterBy) {
+    return fetchAllZohoBooksRows('/purchaseorders', 'purchaseorders', {
+        params: { filter_by: filterBy },
+        timeout: 30000,
+        perPage: 200,
+    });
+}
+
 export async function fetchBillsChunk(query = {}, { startPage = 1, maxRows = 400 } = {}) {
     const params = {};
     const status = String(query.status || '').trim();
