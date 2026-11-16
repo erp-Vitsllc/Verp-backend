@@ -1,11 +1,12 @@
 import express from 'express';
 import { protect } from '../middleware/authMiddleware.js';
-import { checkModuleOrParent, checkPermission } from '../middleware/permissionMiddleware.js';
+import { checkModuleOrParent, checkPermission, checkPermissionAny } from '../middleware/permissionMiddleware.js';
 import { listCategoryImages, listCategories, createCategory, updateCategory, deleteCategory } from '../controllers/inventory/categories.js';
 import { listSubcategoryImages, listSubcategories, createSubcategory, updateSubcategory, deleteSubcategory } from '../controllers/inventory/subcategories.js';
 import { listItemOptions, createItemOption } from '../controllers/inventory/itemOptions.js';
 import { listBrandImages, listBrands, createBrand, updateBrand, deleteBrand } from '../controllers/inventory/itemBrands.js';
 import { listItems, getItem, createItem, updateItem, deleteItem } from '../controllers/inventory/items.js';
+import { addItemStock, listStockOptions } from '../controllers/inventory/itemStock.js';
 import { createVendor, deleteVendor, getVendor, listVendorBills, listVendors, nextVendorCode, previewZohoVendor, syncVendorFromZoho, updateVendor } from '../controllers/inventory/vendors.js';
 import { createVendorContact, deleteVendorContact, markVendorContactPrimary, updateVendorContact } from '../controllers/inventory/vendorContacts.js';
 
@@ -60,7 +61,9 @@ router.post('/vendors/:id/contacts/:contactId/primary', protect, editContacts, m
 router.delete('/vendors/:id/contacts/:contactId', protect, deleteContacts, deleteVendorContact);
 
 router.get('/items', protect, viewItems, listItems);
+router.get('/items/stock-options', protect, viewItems, listStockOptions);
 router.post('/items', protect, createItems, createItem);
+router.post('/items/:id/stock', protect, checkPermissionAny('inventory_item_master', ['edit', 'create']), addItemStock);
 router.get('/items/:id', protect, viewItems, getItem);
 router.put('/items/:id', protect, editItems, updateItem);
 router.delete('/items/:id', protect, deleteItems, deleteItem);

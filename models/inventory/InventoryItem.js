@@ -21,6 +21,7 @@ const inventoryItemSchema = new mongoose.Schema(
         countryOfOrigin: { type: String, default: '', trim: true },
         status: { type: String, enum: STATUSES, default: 'Active' },
         availableQuantity: { type: Number, default: 0, min: 0 },
+        lastStockPrice: { type: Number, default: 0, min: 0 },
     },
     { timestamps: true },
 );
