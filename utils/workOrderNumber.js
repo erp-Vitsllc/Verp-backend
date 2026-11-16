@@ -1,4 +1,4 @@
-const NUMBER_PATTERN = /^WO-(\d{4})-(\d+)$/;
+const NUMBER_PATTERN = /^WO-(\d{2}|\d{4})-(\d+)$/;
 
 const DUBAI_DATE = { timeZone: 'Asia/Dubai', year: 'numeric', month: '2-digit', day: '2-digit' };
 
@@ -20,13 +20,19 @@ export function formatWorkOrderNo(year, sequence) {
     if (!Number.isInteger(seq) || seq < 1) {
         throw new Error('Invalid work order sequence');
     }
-    return `WO-${yr}-${String(seq).padStart(3, '0')}`;
+    const shortYear = String(yr % 100).padStart(2, '0');
+    return `WO-${shortYear}-${String(seq).padStart(3, '0')}`;
+}
+
+function fullYear(yearText) {
+    const year = Number(yearText);
+    return yearText.length === 2 ? 2000 + year : year;
 }
 
 export function parseWorkOrderNo(value) {
     const match = String(value || '').trim().match(NUMBER_PATTERN);
     if (!match) return null;
-    const year = Number(match[1]);
+    const year = fullYear(match[1]);
     const sequence = Number(match[2]);
     if (!Number.isInteger(year) || !Number.isInteger(sequence) || sequence < 1) return null;
     return { year, sequence };

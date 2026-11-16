@@ -14,6 +14,7 @@ const DEFAULT_OAUTH_SCOPES = [
     'ZohoBooks.contacts.READ',
     'ZohoBooks.contacts.CREATE',
     'ZohoBooks.contacts.UPDATE',
+    'ZohoBooks.estimates.READ',
     'ZohoBooks.vendorpayments.READ',
     'ZohoBooks.vendorpayments.CREATE',
     'ZohoBooks.vendorpayments.UPDATE',
@@ -2745,6 +2746,17 @@ function quoteLookupError(message, statusCode) {
     return error;
 }
 
+const ESTIMATES_AUTH_MESSAGE =
+    'Zoho blocked this quotation import. This is not an ERP user permission. Reconnect Zoho from Accounts, sign in as a Zoho Books user who can view Quotes, and accept ZohoBooks.estimates.READ.';
+
+function estimatesAuthError(error) {
+    const message = String(error?.message || '');
+    if (/not authorized|unauthorized|invalid oauth scope|code.?57/i.test(message)) {
+        return quoteLookupError(ESTIMATES_AUTH_MESSAGE, 403);
+    }
+    return null;
+}
+
 function pickZohoEstimate(rows, number) {
     const wanted = normalizeQuoteNumber(number);
     const exact = (Array.isArray(rows) ? rows : []).filter(
@@ -2766,15 +2778,23 @@ export async function fetchZohoEstimateByNumber(number) {
         });
         match = pickZohoEstimate(exact?.estimates, needle);
     } catch (error) {
+        const blocked = estimatesAuthError(error);
+        if (blocked) throw blocked;
         console.error('[ZohoEstimates] Number filter failed:', error?.message || error);
     }
 
     if (!match) {
-        const searched = await requestZohoBooks('/estimates', {
-            params: { search_text: needle, per_page: 200 },
-            timeout: 20000,
-        });
-        match = pickZohoEstimate(searched?.estimates, needle);
+        try {
+            const searched = await requestZohoBooks('/estimates', {
+                params: { search_text: needle, per_page: 200 },
+                timeout: 20000,
+            });
+            match = pickZohoEstimate(searched?.estimates, needle);
+        } catch (error) {
+            const blocked = estimatesAuthError(error);
+            if (blocked) throw blocked;
+            throw error;
+        }
     }
 
     if (!match?.estimate_id) {
