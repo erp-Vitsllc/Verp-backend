@@ -540,6 +540,36 @@ export function viewerCanReassign(viewer, assigneeId, assigneeEmpId) {
     return false;
 }
 
+/**
+ * Edit stays with the requester and an admin super user.
+ * Before completion, the assignee and the requester can both reassign.
+ * Once the assignee submits completion, that assignee loses Reassign.
+ * After the requester approves, Reassign is gone and Assign takes its place.
+ */
+export function taskEditAndReassignAccess({
+    open = false,
+    superUser = false,
+    requester = false,
+    assignee = false,
+    originalAssignee = false,
+    reviewPending = false,
+    completionPending = false,
+    reviewAccepted = false,
+} = {}) {
+    const privileged = Boolean(superUser || requester);
+    const approved = Boolean(reviewAccepted);
+    const canEdit = Boolean(open && privileged);
+    const canAssign = Boolean(open && approved && privileged);
+    let canReassign = false;
+    if (open && !approved) {
+        if (privileged) canReassign = true;
+        else if (reviewPending) canReassign = false;
+        else if (completionPending) canReassign = Boolean(originalAssignee);
+        else canReassign = Boolean(assignee || originalAssignee);
+    }
+    return { canEdit, canReassign, canAssign };
+}
+
 export async function loadPeopleDetails(ids = [], codes = []) {
     const objectIds = [...new Set(ids.map((id) => String(id || "")).filter(isObjectId))];
     const empCodes = [...new Set(codes.map((code) => String(code || "").trim()).filter(Boolean))];

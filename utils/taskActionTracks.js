@@ -413,3 +413,62 @@ export function buildActionTracks({
 
     return tracks.map(({ holder: _holder, ...step }) => step);
 }
+
+function finishedKey(role, id, name) {
+    return `${role}|${id}|${name.toLowerCase()}`;
+}
+
+/** People whose own part of the task is finished: assignee, reassignee, or requester. */
+export function finishedParticipants(closeRequest, history) {
+    const people = [];
+    const add = ({ employeeId, id, empId, name, role }) => {
+        const personId = String(employeeId || id || "").trim();
+        const personName = named(name);
+        const personRole = String(role || "").trim();
+        if ((!personId && !personName) || !personRole) return;
+        const key = finishedKey(personRole, personId, personName);
+        if (people.some((row) => finishedKey(row.role, row.id, row.name) === key)) return;
+        people.push({
+            id: personId,
+            empId: String(empId || "").trim(),
+            name: personName,
+            role: personRole,
+        });
+    };
+    for (const row of closeRequest?.finishedBy || []) add(row);
+    for (const item of history || []) {
+        const detail = String(item?.detail || "");
+        const released = detail.match(/approved the completed work\.\s+(.+?)\s+is no longer an assignee/i);
+        if (released) add({ name: released[1], role: "reassignee" });
+        const remains = detail.match(/approved this task\.\s+(.+?)\s+remains the assignee/i);
+        if (remains) add({ name: remains[1], role: "assignee" });
+        const removed = detail.match(/approved this task\.\s+(.+?)\s+is no longer the assignee/i);
+        if (removed) add({ name: removed[1], role: "assignee" });
+    }
+    return people;
+}
+
+/** Keep a finished person on the task without listing them twice. */
+export function rememberFinishedPeople(closeRequest, people) {
+    const next = finishedParticipants(closeRequest, []);
+    for (const person of people || []) {
+        const name = named(person?.name);
+        const id = String(person?.employeeId || person?.id || "").trim();
+        const role = String(person?.role || "").trim();
+        if ((!id && !name) || !role) continue;
+        const key = finishedKey(role, id, name);
+        if (next.some((row) => finishedKey(row.role, row.id, row.name) === key)) continue;
+        next.push({
+            id,
+            empId: String(person?.empId || "").trim(),
+            name,
+            role,
+        });
+    }
+    return next.map((row) => ({
+        employeeId: row.id || null,
+        empId: row.empId || "",
+        name: row.name || "",
+        role: row.role || "",
+    }));
+}

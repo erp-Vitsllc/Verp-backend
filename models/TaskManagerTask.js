@@ -128,11 +128,21 @@ const taskManagerTaskSchema = new mongoose.Schema(
             },
             reviewPending: { type: Boolean, default: false },
             reviewReturned: { type: Boolean, default: false },
+            reviewAccepted: { type: Boolean, default: false },
             reviewNote: { type: String, default: "" },
             assigneeCleared: { type: Boolean, default: false },
             returnAssigneeId: { type: mongoose.Schema.Types.ObjectId, ref: "EmployeeBasic", default: null },
             returnAssigneeEmpId: { type: String, default: "" },
             returnAssigneeName: { type: String, default: "" },
+            finishedBy: {
+                type: [{
+                    employeeId: { type: mongoose.Schema.Types.ObjectId, ref: "EmployeeBasic", default: null },
+                    empId: { type: String, default: "" },
+                    name: { type: String, default: "" },
+                    role: { type: String, default: "" },
+                }],
+                default: [],
+            },
             reassignmentNotices: {
                 type: [
                     {

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { buildActionTracks, markReassignmentEmails, parseReassignment, reassignmentWorkText } from "./taskActionTracks.js";
+import { buildActionTracks, finishedParticipants, markReassignmentEmails, parseReassignment, reassignmentWorkText, rememberFinishedPeople } from "./taskActionTracks.js";
 
 function titles(steps) {
     return steps.map((step) => [step.title, step.status, step.detail]);
@@ -230,5 +230,32 @@ describe("reassignment wording", () => {
         );
         assert.equal(row.emailSent, true);
         assert.equal(row.assigneeName, "FIDHA SHERIN");
+    });
+});
+
+describe("finished participants", () => {
+    it("keeps a reassignee whose completed work was approved", () => {
+        const people = finishedParticipants({}, [
+            {
+                detail: "Raseel Muhammad approved the completed work. SHAMEEM ABDUL KAREEM is no longer an assignee.",
+            },
+        ]);
+        assert.deepEqual(people, [{
+            id: "",
+            empId: "",
+            name: "SHAMEEM ABDUL KAREEM",
+            role: "reassignee",
+        }]);
+    });
+
+    it("stores an assignee and a requester once each", () => {
+        const stored = rememberFinishedPeople({}, [
+            { employeeId: "a1", empId: "E1", name: "Shameem Abdul Kareem", role: "assignee" },
+            { name: "Raseel Muhammad", role: "requester" },
+            { employeeId: "a1", name: "Shameem Abdul Kareem", role: "assignee" },
+        ]);
+        assert.equal(stored.length, 2);
+        assert.equal(stored[0].role, "assignee");
+        assert.equal(stored[1].role, "requester");
     });
 });

@@ -22,7 +22,7 @@ import {
     reassignmentAssignees,
     latestReassignedAt,
     resolveTaskViewer,
-    viewerCanReassign,
+    taskEditAndReassignAccess,
 } from "../../utils/taskManagerModule.js";
 import { assigneeBlocksDelete, viewerMayDeleteTask } from "../../utils/taskDeleteAccess.js";
 import { listDeletedNoticeKeys, noticeKeysForRecord } from "../../utils/deletedTaskNotice.js";
@@ -36,6 +36,7 @@ import { formatTaskDisplayParts, vehicleRecordId } from "../../utils/taskDisplay
 import { composeTaskDescription } from "../../utils/taskDetailDescription.js";
 import { attendanceFactsByActionId } from "../../utils/loadAttendanceTaskFacts.js";
 import { attachHoldSteps } from "../../utils/taskWaitingSteps.js";
+import { finishedParticipants } from "../../utils/taskActionTracks.js";
 import { syncPendingSalaryEnrollmentTasks } from "../../utils/syncPendingSalaryEnrollmentTasks.js";
 import { ensurePendingUtilityReminderTasks, UTILITY_PAYMENT_REMINDER } from "../../utils/utilityReminderTask.js";
 import { getDepartmentHOD } from "../../utils/getDepartmentHOD.js";
@@ -827,6 +828,7 @@ function closeWaitFlags(closeRequest, rawStatus) {
     return {
         completionPending: Boolean(saved.completionRequestedAt) && !saved.completionConfirmedAt && !saved.reassignmentReleased && !done,
         reviewPending: Boolean(saved.reviewPending) && !done,
+        reviewAccepted: Boolean(saved.reviewAccepted) && !saved.reviewPending && !done,
     };
 }
 
@@ -868,6 +870,36 @@ function viewerOwnsOriginal(viewer, row) {
     const originalName = personKey(cleanRequester(row?.closeRequest?.originalAssigneeName));
     const viewerName = personKey(viewer?.name);
     return Boolean(originalName && viewerName && originalName === viewerName);
+}
+
+function listedTaskAccess(viewer, {
+    assigneeId,
+    assigneeEmpId,
+    assigneeName,
+    requesterUserId,
+    requesterName,
+    row,
+    actionsLocked,
+    status,
+}) {
+    const saved = row?.closeRequest || {};
+    const finished = Boolean(actionsLocked) || status === "Completed" || status === "Closed";
+    return taskEditAndReassignAccess({
+        open: !finished,
+        superUser: Boolean(viewer?.superUser),
+        requester: Boolean(
+            (requesterUserId && viewer?.userId && String(requesterUserId) === String(viewer.userId))
+            || personKey(cleanRequester(requesterName)) === personKey(viewer?.name)
+        ),
+        assignee: assigneeIsViewer(viewer, assigneeId, assigneeEmpId, assigneeName),
+        originalAssignee: viewerOwnsOriginal(viewer, row),
+        reviewPending: Boolean(saved.reviewPending) && !finished,
+        completionPending: Boolean(saved.completionRequestedAt)
+            && !saved.completionConfirmedAt
+            && !saved.reassignmentReleased
+            && !finished,
+        reviewAccepted: Boolean(saved.reviewAccepted) && !saved.reviewPending && !finished,
+    });
 }
 
 function assigneeColumns({ assigneeName, assigneeId, assigneePhoto, originalAssigneeName, originalAssigneeId, byId, photoForName, closed = false }) {
@@ -1530,6 +1562,16 @@ export const getTaskManagerNotifications = async (req, res) => {
                 status = "Open";
             }
             const actionsLocked = status === "Closed" || status === "Rejected" || status === "Cancelled";
+            const access = listedTaskAccess(viewer, {
+                assigneeId: assigneeCleared ? "" : assigneeId,
+                assigneeEmpId: assigneeCleared ? "" : assigneeEmpId,
+                assigneeName,
+                requesterUserId: overlay?.requestedByUserId,
+                requesterName: requesterBase,
+                row: overlay,
+                actionsLocked,
+                status,
+            });
 
             summary.total += 1;
             bump("total", requestMonth);
@@ -1549,12 +1591,9 @@ export const getTaskManagerNotifications = async (req, res) => {
                 actionId: String(action._id),
                 manual: false,
                 workflowLocked: action.requestType !== "Task Manager",
-                canReassign: !actionsLocked && (
-                    viewerCanReassign(viewer, assigneeCleared ? "" : assigneeId, assigneeCleared ? "" : assigneeEmpId)
-                    || viewerOwnsOriginal(viewer, overlay)
-                    || (overlay?.requestedByUserId && viewer?.userId && String(overlay.requestedByUserId) === String(viewer.userId))
-                    || personKey(cleanRequester(requesterBase)) === personKey(viewer?.name)
-                ),
+                canEdit: access.canEdit,
+                canReassign: access.canReassign,
+                canAssign: access.canAssign,
                 canReturn: viewerCanReturnTask(viewer, overlay),
                 canDelete: status === "Rejected" || status === "Cancelled"
                     ? false
@@ -1589,6 +1628,7 @@ export const getTaskManagerNotifications = async (req, res) => {
                 requestDate: requestedAt,
                 reassignedAt: latestReassignedAt(overlay),
                 reviewReceivedAt: overlay?.closeRequest?.completionRequestedAt || null,
+                finishedBy: finishedParticipants(overlay?.closeRequest, overlay?.history),
                 completionDate: overlay?.completionDate || action.actionedDate || null,
                 taskCategory: category,
                 accessPath: accessPathFor(destination, action.requestId, action.subjectEmployeeId, {
@@ -1705,15 +1745,9 @@ export const getTaskManagerNotifications = async (req, res) => {
             const assigneeCleared = Boolean(row.closeRequest?.assigneeCleared);
             const assignee = assigneeCleared ? null : (byId.get(String(row.assignee || "")) || null);
             const heldAssignee = assigneeCleared ? "" : String(row.closeRequest?.returnAssigneeName || "").trim();
-            const rawAssigneeName = assigneeCleared
-                ? ""
-                : (heldAssignee || personName(assignee) || row.assigneeName || row.assigneeEmpId || "Unassigned");
-            const requesterPlain = String(row.requestedByName || "").trim().replace(/\s*\([^)]*\)\s*$/, "").trim();
             const assigneeName = assigneeCleared
                 ? ""
-                : heldAssignee && requesterPlain && requesterPlain.toLowerCase() !== heldAssignee.toLowerCase()
-                    ? `${heldAssignee} (${requesterPlain})`
-                    : rawAssigneeName;
+                : (cleanRequester(heldAssignee) || personName(assignee) || row.assigneeName || row.assigneeEmpId || "Unassigned");
             const requesterBase = String(row.requestedByName || "").trim() || "System";
             const originalAssigneeName = String(row.closeRequest?.originalAssigneeName || "").trim();
             const originalAssigneeId = String(row.closeRequest?.originalAssigneeId || "");
@@ -1756,16 +1790,23 @@ export const getTaskManagerNotifications = async (req, res) => {
 
             const destination = moduleForText(row.taskName, row.description, row.taskType);
             const category = displayTaskType(row.taskType);
+            const access = listedTaskAccess(viewer, {
+                assigneeId,
+                assigneeEmpId: assigneeCleared ? "" : row.assigneeEmpId,
+                assigneeName,
+                requesterUserId: row.requestedByUserId,
+                requesterName: requesterBase,
+                row,
+                actionsLocked,
+                status,
+            });
             tasks.push({
                 actionId: row.sourceDashboardActionId ? String(row.sourceDashboardActionId) : `manual-${row._id}`,
                 manual: true,
                 workflowLocked: false,
-                canReassign: !actionsLocked && (
-                    viewerCanReassign(viewer, assigneeId, assigneeCleared ? "" : row.assigneeEmpId)
-                    || viewerOwnsOriginal(viewer, row)
-                    || (row.requestedByUserId && viewer?.userId && String(row.requestedByUserId) === String(viewer.userId))
-                    || personKey(cleanRequester(requesterBase)) === personKey(viewer?.name)
-                ),
+                canEdit: access.canEdit,
+                canReassign: access.canReassign,
+                canAssign: access.canAssign,
                 canReturn: viewerCanReturnTask(viewer, row),
                 canDelete: status === "Rejected" || status === "Cancelled"
                     ? false
@@ -1799,6 +1840,7 @@ export const getTaskManagerNotifications = async (req, res) => {
                 requestDate: requestedAt,
                 reassignedAt: latestReassignedAt(row),
                 reviewReceivedAt: row?.closeRequest?.completionRequestedAt || null,
+                finishedBy: finishedParticipants(row.closeRequest, row.history),
                 completionDate: row.completionDate || null,
                 taskCategory: category,
                 accessPath: accessPathFor(destination, "", ""),
@@ -1879,17 +1921,6 @@ export const getTaskManagerNotifications = async (req, res) => {
             delete task.storedOnTask;
         }
 
-        const statusRank = {
-            "Pending Due": 0,
-            Pending: 1,
-            "In Progress": 2,
-            "On Hold": 3,
-            Completed: 4,
-            Cancelled: 5,
-            Rejected: 6,
-            Dismissed: 7,
-        };
-        const priorityRank = { High: 0, Medium: 1, Low: 2 };
         const signedPhotos = new Map();
         const signPhoto = (raw) => {
             const text = String(raw || "").trim().replace(/^\/+/, "");
@@ -1916,13 +1947,17 @@ export const getTaskManagerNotifications = async (req, res) => {
         }));
 
         tasks.sort((a, b) => {
-            const priorityGap = (priorityRank[a.priority] ?? 9) - (priorityRank[b.priority] ?? 9);
-            if (priorityGap) return priorityGap;
-            const statusGap = (statusRank[a.displayStatus] ?? 9) - (statusRank[b.displayStatus] ?? 9);
-            if (statusGap) return statusGap;
-            const aTime = new Date(a.requestDate || 0).getTime();
-            const bTime = new Date(b.requestDate || 0).getTime();
-            return bTime - aTime;
+            const aTime = new Date(a.requestDate || a.createdAt || 0).getTime();
+            const bTime = new Date(b.requestDate || b.createdAt || 0).getTime();
+            const timeGap = (Number.isNaN(bTime) ? 0 : bTime) - (Number.isNaN(aTime) ? 0 : aTime);
+            if (timeGap) return timeGap;
+            const sequence = (task) => {
+                const parts = String(task?.taskNumber || "").match(/\d+/g);
+                if (!parts?.length) return 0;
+                const year = Number(parts.length > 1 ? parts[parts.length - 2] : 0) || 0;
+                return year * 1000000 + (Number(parts[parts.length - 1]) || 0);
+            };
+            return sequence(b) - sequence(a);
         });
 
         return res.status(200).json({

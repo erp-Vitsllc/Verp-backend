@@ -74,14 +74,14 @@ function presentItem(row) {
     };
 }
 
-async function nextItemCode() {
+export async function nextItemCode() {
     const latest = await InventoryItem.findOne().sort({ itemCode: -1 }).select('itemCode').lean();
     const current = latest ? Number(String(latest.itemCode).replace(/\D/g, '')) : 0;
     const next = Number.isFinite(current) ? current + 1 : 1;
     return `ITM-${String(next).padStart(5, '0')}`;
 }
 
-async function assertLinks({ categoryId, subcategoryId, itemOptionId, brandId }) {
+export async function assertLinks({ categoryId, subcategoryId, itemOptionId, brandId }) {
     if (![categoryId, subcategoryId, brandId].every((id) => mongoose.isValidObjectId(id))) {
         throw httpError(400, 'Category, subcategory, and brand are required.');
     }
