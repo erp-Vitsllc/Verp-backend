@@ -22,6 +22,7 @@ const inventoryItemSchema = new mongoose.Schema(
         status: { type: String, enum: STATUSES, default: 'Active' },
         availableQuantity: { type: Number, default: 0, min: 0 },
         lastStockPrice: { type: Number, default: 0, min: 0 },
+        pendingStock: { type: Boolean, default: false },
     },
     { timestamps: true },
 );

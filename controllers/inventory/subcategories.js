@@ -31,6 +31,7 @@ function presentSubcategory(row, stats) {
         brandIds,
         brandCount: brandIds.length,
         itemCount: stats?.itemCount || 0,
+        stockQuantity: stats?.stockQuantity || 0,
     };
 }
 
@@ -58,13 +59,14 @@ export async function listSubcategories(req, res) {
         const ids = rows.map((row) => row._id);
         const itemStats = ids.length
             ? await InventoryItem.aggregate([
-                { $match: { subcategoryId: { $in: ids } } },
+                { $match: { subcategoryId: { $in: ids }, pendingStock: { $ne: true } } },
                 {
                     $group: {
                         _id: '$subcategoryId',
                         itemCount: { $sum: 1 },
                         brandIds: { $addToSet: '$brandId' },
                         categoryIds: { $addToSet: '$categoryId' },
+                        stockQuantity: { $sum: '$availableQuantity' },
                     },
                 },
             ])
@@ -131,9 +133,13 @@ export async function deleteSubcategory(req, res) {
         if (!mongoose.isValidObjectId(req.params.id)) throw httpError(404, 'Subcategory was not found.');
         const row = await ItemSubcategory.findById(req.params.id).select('_id');
         if (!row) throw httpError(404, 'Subcategory was not found.');
-        if (await InventoryItem.exists({ subcategoryId: req.params.id })) {
+        if (await InventoryItem.exists({ subcategoryId: req.params.id, availableQuantity: { $gt: 0 } })) {
+            throw httpError(400, 'This subcategory still has items with stock. Delete is available when that stock is 0.');
+        }
+        if (await InventoryItem.exists({ subcategoryId: req.params.id, pendingStock: { $ne: true } })) {
             throw httpError(400, 'Delete the items in this subcategory first.');
         }
+        await InventoryItem.deleteMany({ subcategoryId: req.params.id, pendingStock: true });
         await ItemOption.deleteMany({ subcategoryId: req.params.id });
         await ItemSubcategory.deleteOne({ _id: req.params.id });
         res.json({ ok: true });

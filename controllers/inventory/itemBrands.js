@@ -32,6 +32,7 @@ export async function listBrands(_req, res) {
         const [brands, itemStats] = await Promise.all([
             ItemBrand.find().select('name imageName').sort({ name: 1 }).lean(),
             InventoryItem.aggregate([
+                { $match: { pendingStock: { $ne: true } } },
                 {
                     $group: {
                         _id: '$brandId',
@@ -86,9 +87,10 @@ export async function deleteBrand(req, res) {
         if (!mongoose.isValidObjectId(req.params.id)) throw httpError(404, 'Brand was not found.');
         const brand = await ItemBrand.findById(req.params.id).select('_id');
         if (!brand) throw httpError(404, 'Brand was not found.');
-        if (await InventoryItem.exists({ brandId: req.params.id })) {
+        if (await InventoryItem.exists({ brandId: req.params.id, pendingStock: { $ne: true } })) {
             throw httpError(400, 'Delete the items that use this brand first.');
         }
+        await InventoryItem.deleteMany({ brandId: req.params.id, pendingStock: true });
         if (await InventoryVendorContact.exists({ 'lines.brandId': req.params.id })) {
             throw httpError(400, 'This brand is used by a vendor. Remove it there first.');
         }

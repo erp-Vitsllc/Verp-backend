@@ -5,7 +5,7 @@ import ItemOption from '../../models/inventory/ItemOption.js';
 import ItemBrand from '../../models/inventory/ItemBrand.js';
 import { hasPermission } from '../../services/permissionService.js';
 import { isReqUserSystemSuperUser } from '../../utils/systemSuperUser.js';
-import { cleanName, httpError, nameKey, sendError } from './http.js';
+import { cleanName, httpError, nameKey, requireName, sendError } from './http.js';
 import { assertLinks, assertModelNumberAvailable, nextItemCode, stockStatus } from './items.js';
 
 const STOCK_POPULATE = [
@@ -37,6 +37,7 @@ function presentStockOption(row) {
         itemName: row.itemOptionId?.name || row.description || '',
         brandName: row.brandId?.name || '',
         lastStockPrice: row.lastStockPrice || 0,
+        pendingStock: Boolean(row.pendingStock),
     };
 }
 
@@ -83,6 +84,20 @@ async function canCreateItem(req) {
     if (await isReqUserSystemSuperUser(req.user)) return true;
     if (!req.user?.id) return false;
     return hasPermission(req.user.id, 'inventory_item_master', 'create');
+}
+
+async function ensureItemOption(subcategoryId, itemName) {
+    const key = nameKey(itemName);
+    const found = await ItemOption.findOne({ subcategoryId, nameKey: key });
+    if (found) return found;
+    try {
+        return await ItemOption.create({ subcategoryId, name: itemName, nameKey: key });
+    } catch (error) {
+        if (error?.code !== 11000) throw error;
+        const again = await ItemOption.findOne({ subcategoryId, nameKey: key });
+        if (again) return again;
+        throw error;
+    }
 }
 
 async function resolveItemOption(source, subcategoryId) {
@@ -146,14 +161,135 @@ async function createStockItem(source, identity, quantity, price) {
         status: source.status || 'Active',
         availableQuantity: quantity,
         lastStockPrice: price,
+        pendingStock: false,
     });
     return InventoryItem.findById(created._id).populate(STOCK_POPULATE).lean();
+}
+
+async function optionForIdentity(source, subcategoryId) {
+    const resolved = await resolveItemOption(source, subcategoryId);
+    if (resolved.id) return resolved;
+    const name = cleanName(resolved.name);
+    if (!name) return { id: null, name: '' };
+    const option = await ensureItemOption(subcategoryId, name);
+    return { id: option._id, name: option.name || name };
+}
+
+async function finalizePendingItem(source, identity, quantity, price) {
+    const itemOption = await optionForIdentity(source, identity.subcategoryId);
+    const itemName = cleanName(itemOption.name) || cleanName(source.description);
+    const modelNumber = cleanName(identity.modelNumber) || itemName;
+    const [brand, subcategory] = await Promise.all([
+        ItemBrand.findById(identity.brandId).select('name').lean(),
+        ItemSubcategory.findById(identity.subcategoryId).select('name').lean(),
+    ]);
+    const description = buildDescription({
+        brandName: brand?.name,
+        itemName,
+        modelNumber,
+        subcategoryName: subcategory?.name,
+    });
+    await assertModelNumberAvailable(modelNumber, source._id);
+    await assertLinks({
+        categoryId: identity.categoryId,
+        subcategoryId: identity.subcategoryId,
+        itemOptionId: itemOption.id,
+        brandId: identity.brandId,
+    });
+    const saved = await InventoryItem.findByIdAndUpdate(
+        source._id,
+        {
+            $set: {
+                categoryId: identity.categoryId,
+                subcategoryId: identity.subcategoryId,
+                brandId: identity.brandId,
+                itemOptionId: itemOption.id,
+                modelNumber,
+                description,
+                pendingStock: false,
+                lastStockPrice: price,
+            },
+            $inc: { availableQuantity: quantity },
+        },
+        { new: true, runValidators: true },
+    ).populate(STOCK_POPULATE).lean();
+    if (!saved) throw httpError(404, 'Item was not found.');
+    return saved;
+}
+
+export async function createPendingItem(req, res) {
+    try {
+        const categoryId = String(req.body?.categoryId || '');
+        const subcategoryId = String(req.body?.subcategoryId || '');
+        const brandId = String(req.body?.brandId || '');
+        const itemName = requireName(req.body?.itemName, 'Item');
+        const modelNumber = cleanName(req.body?.modelNumber);
+        const requestedId = String(req.body?.itemId || '');
+        await assertLinks({ categoryId, subcategoryId, brandId });
+        const option = await ensureItemOption(subcategoryId, itemName);
+        const [brand, subcategory] = await Promise.all([
+            ItemBrand.findById(brandId).select('name').lean(),
+            ItemSubcategory.findById(subcategoryId).select('name').lean(),
+        ]);
+        const description = buildDescription({
+            brandName: brand?.name,
+            itemName,
+            modelNumber,
+            subcategoryName: subcategory?.name,
+        });
+        if (requestedId && mongoose.isValidObjectId(requestedId) && modelNumber) {
+            const current = await InventoryItem.findById(requestedId);
+            if (current?.pendingStock && !cleanName(current.modelNumber)) {
+                await assertModelNumberAvailable(modelNumber, current._id);
+                current.categoryId = categoryId;
+                current.subcategoryId = subcategoryId;
+                current.brandId = brandId;
+                current.itemOptionId = option._id;
+                current.modelNumber = modelNumber;
+                current.description = description;
+                await current.save();
+                const saved = await InventoryItem.findById(current._id).populate(STOCK_POPULATE).lean();
+                res.json(presentStockOption(saved));
+                return;
+            }
+        }
+        if (modelNumber) await assertModelNumberAvailable(modelNumber);
+        const duplicate = await InventoryItem.findOne({
+            pendingStock: true,
+            categoryId,
+            subcategoryId,
+            brandId,
+            itemOptionId: option._id,
+            modelNumber,
+        }).populate(STOCK_POPULATE).lean();
+        if (duplicate) {
+            res.json(presentStockOption(duplicate));
+            return;
+        }
+        const created = await InventoryItem.create({
+            itemCode: await nextItemCode(),
+            categoryId,
+            subcategoryId,
+            itemOptionId: option._id,
+            brandId,
+            description,
+            modelNumber,
+            unitOfMeasure: 'Quantity',
+            status: 'Active',
+            availableQuantity: 0,
+            pendingStock: true,
+        });
+        const saved = await InventoryItem.findById(created._id).populate(STOCK_POPULATE).lean();
+        res.status(201).json(presentStockOption(saved));
+    } catch (error) {
+        sendError(res, error);
+    }
 }
 
 export async function listStockOptions(_req, res) {
     try {
         const rows = await InventoryItem.find()
-            .select('itemCode description modelNumber availableQuantity categoryId subcategoryId itemOptionId brandId lastStockPrice')
+            .select('itemCode description modelNumber availableQuantity categoryId subcategoryId itemOptionId brandId lastStockPrice pendingStock')
             .populate(STOCK_POPULATE)
             .sort({ itemCode: 1 })
             .lean();
@@ -172,6 +308,19 @@ export async function addItemStock(req, res) {
         const source = await InventoryItem.findById(req.params.id).lean();
         if (!source) throw httpError(404, 'Item was not found.');
         const identity = readIdentity(req.body, source);
+        if (source.pendingStock) {
+            const saved = await finalizePendingItem(source, identity, quantity, price);
+            res.json({
+                ...presentStockOption(saved),
+                status: stockStatus(saved.availableQuantity, saved.subcategoryId?.reservationQuantity),
+                created: true,
+                pendingStock: false,
+            });
+            return;
+        }
+        if (cleanName(source.modelNumber) && cleanName(identity.modelNumber) !== cleanName(source.modelNumber)) {
+            throw httpError(400, 'This model no belongs to the selected item and cannot be changed.');
+        }
         if (sameIdentity(identity, source)) {
             const saved = await InventoryItem.findByIdAndUpdate(
                 source._id,
@@ -185,6 +334,9 @@ export async function addItemStock(req, res) {
                 created: false,
             });
             return;
+        }
+        if (cleanName(source.modelNumber) && cleanName(identity.modelNumber) === cleanName(source.modelNumber)) {
+            throw httpError(400, 'This model no belongs to the selected item and cannot be changed.');
         }
         // Different category, subcategory, brand, or model starts a new item.
         // The selected item keeps its stock and its saved details.

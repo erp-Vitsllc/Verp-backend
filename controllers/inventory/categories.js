@@ -15,6 +15,7 @@ function presentCategory(row, subcategoryCount, stats) {
         brandIds,
         brandCount: brandIds.length,
         itemCount: stats?.itemCount || 0,
+        stockQuantity: stats?.stockQuantity || 0,
     };
 }
 
@@ -35,11 +36,13 @@ export async function listCategories(_req, res) {
                 { $group: { _id: '$categoryId', count: { $sum: 1 } } },
             ]),
             InventoryItem.aggregate([
+                { $match: { pendingStock: { $ne: true } } },
                 {
                     $group: {
                         _id: '$categoryId',
                         itemCount: { $sum: 1 },
                         brandIds: { $addToSet: '$brandId' },
+                        stockQuantity: { $sum: '$availableQuantity' },
                     },
                 },
             ]),
@@ -93,12 +96,16 @@ export async function deleteCategory(req, res) {
         if (!mongoose.isValidObjectId(req.params.id)) throw httpError(404, 'Category was not found.');
         const category = await ItemCategory.findById(req.params.id).select('_id');
         if (!category) throw httpError(404, 'Category was not found.');
+        if (await InventoryItem.exists({ categoryId: req.params.id, availableQuantity: { $gt: 0 } })) {
+            throw httpError(400, 'This category still has items with stock. Delete is available when that stock is 0.');
+        }
         if (await ItemSubcategory.exists({ categoryId: req.params.id })) {
             throw httpError(400, 'Delete the subcategories in this category first.');
         }
-        if (await InventoryItem.exists({ categoryId: req.params.id })) {
+        if (await InventoryItem.exists({ categoryId: req.params.id, pendingStock: { $ne: true } })) {
             throw httpError(400, 'Delete the items in this category first.');
         }
+        await InventoryItem.deleteMany({ categoryId: req.params.id, pendingStock: true });
         if (await InventoryVendorContact.exists({ 'lines.categoryId': req.params.id })) {
             throw httpError(400, 'This category is used by a vendor. Remove it there first.');
         }

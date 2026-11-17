@@ -164,7 +164,7 @@ export async function listItems(req, res) {
     try {
         const page = Math.max(1, Number(req.query.page) || 1);
         const limit = listLimit(req.query.limit);
-        const filter = {};
+        const filter = { pendingStock: { $ne: true } };
         if (req.query.categoryId && mongoose.isValidObjectId(req.query.categoryId)) {
             filter.categoryId = req.query.categoryId;
         }
@@ -264,8 +264,11 @@ export async function updateItem(req, res) {
 export async function deleteItem(req, res) {
     try {
         if (!mongoose.isValidObjectId(req.params.id)) throw httpError(404, 'Item was not found.');
-        const item = await InventoryItem.findById(req.params.id).select('_id');
+        const item = await InventoryItem.findById(req.params.id).select('_id availableQuantity');
         if (!item) throw httpError(404, 'Item was not found.');
+        if (Number(item.availableQuantity) > 0) {
+            throw httpError(400, 'This item still has stock. Delete is available when stock is 0.');
+        }
         if (await InventoryVendorContact.exists({ 'lines.itemId': req.params.id })) {
             throw httpError(400, 'This item is used by a vendor. Remove it there first.');
         }

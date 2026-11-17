@@ -6,7 +6,7 @@ import { listSubcategoryImages, listSubcategories, createSubcategory, updateSubc
 import { listItemOptions, createItemOption } from '../controllers/inventory/itemOptions.js';
 import { listBrandImages, listBrands, createBrand, updateBrand, deleteBrand } from '../controllers/inventory/itemBrands.js';
 import { listItems, getItem, createItem, updateItem, deleteItem } from '../controllers/inventory/items.js';
-import { addItemStock, listStockOptions } from '../controllers/inventory/itemStock.js';
+import { addItemStock, createPendingItem, listStockOptions } from '../controllers/inventory/itemStock.js';
 import { createVendor, deleteVendor, getVendor, listVendorBills, listVendors, nextVendorCode, previewZohoVendor, syncVendorFromZoho, updateVendor } from '../controllers/inventory/vendors.js';
 import { createVendorContact, deleteVendorContact, markVendorContactPrimary, updateVendorContact } from '../controllers/inventory/vendorContacts.js';
 
@@ -62,6 +62,7 @@ router.delete('/vendors/:id/contacts/:contactId', protect, deleteContacts, delet
 
 router.get('/items', protect, viewItems, listItems);
 router.get('/items/stock-options', protect, viewItems, listStockOptions);
+router.post('/items/pending', protect, createItems, createPendingItem);
 router.post('/items', protect, createItems, createItem);
 router.post('/items/:id/stock', protect, checkPermissionAny('inventory_item_master', ['edit', 'create']), addItemStock);
 router.get('/items/:id', protect, viewItems, getItem);
