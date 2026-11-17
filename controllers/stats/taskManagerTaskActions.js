@@ -96,8 +96,12 @@ function dubaiDateKey(value) {
     return DUBAI_DATE.format(date);
 }
 
-function isGeneralTask(task) {
-    return String(task?.taskType || "") === "General Task";
+function isGeneralTask(task, action = null) {
+    if (canonicalTaskType(task?.taskType) === "General Task") return true;
+    if (String(task?.taskType || "").trim() === "General Task") return true;
+    if (isGeneralHubRequestType(action?.requestType)) return true;
+    if (action && categoryFromRequestType(action.requestType, action.extra2 || "") === "General Task") return true;
+    return Boolean(task && !action && !task.sourceDashboardActionId && !String(task.taskType || "").trim());
 }
 
 function detailDisplayStatus(task, action, manual) {
@@ -627,9 +631,7 @@ function emptyStageBeforeClose() {
 }
 
 function taskCountsAsGeneral(task, action = null) {
-    if (isGeneralTask(task)) return true;
-    if (isGeneralHubRequestType(action?.requestType)) return true;
-    return categoryFromRequestType(action?.requestType, action?.extra2 || "") === "General Task";
+    return isGeneralTask(task, action);
 }
 
 function stageWasSaved(stage) {
@@ -1081,16 +1083,22 @@ async function closeFlags(task, viewer, currentAssigneeId, assigneeEmpId, action
     } else if (open && saved.assigneeCleared) {
         flags.closeMessage = "There is no assignee. Reassign the task, or close it.";
     }
-    const needsRequesterReview = general && !reassigned;
+    const needsRequesterReview = general;
     if (!needsRequesterReview) return flags;
     if (reviewPending) {
-        flags.closeMessage = `${saved.completionRequestedByName || saved.returnAssigneeName || "The assignee"} completed this task. Approve it, or reject it with a reason.`;
+        flags.closeMessage = `${saved.completionRequestedByName || saved.returnAssigneeName || "The assignee"} completed this task. Approve it, or reject it with a reason. After you approve, you can close it.`;
+    } else if (saved.reviewAccepted && open) {
+        const kept = personBaseName(saved.returnAssigneeName || task?.assigneeName) || "The assignee";
+        flags.closeMessage = `${kept} remains the assignee. The requester can close this task.`;
     } else if (saved.reviewReturned && open) {
         flags.closeMessage = "This task was rejected and is open again for the assignee.";
     }
     return {
         ...flags,
         canSubmitCompletion: false,
+        canApproveCompletion: false,
+        canRejectCompletion: false,
+        canRecallCompletion: false,
         canConfirmComplete: false,
         canMarkRejected: false,
         canMarkCompleted: false,
@@ -2335,24 +2343,39 @@ export const submitTaskCompletion = async (req, res) => {
             || viewerMatchesEmployee(viewer, originalAssignee)
             || (viewerIsCurrentAssignee(viewer, currentAssignee) && !viewerIsReassignedHolder),
         );
+        const generalTask = isGeneralTask(task, target.action);
         if (confirmClose) {
-            if (!mayCloseTask) {
+            if (generalTask) {
+                const savedClose = closeSnapshot(task);
+                const requesterViewer = await viewerIsTaskRequester(task, viewer, target.action);
+                const requesterMayClose = (requesterViewer || viewer?.superUser)
+                    && !savedClose.reviewPending
+                    && (savedClose.reviewAccepted || savedClose.assigneeCleared);
+                if (!requesterMayClose) {
+                    return res.status(403).json({
+                        message: "Only the requester can close a general task, after they approve the assignee's completion.",
+                    });
+                }
+            } else if (!mayCloseTask) {
                 return res.status(403).json({ message: "Only the assignee can close this task." });
             }
             if (await closeTaskForRequester(res, target, viewer, note.text, req.params.taskKey)) return;
             return;
         }
-        if (!isGeneralTask(task) && !viewerIsReassignedHolder && mayCloseTask) {
+        if (!generalTask && !viewerIsReassignedHolder && mayCloseTask) {
             if (await closeTaskForRequester(res, target, viewer, note.text, req.params.taskKey)) return;
             return;
         }
-        if (isGeneralTask(task) && !viewerIsReassignedHolder) {
+        if (generalTask) {
             if (task.status === "Completed" || task.status === "Cancelled" || task.status === "Rejected") {
                 return res.status(400).json({ message: "This task is already closed." });
             }
             const saved = closeSnapshot(task);
             if (saved.reviewPending) {
                 return res.status(400).json({ message: "This task is already with the requester for review." });
+            }
+            if (saved.reviewAccepted) {
+                return res.status(400).json({ message: "This task is approved. The requester can close it." });
             }
             const current = assigneeOf(target);
             if (!viewer?.superUser && !viewerIsCurrentAssignee(viewer, current)) {
@@ -2399,7 +2422,7 @@ export const submitTaskCompletion = async (req, res) => {
                         hello: requesterName,
                         lines: [
                             `${viewer.name} completed this task and sent it to you for review.`,
-                            "Approve to close it, or reject it with a reason.",
+                            "Approve it, or reject it with a reason. After you approve, you can close the task.",
                         ],
                         taskName: task.taskName,
                         description: note.text,

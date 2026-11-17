@@ -6,7 +6,7 @@ import ItemBrand from '../../models/inventory/ItemBrand.js';
 import { hasPermission } from '../../services/permissionService.js';
 import { isReqUserSystemSuperUser } from '../../utils/systemSuperUser.js';
 import { cleanName, httpError, nameKey, sendError } from './http.js';
-import { assertLinks, nextItemCode, stockStatus } from './items.js';
+import { assertLinks, assertModelNumberAvailable, nextItemCode, stockStatus } from './items.js';
 
 const STOCK_POPULATE = [
     { path: 'categoryId', select: 'name' },
@@ -98,13 +98,11 @@ async function resolveItemOption(source, subcategoryId) {
     return { id: null, name: option.name || '' };
 }
 
-function buildDescription({ brandName, subcategoryName, itemName, modelNumber, manufacturerPartNumber, moreDescription, copyToDescription }) {
-    const main = [brandName, subcategoryName, itemName, modelNumber, manufacturerPartNumber]
+function buildDescription({ brandName, itemName, modelNumber, subcategoryName }) {
+    const description = [brandName, itemName, modelNumber, subcategoryName]
         .map((part) => cleanName(part))
         .filter(Boolean)
         .join(' ');
-    const extra = copyToDescription ? cleanName(moreDescription) : '';
-    const description = [main, extra].filter(Boolean).join(' ');
     if (!description) throw httpError(400, 'Description is required.');
     return description;
 }
@@ -115,15 +113,15 @@ async function createStockItem(source, identity, quantity, price) {
         ItemSubcategory.findById(identity.subcategoryId).select('name').lean(),
         resolveItemOption(source, identity.subcategoryId),
     ]);
+    const itemName = cleanName(itemOption.name) || cleanName(source.description);
+    const modelNumber = cleanName(identity.modelNumber) || itemName;
     const description = buildDescription({
         brandName: brand?.name,
+        itemName,
+        modelNumber,
         subcategoryName: subcategory?.name,
-        itemName: itemOption.name,
-        modelNumber: identity.modelNumber,
-        manufacturerPartNumber: source.manufacturerPartNumber,
-        moreDescription: source.moreDescription,
-        copyToDescription: source.copyToDescription,
     });
+    await assertModelNumberAvailable(modelNumber);
     await assertLinks({
         categoryId: identity.categoryId,
         subcategoryId: identity.subcategoryId,
@@ -139,7 +137,7 @@ async function createStockItem(source, identity, quantity, price) {
         description,
         moreDescription: source.moreDescription || '',
         copyToDescription: Boolean(source.copyToDescription),
-        modelNumber: identity.modelNumber,
+        modelNumber,
         unitOfMeasure: source.unitOfMeasure,
         manufacturerPartNumber: source.manufacturerPartNumber || '',
         reservationQuantity: source.reservationQuantity || 0,

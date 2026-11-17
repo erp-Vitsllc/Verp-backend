@@ -81,6 +81,16 @@ export async function nextItemCode() {
     return `ITM-${String(next).padStart(5, '0')}`;
 }
 
+export async function assertModelNumberAvailable(modelNumber, exceptId = '') {
+    const model = cleanName(modelNumber);
+    if (!model) return;
+    const rows = await InventoryItem.find({
+        modelNumber: new RegExp(`^${escapeRegex(model)}$`, 'i'),
+    }).select('_id').lean();
+    const conflict = rows.some((row) => String(row._id) !== String(exceptId || ''));
+    if (conflict) throw httpError(400, 'This model no is already used on another item.');
+}
+
 export async function assertLinks({ categoryId, subcategoryId, itemOptionId, brandId }) {
     if (![categoryId, subcategoryId, brandId].every((id) => mongoose.isValidObjectId(id))) {
         throw httpError(400, 'Category, subcategory, and brand are required.');
@@ -100,6 +110,14 @@ export async function assertLinks({ categoryId, subcategoryId, itemOptionId, bra
         throw httpError(400, 'Item does not belong to the selected subcategory.');
     }
     if (!brand) throw httpError(400, 'Brand was not found.');
+}
+
+function matchesStockFilter(rowStatus, statusQuery) {
+    if (statusQuery === 'All') return true;
+    if (!statusQuery || statusQuery === 'Stock In') {
+        return rowStatus === 'Stock In' || rowStatus === 'Low Stock';
+    }
+    return rowStatus === statusQuery;
 }
 
 function readItemBody(body) {
@@ -156,7 +174,10 @@ export async function listItems(req, res) {
         if (req.query.brandId && mongoose.isValidObjectId(req.query.brandId)) {
             filter.brandId = req.query.brandId;
         }
-        const statusQuery = DISPLAY_STATUSES.includes(req.query.status) ? req.query.status : '';
+        const requestedStatus = String(req.query.status || '').trim();
+        const statusQuery = requestedStatus === 'All' || DISPLAY_STATUSES.includes(requestedStatus)
+            ? requestedStatus
+            : '';
         const search = cleanName(req.query.search);
         if (search) {
             const regex = new RegExp(escapeRegex(search), 'i');
@@ -178,7 +199,7 @@ export async function listItems(req, res) {
         const rows = await InventoryItem.find(filter).populate(ITEM_POPULATE).lean();
         const matched = rows
             .map(presentItem)
-            .filter((row) => (statusQuery ? row.status === statusQuery : row.status !== 'Out of Stock'))
+            .filter((row) => matchesStockFilter(row.status, statusQuery))
             .sort((left, right) => {
                 const statusGap = (STATUS_ORDER[left.status] ?? 9) - (STATUS_ORDER[right.status] ?? 9);
                 if (statusGap) return statusGap;
@@ -211,6 +232,7 @@ export async function createItem(req, res) {
     try {
         const payload = readItemBody(req.body);
         await assertLinks(payload);
+        await assertModelNumberAvailable(payload.modelNumber);
         const item = await InventoryItem.create({
             ...payload,
             itemCode: await nextItemCode(),
@@ -227,6 +249,7 @@ export async function updateItem(req, res) {
         if (!mongoose.isValidObjectId(req.params.id)) throw httpError(404, 'Item was not found.');
         const payload = readItemBody(req.body);
         await assertLinks(payload);
+        await assertModelNumberAvailable(payload.modelNumber, req.params.id);
         const saved = await InventoryItem.findByIdAndUpdate(req.params.id, payload, {
             new: true,
             runValidators: true,
