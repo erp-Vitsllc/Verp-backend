@@ -318,9 +318,6 @@ export async function addItemStock(req, res) {
             });
             return;
         }
-        if (cleanName(source.modelNumber) && cleanName(identity.modelNumber) !== cleanName(source.modelNumber)) {
-            throw httpError(400, 'This model no belongs to the selected item and cannot be changed.');
-        }
         if (sameIdentity(identity, source)) {
             const saved = await InventoryItem.findByIdAndUpdate(
                 source._id,
@@ -335,10 +332,7 @@ export async function addItemStock(req, res) {
             });
             return;
         }
-        if (cleanName(source.modelNumber) && cleanName(identity.modelNumber) === cleanName(source.modelNumber)) {
-            throw httpError(400, 'This model no belongs to the selected item and cannot be changed.');
-        }
-        // Different category, subcategory, brand, or model starts a new item.
+        // Different category, subcategory, brand, item, or model starts a new item.
         // The selected item keeps its stock and its saved details.
         if (!(await canCreateItem(req))) {
             throw httpError(403, 'Item create permission is required when category, sub category, brand, or model no differs from the selected item.');
