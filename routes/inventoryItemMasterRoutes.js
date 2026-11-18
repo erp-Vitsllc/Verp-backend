@@ -7,8 +7,11 @@ import { listItemOptions, createItemOption } from '../controllers/inventory/item
 import { listBrandImages, listBrands, createBrand, updateBrand, deleteBrand } from '../controllers/inventory/itemBrands.js';
 import { listItems, getItem, createItem, updateItem, deleteItem } from '../controllers/inventory/items.js';
 import { addItemStock, createPendingItem, listStockOptions } from '../controllers/inventory/itemStock.js';
+import { approveStockEntry, getStockEntry, listInventoryBills, listStockEntries, rejectStockEntry, saveStockEntry, stockApprovalContext } from '../controllers/inventory/stockEntries.js';
 import { createVendor, deleteVendor, getVendor, listVendorBills, listVendors, nextVendorCode, previewZohoVendor, syncVendorFromZoho, updateVendor } from '../controllers/inventory/vendors.js';
 import { createVendorContact, deleteVendorContact, markVendorContactPrimary, updateVendorContact } from '../controllers/inventory/vendorContacts.js';
+import { createDelivery, deleteDelivery, listDeliveries } from '../controllers/inventory/deliveries.js';
+import { hasPermission } from '../services/permissionService.js';
 
 const router = express.Router();
 
@@ -59,6 +62,43 @@ router.post('/vendors/:id/contacts', protect, createContacts, createVendorContac
 router.put('/vendors/:id/contacts/:contactId', protect, editContacts, updateVendorContact);
 router.post('/vendors/:id/contacts/:contactId/primary', protect, editContacts, markVendorContactPrimary);
 router.delete('/vendors/:id/contacts/:contactId', protect, deleteContacts, deleteVendorContact);
+
+const DELIVERY_VIEW_MODULES = [
+    'inventory',
+    'inventory_item_master',
+    'inventory_item_master_category',
+    'inventory_item_master_subcategory',
+    'inventory_item_master_brand',
+    'inventory_vendor',
+    'inventory_vendor_contact',
+];
+
+async function viewDelivery(req, res, next) {
+    try {
+        const userId = req.user?.id;
+        if (!userId) return res.status(401).json({ message: 'Not authorized, no user found' });
+        for (const moduleId of DELIVERY_VIEW_MODULES) {
+            if (await hasPermission(userId, moduleId, 'view')) return next();
+        }
+        return res.status(403).json({ message: "Access denied. You don't have permission for Delivery." });
+    } catch (error) {
+        console.error('Error checking delivery permission:', error);
+        return res.status(500).json({ message: 'Error checking permissions' });
+    }
+}
+
+router.get('/bills', protect, viewDelivery, listInventoryBills);
+router.get('/deliveries', protect, viewDelivery, listDeliveries);
+router.post('/deliveries', protect, viewDelivery, createDelivery);
+router.delete('/deliveries/:id', protect, viewDelivery, deleteDelivery);
+
+const stockWriters = checkPermissionAny('inventory_item_master', ['edit', 'create']);
+router.get('/stock-entries/approval-context', protect, viewItems, stockApprovalContext);
+router.get('/stock-entries', protect, viewItems, listStockEntries);
+router.post('/stock-entries', protect, stockWriters, saveStockEntry);
+router.post('/stock-entries/:id/approve', protect, viewItems, approveStockEntry);
+router.post('/stock-entries/:id/reject', protect, viewItems, rejectStockEntry);
+router.get('/stock-entries/:id', protect, viewItems, getStockEntry);
 
 router.get('/items', protect, viewItems, listItems);
 router.get('/items/stock-options', protect, viewItems, listStockOptions);

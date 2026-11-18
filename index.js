@@ -38,6 +38,7 @@ import whatsappRoute from "./routes/whatsappRoutes.js";
 import notificationEmailPermissionRoute from "./routes/notificationEmailPermissionRoutes.js";
 import currencyRoute from "./routes/currencyRoutes.js";
 import inventoryItemMasterRoute from "./routes/inventoryItemMasterRoutes.js";
+import crmCustomerRoute from "./routes/crmCustomerRoutes.js";
 import workOrderRoute from "./routes/workOrderRoutes.js";
 import { startLocatorWebSocket } from "./services/locatorWebSocketService.js";
 import { syncLocatorToErpDatabase } from "./services/locatorSnapshotService.js";

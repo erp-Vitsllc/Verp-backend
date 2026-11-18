@@ -5,6 +5,7 @@ import ItemSubcategory from '../../models/inventory/ItemSubcategory.js';
 import ItemOption from '../../models/inventory/ItemOption.js';
 import ItemBrand from '../../models/inventory/ItemBrand.js';
 import InventoryVendorContact from '../../models/inventory/InventoryVendorContact.js';
+import InventoryStockEntry from '../../models/inventory/InventoryStockEntry.js';
 import { escapeRegex } from '../../utils/regexHelper.js';
 import { cleanName, httpError, listLimit, sendError } from './http.js';
 
@@ -112,7 +113,43 @@ export async function assertLinks({ categoryId, subcategoryId, itemOptionId, bra
     if (!brand) throw httpError(400, 'Brand was not found.');
 }
 
+function waitingStatus(name) {
+    return `Waiting for ${String(name || '').trim() || 'Purchase Officer'}`;
+}
+
+function isWaitingStatus(status) {
+    return String(status || '').startsWith('Waiting for ');
+}
+
+function statusRank(status) {
+    if (isWaitingStatus(status)) return -1;
+    return STATUS_ORDER[status] ?? 9;
+}
+
+async function waitingItemMap() {
+    const entries = await InventoryStockEntry.find({ status: 'pending' })
+        .select('lines.itemId approverName')
+        .lean();
+    const waiting = new Map();
+    entries.forEach((entry) => {
+        const label = waitingStatus(entry.approverName);
+        (entry.lines || []).forEach((line) => {
+            if (line.itemId) waiting.set(String(line.itemId), label);
+        });
+    });
+    return waiting;
+}
+
+function withWaitingStatus(item, waiting) {
+    const label = waiting.get(String(item._id));
+    if (!label) return item;
+    return { ...item, status: label };
+}
+
 function matchesStockFilter(rowStatus, statusQuery) {
+    if (isWaitingStatus(rowStatus)) {
+        return !statusQuery || statusQuery === 'All' || statusQuery === 'Stock In';
+    }
     if (statusQuery === 'All') return true;
     if (!statusQuery || statusQuery === 'Stock In') {
         return rowStatus === 'Stock In' || rowStatus === 'Low Stock';
@@ -164,15 +201,22 @@ export async function listItems(req, res) {
     try {
         const page = Math.max(1, Number(req.query.page) || 1);
         const limit = listLimit(req.query.limit);
-        const filter = { pendingStock: { $ne: true } };
+        const waiting = await waitingItemMap();
+        const waitingIds = [...waiting.keys()].filter((id) => mongoose.isValidObjectId(id));
+        const constraints = [
+            waitingIds.length
+                ? { $or: [{ pendingStock: { $ne: true } }, { _id: { $in: waitingIds } }] }
+                : { pendingStock: { $ne: true } },
+        ];
+        const filter = {};
         if (req.query.categoryId && mongoose.isValidObjectId(req.query.categoryId)) {
-            filter.categoryId = req.query.categoryId;
+            constraints.push({ categoryId: req.query.categoryId });
         }
         if (req.query.subcategoryId && mongoose.isValidObjectId(req.query.subcategoryId)) {
-            filter.subcategoryId = req.query.subcategoryId;
+            constraints.push({ subcategoryId: req.query.subcategoryId });
         }
         if (req.query.brandId && mongoose.isValidObjectId(req.query.brandId)) {
-            filter.brandId = req.query.brandId;
+            constraints.push({ brandId: req.query.brandId });
         }
         const requestedStatus = String(req.query.status || '').trim();
         const statusQuery = requestedStatus === 'All' || DISPLAY_STATUSES.includes(requestedStatus)
@@ -186,22 +230,26 @@ export async function listItems(req, res) {
                 ItemBrand.find({ name: regex }).select('_id'),
                 ItemOption.find({ name: regex }).select('_id'),
             ]);
-            filter.$or = [
-                { itemCode: regex },
-                { description: regex },
-                { modelNumber: regex },
-                { manufacturerPartNumber: regex },
-                { categoryId: { $in: categories.map((row) => row._id) } },
-                { brandId: { $in: brands.map((row) => row._id) } },
-                { itemOptionId: { $in: options.map((row) => row._id) } },
-            ];
+            constraints.push({
+                $or: [
+                    { itemCode: regex },
+                    { description: regex },
+                    { modelNumber: regex },
+                    { manufacturerPartNumber: regex },
+                    { categoryId: { $in: categories.map((row) => row._id) } },
+                    { brandId: { $in: brands.map((row) => row._id) } },
+                    { itemOptionId: { $in: options.map((row) => row._id) } },
+                ],
+            });
         }
+        const query = constraints.length === 1 ? constraints[0] : { $and: constraints };
+        Object.assign(filter, query);
         const rows = await InventoryItem.find(filter).populate(ITEM_POPULATE).lean();
         const matched = rows
-            .map(presentItem)
+            .map((row) => withWaitingStatus(presentItem(row), waiting))
             .filter((row) => matchesStockFilter(row.status, statusQuery))
             .sort((left, right) => {
-                const statusGap = (STATUS_ORDER[left.status] ?? 9) - (STATUS_ORDER[right.status] ?? 9);
+                const statusGap = statusRank(left.status) - statusRank(right.status);
                 if (statusGap) return statusGap;
                 return String(left.itemCode || '').localeCompare(String(right.itemCode || ''));
             });
@@ -222,7 +270,8 @@ export async function getItem(req, res) {
         if (!mongoose.isValidObjectId(req.params.id)) throw httpError(404, 'Item was not found.');
         const row = await InventoryItem.findById(req.params.id).populate(DETAIL_POPULATE).lean();
         if (!row) throw httpError(404, 'Item was not found.');
-        res.json(presentItem(row));
+        const waiting = await waitingItemMap();
+        res.json(withWaitingStatus(presentItem(row), waiting));
     } catch (error) {
         sendError(res, error);
     }
