@@ -56,6 +56,8 @@ export function mapZohoVendorToDoc(contact, organizationId, syncedAt = new Date(
 
 export function toZohoCustomerApiShape(doc) {
     if (!doc) return null;
+    const raw = doc.zohoRaw && typeof doc.zohoRaw === 'object' ? doc.zohoRaw : {};
+    const billing = raw.billing_address || raw.address || {};
 
     return {
         contact_id: doc.zohoContactId,
@@ -68,6 +70,15 @@ export function toZohoCustomerApiShape(doc) {
         mobile: doc.mobile,
         outstanding_receivable_amount: doc.outstandingReceivableAmount,
         currency_code: doc.currencyCode,
+        payment_terms: raw.payment_terms,
+        payment_terms_label: String(raw.payment_terms_label || '').trim(),
+        place_of_contact: String(raw.place_of_contact || '').trim(),
+        billing_address: {
+            city: String(billing.city || '').trim(),
+            state: String(billing.state || '').trim(),
+            country: String(billing.country || '').trim(),
+        },
+        status: doc.isActive === false ? 'inactive' : String(raw.status || 'active'),
     };
 }
 

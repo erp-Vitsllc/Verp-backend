@@ -268,6 +268,7 @@ app.use("/api/whatsapp", whatsappRoute);
 app.use("/api/NotificationEmailPermission", notificationEmailPermissionRoute);
 app.use("/api/Currency", currencyRoute);
 app.use("/api/Inventory", inventoryItemMasterRoute);
+app.use("/api/CRM", crmCustomerRoute);
 app.use("/api/WorkOrder", workOrderRoute);
 
 app.use((err, req, res, next) => {

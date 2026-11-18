@@ -5,8 +5,8 @@ import { escapeRegex } from '../../utils/regexHelper.js';
 import { dubaiDateKey } from '../../utils/workOrderNumber.js';
 import { httpError, sendError } from './http.js';
 
-const TYPES = new Set(['Project', 'Annual', 'Manual']);
-const SCHEDULED = new Set(['Project', 'Annual']);
+const TYPES = new Set(['Project', 'Manual']);
+const SCHEDULED = new Set(['Project']);
 
 function clipLine(value, max) {
     return String(value || '').replace(/\s+/g, ' ').trim().slice(0, max);

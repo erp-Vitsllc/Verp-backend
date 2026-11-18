@@ -602,7 +602,7 @@ export async function fetchZohoOrganizations() {
     }
 }
 
-export async function fetchCustomers() {
+async function fetchCustomerPages(pathname, extraParams = {}) {
     const config = getZohoConfig();
     assertBooksConfig(config);
     const organizationId = getZohoOrganizationId();
@@ -617,11 +617,12 @@ export async function fetchCustomers() {
     while (hasMore) {
         let response;
         try {
-            response = await axios.get(`${booksApiBase}/customers`, {
+            response = await axios.get(`${booksApiBase}${pathname}`, {
                 params: {
                     organization_id: organizationId,
                     page,
                     per_page: 200,
+                    ...extraParams,
                 },
                 headers: {
                     Authorization: `Zoho-oauthtoken ${accessToken}`,
@@ -630,7 +631,10 @@ export async function fetchCustomers() {
             });
         } catch (error) {
             const zohoMessage = error?.response?.data?.message;
-            throw new Error(zohoMessage || error?.message || 'Failed to fetch customers from Zoho Books');
+            const status = error?.response?.status;
+            const wrapped = new Error(zohoMessage || error?.message || 'Failed to fetch customers from Zoho Books');
+            wrapped.status = status;
+            throw wrapped;
         }
 
         const data = response.data || {};
@@ -650,6 +654,16 @@ export async function fetchCustomers() {
     }
 
     return customers;
+}
+
+export async function fetchCustomers() {
+    try {
+        return await fetchCustomerPages('/customers');
+    } catch (error) {
+        const missing = error?.status === 404 || /404|not found|invalid url/i.test(String(error?.message || ''));
+        if (!missing) throw error;
+        return fetchCustomerPages('/contacts', { contact_type: 'customer' });
+    }
 }
 
 export async function fetchVendorPayments(params = {}) {
