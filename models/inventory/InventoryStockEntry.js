@@ -24,6 +24,7 @@ const inventoryStockEntrySchema = new mongoose.Schema(
         purchaseDate: { type: Date, default: null },
         billNo: { type: String, default: '', trim: true },
         lpoNo: { type: String, default: '', trim: true },
+        note: { type: String, default: '', trim: true },
         lines: { type: [stockEntryLineSchema], default: [] },
         attachment: {
             name: { type: String, default: '' },

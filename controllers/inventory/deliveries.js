@@ -1,9 +1,15 @@
 import mongoose from 'mongoose';
 import DeliveryOrder from '../../models/inventory/DeliveryOrder.js';
-import EmployeeBasic from '../../models/EmployeeBasic.js';
+import InventoryItem from '../../models/inventory/InventoryItem.js';
 import { escapeRegex } from '../../utils/regexHelper.js';
 import { dubaiDateKey } from '../../utils/workOrderNumber.js';
 import { httpError, sendError } from './http.js';
+import {
+    actorIsPurchaseOfficer,
+    closeDeliveryApproval,
+    findPurchaseOfficer,
+    notifyDeliveryApproval,
+} from './stockApproval.js';
 
 const TYPES = new Set(['Project', 'Manual']);
 const SCHEDULED = new Set(['Project']);
@@ -31,6 +37,7 @@ function presentDelivery(row) {
         deliveryAddress: row.deliveryAddress || '',
         contactPersonName: row.contactPersonName || '',
         contactNumber: row.contactNumber || '',
+        note: row.note || '',
         lines: Array.isArray(row.lines) ? row.lines : [],
         createdAt: row.createdAt,
     };
@@ -44,6 +51,10 @@ function readLine(raw) {
     }
     const description = clipLine(raw.description, 300);
     if (!description) throw httpError(400, 'Each delivery item needs a description.');
+    const inventoryItemId = clipLine(raw.inventoryItemId, 40);
+    if (!mongoose.isValidObjectId(inventoryItemId)) {
+        throw httpError(400, 'Only items that are in stock can be added.');
+    }
     return {
         categoryId: clipLine(raw.categoryId, 40),
         categoryName: clipLine(raw.categoryName, 120),
@@ -54,7 +65,7 @@ function readLine(raw) {
         brandId: clipLine(raw.brandId, 40),
         brandName: clipLine(raw.brandName, 120),
         modelNumber: clipLine(raw.modelNumber, 160),
-        inventoryItemId: clipLine(raw.inventoryItemId, 40),
+        inventoryItemId,
         description,
         detail: clipLine(raw.detail, 300),
         quantity,
@@ -78,6 +89,7 @@ function readDelivery(body) {
     const deliveryAddress = clipBlock(body?.deliveryAddress, 500);
     const contactPersonName = clipLine(body?.contactPersonName, 160);
     const contactNumber = clipLine(body?.contactNumber, 40);
+    const note = clipBlock(body?.note, 1000);
 
     if (action === 'submit') {
         if (SCHEDULED.has(deliveryType)) {
@@ -104,6 +116,7 @@ function readDelivery(body) {
         deliveryAddress,
         contactPersonName,
         contactNumber,
+        note,
         lines,
     };
 }
@@ -126,21 +139,95 @@ async function allocateDeliveryNo() {
     throw httpError(500, 'Could not allocate a delivery number.');
 }
 
-export async function viewerIsPurchasingOfficer(req) {
-    const ids = [req.user?.employeeObjectId, req.user?.id]
-        .map((value) => String(value || ''))
-        .filter((value) => mongoose.isValidObjectId(value));
-    const employeeId = clipLine(req.user?.employeeId, 40);
-    const filters = [];
-    if (ids.length) filters.push({ _id: { $in: ids } });
-    if (employeeId) filters.push({ employeeId });
-    let designation = '';
-    if (filters.length) {
-        const employee = await EmployeeBasic.findOne({ $or: filters }).select('designation').lean();
-        designation = employee?.designation || '';
+function lineTotals(lines) {
+    const totals = new Map();
+    (lines || []).forEach((line) => {
+        const id = String(line.inventoryItemId || '');
+        totals.set(id, (totals.get(id) || 0) + Number(line.quantity || 0));
+    });
+    return totals;
+}
+
+async function quantityWaitingOnOtherDeliveries(exceptId = '') {
+    const filter = {
+        status: { $in: ['Submitted', 'Confirming'] },
+        stockApplied: { $ne: true },
+    };
+    if (exceptId && mongoose.isValidObjectId(exceptId)) filter._id = { $ne: exceptId };
+    const rows = await DeliveryOrder.find(filter).select('lines.inventoryItemId lines.quantity').lean();
+    const totals = new Map();
+    rows.forEach((row) => {
+        (row.lines || []).forEach((line) => {
+            const id = String(line.inventoryItemId || '');
+            if (!id) return;
+            totals.set(id, (totals.get(id) || 0) + Number(line.quantity || 0));
+        });
+    });
+    return totals;
+}
+
+async function assertDeliverable(lines, checkQuantity, exceptId = '') {
+    const totals = lineTotals(lines);
+    if (!totals.size) return;
+    const [items, waiting] = await Promise.all([
+        InventoryItem.find({ _id: { $in: [...totals.keys()] } })
+            .select('description availableQuantity pendingStock')
+            .lean(),
+        checkQuantity ? quantityWaitingOnOtherDeliveries(exceptId) : Promise.resolve(new Map()),
+    ]);
+    const byId = new Map(items.map((item) => [String(item._id), item]));
+    for (const [id, quantity] of totals) {
+        const item = byId.get(id);
+        const onHand = Number(item?.availableQuantity) || 0;
+        if (!item || item.pendingStock || onHand <= 0) {
+            throw httpError(400, 'Only items that are in stock can be added.');
+        }
+        if (!checkQuantity) continue;
+        const held = waiting.get(id) || 0;
+        if (onHand - held < quantity) {
+            const name = item.description || 'An item';
+            if (held > 0) {
+                throw httpError(400, `${name} has ${onHand} in stock and ${held} already waiting on another delivery.`);
+            }
+            throw httpError(400, `${name} only has ${onHand} in stock.`);
+        }
     }
-    const role = `${designation} ${req.user?.groupName || ''} ${req.user?.role || ''}`;
-    return /purchasing officer/i.test(role);
+}
+
+async function changeStock(lines, direction) {
+    const totals = lineTotals(lines);
+    const applied = [];
+    try {
+        for (const [id, quantity] of totals) {
+            if (!mongoose.isValidObjectId(id) || quantity < 1) {
+                throw httpError(400, 'Only items that are in stock can be added.');
+            }
+            const filter = direction < 0
+                ? { _id: id, pendingStock: { $ne: true }, availableQuantity: { $gte: quantity } }
+                : { _id: id };
+            const item = await InventoryItem.findOneAndUpdate(
+                filter,
+                { $inc: { availableQuantity: direction * quantity } },
+                { new: true },
+            ).select('description availableQuantity pendingStock');
+            if (!item) {
+                const existing = await InventoryItem.findById(id).select('description availableQuantity pendingStock').lean();
+                if (!existing || existing.pendingStock) throw httpError(400, 'Only items that are in stock can be added.');
+                throw httpError(400, `${existing.description || 'An item'} only has ${existing.availableQuantity || 0} in stock.`);
+            }
+            applied.push({ id, quantity });
+        }
+    } catch (error) {
+        for (const row of applied.reverse()) {
+            await InventoryItem.updateOne({ _id: row.id }, { $inc: { availableQuantity: -direction * row.quantity } });
+        }
+        throw error;
+    }
+}
+
+export async function viewerIsPurchasingOfficer(req) {
+    const officer = await findPurchaseOfficer();
+    return actorIsPurchaseOfficer(req, officer);
 }
 
 export async function listDeliveries(req, res) {
@@ -159,13 +246,23 @@ export async function listDeliveries(req, res) {
 }
 
 export async function createDelivery(req, res) {
+    let payload = null;
+    let reduced = false;
     try {
-        const payload = readDelivery(req.body);
-        const purchasingOfficer = await viewerIsPurchasingOfficer(req);
-        const status = payload.action === 'draft'
-            ? 'Draft'
-            : (purchasingOfficer ? 'Confirmed' : 'Submitted');
+        payload = readDelivery(req.body);
+        const officer = await findPurchaseOfficer();
+        const purchasingOfficer = actorIsPurchaseOfficer(req, officer);
+        const submitting = payload.action === 'submit';
+        if (payload.lines.length) await assertDeliverable(payload.lines, submitting);
+        if (submitting && purchasingOfficer) {
+            await changeStock(payload.lines, -1);
+            reduced = true;
+        } else if (submitting && !officer) {
+            throw httpError(400, 'Assign an active Purchase Officer on the flowchart before submitting a delivery.');
+        }
+        const status = !submitting ? 'Draft' : (purchasingOfficer ? 'Confirmed' : 'Submitted');
         const doDate = /^\d{4}-\d{2}-\d{2}$/.test(payload.doDate) ? payload.doDate : dubaiDateKey();
+        const senderName = clipLine(req.user?.name, 160);
 
         for (let attempt = 0; attempt < 3; attempt += 1) {
             try {
@@ -183,10 +280,16 @@ export async function createDelivery(req, res) {
                     deliveryAddress: payload.deliveryAddress,
                     contactPersonName: payload.contactPersonName,
                     contactNumber: payload.contactNumber,
+                    note: payload.note,
                     lines: payload.lines,
+                    stockApplied: reduced,
+                    approverName: purchasingOfficer && submitting ? (officer?.employeeName || senderName) : '',
                     createdBy: String(req.user?.id || ''),
-                    createdByName: clipLine(req.user?.name, 160),
+                    createdByName: senderName,
                 });
+                if (status === 'Submitted') {
+                    await notifyDeliveryApproval({ delivery: row, officer, senderName });
+                }
                 res.status(201).json({ delivery: presentDelivery(row), purchasingOfficer });
                 return;
             } catch (error) {
@@ -195,6 +298,74 @@ export async function createDelivery(req, res) {
             }
         }
     } catch (error) {
+        if (reduced && payload?.lines) {
+            try {
+                await changeStock(payload.lines, 1);
+            } catch (restoreError) {
+                console.error('Could not restore delivery stock:', restoreError);
+            }
+        }
+        sendError(res, error);
+    }
+}
+
+export async function approveDelivery(req, res) {
+    try {
+        if (!mongoose.isValidObjectId(req.params.id)) throw httpError(404, 'Delivery order was not found.');
+        const officer = await findPurchaseOfficer();
+        if (!actorIsPurchaseOfficer(req, officer)) {
+            throw httpError(403, 'Only the purchase officer can approve this delivery.');
+        }
+        const claimed = await DeliveryOrder.findOneAndUpdate(
+            { _id: req.params.id, stockApplied: { $ne: true }, status: 'Submitted' },
+            { $set: { status: 'Confirming', approverName: officer?.employeeName || 'Purchase Officer' } },
+            { new: true },
+        );
+        if (!claimed) throw httpError(404, 'This delivery is not waiting for approval.');
+        let reduced = false;
+        try {
+            await assertDeliverable(claimed.lines, true, claimed._id);
+            await changeStock(claimed.lines, -1);
+            reduced = true;
+            claimed.status = 'Confirmed';
+            claimed.stockApplied = true;
+            await claimed.save();
+            await closeDeliveryApproval(claimed._id, 'Approved', req.user?.employeeObjectId);
+            res.json({ delivery: presentDelivery(claimed), purchasingOfficer: true });
+        } catch (error) {
+            if (reduced) {
+                try {
+                    await changeStock(claimed.lines, 1);
+                } catch (restoreError) {
+                    console.error('Could not restore delivery stock:', restoreError);
+                }
+            }
+            claimed.status = 'Submitted';
+            claimed.stockApplied = false;
+            await claimed.save();
+            throw error;
+        }
+    } catch (error) {
+        sendError(res, error);
+    }
+}
+
+export async function rejectDelivery(req, res) {
+    try {
+        if (!mongoose.isValidObjectId(req.params.id)) throw httpError(404, 'Delivery order was not found.');
+        const officer = await findPurchaseOfficer();
+        if (!actorIsPurchaseOfficer(req, officer)) {
+            throw httpError(403, 'Only the purchase officer can reject this delivery.');
+        }
+        const row = await DeliveryOrder.findOneAndUpdate(
+            { _id: req.params.id, status: 'Submitted', stockApplied: { $ne: true } },
+            { $set: { status: 'Rejected', approverName: officer?.employeeName || 'Purchase Officer' } },
+            { new: true },
+        );
+        if (!row) throw httpError(404, 'This delivery is not waiting for approval.');
+        await closeDeliveryApproval(row._id, 'Rejected', req.user?.employeeObjectId);
+        res.json({ delivery: presentDelivery(row), purchasingOfficer: true });
+    } catch (error) {
         sendError(res, error);
     }
 }
@@ -202,8 +373,17 @@ export async function createDelivery(req, res) {
 export async function deleteDelivery(req, res) {
     try {
         if (!mongoose.isValidObjectId(req.params.id)) throw httpError(404, 'Delivery order was not found.');
-        const row = await DeliveryOrder.findByIdAndDelete(req.params.id).lean();
+        const row = await DeliveryOrder.findById(req.params.id);
         if (!row) throw httpError(404, 'Delivery order was not found.');
+        if (row.stockApplied) {
+            await changeStock(row.lines, 1);
+            row.stockApplied = false;
+            await row.save();
+        }
+        if (row.status === 'Submitted' || row.status === 'Confirming') {
+            await closeDeliveryApproval(row._id, 'Rejected', req.user?.employeeObjectId);
+        }
+        await DeliveryOrder.deleteOne({ _id: row._id });
         res.json({ ok: true });
     } catch (error) {
         sendError(res, error);

@@ -1,3 +1,11 @@
+function receivableCredits(contact) {
+    const raw = contact?.unused_credits_receivable_amount ?? contact?.unused_credits_receivable_amount_bcy;
+    if (raw == null || raw === '') return {};
+    const amount = Number(raw);
+    if (!Number.isFinite(amount)) return {};
+    return { unusedCreditsReceivableAmount: amount };
+}
+
 export function resolveZohoContactId(contact) {
     return String(contact?.contact_id || contact?.customer_id || contact?.vendor_id || '').trim();
 }
@@ -18,6 +26,7 @@ export function mapZohoCustomerToDoc(contact, organizationId, syncedAt = new Dat
         phone: String(contact.phone || '').trim(),
         mobile: String(contact.mobile || '').trim(),
         outstandingReceivableAmount: Number(contact.outstanding_receivable_amount) || 0,
+        ...receivableCredits(contact),
         currencyCode: String(contact.currency_code || 'AED').trim() || 'AED',
         isActive: true,
         lastSyncedAt: syncedAt,
@@ -69,6 +78,7 @@ export function toZohoCustomerApiShape(doc) {
         phone: doc.phone,
         mobile: doc.mobile,
         outstanding_receivable_amount: doc.outstandingReceivableAmount,
+        unused_credits_receivable_amount: doc.unusedCreditsReceivableAmount,
         currency_code: doc.currencyCode,
         payment_terms: raw.payment_terms,
         payment_terms_label: String(raw.payment_terms_label || '').trim(),

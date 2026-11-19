@@ -17,6 +17,7 @@ const crmCustomerSchema = new mongoose.Schema(
         productCount: { type: Number, default: null },
         paymentTerms: { type: String, default: '', trim: true },
         status: { type: String, enum: ['Active', 'Inactive'], default: 'Active' },
+        suppressedZohoContactIds: { type: [String], default: [] },
     },
     { timestamps: true },
 );

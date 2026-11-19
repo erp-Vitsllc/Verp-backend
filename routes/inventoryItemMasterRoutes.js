@@ -10,7 +10,7 @@ import { addItemStock, createPendingItem, listStockOptions } from '../controller
 import { approveStockEntry, getStockEntry, listInventoryBills, listStockEntries, rejectStockEntry, saveStockEntry, stockApprovalContext } from '../controllers/inventory/stockEntries.js';
 import { createVendor, deleteVendor, getVendor, listVendorBills, listVendors, nextVendorCode, previewZohoVendor, syncVendorFromZoho, updateVendor } from '../controllers/inventory/vendors.js';
 import { createVendorContact, deleteVendorContact, markVendorContactPrimary, updateVendorContact } from '../controllers/inventory/vendorContacts.js';
-import { createDelivery, deleteDelivery, listDeliveries } from '../controllers/inventory/deliveries.js';
+import { approveDelivery, createDelivery, deleteDelivery, listDeliveries, rejectDelivery } from '../controllers/inventory/deliveries.js';
 import { hasPermission } from '../services/permissionService.js';
 
 const router = express.Router();
@@ -90,6 +90,8 @@ async function viewDelivery(req, res, next) {
 router.get('/bills', protect, viewDelivery, listInventoryBills);
 router.get('/deliveries', protect, viewDelivery, listDeliveries);
 router.post('/deliveries', protect, viewDelivery, createDelivery);
+router.post('/deliveries/:id/approve', protect, viewDelivery, approveDelivery);
+router.post('/deliveries/:id/reject', protect, viewDelivery, rejectDelivery);
 router.delete('/deliveries/:id', protect, viewDelivery, deleteDelivery);
 
 const stockWriters = checkPermissionAny('inventory_item_master', ['edit', 'create']);

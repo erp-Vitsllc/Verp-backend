@@ -1661,6 +1661,16 @@ export async function createVendor(payload = {}) {
     return response.contact || response;
 }
 
+export async function fetchCustomerInvoices(customerId) {
+    const id = String(customerId || '').trim();
+    if (!id) return [];
+    return fetchAllZohoBooksRows('/invoices', 'invoices', {
+        params: { customer_id: id },
+        timeout: 60000,
+        maxPages: 10,
+    });
+}
+
 export async function fetchVendorBills({ vendorId } = {}) {
     const params = {
         status: 'unpaid',

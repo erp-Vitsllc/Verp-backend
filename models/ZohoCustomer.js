@@ -11,6 +11,7 @@ const zohoCustomerSchema = new mongoose.Schema(
         phone: { type: String, default: '' },
         mobile: { type: String, default: '' },
         outstandingReceivableAmount: { type: Number, default: 0 },
+        unusedCreditsReceivableAmount: { type: Number, default: 0 },
         currencyCode: { type: String, default: 'AED' },
         isActive: { type: Boolean, default: true },
         lastSyncedAt: { type: Date },

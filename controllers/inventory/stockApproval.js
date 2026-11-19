@@ -108,3 +108,76 @@ export async function closeStockApproval(entryId, status, actorEmployeeId) {
         console.error('Could not close the stock approval notification:', error);
     }
 }
+
+async function sendOfficerMail({ officer, subject, text }) {
+    const email = cleanEmail(officer?.companyEmail);
+    if (!email || !email.includes('@')) return;
+    const user = process.env.EMAIL_USER;
+    const pass = process.env.EMAIL_PASS;
+    if (!user || !pass) return;
+    const transporter = nodemailer.createTransport({
+        host: process.env.SMTP_HOST || 'smtp.office365.com',
+        port: Number(process.env.SMTP_PORT || 587),
+        secure: false,
+        auth: { user, pass },
+    });
+    await transporter.sendMail({
+        from: `"VERP" <${user}>`,
+        to: email,
+        subject,
+        text,
+    });
+}
+
+export async function notifyDeliveryApproval({ delivery, officer, senderName }) {
+    const label = delivery?.deliveryNo || 'a delivery order';
+    const name = senderName || 'An employee';
+    const path = '/inventory/delivery';
+    if (officer?.empObjectId) {
+        try {
+            await syncDashboardAction({
+                requestId: delivery._id,
+                requestType: 'Delivery Approval',
+                assignedTo: officer.empObjectId,
+                status: 'Pending',
+                requestedByName: name,
+                extra1: `Delivery approval · ${label}`,
+                extra2: `${name} submitted a delivery for your approval.`,
+                extra3: JSON.stringify({ path }),
+            });
+        } catch (error) {
+            console.error('Delivery approval notification failed:', error);
+        }
+    }
+    try {
+        await sendOfficerMail({
+            officer,
+            subject: `Delivery approval: ${label}`,
+            text: [
+                `Hello ${officer?.employeeName || 'Purchase Officer'},`,
+                '',
+                `${name} submitted ${label} and it is waiting for your approval.`,
+                'Open Delivery to accept or reject it:',
+                `${appOrigin()}${path}`,
+                '',
+                'VERP',
+            ].join('\n'),
+        });
+    } catch (error) {
+        console.error('Delivery approval email failed:', error);
+    }
+}
+
+export async function closeDeliveryApproval(deliveryId, status, actorEmployeeId) {
+    if (!deliveryId) return;
+    try {
+        await syncDashboardAction({
+            requestId: deliveryId,
+            requestType: 'Delivery Approval',
+            status,
+            actionedBy: actorEmployeeId || undefined,
+        });
+    } catch (error) {
+        console.error('Could not close the delivery approval notification:', error);
+    }
+}

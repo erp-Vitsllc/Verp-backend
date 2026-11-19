@@ -1,8 +1,17 @@
 import mongoose from 'mongoose';
 import CrmCustomer from '../../models/crm/CrmCustomer.js';
+import CrmCustomerContact from '../../models/crm/CrmCustomerContact.js';
+import DeliveryOrder from '../../models/inventory/DeliveryOrder.js';
+import WorkOrder from '../../models/WorkOrder.js';
 import ZohoCustomer from '../../models/ZohoCustomer.js';
-import { fetchVendorContact, getZohoOrganizationId } from '../../services/zohoService.js';
+import { fetchCustomerInvoices, fetchVendorContact, getZohoOrganizationId } from '../../services/zohoService.js';
+import { escapeRegex } from '../../utils/zohoListQuery.js';
 import { cleanName, httpError, listLimit, nameKey, sendError } from '../inventory/http.js';
+import {
+    mergeCustomerContacts,
+    presentCustomerContact,
+    withSinglePrimary,
+} from './customerContacts.js';
 
 const STATUSES = ['Active', 'Inactive'];
 
@@ -271,13 +280,32 @@ function contactRows(raw, customer) {
     return rows;
 }
 
+function firstAmount(...values) {
+    for (const value of values) {
+        const amount = finiteAmount(value);
+        if (amount != null) return amount;
+    }
+    return null;
+}
+
 function amountsFromZoho(raw, stored) {
     const live = raw && typeof raw === 'object' && Object.keys(raw).length ? raw : null;
     const storedRaw = stored?.zohoRaw && typeof stored.zohoRaw === 'object' ? stored.zohoRaw : null;
     const source = live || storedRaw;
-    const outstanding = finiteAmount(source?.outstanding_receivable_amount ?? source?.outstanding_receivable_amount_bcy)
-        ?? finiteAmount(stored?.outstandingReceivableAmount);
-    const credits = finiteAmount(source?.unused_credits_receivable_amount ?? source?.unused_credits_receivable_amount_bcy);
+    const outstanding = firstAmount(
+        live?.outstanding_receivable_amount,
+        live?.outstanding_receivable_amount_bcy,
+        stored?.outstandingReceivableAmount,
+        storedRaw?.outstanding_receivable_amount,
+        storedRaw?.outstanding_receivable_amount_bcy,
+    );
+    const credits = firstAmount(
+        live?.unused_credits_receivable_amount,
+        live?.unused_credits_receivable_amount_bcy,
+        storedRaw?.unused_credits_receivable_amount,
+        storedRaw?.unused_credits_receivable_amount_bcy,
+        stored?.unusedCreditsReceivableAmount,
+    );
     return {
         outstandingPayment: outstanding == null ? 0 : outstanding,
         unusedCredits: credits == null ? 0 : credits,
@@ -292,7 +320,33 @@ async function requireCustomer(id) {
     return row;
 }
 
-async function loadCustomerDetail(row) {
+export async function findVisibleZohoContact(customerId, zohoId) {
+    const row = await CrmCustomer.findById(customerId).lean();
+    if (!row) return null;
+    const adopted = await CrmCustomerContact.findOne({ customerId, zohoPersonId: zohoId }).select('_id').lean();
+    if (adopted) return null;
+    if ((row.suppressedZohoContactIds || []).map(String).includes(String(zohoId))) return null;
+    const source = row.zohoContactId
+        ? await zohoSource({
+            zohoContactId: row.zohoContactId,
+            companyName: row.name,
+            contactName: row.primaryContact,
+            email: row.email,
+            phone: row.phone,
+        })
+        : { zohoRaw: {} };
+    const zohoRaw = source.zohoRaw && typeof source.zohoRaw === 'object' ? source.zohoRaw : {};
+    return contactRows(zohoRaw, row).find((contact) => contact.id === zohoId) || null;
+}
+
+export async function suppressCustomerZohoContact(customerId, zohoId) {
+    await CrmCustomer.updateOne(
+        { _id: customerId },
+        { $addToSet: { suppressedZohoContactIds: String(zohoId) } },
+    );
+}
+
+export async function loadCustomerDetail(row) {
     const zohoDoc = row.zohoContactId
         ? await ZohoCustomer.findOne({
             $or: [{ zohoContactId: String(row.zohoContactId) }, { zohoCustomerId: String(row.zohoContactId) }],
@@ -328,7 +382,15 @@ async function loadCustomerDetail(row) {
         : row;
     const current = updated || { ...row, ...patch };
     const zohoRaw = source.zohoRaw && typeof source.zohoRaw === 'object' ? source.zohoRaw : {};
-    const contacts = contactRows(zohoRaw, current);
+    const localRows = await CrmCustomerContact.find({ customerId: current._id }).sort({ isPrimary: -1, createdAt: 1 }).lean();
+    const hidden = new Set([
+        ...(current.suppressedZohoContactIds || []).map((id) => String(id)),
+        ...localRows.map((contact) => contact.zohoPersonId).filter(Boolean),
+    ]);
+    const contacts = withSinglePrimary(mergeCustomerContacts(
+        localRows.map(presentCustomerContact),
+        contactRows(zohoRaw, current).filter((contact) => !hidden.has(contact.id)),
+    ));
     const primary = contacts.find((contact) => contact.isPrimary) || null;
     return {
         ...presentCustomer(current),
@@ -439,17 +501,13 @@ export async function syncCustomerFromZoho(req, res) {
         }
         if (!text(row.zohoContactId)) throw httpError(400, 'This customer is not linked to Zoho.');
         const detail = await loadCustomerDetail(row);
-        if (detail.outstandingPayment != null) {
-            await ZohoCustomer.updateOne(
-                { zohoContactId: String(row.zohoContactId) },
-                {
-                    $set: {
-                        outstandingReceivableAmount: detail.outstandingPayment,
-                        currencyCode: detail.currencyCode || 'AED',
-                    },
-                },
-            );
-        }
+        const amounts = { currencyCode: detail.currencyCode || 'AED' };
+        if (detail.outstandingPayment != null) amounts.outstandingReceivableAmount = detail.outstandingPayment;
+        if (detail.unusedCredits != null) amounts.unusedCreditsReceivableAmount = detail.unusedCredits;
+        await ZohoCustomer.updateOne(
+            { zohoContactId: String(row.zohoContactId) },
+            { $set: amounts },
+        );
         res.json(detail);
     } catch (error) {
         sendError(res, error);
@@ -520,7 +578,154 @@ export async function deleteCustomer(req, res) {
         if (!mongoose.isValidObjectId(req.params.id)) throw httpError(404, 'Customer was not found.');
         const row = await CrmCustomer.findByIdAndDelete(req.params.id).lean();
         if (!row) throw httpError(404, 'Customer was not found.');
+        await CrmCustomerContact.deleteMany({ customerId: row._id });
         res.json({ ok: true });
+    } catch (error) {
+        sendError(res, error);
+    }
+}
+
+function zohoBooksRecordUrl(organizationId, section, recordId) {
+    const org = text(organizationId);
+    const id = text(recordId);
+    if (!org || !id) return '';
+    const accounts = text(process.env.ZOHO_ACCOUNTS_BASE_URL) || 'https://accounts.zoho.com';
+    let host = 'zoho.com';
+    try {
+        host = new URL(accounts).hostname.replace(/^accounts\./, '') || host;
+    } catch {
+        host = 'zoho.com';
+    }
+    return `https://books.${host}/app/${encodeURIComponent(org)}#/${section}/${encodeURIComponent(id)}`;
+}
+
+async function resolveCustomerRecord(id) {
+    if (mongoose.isValidObjectId(id)) {
+        const row = await CrmCustomer.findById(id).lean();
+        if (row) return row;
+    }
+    const doc = await findZohoCustomer(id);
+    if (!doc) throw httpError(404, 'Customer was not found.');
+    const local = await CrmCustomer.findOne({ zohoContactId: doc.zohoContactId }).lean();
+    if (local) return local;
+    return {
+        _id: null,
+        name: text(doc.companyName) || text(doc.contactName),
+        zohoContactId: text(doc.zohoContactId),
+    };
+}
+
+async function customerMatchNames(row) {
+    const names = [row.name];
+    if (row.zohoContactId) {
+        const doc = await ZohoCustomer.findOne({
+            $or: [{ zohoContactId: String(row.zohoContactId) }, { zohoCustomerId: String(row.zohoContactId) }],
+        }).select('companyName contactName').lean();
+        if (doc) names.push(doc.companyName, doc.contactName);
+    }
+    return [...new Set(names.map((name) => text(name)).filter((name) => name.length >= 2))];
+}
+
+function exactNamePattern(value) {
+    return new RegExp(`^${escapeRegex(value)}$`, 'i');
+}
+
+export async function listCustomerInvoices(req, res) {
+    try {
+        const row = await resolveCustomerRecord(req.params.id);
+        const zohoId = text(row.zohoContactId);
+        if (!zohoId) {
+            res.json({ invoices: [] });
+            return;
+        }
+        const invoices = await fetchCustomerInvoices(zohoId);
+        let organizationId = '';
+        try {
+            organizationId = getZohoOrganizationId();
+        } catch {
+            organizationId = '';
+        }
+        res.json({
+            invoices: invoices.map((invoice) => ({
+                id: text(invoice.invoice_id || invoice.invoice_number),
+                date: text(invoice.date),
+                number: text(invoice.invoice_number),
+                reference: text(invoice.reference_number),
+                status: text(invoice.status),
+                dueDate: text(invoice.due_date),
+                total: Number(invoice.total) || 0,
+                balance: Number(invoice.balance) || 0,
+                currencyCode: text(invoice.currency_code) || 'AED',
+                zohoUrl: zohoBooksRecordUrl(organizationId, 'invoices', invoice.invoice_id),
+            })).filter((invoice) => invoice.id),
+        });
+    } catch (error) {
+        sendError(res, error);
+    }
+}
+
+export async function listCustomerDeliveries(req, res) {
+    try {
+        const row = await resolveCustomerRecord(req.params.id);
+        const names = await customerMatchNames(row);
+        const ids = [row._id ? String(row._id) : '', text(row.zohoContactId)].filter(Boolean);
+        const or = [];
+        if (ids.length) or.push({ customerId: { $in: ids } });
+        names.forEach((name) => or.push({ customerName: exactNamePattern(name) }));
+        const rows = or.length
+            ? await DeliveryOrder.find({ $or: or })
+                .sort({ createdAt: -1 })
+                .limit(200)
+                .select('deliveryNo deliveryType status doDate projectName customerName lines')
+                .lean()
+            : [];
+        res.json({
+            deliveries: rows.map((delivery) => ({
+                id: String(delivery._id),
+                deliveryNo: delivery.deliveryNo,
+                deliveryType: delivery.deliveryType,
+                status: delivery.status,
+                doDate: delivery.doDate || '',
+                projectName: delivery.projectName || '',
+                customerName: delivery.customerName || '',
+                itemCount: Array.isArray(delivery.lines) ? delivery.lines.length : 0,
+                lines: (delivery.lines || []).map((line) => ({
+                    itemName: line.itemName || '',
+                    description: line.description || '',
+                    quantity: line.quantity || 0,
+                    unit: line.unit || '',
+                })),
+            })),
+        });
+    } catch (error) {
+        sendError(res, error);
+    }
+}
+
+export async function listCustomerProjects(req, res) {
+    try {
+        const row = await resolveCustomerRecord(req.params.id);
+        const names = await customerMatchNames(row);
+        const patterns = names.map(exactNamePattern);
+        const rows = patterns.length
+            ? await WorkOrder.find({ customer: { $in: patterns } })
+                .sort({ createdAt: -1 })
+                .limit(200)
+                .select('workOrderNo createdOn status type value invoicedAmount projectName')
+                .lean()
+            : [];
+        res.json({
+            projects: rows.map((order) => ({
+                id: String(order._id),
+                workOrderNo: order.workOrderNo,
+                projectName: order.projectName || '',
+                status: order.status || '',
+                type: order.type || '',
+                value: Number(order.value) || 0,
+                invoicedAmount: Number(order.invoicedAmount) || 0,
+                createdOn: order.createdOn || '',
+            })),
+        });
     } catch (error) {
         sendError(res, error);
     }
@@ -543,7 +748,7 @@ export async function listCustomers(req, res) {
         const zohoDocs = contactIds.length
             ? await ZohoCustomer.find({
                 $or: [{ zohoContactId: { $in: contactIds } }, { zohoCustomerId: { $in: contactIds } }],
-            }).select('zohoContactId zohoCustomerId outstandingReceivableAmount currencyCode zohoRaw').lean()
+            }).select('zohoContactId zohoCustomerId outstandingReceivableAmount unusedCreditsReceivableAmount currencyCode zohoRaw').lean()
             : [];
         const all = locals.map((row) => {
             const contactId = text(row.zohoContactId);

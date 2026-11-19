@@ -9,11 +9,14 @@ import {
     actorIsPurchaseOfficer,
     closeStockApproval,
     findPurchaseOfficer,
-    notifyStockApproval,
 } from './stockApproval.js';
 
 function roundMoney(value) {
     return Math.round(Number(value) * 100) / 100;
+}
+
+function clipNote(value) {
+    return String(value || '').replace(/\r\n/g, '\n').trim().slice(0, 1000);
 }
 
 function presentLine(line) {
@@ -48,6 +51,7 @@ function presentEntry(row) {
         purchaseDate: row.purchaseDate ? row.purchaseDate.toISOString().slice(0, 10) : '',
         billNo: row.billNo || '',
         lpoNo: row.lpoNo || '',
+        note: row.note || '',
         lines: (row.lines || []).map(presentLine),
         attachment,
         status: row.status === 'posting' ? 'draft' : row.status,
@@ -101,6 +105,7 @@ async function readPurchase(body, { posting }) {
             purchaseDate: null,
             billNo: '',
             lpoNo: '',
+            note: clipNote(body?.note),
         };
     }
     const vendorId = String(body?.vendorId || '');
@@ -125,6 +130,7 @@ async function readPurchase(body, { posting }) {
         purchaseDate: dateIsValid ? new Date(`${purchaseDate}T00:00:00.000Z`) : null,
         billNo,
         lpoNo,
+        note: clipNote(body?.note),
     };
 }
 
@@ -172,14 +178,34 @@ async function postLines(req, entry, lines) {
             });
             itemId = String(created.item._id);
         }
-        const result = await applyItemStock(req, itemId, {
-            quantity: line.quantity,
-            price: line.unitPrice,
-            categoryId: line.categoryId,
-            subcategoryId: line.subcategoryId,
-            brandId: line.brandId,
-            modelNumber: line.modelNumber || line.itemName,
-        });
+        let result;
+        try {
+            result = await applyItemStock(req, itemId, {
+                quantity: line.quantity,
+                price: line.unitPrice,
+                categoryId: line.categoryId,
+                subcategoryId: line.subcategoryId,
+                brandId: line.brandId,
+                modelNumber: line.modelNumber || line.itemName,
+            });
+        } catch (error) {
+            if (error?.status !== 403) throw error;
+            const created = await createPendingItemRecord({
+                categoryId: line.categoryId,
+                subcategoryId: line.subcategoryId,
+                brandId: line.brandId,
+                itemName: line.itemName,
+                modelNumber: line.modelNumber,
+            });
+            result = await applyItemStock(req, String(created.item._id), {
+                quantity: line.quantity,
+                price: line.unitPrice,
+                categoryId: line.categoryId,
+                subcategoryId: line.subcategoryId,
+                brandId: line.brandId,
+                modelNumber: line.modelNumber || line.itemName,
+            });
+        }
         posted.push({
             ...line,
             itemId: result.body?._id || itemId,
@@ -207,30 +233,6 @@ function plainLines(lines) {
         unitPrice: line.unitPrice || 0,
         total: line.total || 0,
     }));
-}
-
-async function ensureLineItems(lines) {
-    const next = [];
-    for (const line of lines) {
-        if (line.itemId) {
-            next.push(line);
-            continue;
-        }
-        const created = await createPendingItemRecord({
-            categoryId: line.categoryId,
-            subcategoryId: line.subcategoryId,
-            brandId: line.brandId,
-            itemName: line.itemName,
-            modelNumber: line.modelNumber,
-        });
-        next.push({
-            ...line,
-            itemId: created.item?._id || null,
-            description: created.item?.description || line.description,
-            modelNumber: created.item?.modelNumber || line.modelNumber,
-        });
-    }
-    return next;
 }
 
 function summarizePending(row) {
@@ -289,6 +291,13 @@ export async function listInventoryBills(req, res) {
                     purchaseDate: row.purchaseDate ? new Date(row.purchaseDate).toISOString().slice(0, 10) : '',
                     purchaseType: 'Direct',
                     value: Math.round(value * 100) / 100,
+                    lines: (row.lines || []).map((line) => ({
+                        itemName: line.itemName || '',
+                        description: line.description || '',
+                        quantity: line.quantity || 0,
+                        unitPrice: line.unitPrice || 0,
+                        total: line.total || 0,
+                    })),
                     attachment: hasFile
                         ? { name: row.attachment.name || 'Attachment', url: row.attachment.url || '' }
                         : null,
@@ -380,57 +389,11 @@ export async function saveStockEntry(req, res) {
             res.status(creating ? 201 : 200).json(presentEntry(entry));
             return;
         }
-        const officer = await findPurchaseOfficer();
-        if (!actorIsPurchaseOfficer(req, officer)) {
-            if (!officer) {
-                throw httpError(400, 'Assign an active Purchase Officer on the flowchart before submitting stock.');
-            }
-            const wasPending = entry?.status === 'pending';
-            const pendingLines = await ensureLineItems(lines);
-            const approval = {
-                submittedByName: cleanName(req.user?.name) || entry?.submittedByName || '',
-                approverName: officer.employeeName || 'Purchase Officer',
-                approverEmployeeId: officer.empObjectId || null,
-            };
-            const pendingPayload = {
-                ...payload,
-                lines: pendingLines,
-                ...approval,
-                status: 'pending',
-                postedAt: null,
-                postedCount: 0,
-            };
-            if (entry) {
-                Object.assign(entry, pendingPayload);
-                entry.markModified('lines');
-                await entry.save();
-            } else {
-                try {
-                    entry = await InventoryStockEntry.create(pendingPayload);
-                } catch (error) {
-                    if (error?.code !== 11000 || !clientRequestId) throw error;
-                    const existing = await InventoryStockEntry.findOne({ clientRequestId });
-                    if (existing && (existing.status === 'posted' || existing.status === 'pending')) {
-                        res.json(presentEntry(existing));
-                        return;
-                    }
-                    throw httpError(409, 'This stock entry is already being saved.');
-                }
-            }
-            if (!wasPending) {
-                await notifyStockApproval({
-                    entry,
-                    officer,
-                    senderName: approval.submittedByName,
-                });
-            }
-            res.status(wasPending ? 200 : 201).json(presentEntry(entry));
-            return;
-        }
+        const wasPending = entry?.status === 'pending';
         if (entry) {
             const alreadyPosted = entry.postedCount || 0;
             const claimed = await InventoryStockEntry.findOneAndUpdate(
-                { _id: entry._id, status: 'draft' },
+                { _id: entry._id, status: { $in: ['draft', 'pending'] } },
                 {
                     $set: {
                         ...payload,
@@ -469,6 +432,7 @@ export async function saveStockEntry(req, res) {
             entry.status = 'posted';
             entry.postedAt = new Date();
             await entry.save();
+            if (wasPending) await closeStockApproval(entry._id, 'Approved', req.user?.employeeObjectId);
             res.status(201).json(presentEntry(entry));
         } catch (error) {
             entry.status = 'draft';
