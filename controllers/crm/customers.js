@@ -2,7 +2,6 @@ import mongoose from 'mongoose';
 import CrmCustomer from '../../models/crm/CrmCustomer.js';
 import ZohoCustomer from '../../models/ZohoCustomer.js';
 import { fetchVendorContact, getZohoOrganizationId } from '../../services/zohoService.js';
-import { shouldSyncContactsOnRead, syncZohoCustomersFromApi } from '../../services/zohoContactSyncService.js';
 import { cleanName, httpError, listLimit, nameKey, sendError } from '../inventory/http.js';
 
 const STATUSES = ['Active', 'Inactive'];
@@ -386,28 +385,6 @@ export async function createCustomer(req, res) {
     }
 }
 
-function zohoOrgFilter() {
-    try {
-        const organizationId = getZohoOrganizationId();
-        return organizationId ? { organizationId, isActive: true } : { isActive: true };
-    } catch {
-        return { isActive: true };
-    }
-}
-
-async function zohoCustomerDocs(req) {
-    const filter = zohoOrgFilter();
-    let docs = await ZohoCustomer.find(filter).lean();
-    if (!shouldSyncContactsOnRead(req, docs.length)) return docs;
-    try {
-        await syncZohoCustomersFromApi();
-        docs = await ZohoCustomer.find(filter).lean();
-    } catch (error) {
-        if (!docs.length) throw error;
-    }
-    return docs;
-}
-
 async function detailFromZohoDoc(doc) {
     const source = await zohoSource(doc);
     const fields = fieldsFromZoho(source);
@@ -553,31 +530,6 @@ function sameText(left, right) {
     return text(left).toLowerCase() === text(right).toLowerCase();
 }
 
-function zohoListRow(doc, local) {
-    const source = fieldsFromZoho(doc);
-    const brands = Array.isArray(local?.brands) ? local.brands.filter(Boolean) : [];
-    return {
-        id: local?._id ? String(local._id) : String(doc.zohoContactId),
-        saved: Boolean(local?._id),
-        code: text(local?.customerCode),
-        zohoContactId: String(doc.zohoContactId || ''),
-        name: text(local?.name) || source.name,
-        location: text(local?.location) || source.location,
-        address: text(local?.address) || source.address,
-        contact: text(local?.primaryContact) || source.primaryContact,
-        email: text(local?.email) || source.email,
-        phone: text(local?.phone) || source.phone,
-        website: source.website,
-        taxRegNo: source.taxRegNo,
-        brands,
-        products: local && local.productCount != null ? Number(local.productCount) || 0 : null,
-        paymentTerms: text(local?.paymentTerms) || source.paymentTerms,
-        status: local?.status || source.status,
-        ...amountsFromZoho(doc.zohoRaw, doc),
-        listBrands: brands,
-    };
-}
-
 export async function listCustomers(req, res) {
     try {
         const page = Math.max(1, Number(req.query.page) || 1);
@@ -586,14 +538,22 @@ export async function listCustomers(req, res) {
         const brand = cleanName(req.query.brand);
         const paymentTerms = cleanName(req.query.paymentTerms);
         const search = cleanName(req.query.search).toLowerCase();
-        const [docs, locals] = await Promise.all([
-            zohoCustomerDocs(req),
-            CrmCustomer.find().lean(),
-        ]);
-        const localByZoho = new Map(locals.map((row) => [String(row.zohoContactId || ''), row]));
-        const all = docs
-            .map((doc) => zohoListRow(doc, localByZoho.get(String(doc.zohoContactId || '')) || null))
-            .filter((row) => row.zohoContactId && row.name);
+        const locals = await CrmCustomer.find().sort({ customerCode: 1 }).lean();
+        const contactIds = locals.map((row) => text(row.zohoContactId)).filter(Boolean);
+        const zohoDocs = contactIds.length
+            ? await ZohoCustomer.find({
+                $or: [{ zohoContactId: { $in: contactIds } }, { zohoCustomerId: { $in: contactIds } }],
+            }).select('zohoContactId zohoCustomerId outstandingReceivableAmount currencyCode zohoRaw').lean()
+            : [];
+        const all = locals.map((row) => {
+            const contactId = text(row.zohoContactId);
+            const zoho = zohoDocs.find((doc) => text(doc.zohoContactId) === contactId || text(doc.zohoCustomerId) === contactId);
+            return {
+                ...presentCustomer(row),
+                ...amountsFromZoho(zoho?.zohoRaw, zoho),
+                listBrands: Array.isArray(row.brands) ? row.brands.filter(Boolean) : [],
+            };
+        });
         const filters = {
             products: filled(all.filter((row) => row.products != null).map((row) => String(row.products))),
             brands: filled(all.flatMap((row) => row.listBrands)),
@@ -617,7 +577,7 @@ export async function listCustomers(req, res) {
                 row.paymentTerms,
                 ...(row.listBrands || []),
             ].join(' ').toLowerCase().includes(search);
-        }).sort((left, right) => left.name.localeCompare(right.name));
+        });
         const total = rows.length;
         const customers = limit > 0 ? rows.slice((page - 1) * limit, (page - 1) * limit + limit) : rows;
         res.json({ customers, total, page, limit, filters });
