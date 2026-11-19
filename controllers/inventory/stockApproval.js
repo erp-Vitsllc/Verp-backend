@@ -20,6 +20,13 @@ export async function findPurchaseOfficer() {
     return { ...row, companyEmail };
 }
 
+export async function actorIsManagement(req) {
+    const row = await Flowchart.findOne({ category: 'management', status: 'Active' })
+        .sort({ updatedAt: -1 })
+        .lean();
+    return actorIsPurchaseOfficer(req, row);
+}
+
 export function actorIsPurchaseOfficer(req, officer) {
     if (!officer) return false;
     const actorEmployee = String(req.user?.employeeObjectId || '');
@@ -129,10 +136,14 @@ async function sendOfficerMail({ officer, subject, text }) {
     });
 }
 
-export async function notifyDeliveryApproval({ delivery, officer, senderName }) {
+export async function notifyDeliveryApproval({ delivery, officer, senderName, kind = 'submit' }) {
     const label = delivery?.deliveryNo || 'a delivery order';
     const name = senderName || 'An employee';
     const path = '/inventory/delivery';
+    const edited = kind === 'edit';
+    const summary = edited
+        ? `${name} edited ${label} and it is waiting for your approval.`
+        : `${name} submitted a delivery for your approval.`;
     if (officer?.empObjectId) {
         try {
             await syncDashboardAction({
@@ -141,8 +152,8 @@ export async function notifyDeliveryApproval({ delivery, officer, senderName }) 
                 assignedTo: officer.empObjectId,
                 status: 'Pending',
                 requestedByName: name,
-                extra1: `Delivery approval · ${label}`,
-                extra2: `${name} submitted a delivery for your approval.`,
+                extra1: edited ? `Delivery edit · ${label}` : `Delivery approval · ${label}`,
+                extra2: summary,
                 extra3: JSON.stringify({ path }),
             });
         } catch (error) {
@@ -152,11 +163,11 @@ export async function notifyDeliveryApproval({ delivery, officer, senderName }) 
     try {
         await sendOfficerMail({
             officer,
-            subject: `Delivery approval: ${label}`,
+            subject: edited ? `Delivery edit approval: ${label}` : `Delivery approval: ${label}`,
             text: [
                 `Hello ${officer?.employeeName || 'Purchase Officer'},`,
                 '',
-                `${name} submitted ${label} and it is waiting for your approval.`,
+                summary,
                 'Open Delivery to accept or reject it:',
                 `${appOrigin()}${path}`,
                 '',

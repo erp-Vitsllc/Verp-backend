@@ -9,6 +9,7 @@ import AttendanceChangeRequest from "../../models/AttendanceChangeRequest.js";
 import { attendanceFactsByActionId } from "../../utils/loadAttendanceTaskFacts.js";
 import { isAttendanceTaskType } from "../../utils/attendanceTaskCopy.js";
 import EmployeeBasic from "../../models/EmployeeBasic.js";
+import User from "../../models/User.js";
 import EmployeeHubRequest from "../../models/EmployeeHubRequest.js";
 import Fine from "../../models/Fine.js";
 import Loan from "../../models/Loan.js";
@@ -209,7 +210,7 @@ async function businessEmail(emp) {
 /** Assignee and requester both get every task email. Mentioned people are added. */
 async function taskRecipientEmails(task, extraPeople = []) {
     const assignee = isObjectId(task?.assignee) ? await findAssignee(String(task.assignee)) : null;
-    const requester = await findEmployeeByName(task?.requestedByName);
+    const requester = await resolveTaskRequesterEmployee(task);
     const emails = [];
     for (const person of [assignee, requester, ...extraPeople]) {
         const email = await businessEmail(person);
@@ -907,7 +908,7 @@ async function notifyRequesterTaskClosed(task, target) {
     const saved = closeSnapshot(task);
     if (saved.requesterNotifiedAt) return { sent: false, already: true };
     if (isSystemRequester(task.requestedByName)) return { sent: false, system: true };
-    const requester = await findEmployeeByName(personBaseName(task.requestedByName));
+    const requester = await resolveTaskRequesterEmployee(task);
     const companyEmail = await businessEmail(requester);
     const requesterName = personName(requester) || personBaseName(task.requestedByName) || "there";
     const link = taskDetailLink(target);
@@ -1317,7 +1318,7 @@ async function buildDetail(target, viewer) {
         action,
         sourceRequesters,
     ) || "System";
-    const requester = await findEmployeeByName(personBaseName(requesterName) || requesterName);
+    const requester = await resolveTaskRequesterEmployee(task, personBaseName(requesterName) || requesterName);
     let destination = manual
         ? moduleForText(task.taskName, task.description, task.taskType)
         : moduleForRequestType(action.requestType, `${action.extra1 || ""} ${action.extra2 || ""}`);
@@ -1692,20 +1693,99 @@ async function buildDetail(target, viewer) {
     };
 }
 
+const EMPLOYEE_LOOKUP_SELECT = "firstName lastName employeeId designation companyEmail workEmail profilePicture primaryReportee status";
+
+function exactNamePattern(value) {
+    return new RegExp(`^${escapeIdPattern(value)}$`, "i");
+}
+
+async function loadNamedEmployee(named) {
+    if (!named?._id) return null;
+    const [detailed] = await loadPeopleDetails([named._id], [named.employeeId]);
+    return detailed || named;
+}
+
 async function findEmployeeByName(fullName) {
     const parts = String(fullName || "").trim().split(/\s+/).filter(Boolean);
     if (!parts.length || parts.join(" ").toLowerCase() === "system") return null;
-    const firstName = parts[0];
-    const lastName = parts.slice(1).join(" ");
-    const query = lastName
-        ? { firstName: new RegExp(`^${firstName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`, "i"), lastName: new RegExp(`^${lastName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`, "i") }
-        : { firstName: new RegExp(`^${firstName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`, "i") };
-    const named = await EmployeeBasic.findOne(query)
-        .select("firstName lastName employeeId designation companyEmail workEmail profilePicture primaryReportee status")
-        .lean();
-    if (!named) return null;
-    const [detailed] = await loadPeopleDetails([named._id], [named.employeeId]);
-    return detailed || named;
+    const cuts = parts.length === 1
+        ? [1]
+        : Array.from({ length: parts.length - 1 }, (_, index) => index + 1);
+    for (const cut of cuts) {
+        const firstName = parts.slice(0, cut).join(" ");
+        const lastName = parts.slice(cut).join(" ");
+        const query = lastName
+            ? { firstName: exactNamePattern(firstName), lastName: exactNamePattern(lastName) }
+            : { firstName: exactNamePattern(firstName) };
+        const named = await EmployeeBasic.findOne(query).select(EMPLOYEE_LOOKUP_SELECT).lean();
+        if (named) return loadNamedEmployee(named);
+    }
+    return loadNamedEmployee(await findEmployeeByCompactName(parts));
+}
+
+function compactPersonName(value) {
+    return String(value || "").toLowerCase().replace(/[^a-z0-9]+/g, "");
+}
+
+async function findEmployeeByCompactName(parts) {
+    const target = compactPersonName(parts.join(" "));
+    if (target.length < 6) return null;
+    const anchors = [...parts]
+        .filter((part) => part.length >= 3)
+        .sort((a, b) => b.length - a.length)
+        .slice(0, 2);
+    if (!anchors.length) return null;
+    const rows = await EmployeeBasic.find({
+        $and: anchors.map((token) => ({
+            $or: [
+                { firstName: new RegExp(escapeIdPattern(token), "i") },
+                { lastName: new RegExp(escapeIdPattern(token), "i") },
+            ],
+        })),
+    }).select(EMPLOYEE_LOOKUP_SELECT).limit(20).lean();
+    const hits = rows.filter((emp) => compactPersonName(`${emp.firstName || ""} ${emp.lastName || ""}`) === target);
+    if (hits.length === 1) return hits[0];
+    const active = hits.filter((emp) => String(emp.status || "") !== "Left User");
+    return active.length === 1 ? active[0] : null;
+}
+
+async function requestedUser(userId) {
+    if (!isObjectId(userId)) return null;
+    return User.findById(userId).select("name employeeId email companyEmail profilePicture").lean();
+}
+
+async function employeeForUser(user) {
+    if (!user) return null;
+    const code = String(user.employeeId || "").trim();
+    if (isObjectId(code)) {
+        const [byId] = await loadPeopleDetails([code], []);
+        if (byId) return byId;
+    }
+    if (code) {
+        const [byCode] = await loadPeopleDetails([], [code]);
+        if (byCode) return byCode;
+    }
+    const emails = [...new Set(
+        [user.companyEmail, user.email]
+            .map((value) => String(value || "").trim().toLowerCase())
+            .filter((value) => value.includes("@")),
+    )];
+    if (!emails.length) return null;
+    const row = await EmployeeBasic.findOne({
+        $or: emails.flatMap((email) => ([
+            { companyEmail: exactNamePattern(email) },
+            { workEmail: exactNamePattern(email) },
+        ])),
+    }).select(EMPLOYEE_LOOKUP_SELECT).lean();
+    return loadNamedEmployee(row);
+}
+
+function withUserPhoto(employee, user) {
+    if (!employee) return null;
+    const photo = String(employee.profilePicture || "").trim();
+    const userPhoto = String(user?.profilePicture || "").trim();
+    if (photo || !userPhoto) return employee;
+    return { ...employee, profilePicture: userPhoto };
 }
 
 async function findAssignee(assigneeId) {
@@ -2209,10 +2289,13 @@ export const returnTaskManagerTask = async (req, res) => {
     }
 };
 
-async function resolveTaskRequesterEmployee(task) {
-    const byName = await findEmployeeByName(personBaseName(task?.requestedByName));
-    if (byName) return byName;
-    return null;
+async function resolveTaskRequesterEmployee(task, fallbackName = "") {
+    const user = await requestedUser(task?.requestedByUserId);
+    const linked = await employeeForUser(user);
+    if (linked?._id) return withUserPhoto(linked, user);
+    const name = personBaseName(fallbackName) || personBaseName(task?.requestedByName) || personBaseName(user?.name);
+    if (!name || isSystemRequester(name)) return null;
+    return withUserPhoto(await findEmployeeByName(name), user);
 }
 
 async function closeTaskForRequester(res, target, viewer, noteText, taskKey) {
@@ -3565,7 +3648,7 @@ export const closeTaskManagerRequest = async (req, res) => {
             });
         }
 
-        const requester = await findEmployeeByName(personBaseName(task.requestedByName));
+        const requester = await resolveTaskRequesterEmployee(task);
         const companyEmail = String(requester?.companyEmail || "").trim();
         const requesterName = personName(requester) || personBaseName(task.requestedByName) || "there";
         let channel = "";

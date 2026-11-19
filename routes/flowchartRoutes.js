@@ -28,10 +28,10 @@ router.get('/active-holder/hr', getActiveFlowchartHolderHr);
 router.route('/employees')
     .get(getEmployeesForFlowchart);
 
-router.route('/:id')
+router.route('/category/:category')
     .delete(deleteFlowchartResponsibility);
 
-router.route('/category/:category')
+router.route('/:id')
     .delete(deleteFlowchartResponsibility);
 
 export default router;

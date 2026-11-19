@@ -27,6 +27,11 @@ const inventoryItemSchema = new mongoose.Schema(
     { timestamps: true },
 );
 
+inventoryItemSchema.index({ pendingStock: 1, categoryId: 1 });
+inventoryItemSchema.index({ subcategoryId: 1 });
+inventoryItemSchema.index({ brandId: 1 });
+inventoryItemSchema.index({ modelNumber: 1 });
+
 export const INVENTORY_UNITS = UNITS;
 export const INVENTORY_STATUSES = STATUSES;
 export default mongoose.model('InventoryItem', inventoryItemSchema);

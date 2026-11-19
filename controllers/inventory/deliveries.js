@@ -1,9 +1,12 @@
 import mongoose from 'mongoose';
 import DeliveryOrder from '../../models/inventory/DeliveryOrder.js';
 import InventoryItem from '../../models/inventory/InventoryItem.js';
+import InventoryStockEntry from '../../models/inventory/InventoryStockEntry.js';
 import { escapeRegex } from '../../utils/regexHelper.js';
 import { dubaiDateKey } from '../../utils/workOrderNumber.js';
 import { httpError, sendError } from './http.js';
+import { awaitAdminDeletionArchive } from '../../utils/adminDeletionArchiveRun.js';
+import { isReqUserSystemSuperUser } from '../../utils/systemSuperUser.js';
 import {
     actorIsPurchaseOfficer,
     closeDeliveryApproval,
@@ -37,8 +40,29 @@ function presentDelivery(row) {
         deliveryAddress: row.deliveryAddress || '',
         contactPersonName: row.contactPersonName || '',
         contactNumber: row.contactNumber || '',
+        createdByName: row.createdByName || '',
+        createdBy: row.createdBy || '',
         note: row.note || '',
         lines: Array.isArray(row.lines) ? row.lines : [],
+        stockApplied: Boolean(row.stockApplied),
+        editPending: Boolean(row.editPending),
+        editSubmittedBy: row.pendingEdit?.submittedByName || '',
+        pendingEdit: row.editPending && row.pendingEdit
+            ? {
+                deliveryType: row.pendingEdit.deliveryType || '',
+                doDate: row.pendingEdit.doDate || '',
+                projectName: row.pendingEdit.projectName || '',
+                workOrderId: row.pendingEdit.workOrderId || '',
+                workOrderNo: row.pendingEdit.workOrderNo || '',
+                customerId: row.pendingEdit.customerId || '',
+                customerName: row.pendingEdit.customerName || '',
+                deliveryAddress: row.pendingEdit.deliveryAddress || '',
+                contactPersonName: row.pendingEdit.contactPersonName || '',
+                contactNumber: row.pendingEdit.contactNumber || '',
+                note: row.pendingEdit.note || '',
+                lines: Array.isArray(row.pendingEdit.lines) ? row.pendingEdit.lines : [],
+            }
+            : null,
         createdAt: row.createdAt,
     };
 }
@@ -230,15 +254,75 @@ export async function viewerIsPurchasingOfficer(req) {
     return actorIsPurchaseOfficer(req, officer);
 }
 
+function priceOnDate(prices, when) {
+    let chosen = null;
+    for (const row of prices) {
+        if (!when || row.time <= when) chosen = row.unitPrice;
+        else break;
+    }
+    return chosen;
+}
+
+async function deliveryAmounts(rows) {
+    const itemIds = [...new Set(rows.flatMap((delivery) => (
+        (delivery.lines || []).map((line) => String(line.inventoryItemId || '')).filter((id) => mongoose.isValidObjectId(id))
+    )))];
+    if (!itemIds.length) return rows.map(() => 0);
+    const [entries, items] = await Promise.all([
+        InventoryStockEntry.find({
+            status: 'posted',
+            'lines.itemId': { $in: itemIds },
+        }).select('purchaseDate postedAt lines.itemId lines.unitPrice').lean(),
+        InventoryItem.find({ _id: { $in: itemIds } }).select('lastStockPrice').lean(),
+    ]);
+    const books = new Map(itemIds.map((id) => [id, { prices: [], fallback: 0 }]));
+    items.forEach((item) => {
+        const book = books.get(String(item._id));
+        if (book) book.fallback = Number(item.lastStockPrice) || 0;
+    });
+    entries.forEach((entry) => {
+        const time = entry.purchaseDate
+            ? new Date(entry.purchaseDate).getTime()
+            : (entry.postedAt ? new Date(entry.postedAt).getTime() : 0);
+        (entry.lines || []).forEach((line) => {
+            const book = books.get(String(line.itemId || ''));
+            if (!book) return;
+            book.prices.push({ time, unitPrice: Number(line.unitPrice) || 0 });
+        });
+    });
+    books.forEach((book) => {
+        book.prices.sort((left, right) => left.time - right.time);
+        if (!book.fallback && book.prices.length) book.fallback = book.prices[book.prices.length - 1].unitPrice;
+    });
+    return rows.map((delivery) => {
+        const deliveryDate = delivery.doDate || dubaiDateKey(delivery.createdAt || new Date());
+        const when = /^\d{4}-\d{2}-\d{2}$/.test(deliveryDate)
+            ? new Date(`${deliveryDate}T23:59:59`).getTime()
+            : 0;
+        const total = (delivery.lines || []).reduce((sum, line) => {
+            const book = books.get(String(line.inventoryItemId || ''));
+            const unitPrice = book ? (priceOnDate(book.prices, when) ?? book.fallback) : 0;
+            return sum + (Number(line.quantity) || 0) * unitPrice;
+        }, 0);
+        return Math.round(total * 100) / 100;
+    });
+}
+
 export async function listDeliveries(req, res) {
     try {
         const [rows, purchasingOfficer] = await Promise.all([
-            DeliveryOrder.find().sort({ createdAt: -1 }).limit(300).lean(),
+            DeliveryOrder.find()
+                .sort({ createdAt: -1 })
+                .limit(300)
+                .select('deliveryNo deliveryType status doDate projectName workOrderId workOrderNo customerId customerName deliveryAddress contactPersonName contactNumber note lines stockApplied editPending pendingEdit createdBy createdByName createdAt')
+                .lean(),
             viewerIsPurchasingOfficer(req),
         ]);
+        const amounts = await deliveryAmounts(rows);
         res.json({
-            deliveries: rows.map(presentDelivery),
+            deliveries: rows.map((row, index) => ({ ...presentDelivery(row), amount: amounts[index] || 0 })),
             purchasingOfficer,
+            viewerId: String(req.user?.id || ''),
         });
     } catch (error) {
         sendError(res, error);
@@ -309,12 +393,131 @@ export async function createDelivery(req, res) {
     }
 }
 
+async function assertEditStock(existing, lines) {
+    const totals = lineTotals(lines);
+    if (!totals.size) return;
+    const heldHere = existing.stockApplied ? lineTotals(existing.lines) : new Map();
+    const [items, waiting] = await Promise.all([
+        InventoryItem.find({ _id: { $in: [...totals.keys()] } })
+            .select('description availableQuantity pendingStock')
+            .lean(),
+        quantityWaitingOnOtherDeliveries(existing._id),
+    ]);
+    const byId = new Map(items.map((item) => [String(item._id), item]));
+    for (const [id, quantity] of totals) {
+        const item = byId.get(id);
+        const onHand = Number(item?.availableQuantity) || 0;
+        const mine = heldHere.get(id) || 0;
+        if (!item || item.pendingStock || onHand + mine <= 0) {
+            throw httpError(400, 'Only items that are in stock can be added.');
+        }
+        const held = waiting.get(id) || 0;
+        if (onHand + mine - held < quantity) {
+            const name = item.description || 'An item';
+            throw httpError(400, `${name} only has ${onHand + mine - held} available for this edit.`);
+        }
+    }
+}
+
+function pendingFromPayload(payload, senderName) {
+    return {
+        deliveryType: payload.deliveryType,
+        doDate: /^\d{4}-\d{2}-\d{2}$/.test(payload.doDate) ? payload.doDate : '',
+        projectName: payload.projectName,
+        workOrderId: payload.workOrderId,
+        workOrderNo: payload.workOrderNo,
+        customerId: payload.customerId,
+        customerName: payload.customerName,
+        deliveryAddress: payload.deliveryAddress,
+        contactPersonName: payload.contactPersonName,
+        contactNumber: payload.contactNumber,
+        note: payload.note,
+        lines: payload.lines,
+        submittedByName: senderName,
+        submittedAt: new Date(),
+    };
+}
+
+function writePendingOnto(existing, pending, approverName) {
+    existing.deliveryType = pending.deliveryType;
+    existing.doDate = pending.doDate || existing.doDate || dubaiDateKey();
+    existing.projectName = pending.projectName || '';
+    existing.workOrderId = pending.workOrderId || '';
+    existing.workOrderNo = pending.workOrderNo || '';
+    existing.customerId = pending.customerId || '';
+    existing.customerName = pending.customerName || '';
+    existing.deliveryAddress = pending.deliveryAddress || '';
+    existing.contactPersonName = pending.contactPersonName || '';
+    existing.contactNumber = pending.contactNumber || '';
+    existing.note = pending.note || '';
+    existing.lines = pending.lines || [];
+    existing.status = 'Confirmed';
+    existing.stockApplied = true;
+    existing.editPending = false;
+    existing.pendingEdit = undefined;
+    existing.approverName = approverName;
+}
+
+async function approvePendingEdit(req, officer) {
+    const previous = await DeliveryOrder.findOneAndUpdate(
+        { _id: req.params.id, editPending: true },
+        { $set: { editPending: false } },
+        { new: false },
+    );
+    if (!previous?.pendingEdit) return null;
+    const pending = previous.pendingEdit.toObject?.() || previous.pendingEdit;
+    const hadStock = Boolean(previous.stockApplied);
+    const originalLines = (previous.lines || []).map((line) => ({ ...line.toObject?.() || line }));
+    let restored = false;
+    let reduced = false;
+    try {
+        if (hadStock) {
+            await changeStock(originalLines, 1);
+            restored = true;
+        }
+        await assertDeliverable(pending.lines, true, previous._id);
+        await changeStock(pending.lines, -1);
+        reduced = true;
+        const next = await DeliveryOrder.findById(previous._id);
+        if (!next) throw httpError(404, 'Delivery order was not found.');
+        writePendingOnto(next, pending, officer?.employeeName || 'Purchase Officer');
+        await next.save();
+        await closeDeliveryApproval(next._id, 'Approved', req.user?.employeeObjectId);
+        return next;
+    } catch (error) {
+        if (reduced) {
+            try {
+                await changeStock(pending.lines, 1);
+            } catch (restoreError) {
+                console.error('Could not restore delivery stock:', restoreError);
+            }
+        }
+        if (restored) {
+            try {
+                await changeStock(originalLines, -1);
+            } catch (restoreError) {
+                console.error('Could not restore delivery stock:', restoreError);
+            }
+        }
+        await DeliveryOrder.updateOne(
+            { _id: previous._id },
+            { $set: { editPending: true, pendingEdit: pending, stockApplied: hadStock } },
+        );
+        throw error;
+    }
+}
+
 export async function approveDelivery(req, res) {
     try {
         if (!mongoose.isValidObjectId(req.params.id)) throw httpError(404, 'Delivery order was not found.');
         const officer = await findPurchaseOfficer();
         if (!actorIsPurchaseOfficer(req, officer)) {
             throw httpError(403, 'Only the purchase officer can approve this delivery.');
+        }
+        const edited = await approvePendingEdit(req, officer);
+        if (edited) {
+            res.json({ delivery: presentDelivery(edited), purchasingOfficer: true });
+            return;
         }
         const claimed = await DeliveryOrder.findOneAndUpdate(
             { _id: req.params.id, stockApplied: { $ne: true }, status: 'Submitted' },
@@ -357,6 +560,16 @@ export async function rejectDelivery(req, res) {
         if (!actorIsPurchaseOfficer(req, officer)) {
             throw httpError(403, 'Only the purchase officer can reject this delivery.');
         }
+        const edited = await DeliveryOrder.findOneAndUpdate(
+            { _id: req.params.id, editPending: true },
+            { $set: { editPending: false }, $unset: { pendingEdit: 1 } },
+            { new: true },
+        );
+        if (edited) {
+            await closeDeliveryApproval(edited._id, 'Rejected', req.user?.employeeObjectId);
+            res.json({ delivery: presentDelivery(edited), purchasingOfficer: true });
+            return;
+        }
         const row = await DeliveryOrder.findOneAndUpdate(
             { _id: req.params.id, status: 'Submitted', stockApplied: { $ne: true } },
             { $set: { status: 'Rejected', approverName: officer?.employeeName || 'Purchase Officer' } },
@@ -370,21 +583,216 @@ export async function rejectDelivery(req, res) {
     }
 }
 
-export async function deleteDelivery(req, res) {
+async function applyDeliveryUpdate(req, existing, payload) {
+    const officer = await findPurchaseOfficer();
+    const purchasingOfficer = actorIsPurchaseOfficer(req, officer);
+    const submitting = payload.action === 'submit';
+    if (payload.lines.length) await assertDeliverable(payload.lines, submitting);
+    if (submitting && !officer && !purchasingOfficer) {
+        throw httpError(400, 'Assign an active Purchase Officer on the flowchart before submitting a delivery.');
+    }
+    let reduced = false;
     try {
+        if (submitting && purchasingOfficer) {
+            await changeStock(payload.lines, -1);
+            reduced = true;
+        }
+        const status = !submitting ? 'Draft' : (purchasingOfficer ? 'Confirmed' : 'Submitted');
+    const doDate = /^\d{4}-\d{2}-\d{2}$/.test(payload.doDate) ? payload.doDate : (existing.doDate || dubaiDateKey());
+    existing.deliveryType = payload.deliveryType;
+    existing.status = status;
+    existing.doDate = doDate;
+    existing.projectName = payload.projectName;
+    existing.workOrderId = payload.workOrderId;
+    existing.workOrderNo = payload.workOrderNo;
+    existing.customerId = payload.customerId;
+    existing.customerName = payload.customerName;
+    existing.deliveryAddress = payload.deliveryAddress;
+    existing.contactPersonName = payload.contactPersonName;
+    existing.contactNumber = payload.contactNumber;
+    existing.note = payload.note;
+    existing.lines = payload.lines;
+    existing.stockApplied = reduced;
+    existing.editPending = false;
+    existing.pendingEdit = undefined;
+    if (purchasingOfficer && submitting) {
+        existing.approverName = officer?.employeeName || clipLine(req.user?.name, 160);
+    }
+    await existing.save();
+        if (status === 'Submitted') {
+            await notifyDeliveryApproval({
+                delivery: existing,
+                officer,
+                senderName: clipLine(req.user?.name, 160),
+            });
+        }
+        return existing;
+    } catch (error) {
+        if (reduced) await changeStock(payload.lines, 1);
+        throw error;
+    }
+}
+
+export async function updateDelivery(req, res) {
+    let restored = false;
+    const originalLines = [];
+    try {
+        if (!mongoose.isValidObjectId(req.params.id)) throw httpError(404, 'Delivery order was not found.');
+        const existing = await DeliveryOrder.findById(req.params.id);
+        if (!existing || existing.status === 'Confirming') throw httpError(404, 'Delivery order was not found.');
+        if (existing.status === 'Confirmed' || existing.stockApplied) {
+            throw httpError(400, 'A delivered order cannot be edited.');
+        }
+        const payload = readDelivery(req.body);
+        const officer = await findPurchaseOfficer();
+        const purchasingOfficer = actorIsPurchaseOfficer(req, officer);
+        const submitting = payload.action === 'submit';
+        const senderName = clipLine(req.user?.name, 160);
+        if (!submitting && existing.status !== 'Draft') {
+            throw httpError(400, 'Submit this edit so the purchase officer can approve it.');
+        }
+        const queuesEdit = submitting
+            && !purchasingOfficer
+            && (existing.status === 'Rejected' || existing.editPending);
+        if (queuesEdit) {
+            if (!officer) throw httpError(400, 'Assign an active Purchase Officer on the flowchart before submitting a delivery.');
+            if (payload.lines.length) await assertEditStock(existing, payload.lines);
+            existing.editPending = true;
+            existing.pendingEdit = pendingFromPayload(payload, senderName);
+            existing.markModified('pendingEdit');
+            await existing.save();
+            await notifyDeliveryApproval({ delivery: existing, officer, senderName, kind: 'edit' });
+            res.json({ delivery: presentDelivery(existing), purchasingOfficer: false, pendingApproval: true });
+            return;
+        }
+        originalLines.push(...(existing.lines || []).map((line) => ({ ...line.toObject?.() || line })));
+        if (existing.stockApplied) {
+            await changeStock(originalLines, 1);
+            restored = true;
+            existing.stockApplied = false;
+        }
+        try {
+            const saved = await applyDeliveryUpdate(req, existing, payload);
+            res.json({ delivery: presentDelivery(saved), purchasingOfficer, pendingApproval: false });
+        } catch (error) {
+            if (restored) {
+                await changeStock(originalLines, -1);
+                existing.stockApplied = true;
+                existing.lines = originalLines;
+            }
+            throw error;
+        }
+    } catch (error) {
+        sendError(res, error);
+    }
+}
+
+export async function deleteDelivery(req, res) {
+    let restored = false;
+    try {
+        if (!(await isReqUserSystemSuperUser(req.user))) {
+            throw httpError(403, 'Only the system super user can delete a delivery.');
+        }
         if (!mongoose.isValidObjectId(req.params.id)) throw httpError(404, 'Delivery order was not found.');
         const row = await DeliveryOrder.findById(req.params.id);
         if (!row) throw httpError(404, 'Delivery order was not found.');
+        const lines = (row.lines || []).map((line) => ({ ...line.toObject?.() || line }));
         if (row.stockApplied) {
-            await changeStock(row.lines, 1);
-            row.stockApplied = false;
-            await row.save();
+            await changeStock(lines, 1);
+            restored = true;
         }
-        if (row.status === 'Submitted' || row.status === 'Confirming') {
-            await closeDeliveryApproval(row._id, 'Rejected', req.user?.employeeObjectId);
+        try {
+            if (row.status !== 'Draft') {
+                const label = row.deliveryNo || String(row._id);
+                const details = row.stockApplied
+                    ? `Delivery ${label} deleted. Delivered quantity was added back to item stock.`
+                    : `Delivery ${label} deleted.`;
+                await awaitAdminDeletionArchive(req, {
+                    moduleName: 'Inventory Delivery',
+                    recordId: label,
+                    details,
+                    deletedPayload: row.toObject(),
+                    archive: {
+                        topModule: 'other',
+                        category: 'list',
+                        entityType: 'inventory_delivery',
+                        title: 'Inventory Delivery',
+                        subtitle: label,
+                        details,
+                    },
+                });
+            }
+            if (row.status === 'Submitted' || row.status === 'Confirming' || row.editPending) {
+                await closeDeliveryApproval(row._id, 'Rejected', req.user?.employeeObjectId);
+            }
+            await DeliveryOrder.deleteOne({ _id: row._id });
+        } catch (error) {
+            if (restored) await changeStock(lines, -1);
+            throw error;
         }
-        await DeliveryOrder.deleteOne({ _id: row._id });
         res.json({ ok: true });
+    } catch (error) {
+        sendError(res, error);
+    }
+}
+
+export async function listItemDeliveryHistory(req, res) {
+    try {
+        if (!mongoose.isValidObjectId(req.params.id)) throw httpError(404, 'Item was not found.');
+        const itemId = String(req.params.id);
+        const [rows, purchases, item] = await Promise.all([
+            DeliveryOrder.find({
+                status: 'Confirmed',
+                'lines.inventoryItemId': itemId,
+            }).sort({ createdAt: -1 }).lean(),
+            InventoryStockEntry.find({
+                status: 'posted',
+                'lines.itemId': itemId,
+            }).select('purchaseDate postedAt lines').lean(),
+            InventoryItem.findById(itemId).select('lastStockPrice').lean(),
+        ]);
+        const prices = [];
+        purchases.forEach((entry) => {
+            const time = entry.purchaseDate
+                ? new Date(entry.purchaseDate).getTime()
+                : (entry.postedAt ? new Date(entry.postedAt).getTime() : 0);
+            (entry.lines || []).forEach((line) => {
+                if (String(line.itemId || '') !== itemId) return;
+                prices.push({ time, unitPrice: Number(line.unitPrice) || 0 });
+            });
+        });
+        prices.sort((left, right) => left.time - right.time);
+        const fallback = Number(item?.lastStockPrice) || (prices.length ? prices[prices.length - 1].unitPrice : 0);
+        const deliveries = [];
+        rows.forEach((row) => {
+            const deliveryDate = row.doDate || dubaiDateKey(row.createdAt || new Date());
+            const when = /^\d{4}-\d{2}-\d{2}$/.test(deliveryDate)
+                ? new Date(`${deliveryDate}T23:59:59`).getTime()
+                : 0;
+            const unitPrice = priceOnDate(prices, when) ?? fallback;
+            (row.lines || []).forEach((line, index) => {
+                if (String(line.inventoryItemId || '') !== itemId) return;
+                deliveries.push({
+                    id: `${row._id}-${index}`,
+                    deliveryId: String(row._id),
+                    deliveryDate,
+                    customerId: row.customerId || '',
+                    customerName: row.customerName || '',
+                    deliveryNo: row.deliveryNo || '',
+                    quantity: line.quantity || 0,
+                    unitPrice,
+                    sortTime: row.createdAt ? new Date(row.createdAt).getTime() : 0,
+                    delivery: presentDelivery(row),
+                });
+            });
+        });
+        deliveries.sort((left, right) => {
+            if (right.deliveryDate !== left.deliveryDate) return right.deliveryDate.localeCompare(left.deliveryDate);
+            return right.sortTime - left.sortTime;
+        });
+        res.json({
+            deliveries: deliveries.map(({ sortTime, ...row }) => row),
+        });
     } catch (error) {
         sendError(res, error);
     }

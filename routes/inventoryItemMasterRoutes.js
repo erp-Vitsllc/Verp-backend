@@ -7,10 +7,10 @@ import { listItemOptions, createItemOption } from '../controllers/inventory/item
 import { listBrandImages, listBrands, createBrand, updateBrand, deleteBrand } from '../controllers/inventory/itemBrands.js';
 import { listItems, getItem, createItem, updateItem, deleteItem } from '../controllers/inventory/items.js';
 import { addItemStock, createPendingItem, listStockOptions } from '../controllers/inventory/itemStock.js';
-import { approveStockEntry, getStockEntry, listInventoryBills, listStockEntries, rejectStockEntry, saveStockEntry, stockApprovalContext } from '../controllers/inventory/stockEntries.js';
+import { approveStockEntry, deleteStockEntry, getStockEntry, listInventoryBills, listItemDocuments, listItemPurchaseHistory, listStockEntries, rejectStockEntry, saveStockEntry, stockApprovalContext } from '../controllers/inventory/stockEntries.js';
 import { createVendor, deleteVendor, getVendor, listVendorBills, listVendors, nextVendorCode, previewZohoVendor, syncVendorFromZoho, updateVendor } from '../controllers/inventory/vendors.js';
 import { createVendorContact, deleteVendorContact, markVendorContactPrimary, updateVendorContact } from '../controllers/inventory/vendorContacts.js';
-import { approveDelivery, createDelivery, deleteDelivery, listDeliveries, rejectDelivery } from '../controllers/inventory/deliveries.js';
+import { approveDelivery, createDelivery, deleteDelivery, listDeliveries, listItemDeliveryHistory, rejectDelivery, updateDelivery } from '../controllers/inventory/deliveries.js';
 import { hasPermission } from '../services/permissionService.js';
 
 const router = express.Router();
@@ -90,6 +90,7 @@ async function viewDelivery(req, res, next) {
 router.get('/bills', protect, viewDelivery, listInventoryBills);
 router.get('/deliveries', protect, viewDelivery, listDeliveries);
 router.post('/deliveries', protect, viewDelivery, createDelivery);
+router.put('/deliveries/:id', protect, viewDelivery, updateDelivery);
 router.post('/deliveries/:id/approve', protect, viewDelivery, approveDelivery);
 router.post('/deliveries/:id/reject', protect, viewDelivery, rejectDelivery);
 router.delete('/deliveries/:id', protect, viewDelivery, deleteDelivery);
@@ -101,12 +102,16 @@ router.post('/stock-entries', protect, stockWriters, saveStockEntry);
 router.post('/stock-entries/:id/approve', protect, viewItems, approveStockEntry);
 router.post('/stock-entries/:id/reject', protect, viewItems, rejectStockEntry);
 router.get('/stock-entries/:id', protect, viewItems, getStockEntry);
+router.delete('/stock-entries/:id', protect, viewDelivery, deleteStockEntry);
 
 router.get('/items', protect, viewItems, listItems);
 router.get('/items/stock-options', protect, viewItems, listStockOptions);
 router.post('/items/pending', protect, createItems, createPendingItem);
 router.post('/items', protect, createItems, createItem);
 router.post('/items/:id/stock', protect, checkPermissionAny('inventory_item_master', ['edit', 'create']), addItemStock);
+router.get('/items/:id/purchase-history', protect, viewItems, listItemPurchaseHistory);
+router.get('/items/:id/delivery-history', protect, viewItems, listItemDeliveryHistory);
+router.get('/items/:id/documents', protect, viewItems, listItemDocuments);
 router.get('/items/:id', protect, viewItems, getItem);
 router.put('/items/:id', protect, editItems, updateItem);
 router.delete('/items/:id', protect, deleteItems, deleteItem);

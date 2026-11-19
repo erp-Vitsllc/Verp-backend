@@ -746,54 +746,62 @@ export const respondToResponsibility = async (req, res) => {
     }
 };
 
-// @desc    Delete flowchart responsibility
+// @desc    Unassign a flowchart position (system super user only)
 // @route   DELETE /api/flowchart/:id
 // @route   DELETE /api/flowchart/category/:category
-// @access  Private
+// @access  Private — system super user
 export const deleteFlowchartResponsibility = async (req, res) => {
     try {
-        const isJwtAdmin = isJwtSystemSuperUser(req.user);
-        let isSysAdmin = false;
-        try {
-            isSysAdmin = await isUserAdministrator(req.user?.id);
-        } catch {
-            isSysAdmin = false;
-        }
-        const privileged = isJwtAdmin || isSysAdmin;
-
-        if (!privileged) {
+        if (!isJwtSystemSuperUser(req.user)) {
             return res.status(403).json({
-                message: 'Only Administrators have permission to delete flowchart designations.'
+                message: 'Only the system super user can delete flowchart assignments.'
             });
         }
 
         const { id, category } = req.params;
+        const normalize = (value) => String(value || '').toLowerCase().replace(/\s+/g, '');
 
-        let deletedDoc = null;
+        let docs = [];
         if (id && mongoose.Types.ObjectId.isValid(id)) {
-            deletedDoc = await Flowchart.findByIdAndDelete(id);
-        } else if (category) {
-            deletedDoc = await Flowchart.findOneAndDelete({ category: category.toLowerCase().replace(/\s+/g, '') });
-        } else if (id) {
-            // Check if id is actually a category name instead of ObjectId
-            deletedDoc = await Flowchart.findOneAndDelete({ category: id.toLowerCase().replace(/\s+/g, '') });
+            const existing = await Flowchart.findById(id);
+            if (existing?.category) {
+                docs = await Flowchart.find({ category: existing.category });
+            }
+        } else {
+            const raw = String(category || id || '').trim();
+            const normalized = normalize(raw);
+            if (raw) {
+                docs = await Flowchart.find({
+                    $or: [
+                        { category: raw },
+                        { category: normalized },
+                        { category: raw.toLowerCase() }
+                    ]
+                });
+            }
         }
 
-        if (!deletedDoc) {
+        if (!docs.length) {
             return res.status(404).json({ message: 'Flowchart responsibility not found' });
         }
 
-        // Delete any pending dashboard actions for this responsibility
+        const ids = docs.map((doc) => doc._id);
+        const categories = [...new Set(docs.map((doc) => doc.category).filter(Boolean))];
+
+        await Flowchart.deleteMany({ _id: { $in: ids } });
+
         await DashboardAction.deleteMany({
+            requestType: 'Responsibility Approval',
             $or: [
-                { requestId: deletedDoc._id, requestType: 'Responsibility Approval' },
-                { extra1: deletedDoc.category, requestType: 'Responsibility Approval' }
+                { requestId: { $in: ids } },
+                { extra1: { $in: categories } }
             ]
         });
 
         res.status(200).json({
-            message: 'Responsibility deleted successfully from database',
-            responsibility: deletedDoc
+            message: 'Position unassigned. The employee was removed from this flowchart role.',
+            responsibility: docs[0],
+            removedCount: docs.length
         });
     } catch (error) {
         console.error('Error deleting flowchart responsibility:', error);

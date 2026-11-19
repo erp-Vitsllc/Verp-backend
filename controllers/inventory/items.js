@@ -6,6 +6,7 @@ import ItemOption from '../../models/inventory/ItemOption.js';
 import ItemBrand from '../../models/inventory/ItemBrand.js';
 import InventoryVendorContact from '../../models/inventory/InventoryVendorContact.js';
 import InventoryStockEntry from '../../models/inventory/InventoryStockEntry.js';
+import DeliveryOrder from '../../models/inventory/DeliveryOrder.js';
 import { escapeRegex } from '../../utils/regexHelper.js';
 import { cleanName, httpError, listLimit, sendError } from './http.js';
 
@@ -244,9 +245,19 @@ export async function listItems(req, res) {
         }
         const query = constraints.length === 1 ? constraints[0] : { $and: constraints };
         Object.assign(filter, query);
-        const rows = await InventoryItem.find(filter).populate(ITEM_POPULATE).lean();
+        const rows = await InventoryItem.find(filter)
+            .select('itemCode description moreDescription copyToDescription modelNumber unitOfMeasure manufacturerPartNumber reservationQuantity hsCode countryOfOrigin availableQuantity categoryId subcategoryId itemOptionId brandId')
+            .lean();
+        const subcategoryIds = [...new Set(rows.map((row) => String(row.subcategoryId || '')).filter((id) => mongoose.isValidObjectId(id)))];
+        const reservationRows = subcategoryIds.length
+            ? await ItemSubcategory.find({ _id: { $in: subcategoryIds } }).select('reservationQuantity').lean()
+            : [];
+        const reservationById = new Map(reservationRows.map((row) => [String(row._id), row.reservationQuantity]));
         const matched = rows
-            .map((row) => withWaitingStatus(presentItem(row), waiting))
+            .map((row) => withWaitingStatus(presentItem({
+                ...row,
+                subcategoryId: { _id: row.subcategoryId, reservationQuantity: reservationById.get(String(row.subcategoryId)) },
+            }), waiting))
             .filter((row) => matchesStockFilter(row.status, statusQuery))
             .sort((left, right) => {
                 const statusGap = statusRank(left.status) - statusRank(right.status);
@@ -254,8 +265,27 @@ export async function listItems(req, res) {
                 return String(left.itemCode || '').localeCompare(String(right.itemCode || ''));
             });
         const start = limit > 0 ? (page - 1) * limit : 0;
+        const pageRows = limit > 0 ? matched.slice(start, start + limit) : matched;
+        const idsOf = (key) => [...new Set(pageRows.map((row) => row[key]).filter((id) => mongoose.isValidObjectId(id)))];
+        const [categories, subcategories, options, brands] = await Promise.all([
+            idsOf('categoryId').length ? ItemCategory.find({ _id: { $in: idsOf('categoryId') } }).select('name').lean() : [],
+            idsOf('subcategoryId').length ? ItemSubcategory.find({ _id: { $in: idsOf('subcategoryId') } }).select('name').lean() : [],
+            idsOf('itemOptionId').length ? ItemOption.find({ _id: { $in: idsOf('itemOptionId') } }).select('name').lean() : [],
+            idsOf('brandId').length ? ItemBrand.find({ _id: { $in: idsOf('brandId') } }).select('name').lean() : [],
+        ]);
+        const nameOf = (list) => new Map(list.map((row) => [String(row._id), row.name || '']));
+        const categoryNames = nameOf(categories);
+        const subcategoryNames = nameOf(subcategories);
+        const optionNames = nameOf(options);
+        const brandNames = nameOf(brands);
         res.json({
-            items: limit > 0 ? matched.slice(start, start + limit) : matched,
+            items: pageRows.map((row) => ({
+                ...row,
+                categoryName: categoryNames.get(row.categoryId) || '',
+                subcategoryName: subcategoryNames.get(row.subcategoryId) || '',
+                itemName: optionNames.get(row.itemOptionId) || '',
+                brandName: brandNames.get(row.brandId) || '',
+            })),
             total: matched.length,
             page,
             limit,
@@ -265,13 +295,39 @@ export async function listItems(req, res) {
     }
 }
 
+async function itemMovement(itemId) {
+    const objectId = new mongoose.Types.ObjectId(itemId);
+    const id = String(itemId);
+    const [broughtRows, soldRows] = await Promise.all([
+        InventoryStockEntry.aggregate([
+            { $match: { status: 'posted', $or: [{ 'lines.itemId': objectId }, { 'lines.itemId': id }] } },
+            { $unwind: '$lines' },
+            { $match: { $or: [{ 'lines.itemId': objectId }, { 'lines.itemId': id }] } },
+            { $group: { _id: null, total: { $sum: '$lines.quantity' } } },
+        ]),
+        DeliveryOrder.aggregate([
+            { $match: { stockApplied: true, 'lines.inventoryItemId': id } },
+            { $unwind: '$lines' },
+            { $match: { 'lines.inventoryItemId': id } },
+            { $group: { _id: null, total: { $sum: '$lines.quantity' } } },
+        ]),
+    ]);
+    return {
+        broughtQuantity: Number(broughtRows[0]?.total) || 0,
+        soldQuantity: Number(soldRows[0]?.total) || 0,
+    };
+}
+
 export async function getItem(req, res) {
     try {
         if (!mongoose.isValidObjectId(req.params.id)) throw httpError(404, 'Item was not found.');
         const row = await InventoryItem.findById(req.params.id).populate(DETAIL_POPULATE).lean();
         if (!row) throw httpError(404, 'Item was not found.');
-        const waiting = await waitingItemMap();
-        res.json(withWaitingStatus(presentItem(row), waiting));
+        const [waiting, movement] = await Promise.all([
+            waitingItemMap(),
+            itemMovement(row._id),
+        ]);
+        res.json({ ...withWaitingStatus(presentItem(row), waiting), ...movement });
     } catch (error) {
         sendError(res, error);
     }
