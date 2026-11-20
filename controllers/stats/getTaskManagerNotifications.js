@@ -39,6 +39,7 @@ import { attachHoldSteps } from "../../utils/taskWaitingSteps.js";
 import { finishedParticipants } from "../../utils/taskActionTracks.js";
 import { syncPendingSalaryEnrollmentTasks } from "../../utils/syncPendingSalaryEnrollmentTasks.js";
 import { ensurePendingUtilityReminderTasks, UTILITY_PAYMENT_REMINDER } from "../../utils/utilityReminderTask.js";
+import { ensureNotificationTasks, flowchartHrOwnsTask, loadFlowchartHr } from "../../utils/syncNotificationTasks.js";
 import { getDepartmentHOD } from "../../utils/getDepartmentHOD.js";
 import { getManagementHOD } from "../../utils/getManagementHOD.js";
 import {
@@ -1271,12 +1272,17 @@ export const getTaskManagerNotifications = async (req, res) => {
             });
         }
         const viewer = await resolveTaskViewer(req);
+        const flowchartHrPromise = loadFlowchartHr().catch(() => null);
         await syncPendingSalaryEnrollmentTasks();
         try {
-            await ensurePendingUtilityReminderTasks();
+            await Promise.all([
+                ensurePendingUtilityReminderTasks(),
+                ensureNotificationTasks(),
+            ]);
         } catch (error) {
             console.error("Utility reminder tasks:", error?.message || error);
         }
+        const flowchartHr = await flowchartHrPromise;
         const promotion = promoteDueTaskCompletions().catch((error) => {
             console.error("Promote due tasks failed:", error);
         });
@@ -1667,20 +1673,25 @@ export const getTaskManagerNotifications = async (req, res) => {
                 moduleLabel: destination.label,
                 modulePath: destination.path,
                 mine: assigneeCleared
-                    ? personKey(cleanRequester(requesterBase)) === personKey(viewer?.name)
+                    ? (
+                        personKey(cleanRequester(requesterBase)) === personKey(viewer?.name)
                         || (overlay?.requestedByUserId && viewer?.userId && String(overlay.requestedByUserId) === String(viewer.userId))
-                    : taskMine(viewer, {
-                        assigneeId,
-                        assigneeEmpId,
-                        assigneeName,
-                        row: overlay,
-                        requesterName: requesterBase,
-                        requestedByUserId: overlay?.requestedByUserId,
-                        requestType: action.requestType,
-                        closed: assigneeClosed
-                            || Boolean(overlay?.closeRequest?.reassignmentReleased)
-                            || (isGeneralHubRequestType(action.requestType) && ["Approved", "Completed", "Closed"].includes(String(action.status || ""))),
-                    }),
+                    )
+                    : (
+                        taskMine(viewer, {
+                            assigneeId,
+                            assigneeEmpId,
+                            assigneeName,
+                            row: overlay,
+                            requesterName: requesterBase,
+                            requestedByUserId: overlay?.requestedByUserId,
+                            requestType: action.requestType,
+                            closed: assigneeClosed
+                                || Boolean(overlay?.closeRequest?.reassignmentReleased)
+                                || (isGeneralHubRequestType(action.requestType) && ["Approved", "Completed", "Closed"].includes(String(action.status || ""))),
+                        })
+                        || flowchartHrOwnsTask(viewer, action, flowchartHr)
+                    ),
                 ...closeWaitFlags(overlay?.closeRequest, overlay?.status),
                 displayStatus: status,
                 rawStatus: action.status || "Pending",

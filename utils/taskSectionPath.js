@@ -165,7 +165,10 @@ export function buildCompanySectionPath(companyId, requestType = "") {
     if (!id) return "";
     const type = clean(requestType).toLowerCase();
     const base = `/Company/${encodeURIComponent(id)}`;
-    if (type.includes("company activation") && !type.includes("incomplete")) {
+    if (type.includes("company activation") && type.includes("incomplete")) {
+        return `${base}?tab=basic`;
+    }
+    if (type.includes("company activation")) {
         return `${base}?tab=basic&focusCard=basicDetails&activationReview=1`;
     }
     return base;

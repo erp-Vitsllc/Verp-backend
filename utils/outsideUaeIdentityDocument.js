@@ -10,7 +10,14 @@ export function hasCompleteOutsideUaeIdentityDocument(employee) {
     return (employee?.documents || []).some(isCompleteOutsideUaeIdentityDocument);
 }
 
-/** Profile progress counts only the document saved from Basic Details. */
+function passportNumberPresent(passport) {
+    const number = passport?.number;
+    if (number == null) return false;
+    const text = String(number).trim();
+    return text !== "" && text !== "—";
+}
+
+/** Outside UAE: a saved passport or a Basic Details identity document completes this step. */
 export function outsideUaeProfileIdentitySatisfied(employee) {
-    return hasCompleteOutsideUaeIdentityDocument(employee);
+    return hasCompleteOutsideUaeIdentityDocument(employee) || passportNumberPresent(employee?.passportDetails);
 }

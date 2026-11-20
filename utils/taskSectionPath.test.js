@@ -133,6 +133,11 @@ test("employee and company tasks open the profile section or activation review",
         /activationReview=1/,
     );
     assert.match(buildCompanySectionPath("C-1", "Company Activation"), /focusCard=basicDetails/);
+    assert.equal(
+        buildEmployeeSectionPath("E-100", "Profile Incomplete"),
+        "/emp/E-100?tab=basic&focusCard=basic-details",
+    );
+    assert.equal(buildCompanySectionPath("C-1", "Company Activation Incomplete"), "/Company/C-1?tab=basic");
     const hub = buildHubSectionPath({
         requestType: "Employee Asset Request",
         requestId,
