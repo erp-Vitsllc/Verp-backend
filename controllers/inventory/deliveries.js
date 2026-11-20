@@ -263,22 +263,29 @@ function priceOnDate(prices, when) {
     return chosen;
 }
 
-async function deliveryAmounts(rows) {
+function roundMoney(value) {
+    return Math.round((Number(value) || 0) * 100) / 100;
+}
+
+async function loadPriceBooks(rows) {
     const itemIds = [...new Set(rows.flatMap((delivery) => (
         (delivery.lines || []).map((line) => String(line.inventoryItemId || '')).filter((id) => mongoose.isValidObjectId(id))
     )))];
-    if (!itemIds.length) return rows.map(() => 0);
+    const books = new Map(itemIds.map((id) => [id, { prices: [], fallback: 0, stock: null }]));
+    if (!itemIds.length) return books;
     const [entries, items] = await Promise.all([
         InventoryStockEntry.find({
             status: 'posted',
             'lines.itemId': { $in: itemIds },
         }).select('purchaseDate postedAt lines.itemId lines.unitPrice').lean(),
-        InventoryItem.find({ _id: { $in: itemIds } }).select('lastStockPrice').lean(),
+        InventoryItem.find({ _id: { $in: itemIds } }).select('lastStockPrice availableQuantity').lean(),
     ]);
-    const books = new Map(itemIds.map((id) => [id, { prices: [], fallback: 0 }]));
     items.forEach((item) => {
         const book = books.get(String(item._id));
-        if (book) book.fallback = Number(item.lastStockPrice) || 0;
+        if (book) {
+            book.fallback = Number(item.lastStockPrice) || 0;
+            book.stock = Number(item.availableQuantity) || 0;
+        }
     });
     entries.forEach((entry) => {
         const time = entry.purchaseDate
@@ -294,18 +301,33 @@ async function deliveryAmounts(rows) {
         book.prices.sort((left, right) => left.time - right.time);
         if (!book.fallback && book.prices.length) book.fallback = book.prices[book.prices.length - 1].unitPrice;
     });
-    return rows.map((delivery) => {
-        const deliveryDate = delivery.doDate || dubaiDateKey(delivery.createdAt || new Date());
-        const when = /^\d{4}-\d{2}-\d{2}$/.test(deliveryDate)
-            ? new Date(`${deliveryDate}T23:59:59`).getTime()
-            : 0;
-        const total = (delivery.lines || []).reduce((sum, line) => {
-            const book = books.get(String(line.inventoryItemId || ''));
-            const unitPrice = book ? (priceOnDate(book.prices, when) ?? book.fallback) : 0;
-            return sum + (Number(line.quantity) || 0) * unitPrice;
-        }, 0);
-        return Math.round(total * 100) / 100;
+    return books;
+}
+
+function priceOneDelivery(delivery, books) {
+    const deliveryDate = delivery?.doDate || dubaiDateKey(delivery?.createdAt || new Date());
+    const when = /^\d{4}-\d{2}-\d{2}$/.test(deliveryDate)
+        ? new Date(`${deliveryDate}T23:59:59`).getTime()
+        : 0;
+    const lines = (delivery?.lines || []).map((line) => {
+        const source = line?.toObject?.() || line || {};
+        const book = books.get(String(source.inventoryItemId || ''));
+        const unitPrice = roundMoney(book ? (priceOnDate(book.prices, when) ?? book.fallback) : 0);
+        const quantity = Number(source.quantity) || 0;
+        return {
+            ...source,
+            unitPrice,
+            lineAmount: roundMoney(quantity * unitPrice),
+            stockOnHand: book && book.stock != null ? book.stock : source.stockOnHand,
+        };
     });
+    const amount = roundMoney(lines.reduce((sum, line) => sum + line.lineAmount, 0));
+    return { lines, amount };
+}
+
+export async function priceDeliveries(rows) {
+    const books = await loadPriceBooks(rows);
+    return rows.map((delivery) => priceOneDelivery(delivery, books));
 }
 
 export async function listDeliveries(req, res) {
@@ -318,9 +340,29 @@ export async function listDeliveries(req, res) {
                 .lean(),
             viewerIsPurchasingOfficer(req),
         ]);
-        const amounts = await deliveryAmounts(rows);
+        const pendingIndexes = [];
+        const batch = [...rows];
+        rows.forEach((row, index) => {
+            if (!row.editPending || !row.pendingEdit) return;
+            pendingIndexes.push(index);
+            batch.push({
+                doDate: row.pendingEdit.doDate || row.doDate,
+                createdAt: row.createdAt,
+                lines: row.pendingEdit.lines || [],
+            });
+        });
+        const priced = await priceDeliveries(batch);
+        const pendingByRow = new Map(pendingIndexes.map((rowIndex, offset) => [rowIndex, priced[rows.length + offset]]));
         res.json({
-            deliveries: rows.map((row, index) => ({ ...presentDelivery(row), amount: amounts[index] || 0 })),
+            deliveries: rows.map((row, index) => {
+                const presented = presentDelivery(row);
+                presented.lines = priced[index].lines;
+                presented.amount = priced[index].amount;
+                if (presented.pendingEdit && pendingByRow.has(index)) {
+                    presented.pendingEdit.lines = pendingByRow.get(index).lines;
+                }
+                return presented;
+            }),
             purchasingOfficer,
             viewerId: String(req.user?.id || ''),
         });
@@ -763,13 +805,17 @@ export async function listItemDeliveryHistory(req, res) {
         });
         prices.sort((left, right) => left.time - right.time);
         const fallback = Number(item?.lastStockPrice) || (prices.length ? prices[prices.length - 1].unitPrice : 0);
+        const priced = await priceDeliveries(rows);
         const deliveries = [];
-        rows.forEach((row) => {
+        rows.forEach((row, rowIndex) => {
             const deliveryDate = row.doDate || dubaiDateKey(row.createdAt || new Date());
             const when = /^\d{4}-\d{2}-\d{2}$/.test(deliveryDate)
                 ? new Date(`${deliveryDate}T23:59:59`).getTime()
                 : 0;
             const unitPrice = priceOnDate(prices, when) ?? fallback;
+            const presented = presentDelivery(row);
+            presented.lines = priced[rowIndex].lines;
+            presented.amount = priced[rowIndex].amount;
             (row.lines || []).forEach((line, index) => {
                 if (String(line.inventoryItemId || '') !== itemId) return;
                 deliveries.push({
@@ -782,7 +828,7 @@ export async function listItemDeliveryHistory(req, res) {
                     quantity: line.quantity || 0,
                     unitPrice,
                     sortTime: row.createdAt ? new Date(row.createdAt).getTime() : 0,
-                    delivery: presentDelivery(row),
+                    delivery: presented,
                 });
             });
         });

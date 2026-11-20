@@ -64,6 +64,7 @@ function presentItem(row) {
         countryOfOrigin: row.countryOfOrigin || '',
         status: stockStatus(row.availableQuantity, row.subcategoryId?.reservationQuantity),
         availableQuantity: row.availableQuantity || 0,
+        lastStockPrice: Number(row.lastStockPrice) || 0,
         categoryId: refId(row.categoryId),
         subcategoryId: refId(row.subcategoryId),
         itemOptionId: refId(row.itemOptionId),
@@ -246,7 +247,7 @@ export async function listItems(req, res) {
         const query = constraints.length === 1 ? constraints[0] : { $and: constraints };
         Object.assign(filter, query);
         const rows = await InventoryItem.find(filter)
-            .select('itemCode description moreDescription copyToDescription modelNumber unitOfMeasure manufacturerPartNumber reservationQuantity hsCode countryOfOrigin availableQuantity categoryId subcategoryId itemOptionId brandId')
+            .select('itemCode description moreDescription copyToDescription modelNumber unitOfMeasure manufacturerPartNumber reservationQuantity hsCode countryOfOrigin availableQuantity lastStockPrice categoryId subcategoryId itemOptionId brandId')
             .lean();
         const subcategoryIds = [...new Set(rows.map((row) => String(row.subcategoryId || '')).filter((id) => mongoose.isValidObjectId(id)))];
         const reservationRows = subcategoryIds.length

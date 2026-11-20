@@ -9,9 +9,12 @@ import { awaitAdminDeletionArchive } from '../../utils/adminDeletionArchiveRun.j
 import {
     actorIsManagement,
     actorIsPurchaseOfficer,
+    closeDraftBill,
     closeStockApproval,
     findPurchaseOfficer,
+    notifyDraftBill,
     notifyStockApproval,
+    syncViewerDraftBills,
 } from './stockApproval.js';
 
 function roundMoney(value) {
@@ -434,7 +437,9 @@ export async function listInventoryBills(req, res) {
                 id: String(row._id),
                 billNo: row.billNo || '',
                 message: 'Bill you created is on draft. Submit it.',
+                updatedAt: row.updatedAt || row.createdAt || null,
             }));
+        await syncViewerDraftBills(rows, viewerId);
         res.json({
             myDrafts,
             isManagement: viewerIsManagement,
@@ -565,6 +570,7 @@ export async function saveStockEntry(req, res) {
                     entry.status = 'draft';
                     entry.postedAt = null;
                     await entry.save();
+                    await notifyDraftBill({ entry, actorId: req.user?.id });
                     res.json(presentEntry(entry));
                     return;
                 }
@@ -575,6 +581,7 @@ export async function saveStockEntry(req, res) {
                 entry.status = 'posted';
                 entry.postedAt = entry.postedAt || new Date();
                 await entry.save();
+                await closeDraftBill(entry._id, req.user?.employeeObjectId);
                 res.json(presentEntry(entry));
                 return;
             } catch (error) {
@@ -603,6 +610,7 @@ export async function saveStockEntry(req, res) {
             } else {
                 entry = await InventoryStockEntry.create({ ...payload, status: 'draft' });
             }
+            await notifyDraftBill({ entry, actorId: req.user?.id });
             res.status(creating ? 201 : 200).json(presentEntry(entry));
             return;
         }
@@ -631,6 +639,7 @@ export async function saveStockEntry(req, res) {
                 entry = await InventoryStockEntry.create(pendingPayload);
             }
             await notifyStockApproval({ entry, officer, senderName });
+            await closeDraftBill(entry._id, req.user?.employeeObjectId);
             res.status(creating ? 201 : 200).json(presentEntry(entry));
             return;
         }
@@ -678,10 +687,12 @@ export async function saveStockEntry(req, res) {
             entry.postedAt = new Date();
             await entry.save();
             if (wasPending) await closeStockApproval(entry._id, 'Approved', req.user?.employeeObjectId);
+            await closeDraftBill(entry._id, req.user?.employeeObjectId);
             res.status(201).json(presentEntry(entry));
         } catch (error) {
             entry.status = 'draft';
             await entry.save();
+            await notifyDraftBill({ entry, actorId: entry.createdBy || req.user?.id });
             throw error;
         }
     } catch (error) {
@@ -729,6 +740,7 @@ export async function approveStockEntry(req, res) {
             claimed.markModified('lines');
             await claimed.save();
             await closeStockApproval(claimed._id, 'Approved', req.user?.employeeObjectId);
+            await closeDraftBill(claimed._id, req.user?.employeeObjectId);
             res.json(presentEntry(claimed));
         } catch (error) {
             claimed.status = 'pending';
@@ -778,6 +790,7 @@ export async function rejectStockEntry(req, res) {
                 if (removable.length) await InventoryItem.deleteMany({ _id: { $in: removable } });
             }
             await closeStockApproval(entry._id, 'Rejected', req.user?.employeeObjectId);
+            await closeDraftBill(entry._id, req.user?.employeeObjectId);
             await InventoryStockEntry.deleteOne({ _id: entry._id });
             res.json({ ok: true });
         } catch (error) {
@@ -828,6 +841,7 @@ export async function deleteStockEntry(req, res) {
                 });
                 await closeStockApproval(entry._id, 'Rejected', req.user?.employeeObjectId);
             }
+            await closeDraftBill(entry._id, req.user?.employeeObjectId);
             await InventoryStockEntry.deleteOne({ _id: entry._id });
         } catch (error) {
             if (reversed) {

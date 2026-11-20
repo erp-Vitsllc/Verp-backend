@@ -102,6 +102,55 @@ export async function notifyStockApproval({ entry, officer, senderName }) {
     }
 }
 
+export const INVENTORY_BILL_DRAFT = 'Inventory Bill Draft';
+export const DRAFT_BILL_MESSAGE = 'Bill you created is on draft. Submit it.';
+
+export async function notifyDraftBill({ entry, actorId }) {
+    if (!entry?._id) return;
+    const assignee = entry.createdBy || actorId;
+    if (!assignee) return;
+    const bill = entry.billNo || 'Draft bill';
+    try {
+        await syncDashboardAction({
+            requestId: entry._id,
+            requestType: INVENTORY_BILL_DRAFT,
+            assignedTo: assignee,
+            status: 'Pending',
+            requestedByName: 'System',
+            subjectName: bill,
+            extra1: bill,
+            extra2: DRAFT_BILL_MESSAGE,
+            extra3: JSON.stringify({ path: `/inventory/bills?bill=${entry._id}` }),
+        });
+    } catch (error) {
+        console.error('Draft bill notification failed:', error);
+    }
+}
+
+export async function closeDraftBill(entryId, actorEmployeeId) {
+    if (!entryId) return;
+    try {
+        await syncDashboardAction({
+            requestId: entryId,
+            requestType: INVENTORY_BILL_DRAFT,
+            status: 'Approved',
+            actionedBy: actorEmployeeId || undefined,
+        });
+    } catch (error) {
+        console.error('Could not close the draft bill notification:', error);
+    }
+}
+
+/** Open a task for each of this viewer's draft bills, and leave submitted bills alone. */
+export async function syncViewerDraftBills(rows, viewerUserId) {
+    const drafts = (rows || []).filter((row) => (
+        row?.status === 'draft'
+        && viewerUserId
+        && String(row.createdBy || '') === String(viewerUserId)
+    ));
+    await Promise.all(drafts.map((row) => notifyDraftBill({ entry: row, actorId: viewerUserId })));
+}
+
 export async function closeStockApproval(entryId, status, actorEmployeeId) {
     if (!entryId) return;
     try {

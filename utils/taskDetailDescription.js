@@ -123,6 +123,7 @@ function whatToDo(typeKey, facts) {
     if (typeKey.includes("profile activation")) return "Review this profile activation.";
     if (typeKey.includes("salary")) return "Review this salary request.";
     if (typeKey.includes("certificate")) return "Prepare the salary certificate.";
+    if (typeKey === "inventory bill draft") return "Bill you created is on draft. Submit it.";
     return facts.taskName || "Review this request.";
 }
 

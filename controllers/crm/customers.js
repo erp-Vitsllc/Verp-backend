@@ -2,13 +2,12 @@ import mongoose from 'mongoose';
 import CrmCustomer from '../../models/crm/CrmCustomer.js';
 import CrmCustomerContact from '../../models/crm/CrmCustomerContact.js';
 import DeliveryOrder from '../../models/inventory/DeliveryOrder.js';
-import InventoryItem from '../../models/inventory/InventoryItem.js';
-import InventoryStockEntry from '../../models/inventory/InventoryStockEntry.js';
 import WorkOrder from '../../models/WorkOrder.js';
 import ZohoCustomer from '../../models/ZohoCustomer.js';
 import { fetchCustomerInvoices, fetchVendorContact, getZohoOrganizationId } from '../../services/zohoService.js';
 import { escapeRegex } from '../../utils/zohoListQuery.js';
 import { dubaiDateKey } from '../../utils/workOrderNumber.js';
+import { priceDeliveries } from '../inventory/deliveries.js';
 import { cleanName, httpError, listLimit, nameKey, sendError } from '../inventory/http.js';
 import {
     mergeCustomerContacts,
@@ -667,62 +666,6 @@ export async function listCustomerInvoices(req, res) {
     }
 }
 
-function priceOnDate(prices, when) {
-    let chosen = null;
-    for (const row of prices) {
-        if (!when || row.time <= when) chosen = row.unitPrice;
-        else break;
-    }
-    return chosen;
-}
-
-async function deliveryPriceBooks(rows) {
-    const itemIds = [...new Set(rows.flatMap((delivery) => (
-        (delivery.lines || []).map((line) => String(line.inventoryItemId || '')).filter((id) => mongoose.isValidObjectId(id))
-    )))];
-    if (!itemIds.length) return new Map();
-    const [entries, items] = await Promise.all([
-        InventoryStockEntry.find({
-            status: 'posted',
-            'lines.itemId': { $in: itemIds },
-        }).select('purchaseDate postedAt lines.itemId lines.unitPrice').lean(),
-        InventoryItem.find({ _id: { $in: itemIds } }).select('lastStockPrice').lean(),
-    ]);
-    const books = new Map(itemIds.map((id) => [id, { prices: [], fallback: 0 }]));
-    items.forEach((item) => {
-        const book = books.get(String(item._id));
-        if (book) book.fallback = Number(item.lastStockPrice) || 0;
-    });
-    entries.forEach((entry) => {
-        const time = entry.purchaseDate
-            ? new Date(entry.purchaseDate).getTime()
-            : (entry.postedAt ? new Date(entry.postedAt).getTime() : 0);
-        (entry.lines || []).forEach((line) => {
-            const book = books.get(String(line.itemId || ''));
-            if (!book) return;
-            book.prices.push({ time, unitPrice: Number(line.unitPrice) || 0 });
-        });
-    });
-    books.forEach((book) => {
-        book.prices.sort((left, right) => left.time - right.time);
-        if (!book.fallback && book.prices.length) book.fallback = book.prices[book.prices.length - 1].unitPrice;
-    });
-    return books;
-}
-
-function deliveryAmount(delivery, books) {
-    const deliveryDate = delivery.doDate || dubaiDateKey(delivery.createdAt || new Date());
-    const when = /^\d{4}-\d{2}-\d{2}$/.test(deliveryDate)
-        ? new Date(`${deliveryDate}T23:59:59`).getTime()
-        : 0;
-    const total = (delivery.lines || []).reduce((sum, line) => {
-        const book = books.get(String(line.inventoryItemId || ''));
-        const unitPrice = book ? (priceOnDate(book.prices, when) ?? book.fallback) : 0;
-        return sum + (Number(line.quantity) || 0) * unitPrice;
-    }, 0);
-    return Math.round(total * 100) / 100;
-}
-
 export async function listCustomerDeliveries(req, res) {
     try {
         const row = await resolveCustomerRecord(req.params.id);
@@ -740,20 +683,27 @@ export async function listCustomerDeliveries(req, res) {
             })
                 .sort({ createdAt: -1 })
                 .limit(200)
-                .select('deliveryNo deliveryType status doDate projectName customerName lines stockApplied createdAt')
+                .select('deliveryNo deliveryType status doDate projectName workOrderNo customerName deliveryAddress contactPersonName contactNumber note lines stockApplied createdAt')
                 .lean()
             : [];
-        const books = await deliveryPriceBooks(rows);
+        const priced = await priceDeliveries(rows);
         res.json({
-            deliveries: rows.map((delivery) => ({
+            deliveries: rows.map((delivery, index) => ({
                 id: String(delivery._id),
                 deliveryNo: delivery.deliveryNo,
                 deliveryType: delivery.deliveryType,
                 status: delivery.status,
                 doDate: delivery.doDate || dubaiDateKey(delivery.createdAt || new Date()),
                 projectName: delivery.projectName || '',
+                workOrderNo: delivery.workOrderNo || '',
                 customerName: delivery.customerName || '',
-                amount: deliveryAmount(delivery, books),
+                deliveryAddress: delivery.deliveryAddress || '',
+                contactPersonName: delivery.contactPersonName || '',
+                contactNumber: delivery.contactNumber || '',
+                note: delivery.note || '',
+                createdAt: delivery.createdAt,
+                lines: priced[index].lines,
+                amount: priced[index].amount,
             })),
         });
     } catch (error) {

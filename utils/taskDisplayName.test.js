@@ -312,6 +312,18 @@ test("a task typed by hand keeps the name that was entered", () => {
     );
 });
 
+test("a draft inventory bill is named by its bill number", () => {
+    assert.deepEqual(
+        formatTaskDisplayParts({
+            requestType: "Inventory Bill Draft",
+            extra1: "ABV123",
+            extra2: "Bill you created is on draft. Submit it.",
+            subjectName: "ABV123",
+        }),
+        { title: "ABV123", subject: "" },
+    );
+});
+
 test("pending salary enrollment names the employee under Pending Enrollment", () => {
     assert.deepEqual(
         formatTaskDisplayParts({

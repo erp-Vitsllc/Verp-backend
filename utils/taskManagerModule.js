@@ -101,6 +101,7 @@ export function moduleForRequestType(requestType, extraText = "") {
     if (low.includes("reward")) return { module: "reward", label: "Reward", path: "/HRM/Reward" };
     if (low.includes("salary")) return { module: "salary", label: "Salary", path: "/HRM/Salary" };
     if (low.includes("utility")) return { module: "utility", label: "Utility Bills", path: "/HRM/Asset/UtilityBills" };
+    if (low.includes("inventory bill")) return { module: "inventory", label: "Bills", path: "/inventory/bills" };
     if (low.includes("payment")) return { module: "payment", label: "Payments", path: "/Accounts/Payments" };
     if (low.includes("company")) return { module: "company", label: "Company", path: "/Company" };
     if (low.includes("asset") || low.includes("tool")) {

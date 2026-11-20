@@ -164,6 +164,16 @@ test("attendance description lists the request, times, duration, and OT hours", 
     assert.match(ot, /Reason: Shutdown work/);
 });
 
+test("a draft inventory bill tells the creator to submit it", () => {
+    const description = composeTaskDescription({
+        requestType: "Inventory Bill Draft",
+        extra1: "ABV123",
+        extra2: "Bill you created is on draft. Submit it.",
+        taskName: "ABV123",
+    });
+    assert.match(description, /What to do: Bill you created is on draft\. Submit it\./);
+});
+
 test("a handwritten task keeps its own description", () => {
     assert.equal(composeTaskDescription({
         requestType: "Workflow Task",
