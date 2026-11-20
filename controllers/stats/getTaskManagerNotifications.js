@@ -798,16 +798,16 @@ function isGeneralHubRequest(requestType) {
     return isGeneralHubRequestType(requestType);
 }
 
-/** One approval step, created by the system (expiry and the same kind of reminder). */
+/** One step, created by the system (expiry, a draft bill, and the same kind of reminder). */
 function isSingleStepSystemTask(requestType) {
     const type = String(requestType || "");
-    return /expiry|not renew|card deleted|value missing|asset overdue|profile incomplete|payment reminder|fuel reminder/i.test(type);
+    return /expiry|not renew|card deleted|value missing|asset overdue|profile incomplete|payment reminder|fuel reminder|inventory bill draft/i.test(type);
 }
 
 /**
- * System Task: system-created, one approval step (expiry and similar reminders).
- * Workflow Task: more than one approval step or approver, whether the system or a person started it.
- * General Task: only Early Salary, Salary Certificate, and Assets from the dashboard request row.
+ * System Task: system-created, one step (expiry, a draft bill, and the same kind of reminder).
+ * Workflow Task: an approval flow, whether the system or a person started it.
+ * General Task: Create New Task, and Early Salary, Salary Certificate, and Assets from the dashboard.
  */
 export function taskCategory(requestType, extra = "") {
     if (isGeneralHubRequest(requestType, extra)) return "General Task";
