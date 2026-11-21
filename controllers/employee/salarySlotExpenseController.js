@@ -34,6 +34,17 @@ function money(value) {
     return Math.round(n * 100) / 100;
 }
 
+/** Net salary shown on the slot. Same order as the slot list. */
+function slotNetSalary(pay) {
+    if (pay?.netSalaryPayable != null && pay.netSalaryPayable !== '') {
+        return money(pay.netSalaryPayable);
+    }
+    if (pay?.actualSalary != null && pay.actualSalary !== '') {
+        return money(pay.actualSalary);
+    }
+    return money(pay?.monthlySalary);
+}
+
 function activeZohoAccount(salary) {
     const history = Array.isArray(salary?.salaryHistory) ? salary.salaryHistory : [];
     const active = history.find((row) => !row?.toDate) || history[history.length - 1];
@@ -106,12 +117,12 @@ async function slotExpenseLines(doc, monthKey) {
         const pay = figures.get(personKey(employeeId)) || {};
         const account = activeZohoAccount(salaryByCode.get(personKey(employeeId)));
         const name = `${emp?.firstName || ''} ${emp?.lastName || ''}`.trim() || employeeId;
-        const amount = money(pay.zohoSalary);
+        const amount = slotNetSalary(pay);
         return {
             employeeId: String(emp?.employeeId || employeeId).trim(),
             name,
-            accountId: String(emp?.zohoCategoryAccountId || '').trim(),
-            accountName: String(emp?.zohoCategoryAccountName || '').trim(),
+            accountId: account.zohoAccountId,
+            accountName: account.zohoAccountName,
             zohoCategoryOrganizationId: String(emp?.zohoCategoryOrganizationId || '').trim(),
             employeeAccountId: account.zohoAccountId,
             employeeAccountName: account.zohoAccountName,

@@ -256,7 +256,7 @@ async function readPurchase(body, { posting }) {
             purchaseSource,
             vendorId: null,
             purchaseDate: null,
-            billNo: '',
+            billNo: cleanName(body?.billNo),
             lpoNo: '',
             note: clipNote(body?.note),
         };
