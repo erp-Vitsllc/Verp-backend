@@ -596,6 +596,7 @@ export async function alignOpenFineDashboardRows(actions = [], overlaysByAction 
                 markFineOverlayClosed(overlay);
                 continue;
             }
+            if (String(seed.fineStatus || "") === "Draft") continue;
             const members = byBase.get(fineBaseId(seed.fineId)) || [seed];
             const openFine = members.find((fine) => String(fine._id) === String(action.requestId) && fineStillNeedsInbox(fine))
                 || members.find((fine) => fineStillNeedsInbox(fine));
@@ -613,9 +614,10 @@ export async function alignOpenFineDashboardRows(actions = [], overlaysByAction 
             }
             const person = fineStagePerson(openFine, hods);
             if (!person?.employeeObjectId || sameFineAssignee(action, person)) continue;
+            const previousName = String(overlay?.assigneeName || "").trim();
             action.assignedTo = person.employeeObjectId;
             action.assignedToEmpId = person.employeeId;
-            assigneeWrites.push({ action, person, overlay });
+            assigneeWrites.push({ action, person, overlay, previousName });
             if (overlay && !overlayWasReassigned(overlay)) {
                 overlay.assignee = person.employeeObjectId;
                 overlay.assigneeEmpId = person.employeeId;
@@ -666,18 +668,31 @@ export async function alignOpenFineDashboardRows(actions = [], overlaysByAction 
             }))));
             const overlayWrites = assigneeWrites.filter(({ overlay }) => overlay?._id && !overlayWasReassigned(overlay));
             if (overlayWrites.length) {
-                writes.push(TaskManagerTask.bulkWrite(overlayWrites.map(({ overlay, person }) => ({
-                    updateOne: {
-                        filter: { _id: overlay._id },
-                        update: {
-                            $set: {
-                                assignee: person.employeeObjectId,
-                                assigneeEmpId: person.employeeId,
-                                ...(person.name ? { assigneeName: person.name } : {}),
+                writes.push(TaskManagerTask.bulkWrite(overlayWrites.map(({ overlay, person, previousName }) => {
+                    const nextName = String(person.name || "").trim();
+                    const fromName = String(previousName || "").trim();
+                    const history = nextName && fromName && fromName.toLowerCase() !== nextName.toLowerCase()
+                        ? {
+                            event: "Reassigned",
+                            detail: `Reassigned from ${fromName} to ${nextName}.`,
+                            actorName: fromName,
+                            createdAt: new Date(),
+                        }
+                        : null;
+                    return {
+                        updateOne: {
+                            filter: { _id: overlay._id },
+                            update: {
+                                $set: {
+                                    assignee: person.employeeObjectId,
+                                    assigneeEmpId: person.employeeId,
+                                    ...(person.name ? { assigneeName: person.name } : {}),
+                                },
+                                ...(history ? { $push: { history } } : {}),
                             },
                         },
-                    },
-                }))));
+                    };
+                })));
             }
         }
         const finishedOverlayIds = [...closeByStatus.values()].flat().concat(dismissIds);
@@ -798,14 +813,14 @@ function isGeneralHubRequest(requestType) {
     return isGeneralHubRequestType(requestType);
 }
 
-/** One step, created by the system (expiry, a draft bill, and the same kind of reminder). */
+/** One step, created by the system (expiry and the same kind of reminder). */
 function isSingleStepSystemTask(requestType) {
     const type = String(requestType || "");
-    return /expiry|not renew|card deleted|value missing|asset overdue|profile incomplete|payment reminder|fuel reminder|inventory bill draft/i.test(type);
+    return /expiry|not renew|card deleted|value missing|asset overdue|profile incomplete|payment reminder|fuel reminder/i.test(type);
 }
 
 /**
- * System Task: system-created, one step (expiry, a draft bill, and the same kind of reminder).
+ * System Task: system-created, one step (expiry and the same kind of reminder).
  * Workflow Task: an approval flow, whether the system or a person started it.
  * General Task: Create New Task, and Early Salary, Salary Certificate, and Assets from the dashboard.
  */

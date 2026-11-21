@@ -336,6 +336,40 @@ export const updateLoanDetails = async (req, res) => {
 
         const savedLoan = await loan.save();
 
+        try {
+            const { syncDashboardAction } = await import("../../utils/syncDashboard.js");
+            const { requesterNameForActor } = await import("../../utils/employeeWorkflowTask.js");
+            const creatorId = req.user?.employeeObjectId || req.user?.id || savedLoan.employeeObjectId;
+            const requesterName = await requesterNameForActor(creatorId) || String(req.user?.name || "").trim();
+            const kind = String(type || savedLoan.type || "Loan");
+            const subjectEmployee = employeeBasic || await getCompleteEmployee(savedLoan.employeeObjectId);
+            if (String(savedLoan.status || "") === "Draft") {
+                await syncDashboardAction({
+                    requestId: savedLoan._id,
+                    requestType: "Loan",
+                    assignedTo: creatorId,
+                    status: "Pending",
+                    subjectEmployee,
+                    requestedByName: requesterName,
+                    extra1: `AED ${amount || savedLoan.amount}`,
+                    extra2: `${kind} you created is on draft. Submit it.`,
+                });
+            } else if (oldStatus === "Draft" && reportee?._id) {
+                await syncDashboardAction({
+                    requestId: savedLoan._id,
+                    requestType: "Loan",
+                    assignedTo: reportee._id,
+                    status: "Pending",
+                    subjectEmployee,
+                    requestedByName: requesterName,
+                    extra1: `AED ${amount || savedLoan.amount}`,
+                    extra2: `${duration || savedLoan.duration} Months`,
+                });
+            }
+        } catch (taskError) {
+            console.error("[UpdateLoan] Workflow task failed:", taskError);
+        }
+
         // Super User full edit on post-management loans — refresh acknowledgment PDF.
         if (isApproved && isSuperUser) {
             try {

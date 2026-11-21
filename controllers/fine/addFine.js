@@ -460,7 +460,28 @@ export const addFine = async (req, res) => {
             console.log(`[AddFine] Bulk Processing Complete. Created: ${createdFines.length}, Errors: ${errors.length}`);
 
             // === GROUP DASHBOARD ACTION & EMAIL ===
-            if (createdFines.length > 0 && String(createdFines[0].fineStatus) !== 'Draft') {
+            if (createdFines.length > 0 && String(createdFines[0].fineStatus) === 'Draft') {
+                try {
+                    const { syncDashboardAction } = await import("../../utils/syncDashboard.js");
+                    const { requesterNameForActor } = await import("../../utils/employeeWorkflowTask.js");
+                    const kind = fineDashboardRequest(createdFines);
+                    const primary = kind.primary || createdFines[0];
+                    const creatorId = req.user?.employeeObjectId || req.user?._id || req.user?.id;
+                    const requesterName = await requesterNameForActor(creatorId) || String(req.user?.name || "").trim();
+                    await syncDashboardAction({
+                        requestId: primary._id,
+                        requestType: kind.requestType,
+                        assignedTo: creatorId,
+                        status: 'Pending',
+                        subjectName: kind.isGroup ? kind.subjectName : undefined,
+                        requestedByName: requesterName,
+                        extra1: primary.fineType,
+                        extra2: 'Fine you created is on draft. Submit it.',
+                    });
+                } catch (err) {
+                    console.error('[AddFine] Draft workflow task failed:', err);
+                }
+            } else if (createdFines.length > 0 && String(createdFines[0].fineStatus) !== 'Draft') {
                 const firstFine = createdFines[0];
                 const reporteeStep = firstFine.workflow?.find(w => w.status === 'Pending');
 
@@ -659,7 +680,26 @@ export const addFine = async (req, res) => {
         const savedFine = await fine.save();
 
         // === SYNC DASHBOARD ACTION (SINGLE) ===
-        if (savedFine.fineStatus !== 'Draft') {
+        if (savedFine.fineStatus === 'Draft') {
+            try {
+                const { syncDashboardAction } = await import("../../utils/syncDashboard.js");
+                const { requesterNameForActor } = await import("../../utils/employeeWorkflowTask.js");
+                const creatorId = req.user?.employeeObjectId || req.user?._id || req.user?.id;
+                const requesterName = await requesterNameForActor(creatorId) || String(req.user?.name || "").trim();
+                await syncDashboardAction({
+                    requestId: savedFine._id,
+                    requestType: 'Fine',
+                    assignedTo: creatorId,
+                    status: 'Pending',
+                    subjectEmployee: employee && employeeId !== 'PENDING' ? employee : null,
+                    requestedByName: requesterName,
+                    extra1: savedFine.fineType,
+                    extra2: 'Fine you created is on draft. Submit it.',
+                });
+            } catch (err) {
+                console.error('[AddFine] Draft workflow task failed:', err);
+            }
+        } else if (savedFine.fineStatus !== 'Draft') {
             const { syncDashboardAction } = await import("../../utils/syncDashboard.js");
             const reporteeStep = savedFine.workflow?.find(w => w.status === 'Pending');
             if (reporteeStep && fineStillNeedsApprovalInbox(savedFine)) {

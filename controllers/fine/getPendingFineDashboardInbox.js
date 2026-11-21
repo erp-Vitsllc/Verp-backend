@@ -233,6 +233,14 @@ export const getPendingFineDashboardInbox = async (req, res) => {
         const actionableRows = [];
         for (const da of liveRows) {
             const fine = fineById[String(da.requestId)];
+            if (String(fine?.fineStatus || "") === "Draft") {
+                const requestKey = String(da.requestId);
+                if (!seenRequestIds.has(requestKey)) {
+                    seenRequestIds.add(requestKey);
+                    actionableRows.push(da);
+                }
+                continue;
+            }
             const viewerCanAct = await viewerCanActOnFineNotification(ctx, fine, accountsHod);
             if (!fineStillNeedsInbox(fine) || !viewerCanAct) {
                 if (da._id) idsToDismiss.push(da._id);

@@ -154,6 +154,15 @@ export const getPendingLoanDashboardInbox = async (req, res) => {
 
         for (const da of liveRows) {
             const loan = loanById[String(da.requestId)];
+            const loanStatus = String(loan?.status || loan?.approvalStatus || "");
+            if (loanStatus === "Draft") {
+                const requestKey = String(da.requestId);
+                if (!seenRequestIds.has(requestKey)) {
+                    seenRequestIds.add(requestKey);
+                    actionableRows.push(da);
+                }
+                continue;
+            }
             const stillNeeded = loanStillNeedsInboxAction(loan);
             const assignedToViewer = stillNeeded
                 ? await viewerIsCurrentLoanAssignee(loan, ctx.relevantIds, ctx.employeeIdCode)

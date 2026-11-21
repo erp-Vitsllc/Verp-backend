@@ -179,8 +179,9 @@ export const respondToPayment = async (req, res) => {
                         }
 
                         const allPayments = await Payment.find({
+                            relatedEntityType: { $in: ['Loan', 'Advance'] },
+                            status: 'Completed',
                             $or: [{ relatedEntityId: loan._id }, { referenceId: loan.loanId }],
-                            status: 'Completed'
                         });
                         const totalPaid = allPayments.reduce((sum, p) => sum + parseFloat(p.amount || 0), 0);
                         loan.paidAmount = totalPaid;

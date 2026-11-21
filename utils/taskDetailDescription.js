@@ -110,6 +110,7 @@ function whatToDo(typeKey, facts) {
     if (typeKey === "utility bill payment reminder") return `Pay the ${facts.utility || "utility"} bill.`;
     if (typeKey === "utility bill payment") return `Review and pay the ${facts.utility || "utility"} bill.`;
     if (typeKey === "utility entry status change") return `Activate or deactivate the ${facts.utility || "utility"} account.`;
+    if (/you created is on draft/i.test(text(facts.instruction))) return text(facts.instruction);
     if (typeKey === "fine" || typeKey === "group fine request" || typeKey === "employee fine request") return "Review this fine.";
     if (typeKey === "loan" || typeKey.includes("loan")) return "Review this loan request.";
     if (typeKey.includes("advance")) return "Review this advance request.";
@@ -123,7 +124,9 @@ function whatToDo(typeKey, facts) {
     if (typeKey.includes("profile activation")) return "Review this profile activation.";
     if (typeKey.includes("salary")) return "Review this salary request.";
     if (typeKey.includes("certificate")) return "Prepare the salary certificate.";
-    if (typeKey === "inventory bill draft") return "Bill you created is on draft. Submit it.";
+    if (typeKey === "inventory bill draft") {
+        return text(facts.instruction) || "Bill you created is on draft. Submit it.";
+    }
     return facts.taskName || "Review this request.";
 }
 
@@ -193,7 +196,11 @@ export function composeTaskDescription({
         rewardType: text(source.rewardType),
         paymentType: text(source.paymentType || (typeKey === "payment approval" ? extra1 : "")),
         loanType: text(source.loanType),
-        amount: money(source.amount || meta.amount || (typeKey === "fine" || typeKey === "loan" ? extra2 : "")),
+        amount: money(source.amount || meta.amount || (
+            (typeKey === "fine" || typeKey === "loan") && !/you created is on draft/i.test(text(extra2))
+                ? extra2
+                : ""
+        )),
         account: text(source.accountNo || utility.account),
         utility: text(utility.utility && /utility/.test(typeKey) ? utility.utility : ""),
         month: text(utility.month && /utility/.test(typeKey) ? utility.month : ""),
@@ -204,6 +211,9 @@ export function composeTaskDescription({
         starts: text(source.monthStart),
         reference: text(source.reference),
         requestedBy: text(requestedBy),
+        instruction: typeKey === "inventory bill draft" || /you created is on draft/i.test(text(extra2))
+            ? text(extra2)
+            : "",
         reason: text(source.reason || comment),
         status: text(source.status),
     };

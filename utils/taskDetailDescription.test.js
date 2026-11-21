@@ -164,6 +164,26 @@ test("attendance description lists the request, times, duration, and OT hours", 
     assert.match(ot, /Reason: Shutdown work/);
 });
 
+test("a draft fine tells the creator to submit it", () => {
+    const description = composeTaskDescription({
+        requestType: "Fine",
+        extra1: "Traffic",
+        extra2: "Fine you created is on draft. Submit it.",
+        taskName: "Traffic",
+    });
+    assert.match(description, /What to do: Fine you created is on draft\. Submit it\./);
+});
+
+test("a submitted inventory bill tells the next employee what to do", () => {
+    const description = composeTaskDescription({
+        requestType: "Inventory Bill Draft",
+        extra1: "ABV123",
+        extra2: "Akhila Prasad submitted this bill for your approval.",
+        taskName: "ABV123",
+    });
+    assert.match(description, /What to do: Akhila Prasad submitted this bill for your approval\./);
+});
+
 test("a draft inventory bill tells the creator to submit it", () => {
     const description = composeTaskDescription({
         requestType: "Inventory Bill Draft",

@@ -2,6 +2,7 @@ import nodemailer from 'nodemailer';
 import Flowchart from '../../models/Flowchart.js';
 import EmployeeBasic from '../../models/EmployeeBasic.js';
 import { syncDashboardAction } from '../../utils/syncDashboard.js';
+import { finishEmployeeWorkflowTasks, requesterNameForActor } from '../../utils/employeeWorkflowTask.js';
 
 function cleanEmail(value) {
     return String(value || '').trim().toLowerCase();
@@ -40,7 +41,7 @@ function appOrigin() {
     return String(process.env.FRONTEND_URL || process.env.CLIENT_URL || 'http://localhost:3000').replace(/\/$/, '');
 }
 
-async function sendStockApprovalEmail({ officer, senderName, billNo, entryId }) {
+async function sendStockApprovalEmail({ officer, senderName, billNo, entryId, summary = '' }) {
     const email = cleanEmail(officer?.companyEmail);
     if (!email || !email.includes('@')) return;
     const user = process.env.EMAIL_USER;
@@ -61,7 +62,7 @@ async function sendStockApprovalEmail({ officer, senderName, billNo, entryId }) 
         text: [
             `Hello ${officer.employeeName || 'Purchase Officer'},`,
             '',
-            `${senderName || 'An employee'} submitted ${bill} and it is waiting for your approval.`,
+            summary || `${senderName || 'An employee'} submitted ${bill} and it is waiting for your approval.`,
             'Open Item Master to accept or reject it:',
             link,
             '',
@@ -70,21 +71,28 @@ async function sendStockApprovalEmail({ officer, senderName, billNo, entryId }) 
     });
 }
 
-export async function notifyStockApproval({ entry, officer, senderName }) {
+export const INVENTORY_BILL_DRAFT = 'Inventory Bill Draft';
+export const DRAFT_BILL_MESSAGE = 'Bill you created is on draft. Submit it.';
+
+export async function notifyStockApproval({ entry, officer, senderName, kind = 'submit' }) {
     const bill = entry.billNo || 'Stock bill';
     const name = senderName || 'An employee';
-    const path = `/inventory/item-master?stockEntry=${entry._id}`;
+    const edited = kind === 'edit';
+    const summary = edited
+        ? `${name} edited this bill and it is waiting for your approval.`
+        : `${name} submitted this bill for your approval.`;
     if (officer?.empObjectId) {
         try {
             await syncDashboardAction({
                 requestId: entry._id,
-                requestType: 'Stock Approval',
+                requestType: INVENTORY_BILL_DRAFT,
                 assignedTo: officer.empObjectId,
                 status: 'Pending',
                 requestedByName: name,
-                extra1: `Stock approval · ${bill}`,
-                extra2: `${name} submitted stock for your approval.`,
-                extra3: JSON.stringify({ path }),
+                subjectName: bill,
+                extra1: edited ? `Bill edit · ${bill}` : bill,
+                extra2: summary,
+                extra3: JSON.stringify({ path: `/inventory/bills?bill=${entry._id}` }),
             });
         } catch (error) {
             console.error('Stock approval notification failed:', error);
@@ -96,27 +104,26 @@ export async function notifyStockApproval({ entry, officer, senderName }) {
             senderName: name,
             billNo: entry.billNo,
             entryId: entry._id,
+            summary,
         });
     } catch (error) {
         console.error('Stock approval email failed:', error);
     }
 }
 
-export const INVENTORY_BILL_DRAFT = 'Inventory Bill Draft';
-export const DRAFT_BILL_MESSAGE = 'Bill you created is on draft. Submit it.';
-
 export async function notifyDraftBill({ entry, actorId }) {
     if (!entry?._id) return;
     const assignee = entry.createdBy || actorId;
     if (!assignee) return;
     const bill = entry.billNo || 'Draft bill';
+    const requestedByName = await requesterNameForActor(assignee);
     try {
         await syncDashboardAction({
             requestId: entry._id,
             requestType: INVENTORY_BILL_DRAFT,
             assignedTo: assignee,
             status: 'Pending',
-            requestedByName: 'System',
+            requestedByName,
             subjectName: bill,
             extra1: bill,
             extra2: DRAFT_BILL_MESSAGE,
@@ -127,14 +134,22 @@ export async function notifyDraftBill({ entry, actorId }) {
     }
 }
 
-export async function closeDraftBill(entryId, actorEmployeeId) {
+export async function closeDraftBill(entryId, actorEmployeeId, outcome = 'Approved') {
     if (!entryId) return;
+    const rejected = String(outcome || '') === 'Rejected';
     try {
+        const actorName = await requesterNameForActor(actorEmployeeId);
         await syncDashboardAction({
             requestId: entryId,
             requestType: INVENTORY_BILL_DRAFT,
-            status: 'Approved',
+            status: rejected ? 'Rejected' : 'Approved',
             actionedBy: actorEmployeeId || undefined,
+        });
+        await finishEmployeeWorkflowTasks(entryId, INVENTORY_BILL_DRAFT, {
+            taskStatus: rejected ? 'Rejected' : 'Completed',
+            event: rejected ? 'Rejected' : 'Completed',
+            detail: rejected ? 'The bill was rejected.' : 'The bill is no longer in draft.',
+            actorName,
         });
     } catch (error) {
         console.error('Could not close the draft bill notification:', error);

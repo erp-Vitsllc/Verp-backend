@@ -7,6 +7,8 @@ import { dubaiDateKey } from '../../utils/workOrderNumber.js';
 import { httpError, sendError } from './http.js';
 import { awaitAdminDeletionArchive } from '../../utils/adminDeletionArchiveRun.js';
 import { isReqUserSystemSuperUser } from '../../utils/systemSuperUser.js';
+import { ensureAttachmentPersistedToS3 } from '../../utils/s3Upload.js';
+import { assertPdfAttachment } from './pdfAttachment.js';
 import {
     actorIsPurchaseOfficer,
     closeDeliveryApproval,
@@ -43,6 +45,14 @@ function presentDelivery(row) {
         createdByName: row.createdByName || '',
         createdBy: row.createdBy || '',
         note: row.note || '',
+        attachment: row.attachment?.name || row.attachment?.url
+            ? {
+                name: row.attachment.name || '',
+                mimeType: row.attachment.mimeType || '',
+                publicId: row.attachment.publicId || '',
+                url: row.attachment.url || '',
+            }
+            : null,
         lines: Array.isArray(row.lines) ? row.lines : [],
         stockApplied: Boolean(row.stockApplied),
         editPending: Boolean(row.editPending),
@@ -60,6 +70,14 @@ function presentDelivery(row) {
                 contactPersonName: row.pendingEdit.contactPersonName || '',
                 contactNumber: row.pendingEdit.contactNumber || '',
                 note: row.pendingEdit.note || '',
+                attachment: row.pendingEdit.attachment?.name || row.pendingEdit.attachment?.url
+                    ? {
+                        name: row.pendingEdit.attachment.name || '',
+                        mimeType: row.pendingEdit.attachment.mimeType || '',
+                        publicId: row.pendingEdit.attachment.publicId || '',
+                        url: row.pendingEdit.attachment.url || '',
+                    }
+                    : null,
                 lines: Array.isArray(row.pendingEdit.lines) ? row.pendingEdit.lines : [],
             }
             : null,
@@ -142,6 +160,36 @@ function readDelivery(body) {
         contactNumber,
         note,
         lines,
+    };
+}
+
+async function readDeliveryAttachment(body, previous) {
+    const incoming = body?.attachment;
+    if (!incoming) return { name: '', mimeType: '', publicId: '', url: '' };
+    if (incoming.publicId && !incoming.data) {
+        return {
+            name: clipLine(incoming.name, 240) || previous?.name || '',
+            mimeType: incoming.mimeType || previous?.mimeType || '',
+            publicId: incoming.publicId,
+            url: incoming.url || previous?.url || '',
+        };
+    }
+    assertPdfAttachment(incoming);
+    const stored = await ensureAttachmentPersistedToS3(
+        {
+            name: incoming.name,
+            mimeType: 'application/pdf',
+            data: incoming.data,
+            publicId: incoming.publicId,
+        },
+        { folder: 'inventory-deliveries', fileName: incoming.name || 'delivery.pdf', resourceType: 'auto' },
+    );
+    if (!stored?.publicId) return { name: '', mimeType: '', publicId: '', url: '' };
+    return {
+        name: stored.name || clipLine(incoming.name, 240) || 'delivery.pdf',
+        mimeType: 'application/pdf',
+        publicId: stored.publicId,
+        url: stored.url || '',
     };
 }
 
@@ -336,7 +384,7 @@ export async function listDeliveries(req, res) {
             DeliveryOrder.find()
                 .sort({ createdAt: -1 })
                 .limit(300)
-                .select('deliveryNo deliveryType status doDate projectName workOrderId workOrderNo customerId customerName deliveryAddress contactPersonName contactNumber note lines stockApplied editPending pendingEdit createdBy createdByName createdAt')
+                .select('deliveryNo deliveryType status doDate projectName workOrderId workOrderNo customerId customerName deliveryAddress contactPersonName contactNumber note attachment lines stockApplied editPending pendingEdit createdBy createdByName createdAt')
                 .lean(),
             viewerIsPurchasingOfficer(req),
         ]);
@@ -376,6 +424,7 @@ export async function createDelivery(req, res) {
     let reduced = false;
     try {
         payload = readDelivery(req.body);
+        const attachment = await readDeliveryAttachment(req.body);
         const officer = await findPurchaseOfficer();
         const purchasingOfficer = actorIsPurchaseOfficer(req, officer);
         const submitting = payload.action === 'submit';
@@ -407,6 +456,7 @@ export async function createDelivery(req, res) {
                     contactPersonName: payload.contactPersonName,
                     contactNumber: payload.contactNumber,
                     note: payload.note,
+                    attachment,
                     lines: payload.lines,
                     stockApplied: reduced,
                     approverName: purchasingOfficer && submitting ? (officer?.employeeName || senderName) : '',
@@ -474,6 +524,7 @@ function pendingFromPayload(payload, senderName) {
         contactPersonName: payload.contactPersonName,
         contactNumber: payload.contactNumber,
         note: payload.note,
+        attachment: payload.attachment || { name: '', mimeType: '', publicId: '', url: '' },
         lines: payload.lines,
         submittedByName: senderName,
         submittedAt: new Date(),
@@ -492,6 +543,7 @@ function writePendingOnto(existing, pending, approverName) {
     existing.contactPersonName = pending.contactPersonName || '';
     existing.contactNumber = pending.contactNumber || '';
     existing.note = pending.note || '';
+    if (pending.attachment) existing.attachment = pending.attachment;
     existing.lines = pending.lines || [];
     existing.status = 'Confirmed';
     existing.stockApplied = true;
@@ -653,6 +705,7 @@ async function applyDeliveryUpdate(req, existing, payload) {
     existing.contactPersonName = payload.contactPersonName;
     existing.contactNumber = payload.contactNumber;
     existing.note = payload.note;
+    if (payload.attachment) existing.attachment = payload.attachment;
     existing.lines = payload.lines;
     existing.stockApplied = reduced;
     existing.editPending = false;
@@ -682,10 +735,8 @@ export async function updateDelivery(req, res) {
         if (!mongoose.isValidObjectId(req.params.id)) throw httpError(404, 'Delivery order was not found.');
         const existing = await DeliveryOrder.findById(req.params.id);
         if (!existing || existing.status === 'Confirming') throw httpError(404, 'Delivery order was not found.');
-        if (existing.status === 'Confirmed' || existing.stockApplied) {
-            throw httpError(400, 'A delivered order cannot be edited.');
-        }
         const payload = readDelivery(req.body);
+        payload.attachment = await readDeliveryAttachment(req.body, existing.attachment);
         const officer = await findPurchaseOfficer();
         const purchasingOfficer = actorIsPurchaseOfficer(req, officer);
         const submitting = payload.action === 'submit';
@@ -693,9 +744,7 @@ export async function updateDelivery(req, res) {
         if (!submitting && existing.status !== 'Draft') {
             throw httpError(400, 'Submit this edit so the purchase officer can approve it.');
         }
-        const queuesEdit = submitting
-            && !purchasingOfficer
-            && (existing.status === 'Rejected' || existing.editPending);
+        const queuesEdit = submitting && !purchasingOfficer && existing.status !== 'Draft';
         if (queuesEdit) {
             if (!officer) throw httpError(400, 'Assign an active Purchase Officer on the flowchart before submitting a delivery.');
             if (payload.lines.length) await assertEditStock(existing, payload.lines);

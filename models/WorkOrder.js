@@ -39,8 +39,10 @@ const workOrderSchema = new mongoose.Schema(
             ],
             default: [],
         },
+        attachmentPending: { type: Boolean, default: false },
         lpoAlert: {
             active: { type: Boolean, default: false },
+            kind: { type: String, default: '' },
             message: { type: String, default: '' },
             sentAt: { type: Date },
             sentByName: { type: String, default: '' },

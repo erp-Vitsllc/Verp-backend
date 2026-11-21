@@ -1,10 +1,17 @@
 import mongoose from 'mongoose';
 import WorkOrder from '../models/WorkOrder.js';
 import EmployeeBasic from '../models/EmployeeBasic.js';
+import Flowchart from '../models/Flowchart.js';
 import { dubaiDateKey, formatWorkOrderNo, nextSequenceForYear, workOrderYear } from '../utils/workOrderNumber.js';
-import { lpoNotFilledNotice, sendWorkOrderLpoNotFilledEmail } from '../utils/sendWorkOrderLpoEmail.js';
+import {
+    lpoAttachmentNotice,
+    lpoNotFilledNotice,
+    sendWorkOrderAttachmentRequestEmail,
+    sendWorkOrderLpoNotFilledEmail,
+} from '../utils/sendWorkOrderLpoEmail.js';
 import { syncDashboardAction } from '../utils/syncDashboard.js';
 import DashboardAction from '../models/DashboardAction.js';
+import { finishEmployeeWorkflowTasks } from '../utils/employeeWorkflowTask.js';
 
 const TYPES = new Set(['Standalone', 'Main WO', 'Variation']);
 const STATUSES = new Set(['Draft', 'Not Started', 'Awaiting LPO', 'In Progress', 'Fully Invoiced', 'Completed']);
@@ -72,6 +79,121 @@ async function closeLpoNotFilledNotice(order) {
     } catch (error) {
         console.error('Could not close the LPO notification:', error);
     }
+}
+
+const ATTACHMENT_REQUEST = 'Work Order LPO Attachment';
+
+function actorKeys(req) {
+    return [
+        req.user?.id,
+        req.user?._id,
+        req.user?.employeeId,
+        req.user?.employeeObjectId,
+    ].filter(Boolean).map(String);
+}
+
+function actorMatches(req, ids) {
+    const keys = new Set(actorKeys(req));
+    return (ids || []).some((id) => keys.has(String(id)));
+}
+
+async function findProjectCoordinator() {
+    const row = await Flowchart.findOne({ category: 'projectcoordinator', status: 'Active' })
+        .sort({ updatedAt: -1 })
+        .select('empObjectId employeeId employeeName companyEmail')
+        .lean();
+    if (!row) return null;
+    let employee = null;
+    if (row.empObjectId && mongoose.Types.ObjectId.isValid(String(row.empObjectId))) {
+        employee = await EmployeeBasic.findById(row.empObjectId)
+            .select('firstName lastName companyEmail workEmail status profileStatus employeeId primaryReportee')
+            .populate('primaryReportee', 'companyEmail workEmail status profileStatus')
+            .lean();
+    }
+    if (!employee && row.employeeId) {
+        employee = await EmployeeBasic.findOne({ employeeId: row.employeeId })
+            .select('firstName lastName companyEmail workEmail status profileStatus employeeId primaryReportee')
+            .populate('primaryReportee', 'companyEmail workEmail status profileStatus')
+            .lean();
+    }
+    return employee;
+}
+
+async function closeAttachmentRequest(order, actorName) {
+    if (!order?._id) return;
+    try {
+        await DashboardAction.updateMany(
+            { requestId: order._id, requestType: ATTACHMENT_REQUEST, status: 'Pending' },
+            { $set: { status: 'Dismissed', actionedDate: new Date(), comment: 'Attachment uploaded' } },
+        );
+        await finishEmployeeWorkflowTasks(order._id, ATTACHMENT_REQUEST, {
+            detail: 'Attachment uploaded.',
+            actorName: actorName || 'Employee',
+        });
+    } catch (error) {
+        console.error('Could not close the attachment request:', error);
+    }
+}
+
+async function openAttachmentRequest(order, senderName) {
+    const copy = lpoAttachmentNotice(order.workOrderNo);
+    const coordinator = await findProjectCoordinator();
+    order.attachmentPending = true;
+    order.lpoAlert = {
+        active: true,
+        kind: 'attachment',
+        message: copy.message,
+        sentAt: new Date(),
+        sentByName: senderName || '',
+        sentById: '',
+        attachmentName: '',
+        attachmentMime: '',
+        attachmentData: '',
+        attachmentBytes: 0,
+        emailed: false,
+        emailTo: '',
+        forEmployeeIds: coordinator
+            ? [String(coordinator._id), String(coordinator.employeeId || '')].filter(Boolean)
+            : [],
+    };
+    let emailed = false;
+    let email = '';
+    let message = coordinator
+        ? copy.message
+        : 'Work order created. No active Project Coordinator is set on the flowchart, so the upload notice was not sent.';
+    if (coordinator?._id) {
+        await syncDashboardAction({
+            requestId: order._id,
+            requestType: ATTACHMENT_REQUEST,
+            assignedTo: coordinator._id,
+            status: 'Pending',
+            subjectName: order.customer || '',
+            requestedByName: senderName || '',
+            extra1: copy.extra1,
+            extra2: copy.extra2,
+            extra3: JSON.stringify({
+                path: `/production/work-order?workOrder=${order._id}&section=lpo`,
+            }),
+        });
+        try {
+            const notice = await sendWorkOrderAttachmentRequestEmail({
+                employee: coordinator,
+                workOrderNo: order.workOrderNo,
+                workOrderId: String(order._id),
+            });
+            emailed = Boolean(notice.emailed);
+            email = notice.email || '';
+            message = notice.message || copy.message;
+        } catch (error) {
+            console.error('Work order attachment email failed:', error);
+            message = 'Email could not be sent. The notification was still saved.';
+        }
+    }
+    order.lpoAlert.emailed = emailed;
+    order.lpoAlert.emailTo = email;
+    order.markModified('lpoAlert');
+    await order.save();
+    return { emailed, email, message };
 }
 
 async function openLpoNotFilledNotice(order, senderName) {
@@ -182,12 +304,20 @@ export const createWorkOrder = async (req, res) => {
 
         let receivedLpo = null;
         let notRequiredFile = null;
+        let missingAttachment = false;
         if (lpoMode === 'received') {
             const lpoNo = cleanText(req.body?.lpoNo, 80);
             const lpoDate = cleanText(req.body?.lpoDate, 10);
-            const lpoValue = cleanMoney(req.body?.lpoValue);
+            let lpoValue = cleanMoney(req.body?.lpoValue);
+            if (!(lpoValue > 0) && value > 0) lpoValue = value;
             const file = readAttachment(req.body?.attachment, { required: !intentDraft });
             if (file?.error) return res.status(400).json({ message: file.error });
+            if (!intentDraft && value > 0 && lpoValue && Math.abs(lpoValue - value) > 0.009) {
+                return res.status(400).json({ message: 'LPO value must match the quotation total' });
+            }
+            if (!intentDraft && lpoDate && lpoDate > dubaiDateKey()) {
+                return res.status(400).json({ message: 'LPO date cannot be after today' });
+            }
             if (!intentDraft && (!lpoNo || !/^\d{4}-\d{2}-\d{2}$/.test(lpoDate) || !lpoValue)) {
                 return res.status(400).json({ message: 'LPO number, date, value and attachment are required' });
             }
@@ -203,11 +333,10 @@ export const createWorkOrder = async (req, res) => {
                 };
             }
         } else if (lpoMode === 'not_required' && !intentDraft) {
-            const file = readAttachment(req.body?.attachment, { required: true });
-            if (!file || file.error) {
-                return res.status(400).json({ message: file?.error || 'Attachment is required when LPO is not required' });
-            }
-            notRequiredFile = file;
+            const file = readAttachment(req.body?.attachment, { required: false });
+            if (file?.error) return res.status(400).json({ message: file.error });
+            if (file) notRequiredFile = file;
+            else missingAttachment = true;
         }
 
         if (!intentDraft) {
@@ -301,6 +430,15 @@ export const createWorkOrder = async (req, res) => {
                     }
                     workOrder.markModified('lpoAlert');
                     await workOrder.save();
+                } else if (missingAttachment) {
+                    try {
+                        const notice = await openAttachmentRequest(workOrder, senderName);
+                        emailSent = Boolean(notice.emailed);
+                        emailMessage = notice.message || '';
+                    } catch (error) {
+                        console.error('Work order attachment request failed:', error);
+                        emailMessage = 'The work order was created. The project coordinator notice could not be sent.';
+                    }
                 }
                 return res.status(201).json({
                     workOrder: presentWorkOrder(workOrder),
@@ -357,11 +495,52 @@ export const updateWorkOrder = async (req, res) => {
             if (req.body.status !== 'Draft') order.draftForEmployeeIds = [];
         }
 
+        if (req.body?.convertToProject) {
+            if (order.type !== 'Standalone') {
+                return res.status(400).json({ message: 'Only a standalone work order can be converted to a project' });
+            }
+            order.type = 'Main WO';
+            if (!String(order.projectName || '').trim()) {
+                order.projectName = cleanText(order.customer || order.workOrderNo, 160);
+            }
+        }
+
         if (req.body?.lpoMode) {
             if (!LPO_MODES.has(req.body.lpoMode)) {
                 return res.status(400).json({ message: 'Choose Required, Not required, or LPO received' });
             }
             order.lpoMode = req.body.lpoMode;
+        }
+
+        if (req.body?.uploadPendingAttachment) {
+            if (!order.attachmentPending) {
+                return res.status(400).json({ message: 'This work order does not need an attachment update' });
+            }
+            const allowed = order.lpoAlert?.forEmployeeIds || [];
+            if (allowed.length && !actorMatches(req, allowed)) {
+                return res.status(403).json({ message: 'The project coordinator uploads this attachment' });
+            }
+            const file = readAttachment(req.body.attachment, { required: true });
+            if (!file || file.error) {
+                return res.status(400).json({ message: file?.error || 'Attachment is required' });
+            }
+            const senderName = cleanText(req.user?.name, 120) || 'An employee';
+            order.attachmentPending = false;
+            order.lpoAlert = {
+                ...(order.lpoAlert?.toObject ? order.lpoAlert.toObject() : (order.lpoAlert || {})),
+                active: false,
+                kind: 'attachment',
+                attachmentName: file.name,
+                attachmentMime: file.mime,
+                attachmentData: file.data,
+                attachmentBytes: file.bytes,
+            };
+            order.markModified('lpoAlert');
+            await closeAttachmentRequest(order, senderName);
+            await order.save();
+            return res.status(200).json({
+                workOrder: presentWorkOrder(order, { includeFiles: true }),
+            });
         }
 
         if (req.body?.lpo) {
@@ -370,7 +549,15 @@ export const updateWorkOrder = async (req, res) => {
             }
             const lpoNo = cleanText(req.body.lpo.lpoNo, 80);
             const lpoDate = cleanText(req.body.lpo.lpoDate, 10);
-            const lpoValue = cleanMoney(req.body.lpo.lpoValue);
+            let lpoValue = cleanMoney(req.body.lpo.lpoValue);
+            const quoteTotal = Number(order.value) || 0;
+            if (!(lpoValue > 0) && quoteTotal > 0) lpoValue = quoteTotal;
+            if (quoteTotal > 0 && lpoValue && Math.abs(lpoValue - quoteTotal) > 0.009) {
+                return res.status(400).json({ message: 'LPO value must match the quotation total' });
+            }
+            if (lpoDate && lpoDate > dubaiDateKey()) {
+                return res.status(400).json({ message: 'LPO date cannot be after today' });
+            }
             if (!lpoNo || !/^\d{4}-\d{2}-\d{2}$/.test(lpoDate) || !(lpoValue > 0)) {
                 return res.status(400).json({ message: 'LPO number, date and value are required' });
             }
@@ -394,6 +581,10 @@ export const updateWorkOrder = async (req, res) => {
                 order.markModified('lpoAlert');
             }
             await closeLpoNotFilledNotice(order);
+            if (order.attachmentPending) {
+                order.attachmentPending = false;
+                await closeAttachmentRequest(order, cleanText(req.user?.name, 120) || 'An employee');
+            }
         }
 
         let emailResult = null;
@@ -423,6 +614,10 @@ export const updateWorkOrder = async (req, res) => {
                     email: '',
                     message: 'Email could not be sent. The notification was still saved.',
                 };
+            }
+            if (order.attachmentPending) {
+                order.attachmentPending = false;
+                await closeAttachmentRequest(order, senderName);
             }
             order.lpoAlert = {
                 active: true,

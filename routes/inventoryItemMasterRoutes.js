@@ -11,6 +11,7 @@ import { approveStockEntry, deleteStockEntry, getStockEntry, listInventoryBills,
 import { createVendor, deleteVendor, getVendor, listVendorBills, listVendors, nextVendorCode, previewZohoVendor, syncVendorFromZoho, updateVendor } from '../controllers/inventory/vendors.js';
 import { createVendorContact, deleteVendorContact, markVendorContactPrimary, updateVendorContact } from '../controllers/inventory/vendorContacts.js';
 import { approveDelivery, createDelivery, deleteDelivery, listDeliveries, listItemDeliveryHistory, rejectDelivery, updateDelivery } from '../controllers/inventory/deliveries.js';
+import { getInventoryDashboard } from '../controllers/inventory/dashboard.js';
 import { hasPermission } from '../services/permissionService.js';
 
 const router = express.Router();
@@ -87,6 +88,7 @@ async function viewDelivery(req, res, next) {
     }
 }
 
+router.get('/dashboard', protect, viewDelivery, getInventoryDashboard);
 router.get('/bills', protect, viewDelivery, listInventoryBills);
 router.get('/deliveries', protect, viewDelivery, listDeliveries);
 router.post('/deliveries', protect, viewDelivery, createDelivery);

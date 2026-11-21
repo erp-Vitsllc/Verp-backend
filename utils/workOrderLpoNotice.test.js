@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
-import { lpoNotFilledNotice } from './sendWorkOrderLpoEmail.js';
+import { lpoAttachmentNotice, lpoNotFilledNotice } from './sendWorkOrderLpoEmail.js';
 
 describe('lpoNotFilledNotice', () => {
     it('tells the salesperson the LPO fields were left empty', () => {
@@ -13,5 +13,11 @@ describe('lpoNotFilledNotice', () => {
         assert.match(notice.message, /Sara Ali did not fill the LPO on WO-2026-001 for Emaar Properties/);
         assert.match(notice.message, /Number, date and value were left empty/);
         assert.match(notice.extra2, /Emaar Properties/);
+    });
+
+    it('asks for the missing attachment on that work order', () => {
+        const notice = lpoAttachmentNotice('WO-26-003');
+        assert.equal(notice.message, 'Upload attachment to the work order WO-26-003');
+        assert.equal(notice.extra1, notice.message);
     });
 });

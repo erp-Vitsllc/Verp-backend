@@ -30,7 +30,7 @@ function systemRequestType(requestType, extra2 = "") {
     ) {
         return true;
     }
-    return /expiry|not renew|card deleted|value missing|asset overdue|profile incomplete|payment reminder|fuel reminder|inventory bill draft/i.test(
+    return /expiry|not renew|card deleted|value missing|asset overdue|profile incomplete|payment reminder|fuel reminder/i.test(
         String(requestType || ""),
     );
 }

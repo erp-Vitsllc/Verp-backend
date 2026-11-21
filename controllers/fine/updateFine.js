@@ -808,7 +808,25 @@ export const updateFine = async (req, res) => {
             const stillNeedsApproval = fineStillNeedsApprovalInbox(updatedFine);
             // Never write raw fineStatus (e.g. "Pending Accounts") — DashboardAction
             // only accepts Pending/Approved/Rejected. Invalid status hid Accounts bells.
-            if (!stillNeedsApproval) {
+            if (String(updatedFine.fineStatus || '') === 'Draft') {
+                const { requesterNameForActor } = await import("../../utils/employeeWorkflowTask.js");
+                const creatorId = updatedFine.createdBy?._id || updatedFine.createdBy || req.user?.employeeObjectId || req.user?._id;
+                const requesterName = await requesterNameForActor(creatorId)
+                    || updatedFine.createdBy?.name
+                    || req.user?.name
+                    || '';
+                await syncDashboardAction({
+                    requestId: updatedFine._id,
+                    requestType: reqType,
+                    assignedTo: creatorId,
+                    status: 'Pending',
+                    subjectEmployee: subjectEmp,
+                    subjectName: subjectName,
+                    requestedByName: requesterName,
+                    extra1: updatedFine.fineType,
+                    extra2: 'Fine you created is on draft. Submit it.',
+                });
+            } else if (!stillNeedsApproval) {
                 await syncDashboardAction({
                     requestId: updatedFine._id,
                     requestType: reqType,

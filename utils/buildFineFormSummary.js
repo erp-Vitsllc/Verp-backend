@@ -7,6 +7,7 @@ import {
     resolveCompanyFinePayableAmount,
     resolveEmployeeFinePayableAmount,
 } from './finePayableAmount.js';
+import { loanRecoveredAmount } from './loanRecoveredAmount.js';
 
 const PAID_PAYMENT_STATUSES = ['Completed', 'Paid'];
 const ACTIVE_FINE_STATUSES = ['Approved', 'Active', 'Paid', 'Completed'];
@@ -155,14 +156,7 @@ function getPaidFromPayments(payments, fineDoc) {
 }
 
 function getLoanPaidFromPayments(payments, loanDoc) {
-    const fromPayments = payments
-        .filter(
-            (p) =>
-                (p.relatedEntityType === 'Loan' || p.paymentType === 'Loan' || p.paymentType === 'Advance') &&
-                (String(p.relatedEntityId) === String(loanDoc._id) || p.referenceId === loanDoc.loanId)
-        )
-        .reduce((sum, p) => sum + (parseFloat(p.amount) || 0), 0);
-    return Math.max(fromPayments, parseFloat(loanDoc.paidAmount) || 0);
+    return loanRecoveredAmount(loanDoc, payments);
 }
 
 function isCompanyFineContext(fine, targetEmpId) {
@@ -385,10 +379,9 @@ export async function buildFineFormSummary(fine, options = {}) {
         personalLoan,
         salaryAdvance,
         outstandingBalance:
-            totalAmount -
-            paidAmount +
-            (personalLoan.amount - personalLoan.paid) +
-            (salaryAdvance.amount - salaryAdvance.paid),
+            Math.max(0, totalAmount - paidAmount) +
+            Math.max(0, personalLoan.amount - personalLoan.paid) +
+            Math.max(0, salaryAdvance.amount - salaryAdvance.paid),
         signatures,
         employeeStats: {
             visaExpiry,

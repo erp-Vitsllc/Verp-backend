@@ -13,6 +13,12 @@ import {
     ensureOwnRequestTask,
     isLeaveAttendanceTaskType,
 } from "./ensureRequestTask.js";
+import {
+    assigneeHistoryEntry,
+    employeeWorkflowType,
+    ensureEmployeeWorkflowTask,
+    pushTaskHistory,
+} from "./employeeWorkflowTask.js";
 
 function rowMeta(extra3) {
     if (!extra3) return null;
@@ -37,28 +43,63 @@ function sharesOneTask(requestType) {
 }
 
 /** The next approval stays on the task already open for this activity. */
-async function followActivityAssignee(actionId, assignee, assigneeId, { reopen = false } = {}) {
-    if (!actionId) return;
+async function followActivityAssignee(actionId, assignee, assigneeId, { reopen = false, requestType = "" } = {}) {
+    if (!actionId || !assigneeId) return;
     const name = `${assignee?.firstName || ""} ${assignee?.lastName || ""}`.trim();
-    const set = {
-        assignee: assigneeId,
-        assigneeEmpId: assignee?.employeeId || "",
-        assigneeName: name,
-        status: "Pending",
-        "closeRequest.originalAssigneeId": null,
-        "closeRequest.originalAssigneeEmpId": "",
-        "closeRequest.originalAssigneeName": "",
-        "closeRequest.reassignmentReleased": false,
-        "closeRequest.completionRequestedAt": null,
-        "closeRequest.completionConfirmedAt": null,
-        "closeRequest.reviewPending": false,
-    };
     const filter = {
         sourceDashboardActionId: actionId,
         status: { $nin: ["Cancelled", "Rejected"] },
     };
     if (!reopen) filter.assignee = { $ne: assigneeId };
-    await TaskManagerTask.updateMany(filter, { $set: set });
+    if (!employeeWorkflowType(requestType)) {
+        await TaskManagerTask.updateMany(filter, {
+            $set: {
+                assignee: assigneeId,
+                assigneeEmpId: assignee?.employeeId || "",
+                assigneeName: name,
+                status: "Pending",
+                "closeRequest.originalAssigneeId": null,
+                "closeRequest.originalAssigneeEmpId": "",
+                "closeRequest.originalAssigneeName": "",
+                "closeRequest.reassignmentReleased": false,
+                "closeRequest.completionRequestedAt": null,
+                "closeRequest.completionConfirmedAt": null,
+                "closeRequest.reviewPending": false,
+            },
+        });
+        return;
+    }
+    const tasks = await TaskManagerTask.find(filter);
+    for (const task of tasks) {
+        const previousName = String(task.assigneeName || "").trim();
+        const wasFinished = String(task.status || "") === "Completed";
+        task.assignee = assigneeId;
+        task.assigneeEmpId = assignee?.employeeId || "";
+        task.assigneeName = name;
+        task.status = "Pending";
+        const close = task.closeRequest?.toObject ? task.closeRequest.toObject() : { ...(task.closeRequest || {}) };
+        task.closeRequest = {
+            ...close,
+            originalAssigneeId: null,
+            originalAssigneeEmpId: "",
+            originalAssigneeName: "",
+            reassignmentReleased: false,
+            completionRequestedAt: null,
+            completionConfirmedAt: null,
+            reviewPending: false,
+        };
+        task.markModified("closeRequest");
+        if (wasFinished) {
+            pushTaskHistory(task, {
+                event: "Reopened",
+                detail: name ? `The task is open again with ${name}.` : "The task is open again.",
+                actorName: name || previousName || "Employee",
+                createdAt: new Date(),
+            });
+        }
+        pushTaskHistory(task, assigneeHistoryEntry(previousName, name));
+        await task.save();
+    }
 }
 
 /**
@@ -453,6 +494,9 @@ export const syncDashboardAction = async (data) => {
             if (isLeaveAttendanceTaskType(requestType)) {
                 await ensureOwnRequestTask(separateSaved, assignee);
             }
+            if (employeeWorkflowType(requestType)) {
+                await ensureEmployeeWorkflowTask(separateSaved, assignee, requestedByName);
+            }
             return;
         }
 
@@ -502,7 +546,7 @@ export const syncDashboardAction = async (data) => {
             const revived = target.status !== "Pending" && target.status !== "On Hold";
             await DashboardAction.findByIdAndUpdate(keptId, { $set: updateDoc });
             if (assigneeChanged || revived) {
-                await followActivityAssignee(keptId, assignee, actualAssignedTo, { reopen: true });
+                await followActivityAssignee(keptId, assignee, actualAssignedTo, { reopen: true, requestType });
             }
         } else {
             const created = await DashboardAction.create({
@@ -542,6 +586,12 @@ export const syncDashboardAction = async (data) => {
         if (keptId && isLeaveAttendanceTaskType(requestType)) {
             const fresh = await DashboardAction.findById(keptId);
             await ensureOwnRequestTask(fresh, assignee);
+        }
+        if (keptId && employeeWorkflowType(requestType)) {
+            const fresh = await DashboardAction.findById(keptId);
+            if (fresh && String(fresh.status || "") === "Pending") {
+                await ensureEmployeeWorkflowTask(fresh, assignee, requestedByName);
+            }
         }
 
     } catch (error) {

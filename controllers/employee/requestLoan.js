@@ -303,6 +303,25 @@ export const requestLoan = async (req, res) => {
 
         // 3. Sync with Dashboard Action Table
         const notifyHod = opening?.hod || null;
+        if (!notifyHod && targetStatus === 'Draft') {
+            const { syncDashboardAction } = await import("../../utils/syncDashboard.js");
+            const { requesterNameForActor } = await import("../../utils/employeeWorkflowTask.js");
+            const creatorId = req.user?.employeeObjectId || req.user?.id || employeeBasic._id;
+            const requesterName = await requesterNameForActor(creatorId)
+                || String(req.user?.name || "").trim()
+                || `${employeeBasic.firstName || ""} ${employeeBasic.lastName || ""}`.trim();
+            const kind = String(type || "Loan");
+            await syncDashboardAction({
+                requestId: savedLoan._id,
+                requestType: 'Loan',
+                assignedTo: creatorId,
+                status: 'Pending',
+                subjectEmployee: employeeBasic,
+                requestedByName: requesterName,
+                extra1: `AED ${amount}`,
+                extra2: `${kind} you created is on draft. Submit it.`,
+            });
+        }
         if (notifyHod) {
             const { syncDashboardAction } = await import("../../utils/syncDashboard.js");
             await syncDashboardAction({

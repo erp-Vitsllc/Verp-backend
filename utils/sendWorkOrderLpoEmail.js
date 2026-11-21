@@ -18,6 +18,74 @@ export function lpoNotFilledNotice({ senderName, workOrderNo, customer }) {
     };
 }
 
+export function lpoAttachmentNotice(workOrderNo) {
+    const number = workOrderNo || 'this work order';
+    const message = `Upload attachment to the work order ${number}`;
+    return {
+        message,
+        subject: message,
+        extra1: message,
+        extra2: `Open ${number} and upload the attachment in LPO Details.`,
+    };
+}
+
+function appOrigin() {
+    return String(process.env.FRONTEND_URL || process.env.CLIENT_URL || 'http://localhost:3000').replace(/\/$/, '');
+}
+
+export async function sendWorkOrderAttachmentRequestEmail({
+    employee,
+    workOrderNo,
+    workOrderId,
+}) {
+    const notice = lpoAttachmentNotice(workOrderNo);
+    if (!employee) {
+        return { emailed: false, email: '', message: notice.message, notice };
+    }
+    const { email } = resolveEmployeeEmail(employee);
+    if (!email) {
+        return {
+            emailed: false,
+            email: '',
+            message: 'Project coordinator has no company email. The notification was still saved.',
+            notice,
+        };
+    }
+    const user = process.env.EMAIL_USER;
+    const pass = process.env.EMAIL_PASS;
+    if (!user || !pass) {
+        return {
+            emailed: false,
+            email,
+            message: 'Email is not configured. The notification was still saved.',
+            notice,
+        };
+    }
+    const transporter = nodemailer.createTransport({
+        host: process.env.SMTP_HOST || 'smtp.office365.com',
+        port: Number(process.env.SMTP_PORT || 587),
+        secure: false,
+        auth: { user, pass },
+    });
+    const name = [employee.firstName, employee.lastName].filter(Boolean).join(' ').trim() || 'Project Coordinator';
+    const link = `${appOrigin()}/production/work-order?workOrder=${workOrderId}&section=lpo`;
+    await transporter.sendMail({
+        from: `"VERP" <${user}>`,
+        to: email,
+        subject: notice.subject,
+        text: [
+            `Hello ${name},`,
+            '',
+            notice.message,
+            'Open the work order and upload the attachment in LPO Details:',
+            link,
+            '',
+            'VERP',
+        ].join('\n'),
+    });
+    return { emailed: true, email, message: `Email sent to ${email}.`, notice };
+}
+
 export async function sendWorkOrderLpoNotFilledEmail({
     salespersonId,
     workOrderNo,

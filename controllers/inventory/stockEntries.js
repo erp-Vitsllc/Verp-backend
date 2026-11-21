@@ -2,6 +2,7 @@ import mongoose from 'mongoose';
 import InventoryStockEntry from '../../models/inventory/InventoryStockEntry.js';
 import InventoryVendor from '../../models/inventory/InventoryVendor.js';
 import { ensureAttachmentPersistedToS3 } from '../../utils/s3Upload.js';
+import { assertPdfAttachment } from './pdfAttachment.js';
 import { cleanName, httpError, sendError } from './http.js';
 import InventoryItem from '../../models/inventory/InventoryItem.js';
 import { applyItemStock, createPendingItemRecord } from './itemStock.js';
@@ -187,15 +188,33 @@ function presentLine(line) {
     };
 }
 
+function presentAttachment(file) {
+    if (!file?.publicId && !file?.name && !file?.url) return null;
+    return {
+        name: file.name || '',
+        mimeType: file.mimeType || '',
+        publicId: file.publicId || '',
+        url: file.url || '',
+    };
+}
+
+function presentPendingBill(pending) {
+    if (!pending) return null;
+    return {
+        purchaseSource: pending.purchaseSource === 'manual' ? 'manual' : 'vendor',
+        vendorId: pending.vendorId ? String(pending.vendorId) : '',
+        purchaseDate: pending.purchaseDate ? new Date(pending.purchaseDate).toISOString().slice(0, 10) : '',
+        billNo: pending.billNo || '',
+        lpoNo: pending.lpoNo || '',
+        note: pending.note || '',
+        lines: (pending.lines || []).map(presentLine),
+        attachment: presentAttachment(pending.attachment),
+        submittedByName: pending.submittedByName || '',
+    };
+}
+
 function presentEntry(row) {
-    const attachment = row.attachment?.publicId || row.attachment?.name
-        ? {
-            name: row.attachment.name || '',
-            mimeType: row.attachment.mimeType || '',
-            publicId: row.attachment.publicId || '',
-            url: row.attachment.url || '',
-        }
-        : null;
+    const attachment = presentAttachment(row.attachment);
     return {
         _id: row._id,
         clientRequestId: row.clientRequestId || '',
@@ -208,6 +227,8 @@ function presentEntry(row) {
         lines: (row.lines || []).map(presentLine),
         attachment,
         status: row.status === 'posting' ? 'draft' : row.status,
+        editPending: Boolean(row.editPending),
+        pendingEdit: row.editPending ? presentPendingBill(row.pendingEdit) : null,
         postedAt: row.postedAt || null,
         updatedAt: row.updatedAt,
         submittedByName: row.submittedByName || '',
@@ -298,10 +319,11 @@ async function readAttachment(body, previous) {
             url: incoming.url || previous?.url || '',
         };
     }
+    assertPdfAttachment(incoming);
     const stored = await ensureAttachmentPersistedToS3(
         {
             name: incoming.name,
-            mimeType: incoming.mimeType,
+            mimeType: 'application/pdf',
             data: incoming.data,
             publicId: incoming.publicId,
         },
@@ -310,7 +332,7 @@ async function readAttachment(body, previous) {
     if (!stored?.publicId) return { name: '', mimeType: '', publicId: '', url: '' };
     return {
         name: stored.name || '',
-        mimeType: stored.mimeType || '',
+        mimeType: 'application/pdf',
         publicId: stored.publicId,
         url: stored.url || '',
     };
@@ -389,13 +411,16 @@ function plainLines(lines) {
 }
 
 function summarizePending(row) {
+    const proposed = row.editPending ? row.pendingEdit : null;
+    const lines = proposed?.lines || row.lines;
     return {
         _id: row._id,
-        billNo: row.billNo || '',
-        purchaseSource: row.purchaseSource,
-        submittedByName: row.submittedByName || '',
+        billNo: proposed?.billNo || row.billNo || '',
+        purchaseSource: proposed?.purchaseSource || row.purchaseSource,
+        submittedByName: proposed?.submittedByName || row.submittedByName || '',
         approverName: row.approverName || '',
-        lineCount: row.lines?.length || 0,
+        lineCount: lines?.length || 0,
+        editPending: Boolean(row.editPending),
         updatedAt: row.updatedAt,
     };
 }
@@ -409,7 +434,7 @@ export async function listInventoryBills(req, res) {
             filter.purchaseSource = 'vendor';
         }
         const rows = await InventoryStockEntry.find(filter)
-            .select('status purchaseSource vendorId purchaseDate billNo lpoNo lines attachment updatedAt createdBy')
+            .select('status purchaseSource vendorId purchaseDate billNo lpoNo lines attachment updatedAt createdBy editPending pendingEdit.submittedByName')
             .lean();
         const vendorIds = [...new Set(rows.map((row) => (row.vendorId ? String(row.vendorId) : '')).filter(Boolean))];
         const vendors = vendorIds.length
@@ -430,7 +455,11 @@ export async function listInventoryBills(req, res) {
         });
         const viewerId = String(req.user?.id || req.user?._id || '');
         const deleteReasons = await deleteReasonsByBill(rows);
-        const viewerIsManagement = await actorIsManagement(req);
+        const [viewerIsManagement, officer] = await Promise.all([
+            actorIsManagement(req),
+            findPurchaseOfficer(),
+        ]);
+        const viewerIsPurchaseOfficer = actorIsPurchaseOfficer(req, officer);
         const myDrafts = rows
             .filter((row) => row.status === 'draft' && viewerId && String(row.createdBy || '') === viewerId)
             .map((row) => ({
@@ -443,6 +472,7 @@ export async function listInventoryBills(req, res) {
         res.json({
             myDrafts,
             isManagement: viewerIsManagement,
+            isPurchaseOfficer: viewerIsPurchaseOfficer,
             bills: rows.map((row) => {
                 const value = (row.lines || []).reduce((sum, line) => {
                     const stored = Number(line.total);
@@ -481,6 +511,8 @@ export async function listInventoryBills(req, res) {
                     deleteDisabled: Boolean(deleteReason),
                     deleteReason,
                     stockApplied: row.status === 'posted',
+                    editPending: Boolean(row.editPending),
+                    editSubmittedBy: row.pendingEdit?.submittedByName || '',
                 };
             }),
         });
@@ -538,11 +570,6 @@ export async function saveStockEntry(req, res) {
         } else if (clientRequestId) {
             entry = await InventoryStockEntry.findOne({ clientRequestId });
         }
-        const managementEdit = entry?.status === 'posted' && await actorIsManagement(req);
-        if (entry?.status === 'posted' && !managementEdit) {
-            res.json(presentEntry(entry));
-            return;
-        }
         if (entry?.status === 'posting') {
             throw httpError(409, 'This stock entry is already being saved.');
         }
@@ -555,7 +582,35 @@ export async function saveStockEntry(req, res) {
             createdBy: entry?.createdBy || req.user?.id || null,
         };
         if (!payload.clientRequestId) delete payload.clientRequestId;
-        if (managementEdit) {
+        if (entry?.status === 'posted') {
+            const officer = await findPurchaseOfficer();
+            if (!actorIsPurchaseOfficer(req, officer)) {
+                if (!posting) throw httpError(400, 'Submit this edit so the purchase officer can approve it.');
+                if (!officer) {
+                    throw httpError(400, 'Add purchaser on workflow. Then only can create or submit. Else Draft or Cancel.');
+                }
+                const senderName = cleanName(req.user?.name) || 'An employee';
+                entry.editPending = true;
+                entry.pendingEdit = {
+                    purchaseSource: payload.purchaseSource,
+                    vendorId: payload.vendorId,
+                    purchaseDate: payload.purchaseDate,
+                    billNo: payload.billNo,
+                    lpoNo: payload.lpoNo,
+                    note: payload.note,
+                    lines,
+                    attachment,
+                    submittedByName: senderName,
+                    submittedAt: new Date(),
+                };
+                entry.markModified('pendingEdit');
+                await entry.save();
+                await notifyStockApproval({ entry, officer, senderName, kind: 'edit' });
+                res.json({ ...presentEntry(entry), pendingApproval: true });
+                return;
+            }
+        }
+        if (entry?.status === 'posted') {
             const previousLines = plainLines(entry.lines);
             const previous = await billItemQuantities(entry.lines);
             const hasQuantity = previousLines.some((line) => Number(line.quantity) > 0);
@@ -564,8 +619,10 @@ export async function saveStockEntry(req, res) {
             }
             if (hasQuantity) await reversePostedStock(previous);
             try {
-                Object.assign(entry, payload, { postedCount: 0 });
+                Object.assign(entry, payload, { postedCount: 0, editPending: false });
+                entry.pendingEdit = undefined;
                 entry.markModified('lines');
+                entry.markModified('pendingEdit');
                 if (!posting) {
                     entry.status = 'draft';
                     entry.postedAt = null;
@@ -599,9 +656,8 @@ export async function saveStockEntry(req, res) {
             }
         }
         if (!posting) {
-            if (entry?.status === 'pending' && !await actorIsManagement(req)) {
-                res.json(presentEntry(entry));
-                return;
+            if (entry?.status === 'pending' && !actorIsPurchaseOfficer(req, await findPurchaseOfficer())) {
+                throw httpError(400, 'Submit this edit so the purchase officer can approve it.');
             }
             const creating = !entry;
             if (entry) {
@@ -639,7 +695,6 @@ export async function saveStockEntry(req, res) {
                 entry = await InventoryStockEntry.create(pendingPayload);
             }
             await notifyStockApproval({ entry, officer, senderName });
-            await closeDraftBill(entry._id, req.user?.employeeObjectId);
             res.status(creating ? 201 : 200).json(presentEntry(entry));
             return;
         }
@@ -705,7 +760,12 @@ export async function stockApprovalContext(req, res) {
         const officer = await findPurchaseOfficer();
         const isPurchaseOfficer = actorIsPurchaseOfficer(req, officer);
         const rows = isPurchaseOfficer
-            ? await InventoryStockEntry.find({ status: 'pending' }).sort({ updatedAt: -1 }).lean()
+            ? await InventoryStockEntry.find({
+                $or: [
+                    { status: 'pending' },
+                    { status: 'posted', editPending: true },
+                ],
+            }).sort({ updatedAt: -1 }).lean()
             : [];
         res.json({
             isPurchaseOfficer,
@@ -719,12 +779,72 @@ export async function stockApprovalContext(req, res) {
     }
 }
 
+async function approvePostedBillEdit(req, officer) {
+    const existing = await InventoryStockEntry.findOne({ _id: req.params.id, status: 'posted', editPending: true });
+    if (!existing?.pendingEdit) return null;
+    const pending = existing.pendingEdit.toObject?.() || existing.pendingEdit;
+    const previousLines = plainLines(existing.lines);
+    const previous = await billItemQuantities(existing.lines);
+    const hasQuantity = previousLines.some((line) => Number(line.quantity) > 0);
+    if (hasQuantity && stockDeleteBlockReason(previous)) {
+        throw httpError(400, 'This bill cannot be edited because available stock is lower than the quantity it added.');
+    }
+    if (hasQuantity) await reversePostedStock(previous);
+    try {
+        existing.purchaseSource = pending.purchaseSource === 'manual' ? 'manual' : 'vendor';
+        existing.vendorId = pending.vendorId || null;
+        existing.purchaseDate = pending.purchaseDate || null;
+        existing.billNo = pending.billNo || '';
+        existing.lpoNo = pending.lpoNo || '';
+        existing.note = pending.note || '';
+        existing.attachment = pending.attachment || { name: '', mimeType: '', publicId: '', url: '' };
+        existing.lines = plainLines(pending.lines);
+        existing.postedCount = 0;
+        existing.editPending = false;
+        existing.pendingEdit = undefined;
+        existing.status = 'posting';
+        existing.approverName = officer?.employeeName || 'Purchase Officer';
+        existing.markModified('lines');
+        existing.markModified('pendingEdit');
+        await existing.save();
+        const postedLines = await postLines(req, existing, plainLines(pending.lines));
+        existing.lines = postedLines;
+        existing.status = 'posted';
+        existing.postedAt = existing.postedAt || new Date();
+        existing.markModified('lines');
+        await existing.save();
+        await closeStockApproval(existing._id, 'Approved', req.user?.employeeObjectId);
+        await closeDraftBill(existing._id, req.user?.employeeObjectId);
+        return existing;
+    } catch (error) {
+        if (previous?.totals) {
+            for (const [id, quantity] of previous.totals) {
+                await InventoryItem.updateOne({ _id: id }, { $inc: { availableQuantity: quantity } });
+            }
+        }
+        existing.status = 'posted';
+        existing.lines = previousLines;
+        existing.postedCount = previousLines.length;
+        existing.editPending = true;
+        existing.pendingEdit = pending;
+        existing.markModified('lines');
+        existing.markModified('pendingEdit');
+        await existing.save().catch(() => {});
+        throw error;
+    }
+}
+
 export async function approveStockEntry(req, res) {
     try {
         if (!mongoose.isValidObjectId(req.params.id)) throw httpError(404, 'Stock entry was not found.');
         const officer = await findPurchaseOfficer();
         if (!actorIsPurchaseOfficer(req, officer)) {
             throw httpError(403, 'Only the purchase officer can approve this stock.');
+        }
+        const edited = await approvePostedBillEdit(req, officer);
+        if (edited) {
+            res.json(presentEntry(edited));
+            return;
         }
         const claimed = await InventoryStockEntry.findOneAndUpdate(
             { _id: req.params.id, status: 'pending' },
@@ -759,6 +879,16 @@ export async function rejectStockEntry(req, res) {
         if (!actorIsPurchaseOfficer(req, officer)) {
             throw httpError(403, 'Only the purchase officer can reject this stock.');
         }
+        const edited = await InventoryStockEntry.findOneAndUpdate(
+            { _id: req.params.id, status: 'posted', editPending: true },
+            { $set: { editPending: false }, $unset: { pendingEdit: 1 } },
+            { new: true },
+        );
+        if (edited) {
+            await closeDraftBill(edited._id, req.user?.employeeObjectId, 'Rejected');
+            res.json(presentEntry(edited));
+            return;
+        }
         const entry = await InventoryStockEntry.findOneAndUpdate(
             { _id: req.params.id, status: 'pending' },
             { $set: { status: 'posting' } },
@@ -790,7 +920,7 @@ export async function rejectStockEntry(req, res) {
                 if (removable.length) await InventoryItem.deleteMany({ _id: { $in: removable } });
             }
             await closeStockApproval(entry._id, 'Rejected', req.user?.employeeObjectId);
-            await closeDraftBill(entry._id, req.user?.employeeObjectId);
+            await closeDraftBill(entry._id, req.user?.employeeObjectId, 'Rejected');
             await InventoryStockEntry.deleteOne({ _id: entry._id });
             res.json({ ok: true });
         } catch (error) {

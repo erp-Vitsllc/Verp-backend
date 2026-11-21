@@ -34,6 +34,11 @@ function money(value) {
     return Math.round(n * 100) / 100;
 }
 
+const SALARY_MONTHS = [
+    'January', 'February', 'March', 'April', 'May', 'June',
+    'July', 'August', 'September', 'October', 'November', 'December',
+];
+
 /** Net salary shown on the slot. Same order as the slot list. */
 function slotNetSalary(pay) {
     if (pay?.netSalaryPayable != null && pay.netSalaryPayable !== '') {
@@ -43,6 +48,14 @@ function slotNetSalary(pay) {
         return money(pay.actualSalary);
     }
     return money(pay?.monthlySalary);
+}
+
+/** Expense line note: salary - October - 2026. */
+function salaryExpenseNote(monthKey) {
+    const match = String(monthKey || '').trim().match(/^(\d{4})-(\d{2})/);
+    if (!match) return 'salary';
+    const month = SALARY_MONTHS[Number(match[2]) - 1] || match[2];
+    return `salary - ${month} - ${match[1]}`;
 }
 
 function activeZohoAccount(salary) {
@@ -112,6 +125,7 @@ async function slotExpenseLines(doc, monthKey) {
     ]);
     const peopleByCode = new Map((people || []).map((emp) => [personKey(emp.employeeId), emp]));
     const salaryByCode = new Map((salaries || []).map((row) => [personKey(row.employeeId), row]));
+    const notes = salaryExpenseNote(monthKey);
     return ids.map((employeeId) => {
         const emp = peopleByCode.get(personKey(employeeId));
         const pay = figures.get(personKey(employeeId)) || {};
@@ -127,7 +141,7 @@ async function slotExpenseLines(doc, monthKey) {
             employeeAccountId: account.zohoAccountId,
             employeeAccountName: account.zohoAccountName,
             zohoAccountOrganizationId: account.zohoAccountOrganizationId,
-            notes: `${name} (${String(emp?.employeeId || employeeId).trim()})`,
+            notes,
             amount: amount > 0 ? amount.toFixed(2) : '',
             company: emp?.company || null,
         };
