@@ -51,7 +51,8 @@ async function followActivityAssignee(actionId, assignee, assigneeId, { reopen =
         status: { $nin: ["Cancelled", "Rejected"] },
     };
     if (!reopen) filter.assignee = { $ne: assigneeId };
-    if (!employeeWorkflowType(requestType)) {
+    const recordHistory = employeeWorkflowType(requestType) || isLeaveAttendanceTaskType(requestType);
+    if (!recordHistory) {
         await TaskManagerTask.updateMany(filter, {
             $set: {
                 assignee: assigneeId,
@@ -87,6 +88,13 @@ async function followActivityAssignee(actionId, assignee, assigneeId, { reopen =
             completionRequestedAt: null,
             completionConfirmedAt: null,
             reviewPending: false,
+            ...(isLeaveAttendanceTaskType(requestType)
+                ? {
+                    returnAssigneeId: null,
+                    returnAssigneeEmpId: "",
+                    returnAssigneeName: "",
+                }
+                : {}),
         };
         task.markModified("closeRequest");
         if (wasFinished) {

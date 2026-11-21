@@ -2,6 +2,8 @@ import mongoose from 'mongoose';
 import WorkOrder from '../models/WorkOrder.js';
 import EmployeeBasic from '../models/EmployeeBasic.js';
 import Flowchart from '../models/Flowchart.js';
+import CrmCustomer from '../models/crm/CrmCustomer.js';
+import InventoryVendor from '../models/inventory/InventoryVendor.js';
 import { dubaiDateKey, formatWorkOrderNo, nextSequenceForYear, workOrderYear } from '../utils/workOrderNumber.js';
 import {
     lpoAttachmentNotice,
@@ -12,6 +14,14 @@ import {
 import { syncDashboardAction } from '../utils/syncDashboard.js';
 import DashboardAction from '../models/DashboardAction.js';
 import { finishEmployeeWorkflowTasks } from '../utils/employeeWorkflowTask.js';
+import { isJwtSystemSuperUser } from '../utils/systemSuperUser.js';
+import { fetchZohoEstimateByNumber } from '../services/zohoService.js';
+import {
+    applyQuotationSnapshot,
+    quotationChanges,
+    savedQuotation,
+    snapshotFromEstimate,
+} from '../utils/workOrderQuotationSync.js';
 
 const TYPES = new Set(['Standalone', 'Main WO', 'Variation']);
 const STATUSES = new Set(['Draft', 'Not Started', 'Awaiting LPO', 'In Progress', 'Fully Invoiced', 'Completed']);
@@ -36,6 +46,36 @@ function cleanText(value, max) {
         .replace(/<[^>]*>/g, '')
         .trim()
         .slice(0, max);
+}
+
+function samePartyName(left, right) {
+    const normalize = (value) => String(value || '').trim().replace(/\s+/g, ' ').toLowerCase();
+    const a = normalize(left);
+    const b = normalize(right);
+    return Boolean(a) && a === b;
+}
+
+async function resolveCrmCustomer(customerId, customerName) {
+    const id = cleanText(customerId, 40);
+    if (mongoose.isValidObjectId(id)) {
+        const byId = await CrmCustomer.findById(id).select('name').lean();
+        if (byId?.name) return { id: String(byId._id), name: cleanText(byId.name, 160) };
+    }
+    const name = cleanText(customerName, 160);
+    if (!name) return null;
+    const rows = await CrmCustomer.find().select('name').lean();
+    const match = rows.find((row) => samePartyName(row.name, name));
+    if (!match?.name) return null;
+    return { id: String(match._id), name: cleanText(match.name, 160) };
+}
+
+async function resolveInventoryVendor(vendorId) {
+    const id = cleanText(vendorId, 40);
+    if (!id) return { id: '', name: '' };
+    if (!mongoose.isValidObjectId(id)) return null;
+    const vendor = await InventoryVendor.findById(id).select('name').lean();
+    if (!vendor?.name) return null;
+    return { id: String(vendor._id), name: cleanText(vendor.name, 160) };
 }
 
 function cleanMoney(value) {
@@ -95,6 +135,16 @@ function actorKeys(req) {
 function actorMatches(req, ids) {
     const keys = new Set(actorKeys(req));
     return (ids || []).some((id) => keys.has(String(id)));
+}
+
+async function isProjectCoordinator(req) {
+    const coordinator = await findProjectCoordinator();
+    if (!coordinator) return false;
+    return actorMatches(req, [coordinator._id, coordinator.employeeId]);
+}
+
+async function loadQuotationEstimate(number) {
+    return fetchZohoEstimateByNumber(number, { allowClosed: true });
 }
 
 async function findProjectCoordinator() {
@@ -266,7 +316,7 @@ export const getWorkOrders = async (_req, res) => {
         const workOrders = await WorkOrder.find()
             .sort({ createdAt: -1 })
             .limit(500)
-            .select('-lpos.attachmentData -lpoAlert.attachmentData')
+            .select('-lpos.attachmentData -lpoAlert.attachmentData -budgets')
             .lean();
         return res.status(200).json({ workOrders });
     } catch (error) {
@@ -277,10 +327,11 @@ export const getWorkOrders = async (_req, res) => {
 
 export const createWorkOrder = async (req, res) => {
     try {
-        const customer = cleanText(req.body?.customer, 160);
-        if (customer.length < 2) {
-            return res.status(400).json({ message: 'Customer is required' });
+        const crmCustomer = await resolveCrmCustomer(req.body?.customerId, req.body?.customer);
+        if (!crmCustomer) {
+            return res.status(400).json({ message: 'Select a customer that was added in CRM' });
         }
+        const customer = crmCustomer.name;
 
         const intentDraft = req.body?.intent === 'draft' || req.body?.saveAsDraft === true;
         const type = TYPES.has(req.body?.type) ? req.body.type : 'Standalone';
@@ -376,11 +427,36 @@ export const createWorkOrder = async (req, res) => {
             }
             : undefined;
 
+        const quotationId = cleanText(req.body?.quotationId, 80);
+        const quotationDate = cleanText(req.body?.quotationDate, 10);
+        const quoteFallback = {
+            quotationRef,
+            quotationId,
+            quotationDate,
+            customer,
+            salespersonName,
+            valueExclVat,
+            vatAmount,
+            value,
+        };
+        let quotationSnapshot = null;
+        if (quotationRef) {
+            try {
+                const estimate = await loadQuotationEstimate(quotationRef);
+                quotationSnapshot = snapshotFromEstimate(estimate, quoteFallback);
+            } catch (error) {
+                console.error('Quotation snapshot was not loaded from Zoho:', error?.message || error);
+                quotationSnapshot = snapshotFromEstimate(null, quoteFallback);
+            }
+        }
+
         const payload = {
             customer,
+            customerId: crmCustomer.id,
             quotationRef,
-            quotationId: cleanText(req.body?.quotationId, 80),
-            quotationDate: cleanText(req.body?.quotationDate, 10),
+            quotationId,
+            quotationDate,
+            quotationSnapshot,
             valueExclVat,
             vatAmount,
             lpoMode,
@@ -469,6 +545,108 @@ export const getWorkOrder = async (req, res) => {
     } catch (error) {
         console.error('Error loading work order:', error);
         return res.status(500).json({ message: 'Failed to load the work order' });
+    }
+};
+
+async function findWorkOrder(id) {
+    if (!mongoose.Types.ObjectId.isValid(id)) return null;
+    return WorkOrder.findById(id);
+}
+
+export const getWorkOrderQuotationChanges = async (req, res) => {
+    try {
+        const order = await findWorkOrder(req.params.id);
+        if (!order) return res.status(404).json({ message: 'Work order was not found' });
+        if (!order.quotationRef || !(await isProjectCoordinator(req))) {
+            return res.status(200).json({ canUpdate: false, changed: false, changes: [] });
+        }
+        const estimate = await loadQuotationEstimate(order.quotationRef);
+        const changes = quotationChanges(savedQuotation(order), snapshotFromEstimate(estimate, order));
+        return res.status(200).json({ canUpdate: true, changed: changes.length > 0, changes });
+    } catch (error) {
+        console.error('Error comparing the quotation:', error);
+        const message = error?.message || 'Could not check this quotation in Zoho';
+        return res.status(error.statusCode || 502).json({ message });
+    }
+};
+
+export const updateWorkOrderBudget = async (req, res) => {
+    try {
+        const action = String(req.body?.action || '');
+        if (!['convert', 'rebudget', 'resync'].includes(action)) {
+            return res.status(400).json({ message: 'Choose convert, rebudget, or resync' });
+        }
+        const order = await findWorkOrder(req.params.id);
+        if (!order) return res.status(404).json({ message: 'Work order was not found' });
+        if (!order.quotationRef) {
+            return res.status(400).json({ message: 'This work order has no quotation' });
+        }
+        if (action === 'resync' && !isJwtSystemSuperUser(req.user)) {
+            return res.status(403).json({ message: 'Only a system admin can resync the budget' });
+        }
+        if (action === 'convert' && order.budgeted) {
+            return res.status(400).json({ message: 'This work order is already a budget. Use Re budget.' });
+        }
+        if ((action === 'rebudget' || action === 'resync') && !order.budgeted) {
+            return res.status(400).json({ message: 'Convert this work order to a budget first' });
+        }
+        if (action === 'resync' && !order.budgets?.length) {
+            return res.status(400).json({ message: 'There is no budget quotation to resync' });
+        }
+
+        const estimate = await loadQuotationEstimate(order.quotationRef);
+        const quote = snapshotFromEstimate(estimate, order);
+        const savedByName = cleanText(req.user?.name, 120);
+
+        if (action === 'resync') {
+            const latest = order.budgets[order.budgets.length - 1];
+            latest.quote = quote;
+            latest.savedAt = new Date();
+            latest.savedByName = savedByName;
+            latest.action = 'resync';
+        } else {
+            order.budgets.push({
+                revision: order.budgets.length + 1,
+                savedAt: new Date(),
+                savedByName,
+                action,
+                quote,
+            });
+            order.budgeted = true;
+        }
+        order.markModified('budgets');
+        await order.save();
+        return res.status(200).json({ workOrder: presentWorkOrder(order, { includeFiles: true }) });
+    } catch (error) {
+        console.error('Error updating the work order budget:', error);
+        const message = error?.message || 'Could not update the budget from Zoho';
+        return res.status(error.statusCode || 502).json({ message });
+    }
+};
+
+export const applyWorkOrderQuotationChanges = async (req, res) => {
+    try {
+        const order = await findWorkOrder(req.params.id);
+        if (!order) return res.status(404).json({ message: 'Work order was not found' });
+        if (!(await isProjectCoordinator(req))) {
+            return res.status(403).json({ message: 'Only the project coordinator can update quotation changes' });
+        }
+        if (!order.quotationRef) {
+            return res.status(400).json({ message: 'This work order has no quotation' });
+        }
+        const estimate = await loadQuotationEstimate(order.quotationRef);
+        const changes = quotationChanges(savedQuotation(order), snapshotFromEstimate(estimate, order));
+        const { lpoAdjusted } = applyQuotationSnapshot(order, estimate);
+        await order.save();
+        return res.status(200).json({
+            workOrder: presentWorkOrder(order, { includeFiles: true }),
+            changes,
+            lpoAdjusted,
+        });
+    } catch (error) {
+        console.error('Error updating the quotation:', error);
+        const message = error?.message || 'Could not update this quotation from Zoho';
+        return res.status(error.statusCode || 502).json({ message });
     }
 };
 
@@ -587,6 +765,15 @@ export const updateWorkOrder = async (req, res) => {
             }
         }
 
+        if (Object.prototype.hasOwnProperty.call(req.body || {}, 'vendorId')) {
+            const vendor = await resolveInventoryVendor(req.body.vendorId);
+            if (!vendor) {
+                return res.status(400).json({ message: 'Select a vendor that was added in Vendor Management' });
+            }
+            order.vendorId = vendor.id;
+            order.vendorName = vendor.name;
+        }
+
         let emailResult = null;
         if (req.body?.sendNotRequired) {
             order.lpoMode = 'not_required';
@@ -645,6 +832,37 @@ export const updateWorkOrder = async (req, res) => {
     } catch (error) {
         console.error('Error updating work order:', error);
         return res.status(500).json({ message: 'Failed to update the work order' });
+    }
+};
+
+function partyRows(rows, codeKey) {
+    return rows
+        .map((row) => ({
+            id: String(row._id),
+            name: String(row.name || '').trim(),
+            code: String(row[codeKey] || '').trim(),
+            status: row.status || 'Active',
+        }))
+        .filter((row) => row.name);
+}
+
+export const getWorkOrderCustomers = async (_req, res) => {
+    try {
+        const rows = await CrmCustomer.find().select('name customerCode status').sort({ name: 1 }).lean();
+        return res.status(200).json({ customers: partyRows(rows, 'customerCode') });
+    } catch (error) {
+        console.error('Error listing work order customers:', error);
+        return res.status(500).json({ message: 'Failed to load customers' });
+    }
+};
+
+export const getWorkOrderVendors = async (_req, res) => {
+    try {
+        const rows = await InventoryVendor.find().select('name vendorCode status').sort({ name: 1 }).lean();
+        return res.status(200).json({ vendors: partyRows(rows, 'vendorCode') });
+    } catch (error) {
+        console.error('Error listing work order vendors:', error);
+        return res.status(500).json({ message: 'Failed to load vendors' });
     }
 };
 

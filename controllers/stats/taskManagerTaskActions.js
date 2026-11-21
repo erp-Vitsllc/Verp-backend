@@ -8,6 +8,8 @@ import Attendance from "../../models/Attendance.js";
 import AttendanceChangeRequest from "../../models/AttendanceChangeRequest.js";
 import { attendanceFactsByActionId } from "../../utils/loadAttendanceTaskFacts.js";
 import { isAttendanceTaskType } from "../../utils/attendanceTaskCopy.js";
+import { isLeaveAttendanceTaskType } from "../../utils/ensureRequestTask.js";
+import { alignOpenLeaveAttendanceAssignees } from "../../utils/ensureOpenLeaveAttendanceTasks.js";
 import EmployeeBasic from "../../models/EmployeeBasic.js";
 import User from "../../models/User.js";
 import EmployeeHubRequest from "../../models/EmployeeHubRequest.js";
@@ -1799,12 +1801,21 @@ export const getTaskManagerTask = async (req, res) => {
     try {
         if (!(await denyUnlessViewer(req, res))) return;
         await promoteDueTaskCompletions();
-        const target = await loadTarget(req.params.taskKey);
+        let target = await loadTarget(req.params.taskKey);
         if (!target) return res.status(404).json({ message: "Task not found." });
         if (target.action && /^(fine|group fine request)$/i.test(String(target.action.requestType || ""))) {
             const overlays = new Map();
             if (target.task) overlays.set(String(target.action._id), target.task);
             await alignOpenFineDashboardRows([target.action], overlays);
+        }
+        if (target.action && isLeaveAttendanceTaskType(target.action.requestType)) {
+            const overlays = new Map();
+            if (target.task) overlays.set(String(target.action._id), target.task);
+            const moved = await alignOpenLeaveAttendanceAssignees([target.action], overlays);
+            if (moved) {
+                const fresh = await loadTarget(req.params.taskKey);
+                if (fresh) target = fresh;
+            }
         }
         if (target.action) {
             const hubPlan = await alignDecidedGeneralHubTasks([target.action]);

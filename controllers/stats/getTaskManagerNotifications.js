@@ -39,6 +39,7 @@ import { attachHoldSteps } from "../../utils/taskWaitingSteps.js";
 import { finishedParticipants } from "../../utils/taskActionTracks.js";
 import { syncPendingSalaryEnrollmentTasks } from "../../utils/syncPendingSalaryEnrollmentTasks.js";
 import { ensurePendingUtilityReminderTasks, UTILITY_PAYMENT_REMINDER } from "../../utils/utilityReminderTask.js";
+import { alignOpenLeaveAttendanceAssignees } from "../../utils/ensureOpenLeaveAttendanceTasks.js";
 import { ensureNotificationTasks, flowchartHrOwnsTask, loadFlowchartHr } from "../../utils/syncNotificationTasks.js";
 import { getDepartmentHOD } from "../../utils/getDepartmentHOD.js";
 import { getManagementHOD } from "../../utils/getManagementHOD.js";
@@ -1403,6 +1404,7 @@ export const getTaskManagerNotifications = async (req, res) => {
             if (row.sourceDashboardActionId) fineOverlays.set(String(row.sourceDashboardActionId), row);
         }
         await alignOpenFineDashboardRows(preparedFines.rows, fineOverlays);
+        await alignOpenLeaveAttendanceAssignees(preparedFines.rows, fineOverlays);
         const collapsedTasks = await collapseDuplicateDashboardTasks(preparedFines.rows, manualRows);
         try {
             await completeFinishedSystemWorkflowTasks({ actions, tasks: manualRows, force: true });
@@ -2301,6 +2303,7 @@ export async function listProfileEmployeeTasks({ employeeId, employeeCode, emplo
 
         const preparedProfile = await collapsePendingFineDashboardRows([...actionById.values()]);
         await alignOpenFineDashboardRows(preparedProfile.rows, overlayByAction);
+        await alignOpenLeaveAttendanceAssignees(preparedProfile.rows, overlayByAction);
         const collapsedProfile = await collapseDuplicateDashboardTasks(preparedProfile.rows);
         const profileOverlays = collapsedProfile.overlayByAction;
         const finishedOverlayByAction = finishedOverlayBySource(

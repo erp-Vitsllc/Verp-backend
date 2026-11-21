@@ -263,7 +263,7 @@ export function dashboardTypeForChange(request) {
     return ATTENDANCE_CHANGE_REQUEST_TYPE;
 }
 
-function approverIdForChange(request) {
+export function approverIdForChange(request) {
     if (request?.stage === 'pending_hr') return request.hrId;
     if (request?.stage === 'pending_requester') return request.requestedBy;
     return request.reporteeId;
@@ -365,7 +365,9 @@ export async function ensureOpenChangeDashboards(requests = []) {
             if (match && String(extra._id) === String(match._id)) continue;
             dismissIds.push(extra._id);
         }
-        if (match) kept.push(match);
+        const currentApprover = String(approverIdForChange(request) || "");
+        const rowAssignee = String(match?.assignedTo || "");
+        if (match && (!currentApprover || rowAssignee === currentApprover)) kept.push(match);
         else missing.push(request);
     }
     if (dismissIds.length) {

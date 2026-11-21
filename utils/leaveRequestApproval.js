@@ -39,6 +39,15 @@ export function inferLeaveApprovalStage(record, { reporteeId = '', hrId = '' } =
 }
 
 /**
+ * An attendance change that has already moved to HR is the current hand.
+ * The leave row must not keep showing the previous reportee.
+ */
+export function displayedLeaveApprovalStage(leaveStage, changeStage = '') {
+    if (String(changeStage || '').trim() === LEAVE_STAGE_HR) return LEAVE_STAGE_HR;
+    return String(leaveStage || '').trim();
+}
+
+/**
  * Same rule as the Leave Approval box: this pending request is waiting on the logged-in employee.
  * A reassigned task counts as theirs while that reassignment is still open.
  */

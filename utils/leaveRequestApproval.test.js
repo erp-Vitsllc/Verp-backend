@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 import {
+    displayedLeaveApprovalStage,
     inferLeaveApprovalStage,
     isTwoStepLeaveKind,
     approvalWaitsOnLoggedInEmployee,
@@ -19,6 +20,17 @@ describe('openingLeaveApprovalStage', () => {
 
     it('starts with HR when there is no reportee', () => {
         assert.equal(openingLeaveApprovalStage('', 'hr'), 'pending_hr');
+    });
+});
+
+describe('displayedLeaveApprovalStage', () => {
+    it('shows HR when the attendance change has already moved to HR', () => {
+        assert.equal(displayedLeaveApprovalStage('pending_reportee', 'pending_hr'), 'pending_hr');
+    });
+
+    it('keeps the leave stage while the change is still with the reportee', () => {
+        assert.equal(displayedLeaveApprovalStage('pending_reportee', 'pending_reportee'), 'pending_reportee');
+        assert.equal(displayedLeaveApprovalStage('pending_reportee', ''), 'pending_reportee');
     });
 });
 

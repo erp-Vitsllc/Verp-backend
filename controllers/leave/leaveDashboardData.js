@@ -50,6 +50,7 @@ import {
 import { resolveFlowchartHrEmployee } from '../../utils/resolveFlowchartHrEmployee.js';
 import {
     approvalWaitsOnLoggedInEmployee,
+    displayedLeaveApprovalStage,
     inferLeaveApprovalStage,
     LEAVE_STAGE_HR,
     LEAVE_STAGE_REPORTEE,
@@ -815,6 +816,7 @@ export async function getLeavePendingRequests(req, res) {
             .limit(500)
             .lean()
             .maxTimeMS(8000);
+        const changeStageByCover = new Map();
         const leaveChangeStatuses = new Set([
             'sick_leave',
             'authorized_leave',
@@ -837,8 +839,13 @@ export async function getLeavePendingRequests(req, res) {
             if (action !== 'flexible_ot' && action !== 'hour_adjust' && !leaveChangeStatuses.has(statusKey)) continue;
             const date = String((nextDay && proposed.targetDate) || change.date || '').trim();
             const cover = `${change.employeeMongoId}|${date}|${statusKey}`;
-            if (coveredPending.has(cover)) continue;
             const stage = String(change.stage || '');
+            if (stage === 'pending_hr') {
+                if (!changeStageByCover.has(cover)) changeStageByCover.set(cover, stage);
+                const dayKey = `${change.employeeMongoId}|${date}`;
+                if (!changeStageByCover.has(dayKey)) changeStageByCover.set(dayKey, stage);
+            }
+            if (coveredPending.has(cover)) continue;
             const leaveType = nextDay
                 ? 'Next day attendance'
                 : action === 'flexible_ot'
@@ -931,9 +938,18 @@ export async function getLeavePendingRequests(req, res) {
                     staffTypeByMongoId.get(String(item.employeeMongoId)) ||
                     staffTypeByCode.get(String(item.employeeId || '').trim()) ||
                     '';
-                const approvalStage =
+                const storedStage =
                     item.statusKey === 'pending'
                         ? inferLeaveApprovalStage(item, { reporteeId, hrId })
+                        : '';
+                const cover = `${item.employeeMongoId}|${item.startDateKey}|${item.requestedStatusKey}`;
+                const dayKey = `${item.employeeMongoId}|${item.startDateKey}`;
+                const approvalStage =
+                    item.statusKey === 'pending'
+                        ? displayedLeaveApprovalStage(
+                            storedStage,
+                            changeStageByCover.get(cover) || changeStageByCover.get(dayKey),
+                        )
                         : '';
                 const inherited = [
                     item.id,

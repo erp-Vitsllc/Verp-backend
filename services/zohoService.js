@@ -2741,6 +2741,55 @@ function zohoMoney(value) {
     return Math.round(amount * 100) / 100;
 }
 
+function estimateCustomField(row, pattern) {
+    const fields = Array.isArray(row?.custom_fields) ? row.custom_fields : [];
+    const match = fields.find((field) => pattern.test(String(field?.label || field?.placeholder || '')));
+    return String(match?.value_formatted || match?.value || '').trim();
+}
+
+function estimateBillTo(row) {
+    const address = row?.billing_address && typeof row.billing_address === 'object' ? row.billing_address : {};
+    return [
+        row?.customer_name,
+        address.attention,
+        address.address,
+        address.street2,
+        [address.city, address.state, address.zip].filter(Boolean).join(', '),
+        address.country,
+    ].map((part) => String(part || '').trim()).filter(Boolean);
+}
+
+function estimateLines(row) {
+    const rows = Array.isArray(row?.line_items) ? row.line_items : [];
+    return rows.map((line, index) => {
+        const name = String(line?.name || '').trim();
+        const detail = String(line?.description || '').trim();
+        const description = detail && detail !== name
+            ? [name, detail].filter(Boolean).join('\n')
+            : (name || detail || '—');
+        const quantity = zohoMoney(line?.quantity);
+        const rate = zohoMoney(line?.rate);
+        const listed = zohoMoney(line?.item_total);
+        return {
+            id: String(line?.line_item_id || index + 1),
+            description,
+            quantity,
+            rate,
+            amount: listed || Math.round(quantity * rate * 100) / 100,
+        };
+    });
+}
+
+function estimateTaxLabel(row, vatAmount, valueExclVat) {
+    const taxes = Array.isArray(row?.taxes) ? row.taxes : [];
+    const named = String(taxes[0]?.tax_name || '').trim();
+    if (named) return named;
+    if (!(vatAmount > 0) || !(valueExclVat > 0)) return 'TAX';
+    const percent = Math.round((vatAmount / valueExclVat) * 1000) / 10;
+    const shown = Number.isInteger(percent) ? String(percent) : percent.toFixed(1);
+    return `TAX (${shown}%)`;
+}
+
 function mapZohoEstimate(row) {
     const total = zohoMoney(row?.total);
     const listedExcl = zohoMoney(row?.sub_total ?? row?.bcy_sub_total);
@@ -2757,6 +2806,13 @@ function mapZohoEstimate(row) {
         vatAmount,
         total,
         status: String(row?.status || '').trim(),
+        projectName: estimateCustomField(row, /project/i),
+        salespersonName: String(row?.salesperson_name || '').trim(),
+        billTo: estimateBillTo(row),
+        lines: estimateLines(row),
+        taxLabel: estimateTaxLabel(row, vatAmount, valueExclVat),
+        notes: String(row?.notes || '').trim(),
+        terms: String(row?.terms || '').trim(),
     };
 }
 
@@ -2790,7 +2846,8 @@ function pickZohoEstimate(rows, number) {
 }
 
 /** Find one Zoho Books estimate by the quotation number the user typed. */
-export async function fetchZohoEstimateByNumber(number) {
+export async function fetchZohoEstimateByNumber(number, options = {}) {
+    const allowClosed = Boolean(options.allowClosed);
     const needle = String(number || '').trim();
     if (!needle) throw quoteLookupError('Enter a Zoho quotation number.', 400);
 
@@ -2824,7 +2881,7 @@ export async function fetchZohoEstimateByNumber(number) {
     if (!match?.estimate_id) {
         throw quoteLookupError('No Zoho quotation found for that number.', 404);
     }
-    if (/void|declined/i.test(String(match.status || ''))) {
+    if (!allowClosed && /void|declined/i.test(String(match.status || ''))) {
         throw quoteLookupError('That Zoho quotation is void or declined.', 400);
     }
 
@@ -2840,6 +2897,59 @@ export async function fetchZohoEstimateByNumber(number) {
         throw quoteLookupError('No Zoho quotation found for that number.', 404);
     }
     return mapped;
+}
+
+/**
+ * Download the Zoho Books estimate PDF. This is the quotation document
+ * (Estimate #, bill-to, lines, tax and terms) already stored in Zoho.
+ */
+export async function fetchZohoEstimatePdf({ estimateId = '', number = '' } = {}) {
+    let id = String(estimateId || '').trim();
+    const quoteNumber = String(number || '').trim();
+    if (!id) {
+        const estimate = await fetchZohoEstimateByNumber(quoteNumber, { allowClosed: true });
+        id = String(estimate?.id || '').trim();
+    }
+    if (!id) throw quoteLookupError('Quotation id is required.', 400);
+
+    const { organizationId, booksApiBase, accessToken } = await getBooksRequestContext();
+    const response = await axios({
+        method: 'get',
+        url: `${booksApiBase}/estimates/${encodeURIComponent(id)}`,
+        params: {
+            organization_id: organizationId,
+            accept: 'pdf',
+        },
+        headers: {
+            Authorization: `Zoho-oauthtoken ${accessToken}`,
+            Accept: 'application/pdf',
+        },
+        responseType: 'arraybuffer',
+        timeout: 60000,
+        validateStatus: () => true,
+    });
+
+    const contentType = String(response.headers?.['content-type'] || '').toLowerCase();
+    const buffer = Buffer.from(response.data || []);
+    if (response.status >= 400 || !contentType.includes('pdf')) {
+        let message = 'Zoho did not return a PDF for this quotation.';
+        try {
+            const parsed = JSON.parse(buffer.toString('utf8'));
+            if (parsed?.message) message = parsed.message;
+        } catch {
+            /* keep default */
+        }
+        const blocked = estimatesAuthError({ message });
+        if (blocked) throw blocked;
+        throw quoteLookupError(message, response.status === 404 ? 404 : 502);
+    }
+
+    const disposition = String(response.headers?.['content-disposition'] || '');
+    const match = disposition.match(/filename\*?=(?:UTF-8''|")?([^\";]+)/i);
+    const rawName = match?.[1] ? decodeURIComponent(match[1].replace(/"/g, '')) : '';
+    const safeNumber = (quoteNumber || id).replace(/[^\w.-]+/g, '-');
+    const filename = rawName || `Quotation-${safeNumber}.pdf`;
+    return { buffer, filename, contentType: 'application/pdf' };
 }
 
 /** Zoho Books estimates are the quotations imported onto a work order. */

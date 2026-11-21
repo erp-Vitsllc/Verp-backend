@@ -2,12 +2,17 @@ import express from 'express';
 import { protect } from '../middleware/authMiddleware.js';
 import { checkPermission, checkPermissionAny } from '../middleware/permissionMiddleware.js';
 import {
+    applyWorkOrderQuotationChanges,
     createWorkOrder,
     getNextWorkOrderNo,
     getWorkOrder,
+    getWorkOrderCustomers,
+    getWorkOrderQuotationChanges,
     getWorkOrderSalespeople,
+    getWorkOrderVendors,
     getWorkOrders,
     updateWorkOrder,
+    updateWorkOrderBudget,
 } from '../controllers/workOrderController.js';
 
 const router = express.Router();
@@ -16,8 +21,13 @@ router.use(protect);
 
 router.get('/next-no', checkPermission('production', 'view'), getNextWorkOrderNo);
 router.get('/salespeople', checkPermission('production', 'view'), getWorkOrderSalespeople);
+router.get('/customers', checkPermission('production', 'view'), getWorkOrderCustomers);
+router.get('/vendors', checkPermission('production', 'view'), getWorkOrderVendors);
 router.get('/', checkPermission('production', 'view'), getWorkOrders);
 router.post('/', checkPermissionAny('production', ['create', 'view']), createWorkOrder);
+router.post('/:id/budget', checkPermissionAny('production', ['edit', 'create', 'view']), updateWorkOrderBudget);
+router.get('/:id/quotation-changes', checkPermission('production', 'view'), getWorkOrderQuotationChanges);
+router.post('/:id/quotation-changes', checkPermissionAny('production', ['edit', 'create', 'view']), applyWorkOrderQuotationChanges);
 router.get('/:id', checkPermission('production', 'view'), getWorkOrder);
 router.patch('/:id', checkPermissionAny('production', ['edit', 'create', 'view']), updateWorkOrder);
 

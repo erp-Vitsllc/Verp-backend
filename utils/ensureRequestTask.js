@@ -1,4 +1,6 @@
+import EmployeeBasic from "../models/EmployeeBasic.js";
 import TaskManagerTask from "../models/TaskManagerTask.js";
+import { assigneeHistoryEntry } from "./employeeWorkflowTask.js";
 
 /** Each leave or attendance request keeps one dashboard row and one task. */
 export const LEAVE_ATTENDANCE_TASK_TYPES = new Set([
@@ -16,6 +18,35 @@ export function isLeaveAttendanceTaskType(requestType) {
 
 function personName(person) {
     return [person?.firstName, person?.lastName].filter(Boolean).join(" ").trim();
+}
+
+/** Move a leave or attendance task to the employee who now holds the request. */
+export function applyAssigneeFollow(task, { assigneeId, assigneeEmpId = "", assigneeName = "" } = {}) {
+    const nextId = String(assigneeId || "").trim();
+    if (!task || !nextId || String(task.assignee || "") === nextId) return false;
+    const previousName = String(task.assigneeName || "").trim();
+    const nextName = String(assigneeName || "").trim();
+    task.assignee = assigneeId;
+    task.assigneeEmpId = assigneeEmpId || task.assigneeEmpId || "";
+    if (nextName) task.assigneeName = nextName;
+    const close = task.closeRequest?.toObject ? task.closeRequest.toObject() : { ...(task.closeRequest || {}) };
+    task.closeRequest = {
+        ...close,
+        originalAssigneeId: null,
+        originalAssigneeEmpId: "",
+        originalAssigneeName: "",
+        reassignmentReleased: false,
+        returnAssigneeId: null,
+        returnAssigneeEmpId: "",
+        returnAssigneeName: "",
+    };
+    task.markModified?.("closeRequest");
+    const entry = assigneeHistoryEntry(previousName, nextName);
+    if (entry) {
+        task.history = task.history || [];
+        task.history.push(entry);
+    }
+    return true;
 }
 
 function taskStatusForDecision(status) {
@@ -45,14 +76,27 @@ export async function ensureOwnRequestTask(action, assignee = null) {
             { $set: { status: "Cancelled" } },
         );
     }
-    const name = personName(assignee);
+    let name = personName(assignee);
     if (keep) {
         const assigneeChanged = String(keep.assignee || "") !== String(action.assignedTo);
         const finished = ["Completed", "Rejected"].includes(String(keep.status || ""));
+        if (assigneeChanged && !name) {
+            const person = await EmployeeBasic.findById(action.assignedTo)
+                .select("firstName lastName employeeId")
+                .lean();
+            name = personName(person);
+            if (!assignee?.employeeId && person?.employeeId) {
+                keep.assigneeEmpId = person.employeeId;
+            }
+        }
+        if (assigneeChanged) {
+            applyAssigneeFollow(keep, {
+                assigneeId: action.assignedTo,
+                assigneeEmpId: action.assignedToEmpId || assignee?.employeeId || keep.assigneeEmpId || "",
+                assigneeName: name,
+            });
+        }
         if (assigneeChanged || finished) {
-            keep.assignee = action.assignedTo;
-            keep.assigneeEmpId = action.assignedToEmpId || assignee?.employeeId || keep.assigneeEmpId || "";
-            if (name) keep.assigneeName = name;
             keep.status = "Pending";
             await keep.save();
         }
