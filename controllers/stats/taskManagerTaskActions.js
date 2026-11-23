@@ -1045,6 +1045,9 @@ async function closeFlags(task, viewer, currentAssigneeId, assigneeEmpId, action
         canAssign: actionAccess.canAssign,
         canCloseUnassigned: open && !reviewPending && !closeScheduled && (Boolean(saved.assigneeCleared) || Boolean(saved.reviewAccepted)) && (requesterViewer || viewer?.superUser),
         canReturn: open && reassigned && viewerIsAssignee && !viewerIsOriginal,
+        // The list already sends this. Without it the details page only sees
+        // completionPending and names the assignee who just clicked Complete.
+        reviewPending,
         completionPending,
         completionByName: saved.completionRequestedByName || "",
         completionNote: saved.completionNote || "",

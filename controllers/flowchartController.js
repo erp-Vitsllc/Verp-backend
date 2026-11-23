@@ -329,6 +329,8 @@ export const addFlowchartResponsibility = async (req, res) => {
                                 assetcontroller: 'Asset Controller',
                                 purchaseofficer: 'Purchase Officer',
                                 projectcoordinator: 'Project Coordinator',
+                                projectmanager: 'Project Manager',
+                                logisticcontroller: 'Logistic Controller',
                             };
                             const emailPayload = await buildResponsibilityEmailData(category);
                             await sendResponsibilityApprovalEmail({
@@ -403,6 +405,8 @@ export const addFlowchartResponsibility = async (req, res) => {
                                 'admincontroller': 'Admin Officer',
                                 'purchaseofficer': 'Purchase Officer',
                                 'projectcoordinator': 'Project Coordinator',
+                                'projectmanager': 'Project Manager',
+                                'logisticcontroller': 'Logistic Controller',
                             };
 
                             const emailPayload = await buildResponsibilityEmailData(category);

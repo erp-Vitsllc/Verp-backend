@@ -23,6 +23,10 @@ function clipLine(value, max) {
     return String(value || '').replace(/\s+/g, ' ').trim().slice(0, max);
 }
 
+function deliveryIsDelivered(row) {
+    return Boolean(row?.stockApplied) || row?.status === 'Confirmed';
+}
+
 function clipBlock(value, max) {
     return String(value || '').replace(/\r\n/g, '\n').trim().slice(0, max);
 }
@@ -553,6 +557,10 @@ function writePendingOnto(existing, pending, approverName) {
 }
 
 async function approvePendingEdit(req, officer) {
+    const current = await DeliveryOrder.findById(req.params.id).select('status stockApplied editPending');
+    if (current?.editPending && deliveryIsDelivered(current)) {
+        throw httpError(400, 'A delivered delivery cannot be edited.');
+    }
     const previous = await DeliveryOrder.findOneAndUpdate(
         { _id: req.params.id, editPending: true },
         { $set: { editPending: false } },
@@ -735,6 +743,9 @@ export async function updateDelivery(req, res) {
         if (!mongoose.isValidObjectId(req.params.id)) throw httpError(404, 'Delivery order was not found.');
         const existing = await DeliveryOrder.findById(req.params.id);
         if (!existing || existing.status === 'Confirming') throw httpError(404, 'Delivery order was not found.');
+        if (deliveryIsDelivered(existing)) {
+            throw httpError(400, 'A delivered delivery cannot be edited.');
+        }
         const payload = readDelivery(req.body);
         payload.attachment = await readDeliveryAttachment(req.body, existing.attachment);
         const officer = await findPurchaseOfficer();

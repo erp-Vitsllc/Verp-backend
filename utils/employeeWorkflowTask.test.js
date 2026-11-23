@@ -11,6 +11,8 @@ test("draft bill, fine, loan, and advance rows are employee workflow tasks", () 
     assert.equal(employeeWorkflowType("Fine"), true);
     assert.equal(employeeWorkflowType("Group Fine Request"), true);
     assert.equal(employeeWorkflowType("Loan"), true);
+    assert.equal(employeeWorkflowType("Work Order LPO"), true);
+    assert.equal(employeeWorkflowType("Work Order LPO Attachment"), true);
     assert.equal(employeeWorkflowType("Profile Incomplete"), false);
 });
 

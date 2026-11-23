@@ -8,6 +8,7 @@ import {
     getWorkOrder,
     getWorkOrderCustomers,
     getWorkOrderQuotationChanges,
+    getWorkOrderQuotationUse,
     getWorkOrderSalespeople,
     getWorkOrderVendors,
     getWorkOrders,
@@ -23,6 +24,7 @@ router.get('/next-no', checkPermission('production', 'view'), getNextWorkOrderNo
 router.get('/salespeople', checkPermission('production', 'view'), getWorkOrderSalespeople);
 router.get('/customers', checkPermission('production', 'view'), getWorkOrderCustomers);
 router.get('/vendors', checkPermission('production', 'view'), getWorkOrderVendors);
+router.get('/quotation-used', checkPermission('production', 'view'), getWorkOrderQuotationUse);
 router.get('/', checkPermission('production', 'view'), getWorkOrders);
 router.post('/', checkPermissionAny('production', ['create', 'view']), createWorkOrder);
 router.post('/:id/budget', checkPermissionAny('production', ['edit', 'create', 'view']), updateWorkOrderBudget);

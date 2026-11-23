@@ -56,6 +56,18 @@ const workOrderSchema = new mongoose.Schema(
             ],
             default: [],
         },
+        lpoFollowUp: {
+            type: String,
+            enum: ['', 'salesperson', 'coordinator'],
+            default: '',
+        },
+        supportingNote: { type: String, default: '', trim: true },
+        supportingDocument: {
+            name: { type: String, default: '' },
+            mime: { type: String, default: '' },
+            data: { type: String, default: '' },
+            bytes: { type: Number, default: 0 },
+        },
         attachmentPending: { type: Boolean, default: false },
         lpoAlert: {
             active: { type: Boolean, default: false },
@@ -74,7 +86,7 @@ const workOrderSchema = new mongoose.Schema(
         },
         status: {
             type: String,
-            enum: ['Draft', 'Not Started', 'Awaiting LPO', 'In Progress', 'Fully Invoiced', 'Completed'],
+            enum: ['Draft', 'Not Started', 'Awaiting LPO', 'LPO Pending', 'Created', 'In Progress', 'Fully Invoiced', 'Completed'],
             default: 'Draft',
         },
         type: {

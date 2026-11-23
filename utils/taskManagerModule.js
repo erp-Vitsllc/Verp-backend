@@ -102,6 +102,7 @@ export function moduleForRequestType(requestType, extraText = "") {
     if (low.includes("salary")) return { module: "salary", label: "Salary", path: "/HRM/Salary" };
     if (low.includes("utility")) return { module: "utility", label: "Utility Bills", path: "/HRM/Asset/UtilityBills" };
     if (low.includes("inventory bill")) return { module: "inventory", label: "Bills", path: "/inventory/bills" };
+    if (low.includes("work order")) return { module: "workorder", label: "Work Order", path: "/production/work-order" };
     if (low.includes("payment")) return { module: "payment", label: "Payments", path: "/Accounts/Payments" };
     if (low.includes("company")) return { module: "company", label: "Company", path: "/Company" };
     if (low.includes("asset") || low.includes("tool")) {
@@ -483,6 +484,7 @@ export function accessPathFor(destination, requestId, subjectEmployeeId, context
         else if (moduleName === "reward" && id) path = `/HRM/Reward/${id}`;
         else if (moduleName === "vehicle" && id) path = `/HRM/Asset/Vehicle/details/${id}`;
         else if (moduleName === "tools" && id) path = `/HRM/Asset/details/${id}`;
+        else if (moduleName === "workorder" && id) path = `/production/work-order?workOrder=${id}&section=lpo`;
         else {
             const followUp = String(meta.extra1 || "");
             const expiryTask = /expiry/i.test(String(meta.requestType || "")) || /^expiry follow-up required:/i.test(followUp);

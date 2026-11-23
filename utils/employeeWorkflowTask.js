@@ -9,6 +9,7 @@ export const EMPLOYEE_WORKFLOW_TYPES = new Set([
     "Fine",
     "Group Fine Request",
     "Loan",
+    "Work Order LPO",
     "Work Order LPO Attachment",
 ]);
 

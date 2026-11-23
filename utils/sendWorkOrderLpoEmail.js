@@ -3,7 +3,7 @@ import EmployeeBasic from '../models/EmployeeBasic.js';
 import { resolveEmployeeEmail } from './resolveEmployeeEmail.js';
 
 function personName(employee) {
-    return [employee?.firstName, employee?.lastName].filter(Boolean).join(' ').trim() || 'Salesperson';
+    return [employee?.firstName, employee?.lastName].filter(Boolean).join(' ').trim() || 'there';
 }
 
 export function lpoNotFilledNotice({ senderName, workOrderNo, customer }) {
@@ -15,6 +15,28 @@ export function lpoNotFilledNotice({ senderName, workOrderNo, customer }) {
         subject: `${number}: LPO was not filled`,
         extra1: `LPO was not filled on ${number}`,
         extra2: `${customer || 'Work order'} — number, date and value were left empty.`,
+    };
+}
+
+export function salespersonFollowUpNotice(workOrderNo) {
+    const number = workOrderNo || 'this work order';
+    const message = `Add the supporting document and note on ${number}`;
+    return {
+        message,
+        subject: `${number}: supporting document needed`,
+        extra1: message,
+        extra2: `Open ${number}, add the supporting document and note, then click Create.`,
+    };
+}
+
+export function coordinatorFollowUpNotice(workOrderNo) {
+    const number = workOrderNo || 'this work order';
+    const message = `Create work order ${number}`;
+    return {
+        message,
+        subject: `${number}: create the work order`,
+        extra1: message,
+        extra2: `Open ${number} and click Create. Change the LPO option first if the fields should be different.`,
     };
 }
 
@@ -84,6 +106,52 @@ export async function sendWorkOrderAttachmentRequestEmail({
         ].join('\n'),
     });
     return { emailed: true, email, message: `Email sent to ${email}.`, notice };
+}
+
+export async function sendWorkOrderFollowUpEmail({ employee, notice, workOrderId }) {
+    if (!employee) {
+        return { emailed: false, email: '', message: notice?.message || 'No employee is set for this notice.' };
+    }
+    const { email } = resolveEmployeeEmail(employee);
+    if (!email) {
+        return {
+            emailed: false,
+            email: '',
+            message: 'The employee has no company email. The notification was still saved.',
+        };
+    }
+    const user = process.env.EMAIL_USER;
+    const pass = process.env.EMAIL_PASS;
+    if (!user || !pass) {
+        return {
+            emailed: false,
+            email,
+            message: 'Email is not configured. The notification was still saved.',
+        };
+    }
+    const transporter = nodemailer.createTransport({
+        host: process.env.SMTP_HOST || 'smtp.office365.com',
+        port: Number(process.env.SMTP_PORT || 587),
+        secure: false,
+        auth: { user, pass },
+    });
+    const name = personName(employee);
+    const link = `${appOrigin()}/production/work-order?workOrder=${workOrderId}&section=lpo`;
+    await transporter.sendMail({
+        from: `"VERP" <${user}>`,
+        to: email,
+        subject: notice.subject,
+        text: [
+            `Hello ${name},`,
+            '',
+            notice.message,
+            notice.extra2,
+            link,
+            '',
+            'VERP',
+        ].join('\n'),
+    });
+    return { emailed: true, email, message: `Email sent to ${email}.` };
 }
 
 export async function sendWorkOrderLpoNotFilledEmail({
