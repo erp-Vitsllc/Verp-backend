@@ -3,6 +3,7 @@ import ZohoVendor from '../../models/ZohoVendor.js';
 import InventoryVendor from '../../models/inventory/InventoryVendor.js';
 import InventoryVendorContact from '../../models/inventory/InventoryVendorContact.js';
 import ItemBrand from '../../models/inventory/ItemBrand.js';
+import ItemCategory from '../../models/inventory/ItemCategory.js';
 import { fetchPurchaseOrdersByStatus, fetchVendorContact, getZohoOrganizationId } from '../../services/zohoService.js';
 import { listErpVendorZohoBills, pendingErpBillCounts } from '../../utils/erpVendorZohoBills.js';
 import { withZohoOrganization } from '../../utils/zohoOrgContext.js';
@@ -117,9 +118,8 @@ function outstandingPaymentFromZoho(raw, stored) {
     return { outstandingPayment: null, unusedCredits: null, currencyCode: 'AED' };
 }
 
-function presentVendor(row, primary) {
+function presentVendor(row) {
     const brands = Array.isArray(row.brands) ? row.brands.filter(Boolean) : [];
-    const primaryPhone = Array.isArray(primary?.phones) ? primary.phones.find(Boolean) : '';
     return {
         id: row._id,
         code: row.vendorCode,
@@ -127,9 +127,9 @@ function presentVendor(row, primary) {
         name: row.name,
         location: row.location || '',
         address: row.address || row.location || '',
-        contact: primary?.name || row.primaryContact || '',
+        contact: row.primaryContact || '',
         email: row.email || '',
-        phone: primaryPhone || row.phone || '',
+        phone: row.phone || '',
         website: row.website || '',
         taxRegNo: row.taxRegNo || '',
         brands,
@@ -138,14 +138,6 @@ function presentVendor(row, primary) {
         paymentTerms: row.paymentTerms || '',
         status: row.status || 'Active',
     };
-}
-
-async function primaryContactsFor(vendorIds) {
-    if (!vendorIds.length) return new Map();
-    const rows = await InventoryVendorContact.find({ vendorId: { $in: vendorIds }, isPrimary: true })
-        .select('vendorId name phones')
-        .lean();
-    return new Map(rows.map((row) => [String(row.vendorId), row]));
 }
 
 function uniqueNames(values) {
@@ -211,41 +203,34 @@ async function zohoSource(doc) {
     return source;
 }
 
-async function refreshVendorFromZoho(row) {
-    if (!row?.zohoContactId) return { vendor: row, zohoRaw: {} };
-    const source = await zohoSource({
-        ...row,
-        companyName: row.name,
-        contactName: row.primaryContact,
-        email: row.email,
-        phone: row.phone,
-        locationName: row.location,
-        paymentTermsLabel: row.paymentTerms,
-        isActive: row.status !== 'Inactive',
-        zohoRaw: {},
-    });
-    const fresh = fieldsFromZoho(source);
-    const patch = {};
-    const fillBlank = (key, saved, incoming) => {
-        if (!text(saved) && text(incoming)) patch[key] = text(incoming);
+function storedZohoRaw(doc) {
+    return doc?.zohoRaw && typeof doc.zohoRaw === 'object' ? doc.zohoRaw : {};
+}
+
+async function storedZohoVendor(zohoContactId) {
+    const id = text(zohoContactId);
+    if (!id) return null;
+    return ZohoVendor.findOne({ zohoContactId: id })
+        .select('outstandingPayableAmount unusedCreditsPayableAmount currencyCode zohoRaw')
+        .lean();
+}
+
+async function persistLiveZohoVendor(zohoContactId) {
+    const id = text(zohoContactId);
+    if (!id) return;
+    const source = await zohoSource({ zohoContactId: id, zohoRaw: {} });
+    const raw = storedZohoRaw(source);
+    if (!Object.keys(raw).length) return;
+    const outstanding = finiteAmount(raw.outstanding_payable_amount ?? raw.outstanding_payable_amount_bcy);
+    const credits = finiteAmount(raw.unused_credits_payable_amount ?? raw.unused_credits_payable_amount_bcy);
+    const patch = {
+        zohoRaw: raw,
+        lastSyncedAt: new Date(),
+        currencyCode: text(raw.currency_code) || 'AED',
     };
-    fillBlank('name', row.name, fresh.name);
-    fillBlank('location', row.location, fresh.location);
-    fillBlank('address', row.address, fresh.address);
-    fillBlank('primaryContact', row.primaryContact, fresh.primaryContact);
-    fillBlank('email', row.email, fresh.email);
-    fillBlank('phone', row.phone, fresh.phone);
-    fillBlank('website', row.website, fresh.website);
-    fillBlank('taxRegNo', row.taxRegNo, fresh.taxRegNo);
-    fillBlank('paymentTerms', row.paymentTerms, fresh.paymentTerms);
-    if (patch.name) patch.nameKey = nameKey(patch.name);
-    const updated = Object.keys(patch).length
-        ? await InventoryVendor.findByIdAndUpdate(row._id, patch, { new: true }).lean()
-        : row;
-    return {
-        vendor: updated || { ...row, ...patch },
-        zohoRaw: source.zohoRaw && typeof source.zohoRaw === 'object' ? source.zohoRaw : {},
-    };
+    if (outstanding != null) patch.outstandingPayableAmount = outstanding;
+    if (credits != null) patch.unusedCreditsPayableAmount = credits;
+    await ZohoVendor.updateOne({ zohoContactId: id }, { $set: patch });
 }
 
 function zohoContactRows(raw, vendor) {
@@ -394,7 +379,9 @@ function readVendorEdits(body, base) {
         website: text(base.website),
         taxRegNo: text(base.taxRegNo),
         paymentTerms: text(body?.paymentTerms),
-        brands: brandList(body?.brands),
+        brands: body && Object.prototype.hasOwnProperty.call(body, 'brands')
+            ? brandList(body.brands)
+            : (Array.isArray(base.brands) ? base.brands : []),
         productCount,
         vendorType: text(base.vendorType),
         status,
@@ -433,16 +420,50 @@ export async function previewZohoVendor(req, res) {
     }
 }
 
+async function saveModalPrimaryContact(vendorId, edits) {
+    const name = text(edits.primaryContact);
+    const email = text(edits.email);
+    const phone = text(edits.phone);
+    const existing = await InventoryVendorContact.findOne({ vendorId, isPrimary: true });
+    if (!existing && !name && !email && !phone) return;
+    const patch = {
+        name: name || text(existing?.name) || 'Contact',
+        emails: email ? [email] : [],
+        phones: phone ? [phone] : [],
+        isPrimary: true,
+    };
+    if (existing) {
+        await InventoryVendorContact.updateMany(
+            { vendorId, _id: { $ne: existing._id } },
+            { $set: { isPrimary: false } },
+        );
+        existing.name = patch.name;
+        existing.emails = patch.emails;
+        existing.phones = patch.phones;
+        existing.isPrimary = true;
+        await existing.save();
+        return;
+    }
+    await InventoryVendorContact.create({
+        vendorId,
+        zohoPersonId: '',
+        designation: '',
+        lines: [],
+        ...patch,
+    });
+}
+
 export async function createVendor(req, res) {
     try {
         const fields = await vendorFromZoho(req.body?.zohoContactId);
-        const vendorCode = text(req.body?.vendorCode) || await allocateVendorCode();
+        const vendorCode = await allocateVendorCode();
         const edits = readVendorEdits({ ...req.body, vendorCode }, { ...fields, vendorCode });
         const saved = await InventoryVendor.create({
             ...fields,
             ...edits,
             zohoContactId: fields.zohoContactId,
         });
+        await saveModalPrimaryContact(saved._id, edits);
         res.status(201).json(presentVendor(saved));
     } catch (error) {
         if (error?.code === 11000) {
@@ -460,8 +481,8 @@ export async function findVisibleZohoContact(vendorId, zohoId) {
     if (adopted) return null;
     const hidden = new Set(row.suppressedZohoContactIds || []);
     if (hidden.has(zohoId)) return null;
-    const { vendor, zohoRaw } = await refreshVendorFromZoho(row);
-    return zohoContactRows(zohoRaw, vendor).find((contact) => contact.id === zohoId) || null;
+    const zohoDoc = await storedZohoVendor(row.zohoContactId);
+    return zohoContactRows(storedZohoRaw(zohoDoc), row).find((contact) => contact.id === zohoId) || null;
 }
 
 export async function suppressZohoContactId(vendorId, zohoId) {
@@ -472,49 +493,43 @@ export async function suppressZohoContactId(vendorId, zohoId) {
 }
 
 export async function loadVendorDetail(row) {
-    const { vendor: fresh, zohoRaw } = await refreshVendorFromZoho(row);
-    const zohoDoc = fresh.zohoContactId
-        ? await ZohoVendor.findOne({ zohoContactId: String(fresh.zohoContactId) })
-            .select('outstandingPayableAmount unusedCreditsPayableAmount currencyCode zohoRaw')
-            .lean()
-        : null;
-    const outstanding = outstandingPaymentFromZoho(zohoRaw, zohoDoc);
-    const [contacts, primaryMap] = await Promise.all([
-        InventoryVendorContact.find({ vendorId: fresh._id }).sort({ isPrimary: -1, createdAt: 1 }).lean(),
-        primaryContactsFor([fresh._id]),
-    ]);
+    const zohoDoc = await storedZohoVendor(row?.zohoContactId);
+    const zohoRaw = storedZohoRaw(zohoDoc);
+    const outstanding = outstandingPaymentFromZoho(null, zohoDoc);
+    const contacts = await InventoryVendorContact.find({ vendorId: row._id }).sort({ isPrimary: -1, createdAt: 1 }).lean();
     const localContacts = contacts.map((contact) => ({ ...presentContact(contact), source: 'local' }));
     const hidden = new Set([
-        ...(fresh.suppressedZohoContactIds || []),
+        ...(row.suppressedZohoContactIds || []),
         ...contacts.map((contact) => contact.zohoPersonId).filter(Boolean),
     ]);
-    const zohoContacts = zohoContactRows(zohoRaw, fresh).filter((contact) => !hidden.has(contact.id));
+    const zohoContacts = zohoContactRows(zohoRaw, row).filter((contact) => !hidden.has(contact.id));
     const merged = withSinglePrimary(mergeContacts(localContacts, zohoContacts));
-    const chosen = merged.find((contact) => contact.isPrimary) || null;
-    const presented = presentVendor(fresh, chosen || primaryMap.get(String(fresh._id)));
-    const channel = (contact, key) => (Array.isArray(contact?.[key]) ? contact[key].find(Boolean) : '') || '';
     return {
-        ...presented,
+        ...presentVendor(row),
         ...outstanding,
-        contact: chosen?.name || presented.contact,
-        phone: chosen ? channel(chosen, 'phones') : presented.phone,
-        email: chosen ? channel(chosen, 'emails') : presented.email,
-        contacts: await withBrandImages(merged),
+        contacts: await withCatalogImages(merged),
     };
 }
 
-async function withBrandImages(contacts) {
-    const ids = [...new Set(contacts.flatMap((contact) => (
+async function withCatalogImages(contacts) {
+    const brandIds = [...new Set(contacts.flatMap((contact) => (
         (contact.lines || []).map((line) => line.brandId).filter((id) => mongoose.isValidObjectId(id))
     )))];
-    if (!ids.length) return contacts;
-    const rows = await ItemBrand.find({ _id: { $in: ids } }).select('imageData').lean();
-    const images = new Map(rows.map((row) => [String(row._id), row.imageData || '']));
+    const categoryIds = [...new Set(contacts.flatMap((contact) => (
+        (contact.lines || []).map((line) => line.categoryId).filter((id) => mongoose.isValidObjectId(id))
+    )))];
+    const [brandRows, categoryRows] = await Promise.all([
+        brandIds.length ? ItemBrand.find({ _id: { $in: brandIds } }).select('imageData').lean() : [],
+        categoryIds.length ? ItemCategory.find({ _id: { $in: categoryIds } }).select('imageData').lean() : [],
+    ]);
+    const brandImages = new Map(brandRows.map((item) => [String(item._id), item.imageData || '']));
+    const categoryImages = new Map(categoryRows.map((item) => [String(item._id), item.imageData || '']));
     return contacts.map((contact) => ({
         ...contact,
         lines: (contact.lines || []).map((line) => ({
             ...line,
-            brandImage: images.get(String(line.brandId)) || '',
+            brandImage: brandImages.get(String(line.brandId)) || '',
+            categoryImage: categoryImages.get(String(line.categoryId)) || '',
         })),
     }));
 }
@@ -549,7 +564,10 @@ export async function syncVendorFromZoho(req, res) {
     try {
         const row = await requireInventoryVendor(req.params.id);
         if (!text(row.zohoContactId)) throw httpError(400, 'This vendor is not linked to Zoho.');
-        await listErpVendorZohoBills(row.zohoContactId, { refresh: true });
+        await Promise.all([
+            listErpVendorZohoBills(row.zohoContactId, { refresh: true }),
+            persistLiveZohoVendor(row.zohoContactId),
+        ]);
         const detail = await loadVendorDetail(row);
         const amounts = {};
         if (detail.outstandingPayment != null) amounts.outstandingPayableAmount = detail.outstandingPayment;
@@ -618,13 +636,13 @@ export async function updateVendor(req, res) {
                 status: fields.status,
             };
         }
-        const edits = readVendorEdits(req.body, base);
+        const edits = readVendorEdits({ ...req.body, vendorCode: row.vendorCode }, base);
         const saved = await InventoryVendor.findByIdAndUpdate(row._id, {
             ...edits,
             zohoContactId,
         }, { new: true, runValidators: true }).lean();
-        const primaryMap = await primaryContactsFor([saved._id]);
-        res.json(presentVendor(saved, primaryMap.get(String(saved._id))));
+        await saveModalPrimaryContact(saved._id, edits);
+        res.json(presentVendor(saved));
     } catch (error) {
         if (error?.code === 11000) {
             sendError(res, duplicateVendorMessage(error));
@@ -803,8 +821,7 @@ export async function listVendors(req, res) {
         ]);
         const vendorIds = rows.map((row) => row._id);
         const contactIds = rows.map((row) => text(row.zohoContactId)).filter(Boolean);
-        const [primaryMap, catalog, zohoDocs, pendingCounts, openLpos] = await Promise.all([
-            primaryContactsFor(vendorIds),
+        const [catalog, zohoDocs, pendingCounts, openLpos] = await Promise.all([
             contactNamesFor(vendorIds),
             contactIds.length
                 ? ZohoVendor.find({
@@ -821,7 +838,7 @@ export async function listVendors(req, res) {
                 const contactId = text(row.zohoContactId);
                 const amounts = outstandingForContact(zohoDocs, contactId);
                 return {
-                    ...presentVendor(row, primaryMap.get(String(row._id))),
+                    ...presentVendor(row),
                     ...amounts,
                     pendingBills: pendingCounts.get(contactId) || 0,
                     openLpos: openLposForContact(zohoDocs, contactId, openLpos),

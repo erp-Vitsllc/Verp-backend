@@ -113,7 +113,7 @@ async function readLines(entries) {
 
 async function readContactBody(body) {
     const name = requireName(body?.name, 'Name');
-    const entries = Array.isArray(body?.entries) ? body.entries.slice(0, 20) : [];
+    const entries = Array.isArray(body?.entries) ? body.entries.slice(0, 100) : [];
     assertContactChannels(entries);
     return {
         name,
