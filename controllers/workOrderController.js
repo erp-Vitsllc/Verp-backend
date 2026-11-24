@@ -231,6 +231,45 @@ async function projectCoordinatorName() {
     return [coordinator?.firstName, coordinator?.lastName].filter(Boolean).join(' ').trim();
 }
 
+async function findProjectManager() {
+    const row = await Flowchart.findOne({ category: 'projectmanager', status: 'Active' })
+        .sort({ updatedAt: -1 })
+        .select('empObjectId employeeId employeeName')
+        .lean();
+    if (!row) return null;
+    let employee = null;
+    if (row.empObjectId && mongoose.Types.ObjectId.isValid(String(row.empObjectId))) {
+        employee = await EmployeeBasic.findById(row.empObjectId)
+            .select('firstName lastName companyEmail workEmail status profileStatus employeeId primaryReportee')
+            .populate('primaryReportee', 'companyEmail workEmail status profileStatus')
+            .lean();
+    }
+    if (!employee && row.employeeId) {
+        employee = await EmployeeBasic.findOne({ employeeId: row.employeeId })
+            .select('firstName lastName companyEmail workEmail status profileStatus employeeId primaryReportee')
+            .populate('primaryReportee', 'companyEmail workEmail status profileStatus')
+            .lean();
+    }
+    return employee;
+}
+
+async function projectManagerName() {
+    const row = await Flowchart.findOne({ category: 'projectmanager', status: 'Active' })
+        .sort({ updatedAt: -1 })
+        .select('employeeName')
+        .lean();
+    const fromChart = String(row?.employeeName || '').trim();
+    if (fromChart) return fromChart;
+    const manager = await findProjectManager();
+    return [manager?.firstName, manager?.lastName].filter(Boolean).join(' ').trim();
+}
+
+async function isProjectManager(req) {
+    const manager = await findProjectManager();
+    if (!manager) return false;
+    return actorMatches(req, [manager._id, manager.employeeId]);
+}
+
 async function closeAttachmentRequest(order, actorName) {
     if (!order?._id) return;
     try {
@@ -523,12 +562,361 @@ function presentWorkOrder(order, { includeFiles = false } = {}) {
         if (!includeFiles) delete document.data;
         row.supportingDocument = document;
     }
+    if (row.lpoApproval) {
+        const approval = { ...row.lpoApproval };
+        if (!includeFiles) delete approval.attachmentData;
+        row.lpoApproval = approval;
+    }
     if (row.quotationFile) {
         const file = { ...row.quotationFile };
         delete file.data;
         row.quotationFile = file;
     }
+    if (Array.isArray(row.oldDocuments)) {
+        row.oldDocuments = row.oldDocuments.map((document) => {
+            const next = { ...document };
+            if (!includeFiles) delete next.data;
+            return next;
+        });
+    }
     return row;
+}
+
+function lpoStatusLabel(mode) {
+    if (mode === 'received') return 'LPO received';
+    if (mode === 'not_required') return 'Not required';
+    if (mode === 'required') return 'Required';
+    return '';
+}
+
+function archivedFileRow(file, extra) {
+    return {
+        name: String(file?.name || '').trim(),
+        mime: file?.mime || '',
+        data: file?.data || '',
+        bytes: Number(file?.bytes) || 0,
+        kind: extra.kind,
+        fromStatus: extra.fromStatus,
+        fromLpoMode: extra.fromLpoMode,
+        note: extra.note || '',
+        reason: extra.reason || '',
+        replacedAt: extra.replacedAt,
+        replacedByName: extra.replacedByName || '',
+    };
+}
+
+function archiveRows(order, rows) {
+    const stored = rows.filter((row) => row.name || row.note);
+    if (!stored.length) return;
+    if (!Array.isArray(order.oldDocuments)) order.oldDocuments = [];
+    const signature = stored
+        .map((row) => [row.kind, row.name, row.bytes, row.fromStatus, row.fromLpoMode, row.note].join('|'))
+        .join('||');
+    if (order.oldDocuments.some((row) => row.archiveSignature === signature)) return;
+    stored.forEach((row) => {
+        order.oldDocuments.push({ ...row, archiveSignature: signature });
+    });
+    order.markModified('oldDocuments');
+}
+
+function archivePreviousStatus(order, actorName, reason) {
+    const fromStatus = order.status || '';
+    const fromLpoMode = order.lpoMode || 'required';
+    const replacedAt = new Date();
+    const note = String(order.supportingNote || '').trim();
+    const extra = {
+        fromStatus,
+        fromLpoMode,
+        replacedAt,
+        replacedByName: actorName || '',
+        reason: reason || '',
+    };
+    const rows = [];
+    (order.lpos || []).forEach((lpo) => {
+        if (!lpo?.attachmentName && !lpo?.lpoNo) return;
+        rows.push(archivedFileRow(
+            {
+                name: lpo.attachmentName || lpo.lpoNo,
+                mime: lpo.attachmentMime,
+                data: lpo.attachmentData,
+                bytes: lpo.attachmentBytes,
+            },
+            {
+                ...extra,
+                kind: 'LPO',
+                note: [lpo.lpoNo, lpo.lpoDate, note].filter(Boolean).join(' · '),
+            },
+        ));
+    });
+    if (order.supportingDocument?.name) {
+        rows.push(archivedFileRow(order.supportingDocument, { ...extra, kind: 'Supporting document', note }));
+    }
+    const alertName = order.lpoAlert?.attachmentName || '';
+    if (alertName && alertName !== order.supportingDocument?.name) {
+        rows.push(archivedFileRow(
+            {
+                name: alertName,
+                mime: order.lpoAlert.attachmentMime,
+                data: order.lpoAlert.attachmentData,
+                bytes: order.lpoAlert.attachmentBytes,
+            },
+            { ...extra, kind: 'LPO notice', note: order.lpoAlert.message || note },
+        ));
+    }
+    if (!rows.length) {
+        rows.push(archivedFileRow(
+            { name: [fromStatus || 'Status', lpoStatusLabel(fromLpoMode)].filter(Boolean).join(' · ') },
+            { ...extra, kind: 'Status', note: note || reason || '' },
+        ));
+    }
+    archiveRows(order, rows);
+}
+
+function archiveReplacedFile(order, file, { kind, note, actorName }) {
+    if (!file?.name) return;
+    archiveRows(order, [archivedFileRow(file, {
+        kind,
+        fromStatus: order.status || '',
+        fromLpoMode: order.lpoMode || '',
+        note: note || '',
+        reason: 'File replaced',
+        replacedAt: new Date(),
+        replacedByName: actorName || '',
+    })]);
+}
+
+function statusOrLpoWillChange(order, body) {
+    if (!body) return false;
+    if (body.submitLpoUpdate || body.decideLpoApproval || body.saveLpoDraft) return false;
+    if (body.completeLpoFollowUp || body.uploadPendingAttachment || body.lpo || body.sendNotRequired) return true;
+    if (body.status && body.status !== order.status) return true;
+    if (body.lpoMode && body.lpoMode !== order.lpoMode) return true;
+    return false;
+}
+
+const LPO_APPROVAL = 'Work Order LPO Approval';
+const LPO_WAITING_STATUSES = new Set(['Draft', 'Not Started', 'Awaiting LPO', 'LPO Pending']);
+
+function lpoChoiceLabel(mode) {
+    if (mode === 'received') return 'LPO received';
+    if (mode === 'not_required') return 'Not required';
+    if (mode === 'required') return 'Required';
+    return 'Required';
+}
+
+function clearedLpoApproval() {
+    return {
+        status: '',
+        mode: '',
+        note: '',
+        reason: '',
+        requestedByName: '',
+        requestedById: '',
+        lpoNo: '',
+        lpoDate: '',
+        lpoValue: 0,
+        attachmentName: '',
+        attachmentMime: '',
+        attachmentData: '',
+        attachmentBytes: 0,
+    };
+}
+
+function storedApprovalFile(order) {
+    const approval = order?.lpoApproval;
+    if (!approval?.attachmentName && !approval?.attachmentData) return null;
+    return {
+        name: approval.attachmentName || '',
+        mime: approval.attachmentMime || '',
+        data: approval.attachmentData || '',
+        bytes: approval.attachmentBytes || 0,
+    };
+}
+
+function readOptionalFile(raw) {
+    if (!raw) return null;
+    const file = readAttachment(raw, { required: false });
+    if (!file) return null;
+    if (file.error) return file;
+    return file;
+}
+
+function readLpoUpdate(body, order, { draft = false } = {}) {
+    const mode = LPO_MODES.has(body?.lpoMode) ? body.lpoMode : '';
+    if (!mode) return { error: 'Choose Required, Not required, or LPO received' };
+    if (mode === 'required') return { mode };
+    if (mode === 'not_required') {
+        const note = cleanText(body?.supportingNote, 1000);
+        const uploaded = readOptionalFile(body?.attachment);
+        if (uploaded?.error) {
+            return { error: uploaded.error === 'Attachment is required' ? 'Supporting document is required' : uploaded.error };
+        }
+        const file = uploaded || storedApprovalFile(order);
+        if (!draft && !note) return { error: 'Reason is required' };
+        if (!draft && !file?.data) return { error: 'Supporting document is required' };
+        return { mode, note, file };
+    }
+    const lpoNo = cleanText(body?.lpo?.lpoNo, 80);
+    const lpoDate = cleanText(body?.lpo?.lpoDate, 10);
+    let lpoValue = cleanMoney(body?.lpo?.lpoValue);
+    const quoteTotal = Number(order.value) || 0;
+    if (!(lpoValue > 0) && quoteTotal > 0 && !draft) lpoValue = quoteTotal;
+    if (quoteTotal > 0 && lpoValue && Math.abs(lpoValue - quoteTotal) > 0.009) {
+        return { error: 'LPO value must match the quotation total' };
+    }
+    if (lpoDate && lpoDate > dubaiDateKey()) return { error: 'LPO date cannot be after today' };
+    if (lpoDate && !/^\d{4}-\d{2}-\d{2}$/.test(lpoDate)) return { error: 'LPO date is not valid' };
+    const uploaded = readOptionalFile(body?.lpo?.attachment);
+    if (uploaded?.error) return { error: uploaded.error };
+    const file = uploaded || storedApprovalFile(order);
+    if (!draft && (!lpoNo || !/^\d{4}-\d{2}-\d{2}$/.test(lpoDate) || !(lpoValue > 0) || !file?.data)) {
+        return { error: 'LPO number, date, value and attachment are required' };
+    }
+    return { mode, lpoNo, lpoDate, lpoValue, file };
+}
+
+function approvalFromPayload(order, payload, actorName, req, status) {
+    const previous = order.lpoApproval || {};
+    const file = payload.file;
+    return {
+        status,
+        mode: payload.mode,
+        note: payload.note || '',
+        reason: '',
+        requestedByName: actorName,
+        requestedById: req.user?.id ? String(req.user.id) : (previous.requestedById || ''),
+        requestedAt: status === 'pending' && previous.requestedAt ? previous.requestedAt : new Date(),
+        lpoNo: payload.lpoNo || '',
+        lpoDate: payload.lpoDate || '',
+        lpoValue: payload.lpoValue || 0,
+        attachmentName: file?.name || '',
+        attachmentMime: file?.mime || '',
+        attachmentData: file?.data || '',
+        attachmentBytes: file?.bytes || 0,
+    };
+}
+
+function applyLpoUpdate(order, payload, actorName) {
+    archivePreviousStatus(order, actorName, 'LPO updated');
+    if (payload.mode === 'not_required') {
+        order.supportingNote = payload.note;
+        order.supportingDocument = {
+            name: payload.file.name,
+            mime: payload.file.mime,
+            data: payload.file.data,
+            bytes: payload.file.bytes,
+        };
+        order.lpoMode = 'not_required';
+        if (LPO_WAITING_STATUSES.has(order.status)) order.status = 'Completed';
+    } else if (payload.mode === 'required') {
+        order.lpoMode = 'required';
+        if (LPO_WAITING_STATUSES.has(order.status)) order.status = 'Created';
+    } else {
+        const row = {
+            lpoNo: payload.lpoNo,
+            lpoDate: payload.lpoDate,
+            lpoValue: payload.lpoValue,
+            attachmentName: payload.file.name,
+            attachmentMime: payload.file.mime,
+            attachmentData: payload.file.data,
+            attachmentBytes: payload.file.bytes,
+        };
+        if (!Array.isArray(order.lpos)) order.lpos = [];
+        if (order.lpos.length) order.lpos.splice(0, 1, row);
+        else order.lpos.push(row);
+        order.lpoNo = payload.lpoNo;
+        order.lpoMode = 'received';
+        if (LPO_WAITING_STATUSES.has(order.status)) order.status = 'Created';
+        order.markModified('lpos');
+    }
+    order.lpoFollowUp = '';
+    order.attachmentPending = false;
+    order.lpoLocked = true;
+    order.lpoApproval = clearedLpoApproval();
+    order.markModified('lpoApproval');
+    if (order.lpoAlert) {
+        order.lpoAlert.active = false;
+        order.markModified('lpoAlert');
+    }
+}
+
+function payloadFromApproval(approval) {
+    const file = approval?.attachmentName ? {
+        name: approval.attachmentName,
+        mime: approval.attachmentMime || '',
+        data: approval.attachmentData || '',
+        bytes: approval.attachmentBytes || 0,
+    } : null;
+    if (approval?.mode === 'required') return { mode: 'required' };
+    if (approval?.mode === 'not_required') return { mode: 'not_required', note: approval.note || '', file };
+    return {
+        mode: 'received',
+        lpoNo: approval?.lpoNo || '',
+        lpoDate: approval?.lpoDate || '',
+        lpoValue: approval?.lpoValue || 0,
+        file,
+    };
+}
+
+async function closeLpoApprovalNotice(order, status, comment) {
+    if (!order?._id) return;
+    try {
+        await DashboardAction.updateMany(
+            { requestId: order._id, requestType: LPO_APPROVAL, status: 'Pending' },
+            { $set: { status, actionedDate: new Date(), comment: comment || '' } },
+        );
+    } catch (error) {
+        console.error('Could not close the LPO approval:', error);
+    }
+}
+
+async function notifyProjectManager(order, actorName, payload) {
+    const manager = await findProjectManager();
+    if (!manager?._id) {
+        return { emailed: false, message: 'Assign an active Project Manager on the flowchart before sending this LPO for approval.' };
+    }
+    const label = lpoChoiceLabel(payload.mode);
+    const notice = {
+        message: `Approve the LPO on ${order.workOrderNo}`,
+        subject: `${order.workOrderNo}: LPO approval`,
+        extra1: `Approve the LPO on ${order.workOrderNo}`,
+        extra2: `${actorName} chose ${label}. Approve to change the status, or reject with a reason.`,
+    };
+    await syncDashboardAction({
+        requestId: order._id,
+        requestType: LPO_APPROVAL,
+        assignedTo: manager._id,
+        status: 'Pending',
+        subjectName: order.customer || '',
+        requestedByName: actorName || '',
+        extra1: notice.extra1,
+        extra2: notice.extra2,
+        extra3: JSON.stringify({ path: `/production/work-order?workOrder=${order._id}&section=lpo` }),
+    });
+    let emailed = false;
+    let message = notice.message;
+    try {
+        const sent = await sendWorkOrderFollowUpEmail({
+            employee: manager,
+            notice,
+            workOrderId: String(order._id),
+        });
+        emailed = Boolean(sent.emailed);
+        message = sent.message || notice.message;
+    } catch (error) {
+        console.error('Work order LPO approval email failed:', error);
+        message = 'Email could not be sent. The approval was still saved.';
+    }
+    return { emailed, message, manager };
+}
+
+async function presentedForViewer(order, req) {
+    const presented = presentWorkOrder(order, { includeFiles: true });
+    presented.viewerCanCompleteLpo = Boolean(order.lpoFollowUp) && await canCompleteLpoFollowUp(req, order);
+    presented.viewerIsProjectManager = await isProjectManager(req);
+    presented.lpoAssigneeName = await projectCoordinatorName();
+    presented.projectManagerName = await projectManagerName();
+    return presented;
 }
 
 async function allocateWorkOrderNo() {
@@ -564,7 +952,7 @@ export const getWorkOrders = async (_req, res) => {
         const workOrders = await WorkOrder.find()
             .sort({ createdAt: -1 })
             .limit(500)
-            .select('-lpos.attachmentData -lpoAlert.attachmentData -budgets -quotationFile.data')
+            .select('-lpos.attachmentData -lpoAlert.attachmentData -oldDocuments.data -budgets -quotationFile.data -lpoApproval.attachmentData')
             .lean();
         return res.status(200).json({ workOrders });
     } catch (error) {
@@ -837,10 +1225,7 @@ export const getWorkOrder = async (req, res) => {
         }
         const workOrder = await WorkOrder.findById(id).lean();
         if (!workOrder) return res.status(404).json({ message: 'Work order was not found' });
-        const presented = presentWorkOrder(workOrder, { includeFiles: true });
-        presented.viewerCanCompleteLpo = Boolean(workOrder.lpoFollowUp) && await canCompleteLpoFollowUp(req, workOrder);
-        presented.lpoAssigneeName = await projectCoordinatorName();
-        return res.status(200).json({ workOrder: presented });
+        return res.status(200).json({ workOrder: await presentedForViewer(workOrder, req) });
     } catch (error) {
         console.error('Error loading work order:', error);
         return res.status(500).json({ message: 'Failed to load the work order' });
@@ -978,6 +1363,14 @@ export const applyWorkOrderQuotationChanges = async (req, res) => {
                 number: order.quotationRef,
             });
             if (quotationFile) {
+                const actorName = cleanText(req.user?.name, 120) || 'An employee';
+                if (order.quotationFile?.name && order.quotationFile.data !== quotationFile.data) {
+                    archiveReplacedFile(order, order.quotationFile, {
+                        kind: 'Quotation',
+                        note: order.quotationRef,
+                        actorName,
+                    });
+                }
                 order.quotationFile = quotationFile;
                 order.markModified('quotationFile');
             }
@@ -1005,6 +1398,146 @@ export const updateWorkOrder = async (req, res) => {
         }
         const order = await WorkOrder.findById(id);
         if (!order) return res.status(404).json({ message: 'Work order was not found' });
+        const actorName = cleanText(req.user?.name, 120) || 'An employee';
+        if (req.body?.saveLpoDraft || req.body?.submitLpoUpdate || req.body?.decideLpoApproval) {
+            const manager = await isProjectManager(req);
+            if (req.body?.saveLpoDraft) {
+                if (order.lpoLocked && !manager) {
+                    return res.status(403).json({ message: 'Only the project manager can update the LPO' });
+                }
+                if (order.lpoApproval?.status === 'pending' && !manager) {
+                    return res.status(400).json({ message: 'This LPO is waiting for the project manager' });
+                }
+                const draftPayload = readLpoUpdate(req.body, order, { draft: true });
+                if (draftPayload.error) return res.status(400).json({ message: draftPayload.error });
+                const previousApproval = order.lpoApproval || {};
+                const keepPending = previousApproval.status === 'pending' && manager;
+                order.lpoApproval = approvalFromPayload(
+                    order,
+                    draftPayload,
+                    actorName,
+                    req,
+                    keepPending ? 'pending' : 'draft',
+                );
+                if (keepPending) {
+                    order.lpoApproval.requestedByName = previousApproval.requestedByName || '';
+                    order.lpoApproval.requestedById = previousApproval.requestedById || '';
+                    order.lpoApproval.requestedAt = previousApproval.requestedAt;
+                }
+                order.markModified('lpoApproval');
+                await order.save();
+                return res.status(200).json({
+                    workOrder: await presentedForViewer(order, req),
+                    draftSaved: true,
+                });
+            }
+            if (req.body?.decideLpoApproval) {
+                if (!manager) {
+                    return res.status(403).json({ message: 'Only the project manager can approve the LPO' });
+                }
+                if (order.lpoApproval?.status !== 'pending') {
+                    return res.status(400).json({ message: 'This LPO is not waiting for approval' });
+                }
+                const decision = String(req.body.decision || '').toLowerCase();
+                if (decision === 'reject') {
+                    const reason = cleanText(req.body.reason, 1000);
+                    if (!reason) return res.status(400).json({ message: 'A reason is required to reject the LPO' });
+                    order.lpoApproval.reason = reason;
+                    order.lpoApproval.status = 'rejected';
+                    order.markModified('lpoApproval');
+                    await order.save();
+                    await closeLpoApprovalNotice(order, 'Rejected', reason);
+                    return res.status(200).json({
+                        workOrder: await presentedForViewer(order, req),
+                        rejected: true,
+                    });
+                }
+                if (decision !== 'approve') {
+                    return res.status(400).json({ message: 'Choose approve or reject' });
+                }
+                const approved = payloadFromApproval(order.lpoApproval);
+                if (approved.mode === 'not_required' && (!approved.note || !approved.file?.data)) {
+                    return res.status(400).json({ message: 'Reason and supporting document are required before approval' });
+                }
+                if (
+                    approved.mode === 'received'
+                    && (!approved.lpoNo || !/^\d{4}-\d{2}-\d{2}$/.test(approved.lpoDate || '') || !(approved.lpoValue > 0) || !approved.file?.data)
+                ) {
+                    return res.status(400).json({ message: 'LPO number, date, value and attachment are required before approval' });
+                }
+                applyLpoUpdate(order, approved, actorName);
+                await order.save();
+                await closeLpoApprovalNotice(order, 'Approved', 'LPO approved');
+                await closeLpoFollowUps(order, actorName, 'LPO approved');
+                return res.status(200).json({
+                    workOrder: await presentedForViewer(order, req),
+                    applied: true,
+                });
+            }
+            if (order.lpoLocked && !manager) {
+                return res.status(403).json({ message: 'Only the project manager can update the LPO' });
+            }
+            if (order.lpoApproval?.status === 'pending' && !manager) {
+                return res.status(400).json({ message: 'This LPO is waiting for the project manager' });
+            }
+            const payload = readLpoUpdate(req.body, order);
+            if (payload.error) return res.status(400).json({ message: payload.error });
+            if (manager) {
+                applyLpoUpdate(order, payload, actorName);
+                await order.save();
+                await closeLpoApprovalNotice(order, 'Approved', 'LPO updated by the project manager');
+                await closeLpoFollowUps(order, actorName, 'LPO updated');
+                return res.status(200).json({
+                    workOrder: await presentedForViewer(order, req),
+                    applied: true,
+                });
+            }
+            const managerEmployee = await findProjectManager();
+            if (!managerEmployee?._id) {
+                return res.status(400).json({ message: 'Assign an active Project Manager on the flowchart before updating the LPO.' });
+            }
+            order.lpoApproval = {
+                status: 'pending',
+                mode: payload.mode,
+                note: payload.note || '',
+                reason: '',
+                requestedByName: actorName,
+                requestedById: req.user?.id ? String(req.user.id) : '',
+                requestedAt: new Date(),
+                lpoNo: payload.lpoNo || '',
+                lpoDate: payload.lpoDate || '',
+                lpoValue: payload.lpoValue || 0,
+                attachmentName: payload.file?.name || '',
+                attachmentMime: payload.file?.mime || '',
+                attachmentData: payload.file?.data || '',
+                attachmentBytes: payload.file?.bytes || 0,
+            };
+            order.markModified('lpoApproval');
+            await order.save();
+            const notice = await notifyProjectManager(order, actorName, payload);
+            return res.status(200).json({
+                workOrder: await presentedForViewer(order, req),
+                approvalSent: true,
+                emailMessage: notice.message || '',
+            });
+        }
+        if (statusOrLpoWillChange(order, req.body)) {
+            archivePreviousStatus(order, actorName, 'Status or LPO changed');
+        }
+        const managerForLock = await isProjectManager(req);
+        const touchesLpo = Boolean(
+            req.body?.completeLpoFollowUp
+            || req.body?.uploadPendingAttachment
+            || req.body?.lpo
+            || req.body?.sendNotRequired
+            || (req.body?.lpoMode && req.body.lpoMode !== order.lpoMode),
+        );
+        if (touchesLpo && order.lpoLocked && !managerForLock) {
+            return res.status(403).json({ message: 'Only the project manager can update the LPO' });
+        }
+        if (touchesLpo && order.lpoApproval?.status === 'pending' && !managerForLock) {
+            return res.status(400).json({ message: 'This LPO is waiting for the project manager' });
+        }
 
         if (req.body?.completeLpoFollowUp) {
             if (!order.lpoFollowUp) {
@@ -1015,7 +1548,6 @@ export const updateWorkOrder = async (req, res) => {
                 return res.status(403).json({ message: `The ${who} completes this step` });
             }
             const mode = LPO_MODES.has(req.body?.lpoMode) ? req.body.lpoMode : order.lpoMode;
-            const actorName = cleanText(req.user?.name, 120) || 'An employee';
             if (mode === 'not_required') {
                 const note = cleanText(req.body?.supportingNote, 1000);
                 if (!note) return res.status(400).json({ message: 'Note is required' });
@@ -1111,13 +1643,6 @@ export const updateWorkOrder = async (req, res) => {
             if (!String(order.projectName || '').trim()) {
                 order.projectName = cleanText(order.customer || order.workOrderNo, 160);
             }
-        }
-
-        if (req.body?.lpoMode) {
-            if (!LPO_MODES.has(req.body.lpoMode)) {
-                return res.status(400).json({ message: 'Choose Required, Not required, or LPO received' });
-            }
-            order.lpoMode = req.body.lpoMode;
         }
 
         if (req.body?.uploadPendingAttachment) {

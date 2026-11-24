@@ -11,6 +11,7 @@ export const EMPLOYEE_WORKFLOW_TYPES = new Set([
     "Loan",
     "Work Order LPO",
     "Work Order LPO Attachment",
+    "Work Order LPO Approval",
 ]);
 
 export function employeeWorkflowType(requestType) {

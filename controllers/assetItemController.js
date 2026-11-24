@@ -14900,7 +14900,7 @@ export const updateAssetServiceDraft = async (req, res) => {
         )
             .toLowerCase()
             .trim();
-        // After Send, until Zoho bill accepted — HR only may update Initiate Service fields.
+        // After Send, until Zoho bill accepted — any signed-in user may update Initiate Service.
         const billingStatus = String(remarkObj?.billingStatus || '').toLowerCase();
         const multiBills = Array.isArray(remarkObj?.zohoBills) ? remarkObj.zohoBills : [];
         const multiAllBilled =
@@ -14972,13 +14972,7 @@ export const updateAssetServiceDraft = async (req, res) => {
             }
         }
         if (!roleFieldOverride && isHrAccountsInitiateEdit) {
-            if (!isHr && isAccounts) roleFieldOverride = 'accounts';
-            else if (!isHr) {
-                return res.status(403).json({
-                    message:
-                        'Access denied. Only HR can update Initiate Service after submit until the Zoho bill is accepted.',
-                });
-            }
+            // Any signed-in user may update Initiate Service after submit until the Zoho bill is accepted.
         } else if (!roleFieldOverride && isTireChangePending) {
             const allowed = await actorMayCreateOrInitiateVehicleService(req.user);
             if (!allowed) {
@@ -15065,14 +15059,16 @@ export const updateAssetServiceDraft = async (req, res) => {
             asset.markModified('services');
         }
 
-        // After first Initiate is done: HR edits must appear on Service Workflow History
+        // After first Initiate is done: edits appear on Service Workflow History
         // between Schedule and HR Approval (all types except Car Wash).
         if (isHrAccountsInitiateEdit && !mayUpdateDraft) {
             const serviceTypeLabel = String(service.serviceType || '').trim();
             const isCarWash = serviceTypeLabel === 'Car Wash';
             if (!isCarWash) {
                 const editorName = await getRequesterName(req.user);
-                const note = `Initiate Service edited · Done by HR: ${editorName}`;
+                const note = isHr
+                    ? `Initiate Service edited · Done by HR: ${editorName}`
+                    : `Initiate Service edited · Done by: ${editorName}`;
                 if (serviceTypeLabel === 'Oil Service') {
                     appendOilServiceActivity(service, {
                         type: 'initiate_edited',

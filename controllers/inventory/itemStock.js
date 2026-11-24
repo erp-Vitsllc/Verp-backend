@@ -129,14 +129,14 @@ async function createStockItem(source, identity, quantity, price) {
         resolveItemOption(source, identity.subcategoryId),
     ]);
     const itemName = cleanName(itemOption.name) || cleanName(source.description);
-    const modelNumber = cleanName(identity.modelNumber) || itemName;
+    const modelNumber = cleanName(identity.modelNumber);
     const description = buildDescription({
         brandName: brand?.name,
         itemName,
         modelNumber,
         subcategoryName: subcategory?.name,
     });
-    await assertModelNumberAvailable(modelNumber);
+    if (modelNumber) await assertModelNumberAvailable(modelNumber);
     await assertLinks({
         categoryId: identity.categoryId,
         subcategoryId: identity.subcategoryId,
@@ -178,7 +178,7 @@ async function optionForIdentity(source, subcategoryId) {
 async function finalizePendingItem(source, identity, quantity, price) {
     const itemOption = await optionForIdentity(source, identity.subcategoryId);
     const itemName = cleanName(itemOption.name) || cleanName(source.description);
-    const modelNumber = cleanName(identity.modelNumber) || itemName;
+    const modelNumber = cleanName(identity.modelNumber);
     const [brand, subcategory] = await Promise.all([
         ItemBrand.findById(identity.brandId).select('name').lean(),
         ItemSubcategory.findById(identity.subcategoryId).select('name').lean(),
@@ -189,7 +189,7 @@ async function finalizePendingItem(source, identity, quantity, price) {
         modelNumber,
         subcategoryName: subcategory?.name,
     });
-    await assertModelNumberAvailable(modelNumber, source._id);
+    if (modelNumber) await assertModelNumberAvailable(modelNumber, source._id);
     await assertLinks({
         categoryId: identity.categoryId,
         subcategoryId: identity.subcategoryId,

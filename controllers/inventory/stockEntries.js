@@ -361,7 +361,7 @@ async function postLines(req, entry, lines) {
                 categoryId: line.categoryId,
                 subcategoryId: line.subcategoryId,
                 brandId: line.brandId,
-                modelNumber: line.modelNumber || line.itemName,
+                modelNumber: line.modelNumber || '',
             });
         } catch (error) {
             if (error?.status !== 403) throw error;
@@ -378,7 +378,7 @@ async function postLines(req, entry, lines) {
                 categoryId: line.categoryId,
                 subcategoryId: line.subcategoryId,
                 brandId: line.brandId,
-                modelNumber: line.modelNumber || line.itemName,
+                modelNumber: line.modelNumber || '',
             });
         }
         posted.push({
