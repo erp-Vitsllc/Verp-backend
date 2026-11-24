@@ -1104,6 +1104,25 @@ export const updateWorkOrder = async (req, res) => {
             }
         }
 
+        if (req.body?.invoice) {
+            const invoiceNo = cleanText(req.body.invoice.invoiceNo, 80);
+            const invoiceDate = cleanText(req.body.invoice.invoiceDate, 10);
+            const invoiceValue = cleanMoney(req.body.invoice.value);
+            if (!invoiceNo || !/^\d{4}-\d{2}-\d{2}$/.test(invoiceDate) || !(invoiceValue > 0)) {
+                return res.status(400).json({ message: 'Invoice date, number and value are required' });
+            }
+            if (!Array.isArray(order.invoices)) order.invoices = [];
+            const already = order.invoices.reduce((sum, row) => sum + (Number(row.value) || 0), 0);
+            const orderValue = Number(order.value) || 0;
+            const nextTotal = Math.round((already + invoiceValue) * 100) / 100;
+            if (orderValue > 0 && nextTotal - orderValue > 0.009) {
+                return res.status(400).json({ message: 'Invoice total cannot exceed the work order value' });
+            }
+            order.invoices.push({ invoiceNo, invoiceDate, value: invoiceValue });
+            order.markModified('invoices');
+            order.invoicedAmount = nextTotal;
+        }
+
         if (Object.prototype.hasOwnProperty.call(req.body || {}, 'vendorId')) {
             const vendor = await resolveInventoryVendor(req.body.vendorId);
             if (!vendor) {

@@ -96,6 +96,16 @@ const workOrderSchema = new mongoose.Schema(
         },
         value: { type: Number, default: 0, min: 0 },
         invoicedAmount: { type: Number, default: 0, min: 0 },
+        invoices: {
+            type: [
+                {
+                    invoiceNo: { type: String, default: '', trim: true },
+                    invoiceDate: { type: String, default: '' },
+                    value: { type: Number, default: 0, min: 0 },
+                },
+            ],
+            default: [],
+        },
         projectName: { type: String, default: '', trim: true },
         createdBy: { type: String, default: '' },
         createdByName: { type: String, default: '' },
