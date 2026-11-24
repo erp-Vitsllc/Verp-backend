@@ -220,6 +220,17 @@ async function findProjectCoordinator() {
     return employee;
 }
 
+async function projectCoordinatorName() {
+    const row = await Flowchart.findOne({ category: 'projectcoordinator', status: 'Active' })
+        .sort({ updatedAt: -1 })
+        .select('employeeName')
+        .lean();
+    const fromChart = String(row?.employeeName || '').trim();
+    if (fromChart) return fromChart;
+    const coordinator = await findProjectCoordinator();
+    return [coordinator?.firstName, coordinator?.lastName].filter(Boolean).join(' ').trim();
+}
+
 async function closeAttachmentRequest(order, actorName) {
     if (!order?._id) return;
     try {
@@ -828,6 +839,7 @@ export const getWorkOrder = async (req, res) => {
         if (!workOrder) return res.status(404).json({ message: 'Work order was not found' });
         const presented = presentWorkOrder(workOrder, { includeFiles: true });
         presented.viewerCanCompleteLpo = Boolean(workOrder.lpoFollowUp) && await canCompleteLpoFollowUp(req, workOrder);
+        presented.lpoAssigneeName = await projectCoordinatorName();
         return res.status(200).json({ workOrder: presented });
     } catch (error) {
         console.error('Error loading work order:', error);
@@ -1218,6 +1230,10 @@ export const updateWorkOrder = async (req, res) => {
             if (!file || file.error) {
                 return res.status(400).json({ message: file?.error || 'Attachment is required when LPO is not required' });
             }
+            const note = cleanText(req.body?.supportingNote, 1000);
+            if (!note) {
+                return res.status(400).json({ message: 'Description is required when LPO is not required' });
+            }
             if (!order.salespersonId) {
                 return res.status(400).json({ message: 'This work order has no salesperson to notify' });
             }
@@ -1243,6 +1259,13 @@ export const updateWorkOrder = async (req, res) => {
                 order.attachmentPending = false;
                 await closeAttachmentRequest(order, senderName);
             }
+            order.supportingNote = note;
+            order.supportingDocument = {
+                name: file.name,
+                mime: file.mime,
+                data: file.data,
+                bytes: file.bytes,
+            };
             order.lpoAlert = {
                 active: true,
                 message: copy.message,
