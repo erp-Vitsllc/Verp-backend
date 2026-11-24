@@ -18,7 +18,7 @@ import { syncDashboardAction } from '../utils/syncDashboard.js';
 import DashboardAction from '../models/DashboardAction.js';
 import { finishEmployeeWorkflowTasks } from '../utils/employeeWorkflowTask.js';
 import { isJwtSystemSuperUser } from '../utils/systemSuperUser.js';
-import { fetchZohoEstimateByNumber } from '../services/zohoService.js';
+import { fetchZohoEstimateByNumber, fetchZohoEstimatePdf } from '../services/zohoService.js';
 import {
     applyQuotationSnapshot,
     quotationChanges,
@@ -148,6 +148,20 @@ async function isProjectCoordinator(req) {
 
 async function loadQuotationEstimate(number) {
     return fetchZohoEstimateByNumber(number, { allowClosed: true });
+}
+
+async function captureQuotationFile({ estimateId = '', number = '' } = {}) {
+    const quoteNumber = String(number || '').trim();
+    const quoteId = String(estimateId || '').trim();
+    if (!quoteNumber && !quoteId) return null;
+    const { buffer, filename } = await fetchZohoEstimatePdf({ estimateId: quoteId, number: quoteNumber });
+    if (!buffer?.length || buffer.length > 12 * 1024 * 1024) return null;
+    return {
+        name: filename || `Quotation-${quoteNumber || quoteId}.pdf`,
+        mime: 'application/pdf',
+        data: buffer.toString('base64'),
+        bytes: buffer.length,
+    };
 }
 
 const WORK_ORDER_FLOWCHART_ROLES = [
@@ -498,6 +512,11 @@ function presentWorkOrder(order, { includeFiles = false } = {}) {
         if (!includeFiles) delete document.data;
         row.supportingDocument = document;
     }
+    if (row.quotationFile) {
+        const file = { ...row.quotationFile };
+        delete file.data;
+        row.quotationFile = file;
+    }
     return row;
 }
 
@@ -534,7 +553,7 @@ export const getWorkOrders = async (_req, res) => {
         const workOrders = await WorkOrder.find()
             .sort({ createdAt: -1 })
             .limit(500)
-            .select('-lpos.attachmentData -lpoAlert.attachmentData -budgets')
+            .select('-lpos.attachmentData -lpoAlert.attachmentData -budgets -quotationFile.data')
             .lean();
         return res.status(200).json({ workOrders });
     } catch (error) {
@@ -706,6 +725,17 @@ export const createWorkOrder = async (req, res) => {
                 quotationSnapshot = snapshotFromEstimate(null, quoteFallback);
             }
         }
+        let quotationFile = null;
+        if (quotationRef || quotationId) {
+            try {
+                quotationFile = await captureQuotationFile({
+                    estimateId: quotationSnapshot?.id || quotationId,
+                    number: quotationRef,
+                });
+            } catch (error) {
+                console.error('Quotation PDF was not stored:', error?.message || error);
+            }
+        }
 
         const payload = {
             customer,
@@ -714,6 +744,7 @@ export const createWorkOrder = async (req, res) => {
             quotationId,
             quotationDate,
             quotationSnapshot,
+            ...(quotationFile ? { quotationFile } : {}),
             valueExclVat,
             vatAmount,
             lpoMode,
@@ -809,6 +840,42 @@ async function findWorkOrder(id) {
     return WorkOrder.findById(id);
 }
 
+export const getWorkOrderQuotationFile = async (req, res) => {
+    try {
+        const order = await findWorkOrder(req.params.id);
+        if (!order) return res.status(404).json({ message: 'Work order was not found' });
+        if (!order.quotationRef && !order.quotationId) {
+            return res.status(400).json({ message: 'This work order has no quotation' });
+        }
+
+        let file = order.quotationFile?.data ? order.quotationFile : null;
+        if (!file) {
+            file = await captureQuotationFile({
+                estimateId: order.quotationId,
+                number: order.quotationRef,
+            });
+            if (!file?.data) {
+                return res.status(502).json({ message: 'Could not store this quotation' });
+            }
+            order.quotationFile = file;
+            order.markModified('quotationFile');
+            await order.save();
+        }
+
+        const buffer = Buffer.from(file.data, 'base64');
+        const filename = String(file.name || `Quotation-${order.quotationRef || 'document'}.pdf`).replace(/"/g, '');
+        res.setHeader('Content-Type', file.mime || 'application/pdf');
+        res.setHeader('Content-Disposition', `inline; filename="${filename}"`);
+        res.setHeader('Content-Length', buffer.length);
+        res.setHeader('Cache-Control', 'private, no-store');
+        return res.status(200).send(buffer);
+    } catch (error) {
+        console.error('Error opening the stored quotation:', error);
+        const message = error?.message || 'Could not open this quotation';
+        return res.status(error.statusCode || 502).json({ message });
+    }
+};
+
 export const getWorkOrderQuotationChanges = async (req, res) => {
     try {
         const order = await findWorkOrder(req.params.id);
@@ -893,6 +960,18 @@ export const applyWorkOrderQuotationChanges = async (req, res) => {
         const estimate = await loadQuotationEstimate(order.quotationRef);
         const changes = quotationChanges(savedQuotation(order), snapshotFromEstimate(estimate, order));
         const { lpoAdjusted } = applyQuotationSnapshot(order, estimate);
+        try {
+            const quotationFile = await captureQuotationFile({
+                estimateId: order.quotationId || estimate?.id,
+                number: order.quotationRef,
+            });
+            if (quotationFile) {
+                order.quotationFile = quotationFile;
+                order.markModified('quotationFile');
+            }
+        } catch (error) {
+            console.error('Quotation PDF was not stored:', error?.message || error);
+        }
         await order.save();
         return res.status(200).json({
             workOrder: presentWorkOrder(order, { includeFiles: true }),
@@ -1109,7 +1188,7 @@ export const updateWorkOrder = async (req, res) => {
             const invoiceDate = cleanText(req.body.invoice.invoiceDate, 10);
             const invoiceValue = cleanMoney(req.body.invoice.value);
             if (!invoiceNo || !/^\d{4}-\d{2}-\d{2}$/.test(invoiceDate) || !(invoiceValue > 0)) {
-                return res.status(400).json({ message: 'Invoice date, number and value are required' });
+                return res.status(400).json({ message: 'Invoice date, invoice number and value are required' });
             }
             if (!Array.isArray(order.invoices)) order.invoices = [];
             const already = order.invoices.reduce((sum, row) => sum + (Number(row.value) || 0), 0);

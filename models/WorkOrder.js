@@ -14,6 +14,12 @@ const workOrderSchema = new mongoose.Schema(
         quotationId: { type: String, default: '', trim: true },
         quotationDate: { type: String, default: '' },
         quotationSnapshot: { type: mongoose.Schema.Types.Mixed, default: null },
+        quotationFile: {
+            name: { type: String, default: '' },
+            mime: { type: String, default: '' },
+            data: { type: String, default: '' },
+            bytes: { type: Number, default: 0 },
+        },
         budgeted: { type: Boolean, default: false },
         budgets: {
             type: [
