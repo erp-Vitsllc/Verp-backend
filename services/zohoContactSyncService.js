@@ -46,6 +46,14 @@ async function upsertZohoCustomers(contacts, organizationId, syncedAt) {
 
     await runBulkUpserts(ZohoCustomer, bulkOps);
 
+    if (!syncedIds.length) {
+        return {
+            upserted: 0,
+            deactivated: 0,
+            syncedAt,
+        };
+    }
+
     const result = await ZohoCustomer.deleteMany({
         organizationId,
         zohoContactId: { $nin: syncedIds },

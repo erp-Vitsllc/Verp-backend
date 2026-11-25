@@ -645,10 +645,10 @@ async function fetchCustomerPages(pathname, extraParams = {}) {
         const pageCustomers = extractZohoContactPage(data, 'customer');
         customers.push(...pageCustomers);
 
-        hasMore = Boolean(data.page_context?.has_more_page);
+        hasMore = customerPageHasMore(data, pageCustomers.length, 200);
         page += 1;
 
-        if (!pageCustomers.length) {
+        if (!pageCustomers.length || page > 500) {
             break;
         }
     }
@@ -656,14 +656,40 @@ async function fetchCustomerPages(pathname, extraParams = {}) {
     return customers;
 }
 
+function customerPageHasMore(data, rowCount, perPage) {
+    const flag = data?.page_context?.has_more_page;
+    if (flag === true || flag === 'true' || flag === 1) return true;
+    if (flag === false || flag === 'false' || flag === 0) return false;
+    return rowCount >= perPage;
+}
+
+function keepCustomerContacts(rows) {
+    return (Array.isArray(rows) ? rows : []).filter((row) => {
+        const type = String(row?.contact_type || '').trim().toLowerCase();
+        return !type || type === 'customer';
+    });
+}
+
 export async function fetchCustomers() {
-    try {
-        return await fetchCustomerPages('/customers');
-    } catch (error) {
-        const missing = error?.status === 404 || /404|not found|invalid url/i.test(String(error?.message || ''));
-        if (!missing) throw error;
-        return fetchCustomerPages('/contacts', { contact_type: 'customer' });
+    const attempts = [
+        () => fetchCustomerPages('/contacts', { contact_type: 'customer', filter_by: 'Status.All' }),
+        () => fetchCustomerPages('/contacts', { contact_type: 'customer' }),
+        () => fetchCustomerPages('/customers', { filter_by: 'Status.All' }),
+        () => fetchCustomerPages('/customers'),
+    ];
+    let lastError = null;
+    for (const attempt of attempts) {
+        try {
+            return keepCustomerContacts(await attempt());
+        } catch (error) {
+            lastError = error;
+            const message = String(error?.message || '');
+            if (/not connected|not configured|re-authorize|refresh_token|rate limit|too many requests/i.test(message)) {
+                throw error;
+            }
+        }
     }
+    throw lastError || new Error('Failed to fetch customers from Zoho Books');
 }
 
 export async function fetchVendorPayments(params = {}) {

@@ -216,6 +216,9 @@ function readCustomerEdits(body, base) {
             productCount = count;
         }
     }
+    const brands = body && Object.prototype.hasOwnProperty.call(body, 'brands')
+        ? brandList(body.brands)
+        : (Array.isArray(base.brands) ? base.brands : []);
     return {
         customerCode,
         name,
@@ -228,7 +231,7 @@ function readCustomerEdits(body, base) {
         website: text(base.website),
         taxRegNo: text(base.taxRegNo),
         paymentTerms: text(body?.paymentTerms),
-        brands: brandList(body?.brands),
+        brands,
         productCount,
         status,
     };
