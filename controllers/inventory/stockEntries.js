@@ -353,59 +353,70 @@ async function readAttachment(body, previous) {
     };
 }
 
+function rowSaveError(index, error) {
+    const status = error?.status || 500;
+    const detail = error?.message || 'Could not save this item.';
+    if (/^Row \d+:/i.test(detail)) return httpError(status, detail);
+    return httpError(status, `Row ${index + 1}: ${detail}`);
+}
+
 async function postLines(req, entry, lines) {
     const posted = lines.slice(0, entry.postedCount || 0).map((line) => ({ ...line }));
     for (let index = posted.length; index < lines.length; index += 1) {
         const line = lines[index];
-        let itemId = line.itemId ? String(line.itemId) : '';
-        if (!itemId) {
-            const created = await createPendingItemRecord({
-                categoryId: line.categoryId,
-                subcategoryId: line.subcategoryId,
-                brandId: line.brandId,
-                itemName: line.itemName,
-                modelNumber: line.modelNumber,
-            });
-            itemId = String(created.item._id);
-        }
-        let result;
         try {
-            result = await applyItemStock(req, itemId, {
-                quantity: line.quantity,
-                price: line.unitPrice,
-                categoryId: line.categoryId,
-                subcategoryId: line.subcategoryId,
-                brandId: line.brandId,
-                modelNumber: line.modelNumber || '',
+            let itemId = line.itemId ? String(line.itemId) : '';
+            if (!itemId) {
+                const created = await createPendingItemRecord({
+                    categoryId: line.categoryId,
+                    subcategoryId: line.subcategoryId,
+                    brandId: line.brandId,
+                    itemName: line.itemName,
+                    modelNumber: line.modelNumber,
+                });
+                itemId = String(created.item._id);
+            }
+            let result;
+            try {
+                result = await applyItemStock(req, itemId, {
+                    quantity: line.quantity,
+                    price: line.unitPrice,
+                    categoryId: line.categoryId,
+                    subcategoryId: line.subcategoryId,
+                    brandId: line.brandId,
+                    modelNumber: line.modelNumber || '',
+                });
+            } catch (error) {
+                if (error?.status !== 403) throw error;
+                const created = await createPendingItemRecord({
+                    categoryId: line.categoryId,
+                    subcategoryId: line.subcategoryId,
+                    brandId: line.brandId,
+                    itemName: line.itemName,
+                    modelNumber: line.modelNumber,
+                });
+                result = await applyItemStock(req, String(created.item._id), {
+                    quantity: line.quantity,
+                    price: line.unitPrice,
+                    categoryId: line.categoryId,
+                    subcategoryId: line.subcategoryId,
+                    brandId: line.brandId,
+                    modelNumber: line.modelNumber || '',
+                });
+            }
+            posted.push({
+                ...line,
+                itemId: result.body?._id || itemId,
+                description: result.body?.description || line.description,
+                modelNumber: result.body?.modelNumber || line.modelNumber,
             });
+            entry.lines = posted.concat(lines.slice(index + 1));
+            entry.postedCount = posted.length;
+            entry.markModified('lines');
+            await entry.save();
         } catch (error) {
-            if (error?.status !== 403) throw error;
-            const created = await createPendingItemRecord({
-                categoryId: line.categoryId,
-                subcategoryId: line.subcategoryId,
-                brandId: line.brandId,
-                itemName: line.itemName,
-                modelNumber: line.modelNumber,
-            });
-            result = await applyItemStock(req, String(created.item._id), {
-                quantity: line.quantity,
-                price: line.unitPrice,
-                categoryId: line.categoryId,
-                subcategoryId: line.subcategoryId,
-                brandId: line.brandId,
-                modelNumber: line.modelNumber || '',
-            });
+            throw rowSaveError(index, error);
         }
-        posted.push({
-            ...line,
-            itemId: result.body?._id || itemId,
-            description: result.body?.description || line.description,
-            modelNumber: result.body?.modelNumber || line.modelNumber,
-        });
-        entry.lines = posted.concat(lines.slice(index + 1));
-        entry.postedCount = posted.length;
-        entry.markModified('lines');
-        await entry.save();
     }
     return posted;
 }

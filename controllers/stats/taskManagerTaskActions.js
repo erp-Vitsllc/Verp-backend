@@ -143,6 +143,50 @@ function parseCompletionDate(value) {
     return Number.isNaN(date.getTime()) ? null : date;
 }
 
+const READABLE_DATE = new Intl.DateTimeFormat("en-US", {
+    month: "short",
+    day: "numeric",
+    year: "numeric",
+    timeZone: "Asia/Dubai",
+});
+
+function readableDate(value) {
+    const date = value instanceof Date ? value : new Date(value);
+    if (!value || Number.isNaN(date.getTime())) return "";
+    return READABLE_DATE.format(date);
+}
+
+function shownCompletionDate(task, action) {
+    if (task && !task.isNew && task.completionDate) return task.completionDate;
+    return action?.actionedDate || action?.requestedDate || task?.completionDate || null;
+}
+
+/** The first completion date stays put. Later dates replace the active completion date. */
+function applyChangedCompletionDate(task, nextDate, shownDate) {
+    const current = shownDate || task?.completionDate || null;
+    const nextKey = dubaiDateKey(nextDate);
+    const currentKey = dubaiDateKey(current);
+    if (!nextKey || nextKey === currentKey) {
+        if (task?.isNew && current) task.completionDate = current;
+        return { changed: false };
+    }
+    if (!task.originalCompletionDate && current) {
+        task.originalCompletionDate = current instanceof Date ? current : new Date(current);
+    }
+    const originalKey = dubaiDateKey(task.originalCompletionDate);
+    if (originalKey && originalKey === nextKey) {
+        task.completionDate = task.originalCompletionDate;
+        task.originalCompletionDate = null;
+    } else {
+        task.completionDate = nextDate;
+    }
+    return {
+        changed: true,
+        fromLabel: readableDate(current),
+        toLabel: readableDate(nextDate),
+    };
+}
+
 function historyEntry(event, detail, actorName) {
     return { event, detail, actorName, createdAt: new Date() };
 }
@@ -1082,6 +1126,10 @@ async function closeFlags(task, viewer, currentAssigneeId, assigneeEmpId, action
         canApproveGeneral: false,
         canRejectGeneral: false,
     };
+    const dateType = displayTaskType(task?.taskType) || (action ? categoryFromRequestType(action.requestType, action.extra2 || "") : "");
+    flags.canChangeCompletionDate = Boolean(open)
+        && (dateType === "Workflow Task" || dateType === "General Task")
+        && (Boolean(viewer?.superUser) || requesterViewer || viewerIsAssignee);
     flags.reviewAccepted = Boolean(saved.reviewAccepted) && !reviewPending && open;
     if (open && saved.reviewAccepted && !reviewPending) {
         const kept = personBaseName(saved.returnAssigneeName || task?.assigneeName) || "The assignee";
@@ -1623,6 +1671,7 @@ async function buildDetail(target, viewer) {
         status: task?.status || action?.status || "Pending",
         requestDate: manual ? task.createdAt : action.requestedDate || action.createdAt,
         completionDate: task?.completionDate || action?.actionedDate || null,
+        originalCompletionDate: task?.originalCompletionDate || null,
         updatedAt: task?.updatedAt || action?.updatedAt || null,
         assigneeId: assigneeCleared
             ? ""
@@ -1909,9 +1958,16 @@ export const updateTaskManagerTask = async (req, res) => {
             task.assignee = assignee._id;
             task.assigneeEmpId = assignee.employeeId || "";
             task.assigneeName = assigneeName;
-            task.completionDate = completionDate;
+            const dateChange = applyChangedCompletionDate(task, completionDate, shownCompletionDate(task, target.action));
             if (storedFiles.length) task.attachments = [...(task.attachments || []), ...storedFiles];
             task.history = task.history || [];
+            if (dateChange.changed) {
+                task.history.push(historyEntry(
+                    "Completion Date",
+                    `Completion date changed from ${dateChange.fromLabel || "—"} to ${dateChange.toLabel}.`,
+                    viewer.name,
+                ));
+            }
             if (assigning) {
                 task.history.push(historyEntry("Assigned", `Assigned to ${assigneeName}.`, viewer.name));
             } else {
@@ -1946,9 +2002,16 @@ export const updateTaskManagerTask = async (req, res) => {
             overlay.assignee = assignee._id;
             overlay.assigneeEmpId = assignee.employeeId || "";
             overlay.assigneeName = assigneeName;
-            overlay.completionDate = completionDate;
+            const dateChange = applyChangedCompletionDate(overlay, completionDate, shownCompletionDate(overlay, action));
             if (storedFiles.length) overlay.attachments = [...(overlay.attachments || []), ...storedFiles];
             overlay.history = overlay.history || [];
+            if (dateChange.changed) {
+                overlay.history.push(historyEntry(
+                    "Completion Date",
+                    `Completion date changed from ${dateChange.fromLabel || "—"} to ${dateChange.toLabel}.`,
+                    viewer.name,
+                ));
+            }
             overlay.history.push(historyEntry(
                 assigning ? "Assigned" : "Edited",
                 assigning ? `Assigned to ${assigneeName}.` : "Task details were updated.",
@@ -3810,6 +3873,60 @@ export const updateTaskManagerReminders = async (req, res) => {
     } catch (error) {
         console.error("Task reminder error:", error);
         return res.status(500).json({ message: "Failed to update reminders" });
+    }
+};
+
+export const changeTaskCompletionDate = async (req, res) => {
+    try {
+        if (!(await denyUnlessViewer(req, res))) return;
+        const target = await loadTarget(req.params.taskKey);
+        if (!target) return res.status(404).json({ message: "Task not found." });
+        const viewer = await resolveTaskViewer(req);
+        const action = target.action || null;
+        const dateType = displayTaskType(target.task?.taskType)
+            || (action ? categoryFromRequestType(action.requestType, action.extra2 || "") : "");
+        if (dateType !== "Workflow Task" && dateType !== "General Task") {
+            return res.status(400).json({ message: "Only a workflow task or a general task can change its completion date." });
+        }
+        const nextDate = parseCompletionDate(req.body?.completionDate);
+        if (!nextDate) return res.status(400).json({ message: "Choose a completion date." });
+
+        const current = assigneeOf(target);
+        const flags = await closeFlags(target.task, viewer, current.assigneeId, current.assigneeEmpId, action);
+        if (!flags.canChangeCompletionDate) {
+            return res.status(403).json({ message: "You cannot change the completion date of this task." });
+        }
+
+        let task = target.task;
+        if (!task && action) task = await ensureOverlay(action);
+        if (!task) return res.status(404).json({ message: "Task not found." });
+
+        const change = applyChangedCompletionDate(task, nextDate, shownCompletionDate(task, action));
+        if (!change.changed) {
+            return res.status(400).json({ message: "Choose a different completion date." });
+        }
+        task.history = task.history || [];
+        task.history.push(historyEntry(
+            "Completion Date",
+            `Completion date changed from ${change.fromLabel || "—"} to ${change.toLabel}.`,
+            viewer.name,
+        ));
+        await task.save();
+        if (!task.sourceDashboardActionId) {
+            try {
+                await syncManualTaskNotification(task);
+            } catch (noticeError) {
+                console.error("Completion date notice sync failed:", noticeError);
+            }
+        }
+        const fresh = await loadTarget(req.params.taskKey);
+        return res.status(200).json({
+            message: "Completion date changed.",
+            task: await buildDetail(fresh || { ...target, task }, viewer),
+        });
+    } catch (error) {
+        console.error("Change completion date error:", error);
+        return res.status(500).json({ message: "Failed to change the completion date" });
     }
 };
 

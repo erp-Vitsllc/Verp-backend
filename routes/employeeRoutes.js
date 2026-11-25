@@ -198,6 +198,7 @@ import {
     updateTaskManagerReminders,
     updateTaskManagerTask,
     updateTaskManagerTaskStatus,
+    changeTaskCompletionDate,
 } from "../controllers/stats/taskManagerTaskActions.js";
 import { getPayrollDashboard } from "../controllers/employee/getPayrollDashboard.js";
 import { getSalaryRegister, deleteSalaryRegisterMonth, restoreSalaryRegisterMonths, sendPayrollBlockerReminders, createSalaryMonthPayment, updateSalaryMonthPayment, downloadSalarySlotExcel } from "../controllers/employee/getSalaryRegister.js";
@@ -699,6 +700,7 @@ router.get("/task-manager/tasks/:taskKey", getTaskManagerTask);
 router.get("/task-manager/tasks/:taskKey/workflow", getTaskManagerWorkflow);
 router.post("/task-manager/tasks/:taskKey/workflow/decision", decideTaskManagerWorkflow);
 router.patch("/task-manager/tasks/:taskKey", updateTaskManagerTask);
+router.post("/task-manager/tasks/:taskKey/completion-date", changeTaskCompletionDate);
 router.delete("/task-manager/tasks/:taskKey", deleteTaskManagerTask);
 router.post("/task-manager/tasks/:taskKey/reassign", reassignTaskManagerTask);
 router.post("/task-manager/tasks/:taskKey/return", returnTaskManagerTask);

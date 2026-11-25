@@ -1375,7 +1375,7 @@ export const getTaskManagerNotifications = async (req, res) => {
 
         const manualRows = await TaskManagerTask.find({})
             .select(
-                "taskType priority taskName description assignee assigneeEmpId assigneeName completionDate requestedByName requestedByUserId status createdAt updatedAt sourceDashboardActionId closeRequest history taskNumber",
+                "taskType priority taskName description assignee assigneeEmpId assigneeName completionDate originalCompletionDate requestedByName requestedByUserId status createdAt updatedAt sourceDashboardActionId closeRequest history taskNumber",
             )
             .lean()
             .maxTimeMS(10000);
@@ -1653,6 +1653,7 @@ export const getTaskManagerNotifications = async (req, res) => {
                 reviewReceivedAt: overlay?.closeRequest?.completionRequestedAt || null,
                 finishedBy: finishedParticipants(overlay?.closeRequest, overlay?.history),
                 completionDate: overlay?.completionDate || action.actionedDate || null,
+                originalCompletionDate: overlay?.originalCompletionDate || null,
                 taskCategory: category,
                 accessPath: accessPathFor(destination, action.requestId, action.subjectEmployeeId, {
                     extra1: action.extra1,
@@ -1870,6 +1871,7 @@ export const getTaskManagerNotifications = async (req, res) => {
                 reviewReceivedAt: row?.closeRequest?.completionRequestedAt || null,
                 finishedBy: finishedParticipants(row.closeRequest, row.history),
                 completionDate: row.completionDate || null,
+                originalCompletionDate: row.originalCompletionDate || null,
                 taskCategory: category,
                 accessPath: accessPathFor(destination, "", ""),
                 requestType: displayTaskType(row.taskType),

@@ -28,6 +28,7 @@ const taskManagerTaskSchema = new mongoose.Schema(
         assigneeEmpId: { type: String, default: "" },
         assigneeName: { type: String, default: "" },
         completionDate: { type: Date, required: true },
+        originalCompletionDate: { type: Date, default: null },
         attachments: { type: [attachmentSchema], default: [] },
         requestedByName: { type: String, default: "" },
         requestedByUserId: { type: mongoose.Schema.Types.ObjectId, ref: "User" },

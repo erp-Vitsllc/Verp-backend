@@ -89,9 +89,9 @@ export async function assertModelNumberAvailable(modelNumber, exceptId = '') {
     if (!model) return;
     const rows = await InventoryItem.find({
         modelNumber: new RegExp(`^${escapeRegex(model)}$`, 'i'),
-    }).select('_id').lean();
-    const conflict = rows.some((row) => String(row._id) !== String(exceptId || ''));
-    if (conflict) throw httpError(400, 'This model no is already used on another item.');
+    }).select('_id modelNumber').lean();
+    const conflict = rows.some((row) => cleanName(row.modelNumber) && String(row._id) !== String(exceptId || ''));
+    if (conflict) throw httpError(400, `This model no "${model}" is already used on another item.`);
 }
 
 export async function assertLinks({ categoryId, subcategoryId, itemOptionId, brandId }) {
@@ -241,6 +241,7 @@ export async function findSameItem(catalog, exceptId = '') {
 }
 
 async function assertItemIdentityAvailable(catalog, exceptId = '') {
+    if (!cleanName(catalog?.modelNumber)) return;
     const conflict = await findSameItem(catalog, exceptId);
     if (conflict) {
         throw httpError(400, 'An item with this category, sub category, item, brand, and model no already exists.');
