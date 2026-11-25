@@ -7,6 +7,7 @@ import {
     getNextWorkOrderNo,
     getWorkOrder,
     getWorkOrderActualBoq,
+    getWorkOrderBoqCatalog,
     getWorkOrderCustomers,
     getWorkOrderQuotationChanges,
     getWorkOrderQuotationFile,
@@ -26,6 +27,7 @@ router.get('/next-no', checkPermission('production', 'view'), getNextWorkOrderNo
 router.get('/salespeople', checkPermission('production', 'view'), getWorkOrderSalespeople);
 router.get('/customers', checkPermission('production', 'view'), getWorkOrderCustomers);
 router.get('/vendors', checkPermission('production', 'view'), getWorkOrderVendors);
+router.get('/boq-catalog', checkPermission('production', 'view'), getWorkOrderBoqCatalog);
 router.get('/quotation-used', checkPermission('production', 'view'), getWorkOrderQuotationUse);
 router.get('/', checkPermission('production', 'view'), getWorkOrders);
 router.post('/', checkPermissionAny('production', ['create', 'view']), createWorkOrder);

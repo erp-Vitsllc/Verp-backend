@@ -4,6 +4,7 @@ import EmployeeBasic from '../models/EmployeeBasic.js';
 import Flowchart from '../models/Flowchart.js';
 import CrmCustomer from '../models/crm/CrmCustomer.js';
 import InventoryVendor from '../models/inventory/InventoryVendor.js';
+import InventoryItem from '../models/inventory/InventoryItem.js';
 import { dubaiDateKey, formatWorkOrderNo, nextSequenceForYear, workOrderYear } from '../utils/workOrderNumber.js';
 import {
     coordinatorFollowUpNotice,
@@ -920,28 +921,40 @@ const ACTUAL_BOQ_FIELDS = [
     'descriptionNew', 'descriptionOld', 'quantity', 'unitPrice', 'total',
     'vendorName', 'paymentTerms',
 ];
+const ACTUAL_BOQ_IDS = ['itemId', 'categoryId', 'subcategoryId', 'itemOptionId', 'brandId'];
+
+function cleanBoqLine(row) {
+    const next = { kind: 'line' };
+    ACTUAL_BOQ_IDS.forEach((key) => {
+        next[key] = cleanText(row?.[key], 40);
+    });
+    ACTUAL_BOQ_FIELDS.forEach((key) => {
+        const value = row?.[key];
+        if (key === 'quantity' || key === 'unitPrice' || key === 'total' || key === 'slNo') {
+            if (value === '' || value == null) next[key] = '';
+            else {
+                const amount = Number(value);
+                next[key] = Number.isFinite(amount) ? amount : cleanText(value, 40);
+            }
+        } else {
+            next[key] = cleanText(value, 2000);
+        }
+    });
+    return next;
+}
 
 function cleanBoqTables(raw) {
     const tables = Array.isArray(raw) ? raw.slice(0, 30) : [];
     return tables.map((table) => ({
         title: cleanText(table?.title, 120),
         rows: (Array.isArray(table?.rows) ? table.rows : []).slice(0, 400).map((row) => {
-            const next = {};
-            ACTUAL_BOQ_FIELDS.forEach((key) => {
-                const value = row?.[key];
-                if (key === 'quantity' || key === 'unitPrice' || key === 'total' || key === 'slNo') {
-                    if (value === '' || value == null) next[key] = '';
-                    else {
-                        const amount = Number(value);
-                        next[key] = Number.isFinite(amount) ? amount : cleanText(value, 40);
-                    }
-                } else {
-                    next[key] = cleanText(value, 2000);
-                }
-            });
-            return next;
-        }),
-    })).filter((table) => table.rows.length);
+            if (row?.kind === 'header') {
+                const title = cleanText(row?.title, 120);
+                return title ? { kind: 'header', title } : null;
+            }
+            return cleanBoqLine(row);
+        }).filter(Boolean),
+    })).filter((table) => table.rows.some((row) => row.kind !== 'header'));
 }
 
 async function findActorEmployee(req) {
@@ -1478,6 +1491,54 @@ export const getWorkOrderActualBoq = async (req, res) => {
     } catch (error) {
         console.error('Error loading actual BOQ:', error);
         return res.status(500).json({ message: 'Failed to load the actual BOQ' });
+    }
+};
+
+function refName(ref) {
+    if (!ref || typeof ref !== 'object') return '';
+    return cleanText(ref.name, 160);
+}
+
+export const getWorkOrderBoqCatalog = async (_req, res) => {
+    try {
+        const [items, vendors] = await Promise.all([
+            InventoryItem.find()
+                .select('description moreDescription modelNumber categoryId subcategoryId itemOptionId brandId lastStockPrice pendingStock')
+                .populate('categoryId', 'name')
+                .populate('subcategoryId', 'name')
+                .populate('itemOptionId', 'name')
+                .populate('brandId', 'name')
+                .lean(),
+            InventoryVendor.find().select('name vendorCode status paymentTerms').sort({ name: 1 }).lean(),
+        ]);
+        return res.status(200).json({
+            items: items.map((row) => ({
+                id: String(row._id),
+                categoryId: row.categoryId?._id ? String(row.categoryId._id) : '',
+                subcategoryId: row.subcategoryId?._id ? String(row.subcategoryId._id) : '',
+                itemOptionId: row.itemOptionId?._id ? String(row.itemOptionId._id) : '',
+                brandId: row.brandId?._id ? String(row.brandId._id) : '',
+                categoryName: refName(row.categoryId),
+                subcategoryName: refName(row.subcategoryId),
+                itemName: refName(row.itemOptionId),
+                brandName: refName(row.brandId),
+                modelNumber: cleanText(row.modelNumber, 160),
+                description: cleanText(row.description, 2000),
+                moreDescription: cleanText(row.moreDescription, 2000),
+                lastStockPrice: Number(row.lastStockPrice) || 0,
+                pendingStock: Boolean(row.pendingStock),
+            })).filter((row) => row.categoryName || row.subcategoryName || row.itemName || row.brandName || row.modelNumber),
+            vendors: vendors.map((row) => ({
+                id: String(row._id),
+                name: cleanText(row.name, 160),
+                code: cleanText(row.vendorCode, 80),
+                status: row.status || 'Active',
+                paymentTerms: cleanText(row.paymentTerms, 160),
+            })).filter((row) => row.name),
+        });
+    } catch (error) {
+        console.error('Error loading actual BOQ catalog:', error);
+        return res.status(500).json({ message: 'Failed to load actual BOQ choices' });
     }
 };
 
@@ -2113,8 +2174,14 @@ export const getWorkOrderCustomers = async (_req, res) => {
 
 export const getWorkOrderVendors = async (_req, res) => {
     try {
-        const rows = await InventoryVendor.find().select('name vendorCode status').sort({ name: 1 }).lean();
-        return res.status(200).json({ vendors: partyRows(rows, 'vendorCode') });
+        const rows = await InventoryVendor.find().select('name vendorCode status paymentTerms').sort({ name: 1 }).lean();
+        const terms = new Map(rows.map((row) => [String(row._id), cleanText(row.paymentTerms, 160)]));
+        return res.status(200).json({
+            vendors: partyRows(rows, 'vendorCode').map((row) => ({
+                ...row,
+                paymentTerms: terms.get(row.id) || '',
+            })),
+        });
     } catch (error) {
         console.error('Error listing work order vendors:', error);
         return res.status(500).json({ message: 'Failed to load vendors' });

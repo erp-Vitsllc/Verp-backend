@@ -182,10 +182,10 @@ async function zohoSource(doc) {
 
 async function customerFromZoho(zohoContactId) {
     const doc = await findZohoCustomer(zohoContactId);
-    if (!doc) throw httpError(404, 'That Zoho customer was not found. Refresh Zoho customers and try again.');
+    if (!doc) throw httpError(404, 'That customer was not found. Refresh Customers under Accounts and try again.');
     const existing = await CrmCustomer.findOne({ zohoContactId: doc.zohoContactId }).select('_id').lean();
     if (existing) throw httpError(400, 'This customer is already added.');
-    return fieldsFromZoho(await zohoSource(doc));
+    return fieldsFromZoho(doc);
 }
 
 function readCustomerEdits(body, base) {
@@ -541,13 +541,13 @@ export async function updateCustomer(req, res) {
         };
         if (String(zohoContactId) !== String(row.zohoContactId)) {
             const doc = await findZohoCustomer(zohoContactId);
-            if (!doc) throw httpError(404, 'That Zoho customer was not found.');
+            if (!doc) throw httpError(404, 'That customer was not found. Refresh Customers under Accounts and try again.');
             const taken = await CrmCustomer.findOne({
                 zohoContactId: doc.zohoContactId,
                 _id: { $ne: row._id },
             }).select('_id').lean();
             if (taken) throw httpError(400, 'This customer is already added.');
-            const fields = fieldsFromZoho(await zohoSource(doc));
+            const fields = fieldsFromZoho(doc);
             zohoContactId = fields.zohoContactId;
             base = {
                 ...base,

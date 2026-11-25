@@ -7,6 +7,7 @@ import AssetItem from "../../models/AssetItem.js";
 import Attendance from "../../models/Attendance.js";
 import AttendanceChangeRequest from "../../models/AttendanceChangeRequest.js";
 import { attendanceFactsByActionId } from "../../utils/loadAttendanceTaskFacts.js";
+import { billItemsByRequestId } from "../inventory/stockApproval.js";
 import { isAttendanceTaskType } from "../../utils/attendanceTaskCopy.js";
 import { isLeaveAttendanceTaskType } from "../../utils/ensureRequestTask.js";
 import { alignOpenLeaveAttendanceAssignees } from "../../utils/ensureOpenLeaveAttendanceTasks.js";
@@ -1149,8 +1150,20 @@ async function closeFlags(task, viewer, currentAssigneeId, assigneeEmpId, action
         description: String(dateRequest.description || ""),
         requestedByName: String(dateRequest.requestedByName || ""),
         requestedByRole: String(dateRequest.requestedByRole || ""),
+        requestedByEmpId: String(dateRequest.requestedByEmpId || ""),
+        requestedByDesignation: "",
+        requestedByPhoto: "",
         requestedAt: dateRequest.requestedAt || null,
     } : null;
+    if (datePending && flags.dateChangeProposal && isObjectId(dateRequest.requestedById)) {
+        const asker = await findAssignee(String(dateRequest.requestedById));
+        if (asker) {
+            flags.dateChangeProposal.requestedByName = personName(asker) || flags.dateChangeProposal.requestedByName;
+            flags.dateChangeProposal.requestedByEmpId = String(asker.employeeId || dateRequest.requestedByEmpId || "");
+            flags.dateChangeProposal.requestedByDesignation = String(asker.designation || "");
+            flags.dateChangeProposal.requestedByPhoto = await signedProfilePhoto(asker.profilePicture);
+        }
+    }
     flags.canChangeCompletionDate = Boolean(flags.dateChangeRole) && !datePending;
     flags.canDecideDateChange = datePending && canDecideDateChange({
         requester: requesterViewer,
@@ -1245,6 +1258,10 @@ async function loadTaskSourceFacts(action) {
     if (isAttendanceTaskType(type)) {
         const map = await attendanceFactsByActionId([action]);
         return map.get(String(action?._id || "")) || {};
+    }
+    if (type === "Inventory Bill Draft") {
+        const map = await billItemsByRequestId([action]);
+        return map.get(String(action?.requestId || "")) || {};
     }
     const id = String(action?.requestId || "");
     if (!isObjectId(id)) return {};
@@ -4004,6 +4021,16 @@ function storedDateRequest(task) {
     return { ...(task?.dateChangeRequest || {}) };
 }
 
+async function pushDateChangeUpdate(task, viewer, { badge, text }) {
+    await pushWorkUpdate(task, {
+        authorName: viewer?.name || "",
+        authorRole: await authorRoleFor(viewer),
+        kind: "Completion Date",
+        badge,
+        text: String(text || "").trim(),
+    }, SILENT_MAIL);
+}
+
 export const changeTaskCompletionDate = async (req, res) => {
     try {
         if (!(await denyUnlessViewer(req, res))) return;
@@ -4068,6 +4095,10 @@ export const changeTaskCompletionDate = async (req, res) => {
                 `Completion date changed from ${change.fromLabel || fromLabel} to ${change.toLabel || toLabel}. ${note.text}`,
                 viewer.name,
             ));
+            await pushDateChangeUpdate(task, viewer, {
+                badge: "Changed",
+                text: `Completion date changed from ${change.fromLabel || fromLabel} to ${change.toLabel || toLabel}.\n${note.text}`,
+            });
             await task.save();
             const mailed = await emailDateChange(target, task, "requester-changed", people, {
                 subject: `Completion date changed: ${taskName}`,
@@ -4109,6 +4140,10 @@ export const changeTaskCompletionDate = async (req, res) => {
             `Asked to change the completion date from ${fromLabel} to ${toLabel}. Waiting for the ${waitingFor} to approve. ${note.text}`,
             viewer.name,
         ));
+        await pushDateChangeUpdate(task, viewer, {
+            badge: "Pending approval",
+            text: `Asked to change the completion date from ${fromLabel} to ${toLabel}. Waiting for the ${waitingFor} to approve.\n${note.text}`,
+        });
         await task.save();
         const event = flags.dateChangeRole === "reassignee" ? "reassignee-requested" : "assignee-requested";
         const approver = flags.dateChangeRole === "reassignee" ? people.assignee : people.requester;
@@ -4186,6 +4221,14 @@ export const decideTaskCompletionDate = async (req, res) => {
                 `Rejected the completion date change from ${fromLabel} to ${toLabel}. ${reason}`,
                 viewer.name,
             ));
+            await pushDateChangeUpdate(task, viewer, {
+                badge: "Rejected",
+                text: [
+                    `Rejected the completion date change from ${fromLabel} to ${toLabel}.`,
+                    request.description ? `Request: ${request.description}` : "",
+                    `Reason: ${reason}`,
+                ].filter(Boolean).join("\n"),
+            });
             await task.save();
             const event = request.requestedByRole === "reassignee" ? "reassignee-rejected" : "assignee-rejected";
             const askedEmployee = isObjectId(request.requestedById)
@@ -4234,6 +4277,13 @@ export const decideTaskCompletionDate = async (req, res) => {
             `Approved the completion date change from ${change.fromLabel || fromLabel} to ${change.toLabel || toLabel}. ${request.description || ""}`.trim(),
             viewer.name,
         ));
+        await pushDateChangeUpdate(task, viewer, {
+            badge: "Approved",
+            text: [
+                `Approved the completion date change from ${change.fromLabel || fromLabel} to ${change.toLabel || toLabel}.`,
+                request.description || "",
+            ].filter(Boolean).join("\n"),
+        });
         await task.save();
         const event = request.requestedByRole === "reassignee" ? "reassignee-approved" : "assignee-approved";
         const mailed = await emailDateChange(target, task, event, people, {

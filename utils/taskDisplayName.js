@@ -284,6 +284,30 @@ function vehicleLines({ vehicleNo, assetNo, assetName, subjectEmployeeId, extra2
     return [name, code];
 }
 
+function inventoryBillTitle(body, stored, subjectName) {
+    const raw = text(body).replace(/^bill edit\s*[·•-]\s*/i, "")
+        || text(subjectName)
+        || text(stored).replace(/^bill edit\s*[·•-]\s*/i, "");
+    return raw || "Draft bill";
+}
+
+function inventoryItemLines(source) {
+    const rows = (Array.isArray(source?.items) ? source.items : [])
+        .map((row) => ({ name: text(row?.name), code: text(row?.code) }))
+        .filter((row) => row.name || row.code);
+    if (!rows.length) return [];
+    if (rows.length === 1) {
+        const { name, code } = rows[0];
+        if (name && code && name.toLowerCase() !== code.toLowerCase()) return [name, code];
+        return [name || code];
+    }
+    return rows.map((row) => (
+        row.name && row.code && row.name.toLowerCase() !== row.code.toLowerCase()
+            ? `${row.name} — ${row.code}`
+            : (row.name || row.code)
+    ));
+}
+
 function joinedTitle(parts) {
     const lines = [];
     const seen = new Set();
@@ -446,6 +470,10 @@ export function formatTaskDisplayParts({
             ? (recordCode(source?.employeeId)?.split(",")[0] || recordCode(subjectEmployeeId))
             : "";
         return uniqueLines(fineTaskTitle({ typeKey: effective, body, meta, source, subjectName }), [text(singleCode).split(",")[0]]);
+    }
+
+    if (typeKey === "inventory bill draft") {
+        return uniqueLines(inventoryBillTitle(body, stored, subjectName), inventoryItemLines(source));
     }
 
     if (typeKey === "payment approval") {

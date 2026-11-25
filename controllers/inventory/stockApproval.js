@@ -1,6 +1,8 @@
 import nodemailer from 'nodemailer';
 import Flowchart from '../../models/Flowchart.js';
 import EmployeeBasic from '../../models/EmployeeBasic.js';
+import InventoryItem from '../../models/inventory/InventoryItem.js';
+import InventoryStockEntry from '../../models/inventory/InventoryStockEntry.js';
 import { syncDashboardAction } from '../../utils/syncDashboard.js';
 import { finishEmployeeWorkflowTasks, requesterNameForActor } from '../../utils/employeeWorkflowTask.js';
 
@@ -73,6 +75,56 @@ async function sendStockApprovalEmail({ officer, senderName, billNo, entryId, su
 
 export const INVENTORY_BILL_DRAFT = 'Inventory Bill Draft';
 export const DRAFT_BILL_MESSAGE = 'Bill you created is on draft. Submit it.';
+
+function isRecordId(value) {
+    return /^[a-fA-F0-9]{24}$/.test(String(value || '').trim());
+}
+
+function billLines(entry) {
+    if (entry?.editPending && Array.isArray(entry?.pendingEdit?.lines) && entry.pendingEdit.lines.length) {
+        return entry.pendingEdit.lines;
+    }
+    return Array.isArray(entry?.lines) ? entry.lines : [];
+}
+
+/** Item name and item code for a stock bill, in line order. */
+export function presentBillItems(entry, codeByItemId = new Map()) {
+    const items = [];
+    const seen = new Set();
+    for (const line of billLines(entry)) {
+        const name = String(line?.itemName || line?.description || line?.modelNumber || '').trim();
+        const code = String(codeByItemId.get(String(line?.itemId || '')) || '').trim();
+        const key = `${name.toLowerCase()}|${code.toLowerCase()}`;
+        if ((!name && !code) || seen.has(key)) continue;
+        seen.add(key);
+        items.push({ name, code });
+    }
+    return { items };
+}
+
+/** Items on each Inventory Bill Draft, keyed by the stock entry id. */
+export async function billItemsByRequestId(actions = []) {
+    const ids = [...new Set(
+        (actions || [])
+            .filter((action) => String(action?.requestType || '') === INVENTORY_BILL_DRAFT)
+            .map((action) => String(action?.requestId || '').trim())
+            .filter(isRecordId),
+    )];
+    const map = new Map();
+    if (!ids.length) return map;
+    const entries = await InventoryStockEntry.find({ _id: { $in: ids } })
+        .select('editPending pendingEdit.lines.itemId pendingEdit.lines.itemName pendingEdit.lines.description pendingEdit.lines.modelNumber lines.itemId lines.itemName lines.description lines.modelNumber')
+        .lean();
+    const itemIds = [...new Set(entries.flatMap((entry) => (
+        billLines(entry).map((line) => String(line?.itemId || '')).filter(isRecordId)
+    )))];
+    const catalog = itemIds.length
+        ? await InventoryItem.find({ _id: { $in: itemIds } }).select('itemCode').lean()
+        : [];
+    const codeByItemId = new Map(catalog.map((row) => [String(row._id), String(row.itemCode || '').trim()]));
+    for (const entry of entries) map.set(String(entry._id), presentBillItems(entry, codeByItemId));
+    return map;
+}
 
 export async function notifyStockApproval({ entry, officer, senderName, kind = 'submit' }) {
     const bill = entry.billNo || 'Stock bill';

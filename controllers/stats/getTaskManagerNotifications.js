@@ -35,6 +35,7 @@ import { activityTaskKey, duplicateOverlayShouldClose, keepActivityCopy, taskMat
 import { isModuleBarShare } from "../../utils/moduleBarShare.js";
 import { finishedOverlayBySource, overlayForListRow } from "../../utils/finishedTaskOverlay.js";
 import { formatTaskDisplayParts, vehicleRecordId } from "../../utils/taskDisplayName.js";
+import { billItemsByRequestId } from "../inventory/stockApproval.js";
 import { composeTaskDescription } from "../../utils/taskDetailDescription.js";
 import { attendanceFactsByActionId } from "../../utils/loadAttendanceTaskFacts.js";
 import { attachHoldSteps } from "../../utils/taskWaitingSteps.js";
@@ -1449,10 +1450,11 @@ export const getTaskManagerNotifications = async (req, res) => {
         });
         const finesByRequest = preparedFines.fineInfo;
 
-        const [sourceRequesters, vehicles, attendanceByAction] = await Promise.all([
+        const [sourceRequesters, vehicles, attendanceByAction, billItems] = await Promise.all([
             sourceRequesterNameMap(uniqueActions),
             vehicleDisplayById(uniqueActions),
             attendanceFactsByActionId(uniqueActions),
+            billItemsByRequestId(uniqueActions),
         ]);
         const pendingLive = uniqueActions
             .filter((action) => ["Pending", "On Hold"].includes(String(action.status || "")))
@@ -1570,6 +1572,7 @@ export const getTaskManagerNotifications = async (req, res) => {
                 source: {
                     ...(attendanceByAction.get(String(action._id)) || {}),
                     ...(finesByRequest.get(String(action.requestId)) || {}),
+                    ...(billItems.get(String(action.requestId)) || {}),
                 },
                 ...vehicleDisplayFor(action, vehicles),
             });

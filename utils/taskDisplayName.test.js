@@ -324,6 +324,31 @@ test("a draft inventory bill is named by its bill number", () => {
     );
 });
 
+test("a draft inventory bill shows the item name and item code under the bill number", () => {
+    assert.deepEqual(
+        formatTaskDisplayParts({
+            requestType: "Inventory Bill Draft",
+            extra1: "Draft B",
+            subjectName: "Draft B",
+            source: { items: [{ name: "Cable Tray", code: "ITM-0012" }] },
+        }),
+        { title: "Draft B", subject: "Cable Tray\nITM-0012" },
+    );
+    assert.deepEqual(
+        formatTaskDisplayParts({
+            requestType: "Inventory Bill Draft",
+            extra1: "Bill edit · 123456",
+            source: {
+                items: [
+                    { name: "Cable", code: "ITM-1" },
+                    { name: "Switch", code: "ITM-2" },
+                ],
+            },
+        }),
+        { title: "123456", subject: "Cable — ITM-1\nSwitch — ITM-2" },
+    );
+});
+
 test("pending salary enrollment names the employee under Pending Enrollment", () => {
     assert.deepEqual(
         formatTaskDisplayParts({
