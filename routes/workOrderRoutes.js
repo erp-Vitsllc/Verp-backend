@@ -6,6 +6,7 @@ import {
     createWorkOrder,
     getNextWorkOrderNo,
     getWorkOrder,
+    getWorkOrderActualBoq,
     getWorkOrderCustomers,
     getWorkOrderQuotationChanges,
     getWorkOrderQuotationFile,
@@ -31,6 +32,7 @@ router.post('/', checkPermissionAny('production', ['create', 'view']), createWor
 router.post('/:id/budget', checkPermissionAny('production', ['edit', 'create', 'view']), updateWorkOrderBudget);
 router.get('/:id/quotation-changes', checkPermission('production', 'view'), getWorkOrderQuotationChanges);
 router.get('/:id/quotation-file', checkPermission('production', 'view'), getWorkOrderQuotationFile);
+router.get('/:id/actual-boq', checkPermission('production', 'view'), getWorkOrderActualBoq);
 router.post('/:id/quotation-changes', checkPermissionAny('production', ['edit', 'create', 'view']), applyWorkOrderQuotationChanges);
 router.get('/:id', checkPermission('production', 'view'), getWorkOrder);
 router.patch('/:id', checkPermissionAny('production', ['edit', 'create', 'view']), updateWorkOrder);

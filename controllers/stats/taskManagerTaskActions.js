@@ -84,6 +84,7 @@ import {
 import { assigneeBlocksDelete, recordIsFinishedForDelete, requesterMayDeleteCategory, viewerMayDeleteTask } from "../../utils/taskDeleteAccess.js";
 import { adminDeletedTaskEmail } from "../../utils/adminDeletedTaskEmail.js";
 import { isSystemOrWorkflowTask, superUserRejectsImmediately } from "../../utils/taskRejectAccess.js";
+import { canDecideDateChange, dateChangeActorRole, dateChangeMailTargets } from "../../utils/taskDateChange.js";
 import { purgePendingCopiesOf } from "../../utils/deletedTaskNotice.js";
 import { attachHoldSteps } from "../../utils/taskWaitingSteps.js";
 import { buildActionTracks, markReassignmentEmails, parseReassignment, reassignmentWorkText } from "../../utils/taskActionTracks.js";
@@ -1129,9 +1130,33 @@ async function closeFlags(task, viewer, currentAssigneeId, assigneeEmpId, action
         canRejectGeneral: false,
     };
     const dateType = displayTaskType(task?.taskType) || (action ? categoryFromRequestType(action.requestType, action.extra2 || "") : "");
-    flags.canChangeCompletionDate = Boolean(open)
-        && (dateType === "Workflow Task" || isManualTaskType(dateType))
-        && (Boolean(viewer?.superUser) || requesterViewer || viewerIsAssignee);
+    const isReassignee = Boolean(reassigned && viewerIsAssignee && !viewerIsOriginal);
+    const dateRole = dateChangeActorRole({
+        requester: requesterViewer,
+        assignee: Boolean(viewerIsOriginal || (viewerIsAssignee && !isReassignee)),
+        reassignee: isReassignee,
+    });
+    const dateTypeAllowed = dateType === "Workflow Task" || isManualTaskType(dateType);
+    const dateRequest = task?.dateChangeRequest?.toObject
+        ? task.dateChangeRequest.toObject()
+        : (task?.dateChangeRequest || {});
+    const datePending = Boolean(open && dateRequest.status === "Pending" && dateRequest.proposedDate);
+    flags.dateChangeRole = open && dateTypeAllowed ? dateRole : "";
+    flags.dateChangePending = datePending;
+    flags.dateChangeProposal = datePending ? {
+        proposedDate: dateRequest.proposedDate,
+        previousDate: dateRequest.previousDate || null,
+        description: String(dateRequest.description || ""),
+        requestedByName: String(dateRequest.requestedByName || ""),
+        requestedByRole: String(dateRequest.requestedByRole || ""),
+        requestedAt: dateRequest.requestedAt || null,
+    } : null;
+    flags.canChangeCompletionDate = Boolean(flags.dateChangeRole) && !datePending;
+    flags.canDecideDateChange = datePending && canDecideDateChange({
+        requester: requesterViewer,
+        assignee: reassigned ? viewerIsOriginal : viewerIsAssignee,
+        requestRole: dateRequest.requestedByRole,
+    });
     flags.reviewAccepted = Boolean(saved.reviewAccepted) && !reviewPending && open;
     if (open && saved.reviewAccepted && !reviewPending) {
         const kept = personBaseName(saved.returnAssigneeName || task?.assigneeName) || "The assignee";
@@ -3896,6 +3921,89 @@ export const updateTaskManagerReminders = async (req, res) => {
     }
 };
 
+function sameEmployeeRecord(left, right) {
+    if (!left || !right) return false;
+    if (left._id && right._id && String(left._id) === String(right._id)) return true;
+    const leftName = personName(left).toLowerCase();
+    const rightName = personName(right).toLowerCase();
+    return Boolean(leftName && leftName === rightName);
+}
+
+function companyAddress(emp) {
+    return String(emp?.companyEmail || "").trim();
+}
+
+async function dateChangePeople(task, action = null) {
+    const assigneeId = task?.assignee || action?.assignedTo || "";
+    const current = isObjectId(assigneeId) ? await findAssignee(String(assigneeId)) : null;
+    const reassigned = taskWasReassigned(task);
+    const original = reassigned ? await resolveOriginalAssignee(task) : null;
+    const hasReassignee = Boolean(reassigned && current && (!original || !sameEmployeeRecord(current, original)));
+    const requester = await resolveTaskRequesterEmployee(task);
+    return {
+        requester,
+        assignee: hasReassignee ? (original || null) : (current || original || null),
+        reassignee: hasReassignee ? current : null,
+    };
+}
+
+function dateChangeAddresses(people) {
+    return {
+        requester: companyAddress(people?.requester),
+        assignee: companyAddress(people?.assignee),
+        reassignee: companyAddress(people?.reassignee),
+    };
+}
+
+async function emailDateChange(target, task, event, people, { subject, lines, description, emailType, hello }) {
+    const to = dateChangeMailTargets(event, dateChangeAddresses(people));
+    if (!to.length) return { sent: false, to };
+    try {
+        const result = await sendTaskActivityEmail({
+            to,
+            subject,
+            html: taskActionHtml({
+                hello: hello || "there",
+                lines,
+                taskName: task?.taskName,
+                description,
+                link: taskDetailLink({ ...target, task }),
+            }),
+            recordId: String(task?.sourceDashboardActionId || target?.action?._id || task?._id || ""),
+            emailType,
+        });
+        return { sent: Boolean(result?.sent), to };
+    } catch (error) {
+        console.error("Completion date email failed:", error);
+        return { sent: false, to };
+    }
+}
+
+async function rememberDateMail(task, viewerName, sent) {
+    if (sent) return;
+    task.history = task.history || [];
+    task.history.push(historyEntry(
+        "Completion Date",
+        "No company email was sent for this date change.",
+        viewerName,
+    ));
+    await task.save();
+}
+
+async function syncCompletionDateNotice(task) {
+    if (task?.sourceDashboardActionId) return;
+    try {
+        await syncManualTaskNotification(task);
+    } catch (noticeError) {
+        console.error("Completion date notice sync failed:", noticeError);
+    }
+}
+
+function storedDateRequest(task) {
+    if (task?.dateChangeRequest?.toObject) return task.dateChangeRequest.toObject();
+    return { ...(task?.dateChangeRequest || {}) };
+}
+
 export const changeTaskCompletionDate = async (req, res) => {
     try {
         if (!(await denyUnlessViewer(req, res))) return;
@@ -3908,45 +4016,248 @@ export const changeTaskCompletionDate = async (req, res) => {
         if (dateType !== "Workflow Task" && !isManualTaskType(dateType)) {
             return res.status(400).json({ message: "Only a workflow task, a general task, or a project task can change its completion date." });
         }
+        const note = readDescription(req.body);
+        if (note.error) return res.status(400).json({ message: note.error });
         const nextDate = parseCompletionDate(req.body?.completionDate);
         if (!nextDate) return res.status(400).json({ message: "Choose a completion date." });
 
         const current = assigneeOf(target);
         const flags = await closeFlags(target.task, viewer, current.assigneeId, current.assigneeEmpId, action);
-        if (!flags.canChangeCompletionDate) {
+        if (flags.dateChangePending) {
+            return res.status(400).json({ message: "A completion date change is already waiting for approval." });
+        }
+        if (!flags.dateChangeRole) {
             return res.status(403).json({ message: "You cannot change the completion date of this task." });
         }
 
         let task = target.task;
         if (!task && action) task = await ensureOverlay(action);
         if (!task) return res.status(404).json({ message: "Task not found." });
+        target.task = task;
 
-        const change = applyChangedCompletionDate(task, nextDate, shownCompletionDate(task, action));
-        if (!change.changed) {
+        const shown = shownCompletionDate(task, action);
+        if (dubaiDateKey(shown) && dubaiDateKey(shown) === dubaiDateKey(nextDate)) {
             return res.status(400).json({ message: "Choose a different completion date." });
         }
+        const people = await dateChangePeople(task, action);
+        const fromLabel = readableDate(shown) || "—";
+        const toLabel = readableDate(nextDate);
+        const taskName = task.taskName || "Task";
         task.history = task.history || [];
+
+        if (flags.dateChangeRole === "requester") {
+            const change = applyChangedCompletionDate(task, nextDate, shown);
+            if (!change.changed) return res.status(400).json({ message: "Choose a different completion date." });
+            task.dateChangeRequest = {
+                status: "",
+                requestedByRole: "",
+                requestedById: null,
+                requestedByEmpId: "",
+                requestedByName: "",
+                description: "",
+                proposedDate: null,
+                previousDate: null,
+                requestedAt: null,
+                decidedAt: null,
+                decidedByName: "",
+                decisionReason: "",
+            };
+            task.markModified("dateChangeRequest");
+            task.history.push(historyEntry(
+                "Completion Date",
+                `Completion date changed from ${change.fromLabel || fromLabel} to ${change.toLabel || toLabel}. ${note.text}`,
+                viewer.name,
+            ));
+            await task.save();
+            const mailed = await emailDateChange(target, task, "requester-changed", people, {
+                subject: `Completion date changed: ${taskName}`,
+                lines: [`${viewer.name} changed the completion date from ${change.fromLabel || fromLabel} to ${change.toLabel || toLabel}.`],
+                description: note.text,
+                emailType: "Completion date changed",
+            });
+            await rememberDateMail(task, viewer.name, mailed.sent);
+            await syncCompletionDateNotice(task);
+            const fresh = await loadTarget(req.params.taskKey);
+            const who = people.reassignee
+                ? "The requester, assignee, and reassignee were emailed at their company address."
+                : "The requester and assignee were emailed at their company address.";
+            return res.status(200).json({
+                outcome: "changed",
+                message: mailed.sent ? `Completion date changed. ${who}` : "Completion date changed. No company email was found.",
+                task: await buildDetail(fresh || { ...target, task }, viewer),
+            });
+        }
+
+        const waitingFor = flags.dateChangeRole === "reassignee" ? "assignee" : "requester";
+        task.dateChangeRequest = {
+            status: "Pending",
+            requestedByRole: flags.dateChangeRole,
+            requestedById: isObjectId(viewer?.employeeObjectId) ? viewer.employeeObjectId : null,
+            requestedByEmpId: viewer?.employeeId || "",
+            requestedByName: viewer.name || "",
+            description: note.text,
+            proposedDate: nextDate,
+            previousDate: shown ? new Date(shown) : null,
+            requestedAt: new Date(),
+            decidedAt: null,
+            decidedByName: "",
+            decisionReason: "",
+        };
+        task.markModified("dateChangeRequest");
         task.history.push(historyEntry(
             "Completion Date",
-            `Completion date changed from ${change.fromLabel || "—"} to ${change.toLabel}.`,
+            `Asked to change the completion date from ${fromLabel} to ${toLabel}. Waiting for the ${waitingFor} to approve. ${note.text}`,
             viewer.name,
         ));
         await task.save();
-        if (!task.sourceDashboardActionId) {
-            try {
-                await syncManualTaskNotification(task);
-            } catch (noticeError) {
-                console.error("Completion date notice sync failed:", noticeError);
-            }
-        }
+        const event = flags.dateChangeRole === "reassignee" ? "reassignee-requested" : "assignee-requested";
+        const approver = flags.dateChangeRole === "reassignee" ? people.assignee : people.requester;
+        const mailed = await emailDateChange(target, task, event, people, {
+            subject: `Approve completion date change: ${taskName}`,
+            hello: personName(approver) || "there",
+            lines: [
+                `${viewer.name} asked to change the completion date from ${fromLabel} to ${toLabel}.`,
+                "Open the task to approve it, or reject it with a reason.",
+            ],
+            description: note.text,
+            emailType: "Completion date approval",
+        });
+        await rememberDateMail(task, viewer.name, mailed.sent);
         const fresh = await loadTarget(req.params.taskKey);
+        const asked = flags.dateChangeRole === "reassignee"
+            ? "The assignee was emailed at their company address to approve or reject this date change."
+            : "The requester was emailed at their company address to approve or reject this date change.";
         return res.status(200).json({
-            message: "Completion date changed.",
+            outcome: "pending",
+            message: mailed.sent ? asked : "The date change is waiting for approval. No company email was found.",
             task: await buildDetail(fresh || { ...target, task }, viewer),
         });
     } catch (error) {
         console.error("Change completion date error:", error);
         return res.status(500).json({ message: "Failed to change the completion date" });
+    }
+};
+
+export const decideTaskCompletionDate = async (req, res) => {
+    try {
+        if (!(await denyUnlessViewer(req, res))) return;
+        const decision = String(req.body?.decision || "").trim().toLowerCase();
+        if (decision !== "approve" && decision !== "reject") {
+            return res.status(400).json({ message: "Choose approve or reject." });
+        }
+        const target = await loadTarget(req.params.taskKey);
+        if (!target?.task) return res.status(404).json({ message: "Task not found." });
+        const viewer = await resolveTaskViewer(req);
+        const action = target.action || null;
+        const current = assigneeOf(target);
+        const flags = await closeFlags(target.task, viewer, current.assigneeId, current.assigneeEmpId, action);
+        if (!flags.canDecideDateChange) {
+            return res.status(403).json({ message: "You cannot decide this date change." });
+        }
+        const task = target.task;
+        const request = storedDateRequest(task);
+        if (request.status !== "Pending" || !request.proposedDate) {
+            return res.status(400).json({ message: "There is no completion date change waiting for approval." });
+        }
+        const proposed = request.proposedDate instanceof Date ? request.proposedDate : new Date(request.proposedDate);
+        if (Number.isNaN(proposed.getTime())) {
+            return res.status(400).json({ message: "The requested completion date is not valid." });
+        }
+        const people = await dateChangePeople(task, action);
+        const fromLabel = readableDate(request.previousDate) || "—";
+        const toLabel = readableDate(proposed);
+        const taskName = task.taskName || "Task";
+        task.history = task.history || [];
+
+        if (decision === "reject") {
+            const reason = String(req.body?.reason || req.body?.description || "").trim();
+            if (!reason) return res.status(400).json({ message: "A reason is required." });
+            if (reason.length > 500) return res.status(400).json({ message: "Reason must be 500 characters or less." });
+            task.dateChangeRequest = {
+                ...request,
+                status: "Rejected",
+                decidedAt: new Date(),
+                decidedByName: viewer.name || "",
+                decisionReason: reason,
+            };
+            task.markModified("dateChangeRequest");
+            task.history.push(historyEntry(
+                "Completion Date",
+                `Rejected the completion date change from ${fromLabel} to ${toLabel}. ${reason}`,
+                viewer.name,
+            ));
+            await task.save();
+            const event = request.requestedByRole === "reassignee" ? "reassignee-rejected" : "assignee-rejected";
+            const askedEmployee = isObjectId(request.requestedById)
+                ? await findAssignee(String(request.requestedById))
+                : null;
+            const asker = askedEmployee || (request.requestedByRole === "reassignee" ? people.reassignee : people.assignee);
+            const rejectPeople = request.requestedByRole === "reassignee"
+                ? { ...people, reassignee: asker }
+                : { ...people, assignee: asker };
+            const mailed = await emailDateChange(target, task, event, rejectPeople, {
+                subject: `Completion date change rejected: ${taskName}`,
+                hello: personName(asker) || request.requestedByName || "there",
+                lines: [
+                    `${viewer.name} rejected the completion date change from ${fromLabel} to ${toLabel}.`,
+                    request.description ? `Request: ${request.description}` : "",
+                    `Reason: ${reason}`,
+                ].filter(Boolean),
+                description: "",
+                emailType: "Completion date rejected",
+            });
+            await rememberDateMail(task, viewer.name, mailed.sent);
+            const fresh = await loadTarget(req.params.taskKey);
+            return res.status(200).json({
+                outcome: "rejected",
+                message: mailed.sent
+                    ? "The date change was rejected. The person who asked was emailed the reason at their company address."
+                    : "The date change was rejected. No company email was found.",
+                task: await buildDetail(fresh || target, viewer),
+            });
+        }
+
+        const change = applyChangedCompletionDate(task, proposed, shownCompletionDate(task, action));
+        if (!change.changed) {
+            return res.status(400).json({ message: "Choose a different completion date." });
+        }
+        task.dateChangeRequest = {
+            ...request,
+            status: "Approved",
+            decidedAt: new Date(),
+            decidedByName: viewer.name || "",
+            decisionReason: "",
+        };
+        task.markModified("dateChangeRequest");
+        task.history.push(historyEntry(
+            "Completion Date",
+            `Approved the completion date change from ${change.fromLabel || fromLabel} to ${change.toLabel || toLabel}. ${request.description || ""}`.trim(),
+            viewer.name,
+        ));
+        await task.save();
+        const event = request.requestedByRole === "reassignee" ? "reassignee-approved" : "assignee-approved";
+        const mailed = await emailDateChange(target, task, event, people, {
+            subject: `Completion date changed: ${taskName}`,
+            lines: [`${viewer.name} approved the completion date change from ${change.fromLabel || fromLabel} to ${change.toLabel || toLabel}.`],
+            description: request.description || "",
+            emailType: "Completion date changed",
+        });
+        await rememberDateMail(task, viewer.name, mailed.sent);
+        await syncCompletionDateNotice(task);
+        const fresh = await loadTarget(req.params.taskKey);
+        const who = request.requestedByRole === "reassignee"
+            ? "The requester and reassignee were emailed at their company address."
+            : (people.reassignee
+                ? "The assignee and reassignee were emailed at their company address."
+                : "The assignee was emailed at their company address.");
+        return res.status(200).json({
+            outcome: "approved",
+            message: mailed.sent ? `Completion date changed. ${who}` : "Completion date changed. No company email was found.",
+            task: await buildDetail(fresh || target, viewer),
+        });
+    } catch (error) {
+        console.error("Decide completion date error:", error);
+        return res.status(500).json({ message: "Failed to decide the completion date" });
     }
 };
 

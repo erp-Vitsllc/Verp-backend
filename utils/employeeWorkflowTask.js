@@ -13,6 +13,8 @@ export const EMPLOYEE_WORKFLOW_TYPES = new Set([
     "Work Order LPO",
     "Work Order LPO Attachment",
     "Work Order LPO Approval",
+    "Work Order Actual BOQ",
+    "Work Order MR",
 ]);
 
 export function employeeWorkflowType(requestType) {

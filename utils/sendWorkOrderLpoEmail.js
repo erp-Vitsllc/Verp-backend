@@ -108,7 +108,7 @@ export async function sendWorkOrderAttachmentRequestEmail({
     return { emailed: true, email, message: `Email sent to ${email}.`, notice };
 }
 
-export async function sendWorkOrderFollowUpEmail({ employee, notice, workOrderId }) {
+export async function sendWorkOrderFollowUpEmail({ employee, notice, workOrderId, section = 'lpo' }) {
     if (!employee) {
         return { emailed: false, email: '', message: notice?.message || 'No employee is set for this notice.' };
     }
@@ -136,7 +136,8 @@ export async function sendWorkOrderFollowUpEmail({ employee, notice, workOrderId
         auth: { user, pass },
     });
     const name = personName(employee);
-    const link = `${appOrigin()}/production/work-order?workOrder=${workOrderId}&section=lpo`;
+    const safeSection = String(section || 'lpo').replace(/[^a-z0-9-]/gi, '') || 'lpo';
+    const link = `${appOrigin()}/production/work-order?workOrder=${workOrderId}&section=${safeSection}`;
     await transporter.sendMail({
         from: `"VERP" <${user}>`,
         to: email,

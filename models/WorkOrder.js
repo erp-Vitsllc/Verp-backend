@@ -76,6 +76,23 @@ const workOrderSchema = new mongoose.Schema(
         },
         attachmentPending: { type: Boolean, default: false },
         lpoLocked: { type: Boolean, default: false },
+        actualBoq: {
+            status: { type: String, enum: ['', 'draft', 'pending', 'approved', 'rejected'], default: '' },
+            tables: { type: [mongoose.Schema.Types.Mixed], default: [] },
+            requestedByName: { type: String, default: '' },
+            requestedById: { type: String, default: '' },
+            requestedAt: { type: Date },
+            reason: { type: String, default: '' },
+            decidedByName: { type: String, default: '' },
+            decidedAt: { type: Date },
+        },
+        materialRequest: {
+            status: { type: String, enum: ['', 'open'], default: '' },
+            createdAt: { type: Date },
+            purchaserName: { type: String, default: '' },
+            purchaserId: { type: String, default: '' },
+            tables: { type: [mongoose.Schema.Types.Mixed], default: [] },
+        },
         lpoApproval: {
             status: { type: String, enum: ['', 'draft', 'pending', 'rejected'], default: '' },
             mode: { type: String, enum: ['', 'required', 'not_required', 'received'], default: '' },

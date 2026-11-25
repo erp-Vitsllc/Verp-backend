@@ -16,6 +16,7 @@ import {
 } from '../utils/sendWorkOrderLpoEmail.js';
 import { syncDashboardAction } from '../utils/syncDashboard.js';
 import DashboardAction from '../models/DashboardAction.js';
+import TaskManagerTask from '../models/TaskManagerTask.js';
 import { finishEmployeeWorkflowTasks } from '../utils/employeeWorkflowTask.js';
 import { isJwtSystemSuperUser } from '../utils/systemSuperUser.js';
 import { fetchZohoEstimateByNumber, fetchZohoEstimatePdf } from '../services/zohoService.js';
@@ -25,6 +26,8 @@ import {
     savedQuotation,
     snapshotFromEstimate,
 } from '../utils/workOrderQuotationSync.js';
+import { buildActualBoq } from '../utils/workOrderActualBoq.js';
+import { findPurchaseOfficer } from './inventory/stockApproval.js';
 
 const TYPES = new Set(['Standalone', 'Main WO', 'Variation']);
 const STATUSES = new Set(['Draft', 'Not Started', 'Awaiting LPO', 'LPO Pending', 'Created', 'In Progress', 'Fully Invoiced', 'Completed']);
@@ -125,6 +128,8 @@ async function closeLpoNotFilledNotice(order) {
 }
 
 const ATTACHMENT_REQUEST = 'Work Order LPO Attachment';
+const ACTUAL_BOQ_REQUEST = 'Work Order Actual BOQ';
+const MATERIAL_REQUEST = 'Work Order MR';
 
 function actorKeys(req) {
     return [
@@ -910,6 +915,248 @@ async function notifyProjectManager(order, actorName, payload) {
     return { emailed, message, manager };
 }
 
+const ACTUAL_BOQ_FIELDS = [
+    'slNo', 'category', 'subcategory', 'item', 'brand', 'modelNo',
+    'descriptionNew', 'descriptionOld', 'quantity', 'unitPrice', 'total',
+    'vendorName', 'paymentTerms',
+];
+
+function cleanBoqTables(raw) {
+    const tables = Array.isArray(raw) ? raw.slice(0, 30) : [];
+    return tables.map((table) => ({
+        rows: (Array.isArray(table?.rows) ? table.rows : []).slice(0, 400).map((row) => {
+            const next = {};
+            ACTUAL_BOQ_FIELDS.forEach((key) => {
+                const value = row?.[key];
+                if (key === 'quantity' || key === 'unitPrice' || key === 'total' || key === 'slNo') {
+                    if (value === '' || value == null) next[key] = '';
+                    else {
+                        const amount = Number(value);
+                        next[key] = Number.isFinite(amount) ? amount : cleanText(value, 40);
+                    }
+                } else {
+                    next[key] = cleanText(value, 2000);
+                }
+            });
+            return next;
+        }),
+    })).filter((table) => table.rows.length);
+}
+
+async function findActorEmployee(req) {
+    const objectId = req.user?.employeeObjectId;
+    const select = 'firstName lastName companyEmail workEmail status profileStatus employeeId primaryReportee';
+    if (objectId && mongoose.Types.ObjectId.isValid(String(objectId))) {
+        const employee = await EmployeeBasic.findById(objectId)
+            .select(select)
+            .populate('primaryReportee', 'companyEmail workEmail status profileStatus')
+            .lean();
+        if (employee) return employee;
+    }
+    if (req.user?.employeeId) {
+        return EmployeeBasic.findOne({ employeeId: req.user.employeeId })
+            .select(select)
+            .populate('primaryReportee', 'companyEmail workEmail status profileStatus')
+            .lean();
+    }
+    return null;
+}
+
+async function closeActualBoqNotice(order, status, comment) {
+    if (!order?._id) return;
+    await DashboardAction.updateMany(
+        { requestId: order._id, requestType: ACTUAL_BOQ_REQUEST, status: 'Pending' },
+        { $set: { status, actionedDate: new Date(), comment: comment || '' } },
+    );
+}
+
+async function markActualBoqProjectTask(orderId) {
+    const action = await DashboardAction.findOne({
+        requestId: orderId,
+        requestType: ACTUAL_BOQ_REQUEST,
+        status: 'Pending',
+    }).select('_id').lean();
+    if (!action?._id) return;
+    const task = await TaskManagerTask.findOne({
+        sourceDashboardActionId: action._id,
+        status: { $nin: ['Cancelled'] },
+    }).sort({ updatedAt: -1 });
+    if (!task) return;
+    task.taskType = 'Project Task';
+    await task.save();
+}
+
+async function saveActualBoq(req, res, order, actorName) {
+    const tables = cleanBoqTables(req.body?.actualBoqTables);
+    if (!tables.length) return res.status(400).json({ message: 'Add at least one actual BOQ row before saving' });
+    if (order.actualBoq?.status === 'approved') {
+        return res.status(400).json({ message: 'This actual BOQ is already approved' });
+    }
+    if (order.actualBoq?.status === 'pending') {
+        return res.status(400).json({ message: 'This actual BOQ is waiting for the project manager' });
+    }
+    const actor = await findActorEmployee(req);
+    if (!actor?._id) return res.status(400).json({ message: 'Your employee record is required to save this actual BOQ' });
+
+    const submitting = Boolean(req.body?.submitActualBoq);
+    const manager = submitting ? await findProjectManager() : null;
+    if (submitting && !manager?._id) {
+        return res.status(400).json({ message: 'Assign an active Project Manager on the flowchart before submitting the actual BOQ.' });
+    }
+
+    order.actualBoq = {
+        status: submitting ? 'pending' : 'draft',
+        tables,
+        requestedByName: actorName,
+        requestedById: String(actor._id),
+        requestedAt: new Date(),
+        reason: '',
+        decidedByName: '',
+        decidedAt: null,
+    };
+    order.markModified('actualBoq');
+    await order.save();
+
+    const assignee = submitting ? manager : actor;
+    const notice = submitting
+        ? {
+            extra1: `Approve the actual BOQ on ${order.workOrderNo}`,
+            extra2: `${actorName} submitted the actual BOQ. Approve it, or reject with a description.`,
+            subject: `${order.workOrderNo}: actual BOQ approval`,
+            message: `Approve the actual BOQ on ${order.workOrderNo}`,
+        }
+        : {
+            extra1: `Actual BOQ draft on ${order.workOrderNo}`,
+            extra2: `${actorName} saved an actual BOQ draft. Requester and assignee are the same.`,
+            subject: `${order.workOrderNo}: actual BOQ draft`,
+            message: `Actual BOQ draft on ${order.workOrderNo}`,
+        };
+    await syncDashboardAction({
+        requestId: order._id,
+        requestType: ACTUAL_BOQ_REQUEST,
+        assignedTo: assignee._id,
+        status: 'Pending',
+        subjectName: order.customer || '',
+        requestedByName: actorName,
+        extra1: notice.extra1,
+        extra2: notice.extra2,
+        extra3: JSON.stringify({ path: `/production/work-order?workOrder=${order._id}&section=actual-boq` }),
+    });
+    if (submitting) await markActualBoqProjectTask(order._id);
+
+    let emailMessage = submitting ? notice.message : 'Draft saved. The task and notification are assigned to you.';
+    if (submitting) {
+        try {
+            const sent = await sendWorkOrderFollowUpEmail({
+                employee: manager,
+                notice,
+                workOrderId: String(order._id),
+                section: 'actual-boq',
+            });
+            emailMessage = sent.message || notice.message;
+        } catch (error) {
+            console.error('Actual BOQ approval email failed:', error);
+            emailMessage = 'Email could not be sent. The approval was still saved.';
+        }
+    }
+    return res.status(200).json({
+        workOrder: await presentedForViewer(order, req),
+        emailMessage,
+        actualBoqSaved: true,
+    });
+}
+
+async function openMaterialRequest(order, actorName) {
+    const officer = await findPurchaseOfficer();
+    const employee = officer?.empObjectId
+        ? await EmployeeBasic.findById(officer.empObjectId)
+            .select('firstName lastName companyEmail workEmail status profileStatus employeeId primaryReportee')
+            .populate('primaryReportee', 'companyEmail workEmail status profileStatus')
+            .lean()
+        : null;
+    const purchaserName = String(officer?.employeeName || [employee?.firstName, employee?.lastName].filter(Boolean).join(' ') || '').trim();
+    order.materialRequest = {
+        status: 'open',
+        createdAt: new Date(),
+        purchaserName,
+        purchaserId: officer?.empObjectId ? String(officer.empObjectId) : '',
+        tables: Array.isArray(order.actualBoq?.tables) ? order.actualBoq.tables : [],
+    };
+    order.markModified('materialRequest');
+    if (!officer?.empObjectId) {
+        return { message: 'Actual BOQ approved. Assign an active Purchase Officer on the flowchart so the material request can be assigned.' };
+    }
+    const notice = {
+        extra1: `Create the MR for ${order.workOrderNo}`,
+        extra2: `${actorName} approved the actual BOQ. Create the material request from these lines.`,
+        subject: `${order.workOrderNo}: create the material request`,
+        message: `Create the material request for ${order.workOrderNo}`,
+    };
+    await syncDashboardAction({
+        requestId: order._id,
+        requestType: MATERIAL_REQUEST,
+        assignedTo: officer.empObjectId,
+        status: 'Pending',
+        subjectName: order.customer || '',
+        requestedByName: actorName,
+        extra1: notice.extra1,
+        extra2: notice.extra2,
+        extra3: JSON.stringify({ path: `/production/work-order?workOrder=${order._id}&section=mr` }),
+    });
+    const companyEmail = String(officer.companyEmail || employee?.companyEmail || '').trim();
+    if (!companyEmail) {
+        return { message: `Material request assigned to ${purchaserName || 'the purchase officer'}. No company email is set, so the email was not sent.` };
+    }
+    try {
+        const sent = await sendWorkOrderFollowUpEmail({
+            employee: employee ? { ...employee, companyEmail, workEmail: '' } : { companyEmail, firstName: purchaserName, status: 'Active', profileStatus: 'Active' },
+            notice,
+            workOrderId: String(order._id),
+            section: 'mr',
+        });
+        return { message: sent.message || `Email sent to ${companyEmail}.` };
+    } catch (error) {
+        console.error('Material request email failed:', error);
+        return { message: 'The material request task was saved. Email could not be sent.' };
+    }
+}
+
+async function decideActualBoq(req, res, order, actorName) {
+    const manager = await isProjectManager(req) || isJwtSystemSuperUser(req.user);
+    if (!manager) return res.status(403).json({ message: 'Only the project manager can approve the actual BOQ' });
+    if (order.actualBoq?.status !== 'pending') {
+        return res.status(400).json({ message: 'This actual BOQ is not waiting for approval' });
+    }
+    const decision = req.body?.decideActualBoq === 'reject' ? 'reject' : 'approve';
+    const reason = cleanText(req.body?.rejectReason, 1000);
+    if (decision === 'reject' && !reason) {
+        return res.status(400).json({ message: 'A description is required to reject the actual BOQ' });
+    }
+    order.actualBoq.status = decision === 'approve' ? 'approved' : 'rejected';
+    order.actualBoq.reason = decision === 'reject' ? reason : '';
+    order.actualBoq.decidedByName = actorName;
+    order.actualBoq.decidedAt = new Date();
+    order.markModified('actualBoq');
+    let mrMessage = '';
+    if (decision === 'approve') {
+        mrMessage = (await openMaterialRequest(order, actorName)).message;
+    }
+    await order.save();
+    const closed = decision === 'approve' ? 'Approved' : 'Rejected';
+    await closeActualBoqNotice(order, closed, reason || 'Actual BOQ approved');
+    await finishEmployeeWorkflowTasks(order._id, ACTUAL_BOQ_REQUEST, {
+        taskStatus: decision === 'approve' ? 'Completed' : 'Rejected',
+        event: closed,
+        detail: decision === 'approve' ? 'Actual BOQ approved.' : reason,
+        actorName,
+    });
+    return res.status(200).json({
+        workOrder: await presentedForViewer(order, req),
+        emailMessage: decision === 'approve' ? mrMessage : '',
+        actualBoqSaved: true,
+    });
+}
+
 async function presentedForViewer(order, req) {
     const presented = presentWorkOrder(order, { includeFiles: true });
     presented.viewerCanCompleteLpo = Boolean(order.lpoFollowUp) && await canCompleteLpoFollowUp(req, order);
@@ -1217,6 +1464,22 @@ export const createWorkOrder = async (req, res) => {
     }
 };
 
+export const getWorkOrderActualBoq = async (req, res) => {
+    try {
+        const { id } = req.params;
+        if (!mongoose.Types.ObjectId.isValid(id)) {
+            return res.status(404).json({ message: 'Work order was not found' });
+        }
+        const order = await WorkOrder.findById(id).select('quotationSnapshot vendorId vendorName').lean();
+        if (!order) return res.status(404).json({ message: 'Work order was not found' });
+        const lines = await buildActualBoq(order);
+        return res.status(200).json({ lines });
+    } catch (error) {
+        console.error('Error loading actual BOQ:', error);
+        return res.status(500).json({ message: 'Failed to load the actual BOQ' });
+    }
+};
+
 export const getWorkOrder = async (req, res) => {
     try {
         const { id } = req.params;
@@ -1399,6 +1662,12 @@ export const updateWorkOrder = async (req, res) => {
         const order = await WorkOrder.findById(id);
         if (!order) return res.status(404).json({ message: 'Work order was not found' });
         const actorName = cleanText(req.user?.name, 120) || 'An employee';
+        if (req.body?.saveActualBoqDraft || req.body?.submitActualBoq) {
+            return saveActualBoq(req, res, order, actorName);
+        }
+        if (req.body?.decideActualBoq) {
+            return decideActualBoq(req, res, order, actorName);
+        }
         if (req.body?.saveLpoDraft || req.body?.submitLpoUpdate || req.body?.decideLpoApproval) {
             const manager = await isProjectManager(req);
             if (req.body?.saveLpoDraft) {
