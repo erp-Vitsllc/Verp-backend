@@ -6,6 +6,7 @@ import { assertPdfAttachment } from './pdfAttachment.js';
 import { cleanName, httpError, sendError } from './http.js';
 import InventoryItem from '../../models/inventory/InventoryItem.js';
 import { applyItemStock, createPendingItemRecord } from './itemStock.js';
+import { resolveItemCatalog } from './items.js';
 import { awaitAdminDeletionArchive } from '../../utils/adminDeletionArchiveRun.js';
 import {
     actorIsManagement,
@@ -236,10 +237,10 @@ function presentEntry(row) {
     };
 }
 
-function readLines(body, { posting }) {
+async function readLines(body, { posting }) {
     const rows = Array.isArray(body?.lines) ? body.lines : [];
     if (posting && rows.length === 0) throw httpError(400, 'Add at least one item.');
-    return rows.map((line, index) => {
+    return Promise.all(rows.map(async (line, index) => {
         const quantity = Number(line?.quantity);
         const unitPrice = line?.unitPrice === '' || line?.unitPrice == null ? NaN : Number(line.unitPrice);
         if (posting) {
@@ -252,22 +253,36 @@ function readLines(body, { posting }) {
         }
         const safeQuantity = Number.isFinite(quantity) && quantity > 0 ? roundMoney(quantity) : 0;
         const safePrice = Number.isFinite(unitPrice) && unitPrice >= 0 ? roundMoney(unitPrice) : 0;
-        if (!line?.categoryId || !line?.subcategoryId || !line?.brandId || !cleanName(line?.itemName)) {
-            throw httpError(400, `Row ${index + 1} is missing category, sub category, brand, or item.`);
+        let catalog;
+        try {
+            catalog = await resolveItemCatalog({
+                categoryId: line?.categoryId,
+                categoryName: line?.categoryName,
+                subcategoryId: line?.subcategoryId,
+                subcategoryName: line?.subcategoryName,
+                brandId: line?.brandId,
+                brandName: line?.brandName,
+                itemOptionId: line?.itemOptionId,
+                itemName: line?.itemName,
+                modelNumber: line?.modelNumber,
+            });
+        } catch (error) {
+            if (error?.status) throw httpError(error.status, `Row ${index + 1}: ${error.message}`);
+            throw error;
         }
         return {
             itemId: line.itemId && mongoose.isValidObjectId(line.itemId) ? line.itemId : null,
-            categoryId: line.categoryId,
-            subcategoryId: line.subcategoryId,
-            brandId: line.brandId,
+            categoryId: catalog.categoryId,
+            subcategoryId: catalog.subcategoryId,
+            brandId: catalog.brandId,
             modelNumber: cleanName(line.modelNumber),
-            itemName: cleanName(line.itemName),
-            description: cleanName(line.description),
+            itemName: catalog.itemName,
+            description: cleanName(line.description) || catalog.description,
             quantity: safeQuantity,
             unitPrice: safePrice,
             total: roundMoney(safeQuantity * safePrice),
         };
-    });
+    }));
 }
 
 async function readPurchase(body, { posting }) {
@@ -561,7 +576,7 @@ export async function saveStockEntry(req, res) {
     try {
         const posting = req.body?.status === 'posted';
         const purchase = await readPurchase(req.body, { posting });
-        const lines = readLines(req.body, { posting });
+        const lines = await readLines(req.body, { posting });
         const clientRequestId = cleanName(req.body?.clientRequestId);
         const requestedId = String(req.body?.id || '');
         let entry = null;

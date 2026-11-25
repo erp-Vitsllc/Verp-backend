@@ -6,7 +6,7 @@ import ItemBrand from '../../models/inventory/ItemBrand.js';
 import { hasPermission } from '../../services/permissionService.js';
 import { isReqUserSystemSuperUser } from '../../utils/systemSuperUser.js';
 import { cleanName, httpError, nameKey, requireName, sendError } from './http.js';
-import { assertLinks, assertModelNumberAvailable, nextItemCode, stockStatus } from './items.js';
+import { assertLinks, assertModelNumberAvailable, findSameItem, nextItemCode, stockStatus } from './items.js';
 
 const STOCK_POPULATE = [
     { path: 'categoryId', select: 'name' },
@@ -239,6 +239,17 @@ export async function createPendingItemRecord(body) {
     if (requestedId && mongoose.isValidObjectId(requestedId) && modelNumber) {
         const current = await InventoryItem.findById(requestedId);
         if (current?.pendingStock && !cleanName(current.modelNumber)) {
+            const same = await findSameItem({
+                categoryId,
+                subcategoryId,
+                brandId,
+                itemOptionId: option._id,
+                modelNumber,
+            }, current._id);
+            if (same) {
+                const saved = await InventoryItem.findById(same._id).populate(STOCK_POPULATE).lean();
+                return { item: presentStockOption(saved), created: false };
+            }
             await assertModelNumberAvailable(modelNumber, current._id);
             current.categoryId = categoryId;
             current.subcategoryId = subcategoryId;
@@ -251,16 +262,18 @@ export async function createPendingItemRecord(body) {
             return { item: presentStockOption(saved), created: false };
         }
     }
-    if (modelNumber) await assertModelNumberAvailable(modelNumber);
-    const duplicate = await InventoryItem.findOne({
-        pendingStock: true,
+    const same = await findSameItem({
         categoryId,
         subcategoryId,
         brandId,
         itemOptionId: option._id,
         modelNumber,
-    }).populate(STOCK_POPULATE).lean();
-    if (duplicate) return { item: presentStockOption(duplicate), created: false };
+    });
+    if (same) {
+        const saved = await InventoryItem.findById(same._id).populate(STOCK_POPULATE).lean();
+        return { item: presentStockOption(saved), created: false };
+    }
+    if (modelNumber) await assertModelNumberAvailable(modelNumber);
     const created = await InventoryItem.create({
         itemCode: await nextItemCode(),
         categoryId,

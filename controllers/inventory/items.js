@@ -8,7 +8,7 @@ import InventoryVendorContact from '../../models/inventory/InventoryVendorContac
 import InventoryStockEntry from '../../models/inventory/InventoryStockEntry.js';
 import DeliveryOrder from '../../models/inventory/DeliveryOrder.js';
 import { escapeRegex } from '../../utils/regexHelper.js';
-import { cleanName, httpError, listLimit, sendError } from './http.js';
+import { cleanName, httpError, listLimit, nameKey, requireName, sendError } from './http.js';
 
 const ITEM_POPULATE = [
     { path: 'categoryId', select: 'name' },
@@ -115,6 +115,212 @@ export async function assertLinks({ categoryId, subcategoryId, itemOptionId, bra
     if (!brand) throw httpError(400, 'Brand was not found.');
 }
 
+function buildStoredDescription({ brandName, itemName, modelNumber, subcategoryName }) {
+    const description = [brandName, itemName, modelNumber, subcategoryName]
+        .map((part) => cleanName(part))
+        .filter(Boolean)
+        .join(' ');
+    if (!description) throw httpError(400, 'Item name is required.');
+    return description;
+}
+
+function modelQuery(modelNumber) {
+    const model = cleanName(modelNumber);
+    if (!model) return { $in: ['', null] };
+    return new RegExp(`^${escapeRegex(model)}$`, 'i');
+}
+
+async function findOrCreateNamed(Model, name, extra = {}) {
+    const key = nameKey(name);
+    const found = await Model.findOne({ nameKey: key, ...extra });
+    if (found) return found;
+    try {
+        return await Model.create({ name, nameKey: key, ...extra });
+    } catch (error) {
+        if (error?.code !== 11000) throw error;
+        const again = await Model.findOne({ nameKey: key, ...extra });
+        if (again) return again;
+        throw error;
+    }
+}
+
+async function resolveCategory({ categoryId, categoryName }) {
+    const named = cleanName(categoryName);
+    if (categoryId && mongoose.isValidObjectId(categoryId)) {
+        const row = await ItemCategory.findById(categoryId);
+        if (row && (!named || nameKey(row.name) === nameKey(named))) return row;
+    }
+    return findOrCreateNamed(ItemCategory, requireName(named, 'Category'));
+}
+
+async function resolveBrand({ brandId, brandName }) {
+    const named = cleanName(brandName);
+    if (brandId && mongoose.isValidObjectId(brandId)) {
+        const row = await ItemBrand.findById(brandId);
+        if (row && (!named || nameKey(row.name) === nameKey(named))) return row;
+    }
+    return findOrCreateNamed(ItemBrand, requireName(named, 'Brand'));
+}
+
+async function resolveSubcategory(categoryId, { subcategoryId, subcategoryName }) {
+    const named = cleanName(subcategoryName);
+    const key = named ? nameKey(named) : '';
+    if (subcategoryId && mongoose.isValidObjectId(subcategoryId)) {
+        const row = await ItemSubcategory.findById(subcategoryId);
+        if (row && (!key || nameKey(row.name) === key)) {
+            if (String(row.categoryId) !== String(categoryId)) {
+                throw httpError(400, 'Sub category does not belong to the selected category.');
+            }
+            return row;
+        }
+    }
+    const name = requireName(named, 'Sub category');
+    const existing = await ItemSubcategory.findOne({ nameKey: nameKey(name) });
+    if (existing) {
+        if (String(existing.categoryId) !== String(categoryId)) {
+            throw httpError(400, 'This sub category already belongs to another category.');
+        }
+        return existing;
+    }
+    try {
+        return await ItemSubcategory.create({ categoryId, name, nameKey: nameKey(name) });
+    } catch (error) {
+        if (error?.code !== 11000) throw error;
+        const again = await ItemSubcategory.findOne({ nameKey: nameKey(name) });
+        if (again && String(again.categoryId) === String(categoryId)) return again;
+        throw httpError(400, 'This sub category already belongs to another category.');
+    }
+}
+
+async function resolveItemOption(subcategoryId, itemOptionId, itemName) {
+    const named = cleanName(itemName);
+    if (itemOptionId && mongoose.isValidObjectId(itemOptionId)) {
+        const row = await ItemOption.findById(itemOptionId);
+        if (row && String(row.subcategoryId) === String(subcategoryId) && (!named || nameKey(row.name) === nameKey(named))) {
+            return row;
+        }
+    }
+    return findOrCreateNamed(ItemOption, requireName(named, 'Item'), { subcategoryId });
+}
+
+export async function resolveItemCatalog(body) {
+    const category = await resolveCategory(body || {});
+    const subcategory = await resolveSubcategory(category._id, body || {});
+    const brand = await resolveBrand(body || {});
+    const option = await resolveItemOption(subcategory._id, body?.itemOptionId, body?.itemName);
+    const modelNumber = cleanName(body?.modelNumber);
+    return {
+        categoryId: category._id,
+        subcategoryId: subcategory._id,
+        brandId: brand._id,
+        itemOptionId: option._id,
+        categoryName: category.name,
+        subcategoryName: subcategory.name,
+        brandName: brand.name,
+        itemName: option.name,
+        modelNumber,
+        description: buildStoredDescription({
+            brandName: brand.name,
+            itemName: option.name,
+            modelNumber,
+            subcategoryName: subcategory.name,
+        }),
+    };
+}
+
+export async function findSameItem(catalog, exceptId = '') {
+    const filter = {
+        categoryId: catalog.categoryId,
+        subcategoryId: catalog.subcategoryId,
+        brandId: catalog.brandId,
+        itemOptionId: catalog.itemOptionId,
+        modelNumber: modelQuery(catalog.modelNumber),
+    };
+    if (exceptId && mongoose.isValidObjectId(exceptId)) filter._id = { $ne: exceptId };
+    return InventoryItem.findOne(filter);
+}
+
+async function assertItemIdentityAvailable(catalog, exceptId = '') {
+    const conflict = await findSameItem(catalog, exceptId);
+    if (conflict) {
+        throw httpError(400, 'An item with this category, sub category, item, brand, and model no already exists.');
+    }
+}
+
+async function syncItemCopies(itemId, catalog) {
+    const objectId = new mongoose.Types.ObjectId(String(itemId));
+    const idString = String(itemId);
+    const stockPatch = {
+        'lines.$[line].categoryId': catalog.categoryId,
+        'lines.$[line].subcategoryId': catalog.subcategoryId,
+        'lines.$[line].brandId': catalog.brandId,
+        'lines.$[line].modelNumber': catalog.modelNumber,
+        'lines.$[line].itemName': catalog.itemName,
+        'lines.$[line].description': catalog.description,
+    };
+    await InventoryStockEntry.updateMany(
+        { 'lines.itemId': objectId },
+        { $set: stockPatch },
+        { arrayFilters: [{ 'line.itemId': objectId }] },
+    );
+    await InventoryStockEntry.updateMany(
+        { 'pendingEdit.lines.itemId': objectId },
+        { $set: {
+            'pendingEdit.lines.$[line].categoryId': catalog.categoryId,
+            'pendingEdit.lines.$[line].subcategoryId': catalog.subcategoryId,
+            'pendingEdit.lines.$[line].brandId': catalog.brandId,
+            'pendingEdit.lines.$[line].modelNumber': catalog.modelNumber,
+            'pendingEdit.lines.$[line].itemName': catalog.itemName,
+            'pendingEdit.lines.$[line].description': catalog.description,
+        } },
+        { arrayFilters: [{ 'line.itemId': objectId }] },
+    );
+    const deliveryPatch = {
+        'lines.$[line].categoryId': String(catalog.categoryId),
+        'lines.$[line].categoryName': catalog.categoryName,
+        'lines.$[line].subcategoryId': String(catalog.subcategoryId),
+        'lines.$[line].subcategoryName': catalog.subcategoryName,
+        'lines.$[line].itemOptionId': String(catalog.itemOptionId),
+        'lines.$[line].itemName': catalog.itemName,
+        'lines.$[line].brandId': String(catalog.brandId),
+        'lines.$[line].brandName': catalog.brandName,
+        'lines.$[line].modelNumber': catalog.modelNumber,
+        'lines.$[line].description': catalog.description,
+    };
+    await DeliveryOrder.updateMany(
+        { 'lines.inventoryItemId': idString },
+        { $set: deliveryPatch },
+        { arrayFilters: [{ 'line.inventoryItemId': idString }] },
+    );
+    await DeliveryOrder.updateMany(
+        { 'pendingEdit.lines.inventoryItemId': idString },
+        { $set: {
+            'pendingEdit.lines.$[line].categoryId': String(catalog.categoryId),
+            'pendingEdit.lines.$[line].categoryName': catalog.categoryName,
+            'pendingEdit.lines.$[line].subcategoryId': String(catalog.subcategoryId),
+            'pendingEdit.lines.$[line].subcategoryName': catalog.subcategoryName,
+            'pendingEdit.lines.$[line].itemOptionId': String(catalog.itemOptionId),
+            'pendingEdit.lines.$[line].itemName': catalog.itemName,
+            'pendingEdit.lines.$[line].brandId': String(catalog.brandId),
+            'pendingEdit.lines.$[line].brandName': catalog.brandName,
+            'pendingEdit.lines.$[line].modelNumber': catalog.modelNumber,
+            'pendingEdit.lines.$[line].description': catalog.description,
+        } },
+        { arrayFilters: [{ 'line.inventoryItemId': idString }] },
+    );
+    await InventoryVendorContact.updateMany(
+        { 'lines.itemId': objectId },
+        { $set: {
+            'lines.$[line].itemLabel': catalog.description,
+            'lines.$[line].categoryId': catalog.categoryId,
+            'lines.$[line].categoryName': catalog.categoryName,
+            'lines.$[line].brandId': catalog.brandId,
+            'lines.$[line].brandName': catalog.brandName,
+        } },
+        { arrayFilters: [{ 'line.itemId': objectId }] },
+    );
+}
+
 function waitingStatus(name) {
     return `Waiting for ${String(name || '').trim() || 'Purchase Officer'}`;
 }
@@ -159,43 +365,23 @@ function matchesStockFilter(rowStatus, statusQuery) {
     return rowStatus === statusQuery;
 }
 
-function readItemBody(body) {
-    const description = cleanName(body?.description);
-    const modelNumber = cleanName(body?.modelNumber);
+function readItemDetails(body) {
     const unitOfMeasure = cleanName(body?.unitOfMeasure);
-    const status = cleanName(body?.status) || 'Active';
     const reservationQuantity = Number(body?.reservationQuantity ?? 0);
-    const hasItemOption = body != null && Object.prototype.hasOwnProperty.call(body, 'itemOptionId');
-    const itemOptionId = hasItemOption ? (body.itemOptionId || null) : undefined;
-    if (!body?.categoryId || !body?.subcategoryId || !body?.brandId) {
-        throw httpError(400, 'Category, subcategory, and brand are required.');
-    }
-    if (hasItemOption && itemOptionId && !mongoose.isValidObjectId(itemOptionId)) {
-        throw httpError(400, 'Item was not found.');
-    }
-    if (!description) throw httpError(400, 'Description is required.');
     if (!unitOfMeasure || unitOfMeasure === 'None' || !INVENTORY_UNITS.includes(unitOfMeasure)) {
         throw httpError(400, 'Choose a unit of measure.');
     }
-    if (!INVENTORY_STATUSES.includes(status)) throw httpError(400, 'Choose a valid status.');
     if (!Number.isFinite(reservationQuantity) || reservationQuantity < 0) {
         throw httpError(400, 'Reservation quantity must be zero or more.');
     }
+    const status = cleanName(body?.status);
     return {
-        categoryId: body.categoryId,
-        subcategoryId: body.subcategoryId,
-        ...(hasItemOption ? { itemOptionId } : {}),
-        brandId: body.brandId,
-        description,
-        moreDescription: cleanName(body?.moreDescription),
-        copyToDescription: body?.copyToDescription === true,
-        modelNumber,
         unitOfMeasure,
         manufacturerPartNumber: cleanName(body?.manufacturerPartNumber),
         reservationQuantity,
         hsCode: cleanName(body?.hsCode),
         countryOfOrigin: cleanName(body?.countryOfOrigin),
-        status,
+        ...(INVENTORY_STATUSES.includes(status) ? { status } : {}),
     };
 }
 
@@ -336,12 +522,20 @@ export async function getItem(req, res) {
 
 export async function createItem(req, res) {
     try {
-        const payload = readItemBody(req.body);
-        await assertLinks(payload);
-        await assertModelNumberAvailable(payload.modelNumber);
+        const catalog = await resolveItemCatalog(req.body);
+        const details = readItemDetails(req.body);
+        await assertItemIdentityAvailable(catalog);
+        await assertModelNumberAvailable(catalog.modelNumber);
         const item = await InventoryItem.create({
-            ...payload,
+            ...details,
+            categoryId: catalog.categoryId,
+            subcategoryId: catalog.subcategoryId,
+            brandId: catalog.brandId,
+            itemOptionId: catalog.itemOptionId,
+            description: catalog.description,
+            modelNumber: catalog.modelNumber,
             itemCode: await nextItemCode(),
+            status: details.status || 'Active',
         });
         const saved = await InventoryItem.findById(item._id).populate(ITEM_POPULATE).lean();
         res.status(201).json(presentItem(saved));
@@ -353,14 +547,24 @@ export async function createItem(req, res) {
 export async function updateItem(req, res) {
     try {
         if (!mongoose.isValidObjectId(req.params.id)) throw httpError(404, 'Item was not found.');
-        const payload = readItemBody(req.body);
-        await assertLinks(payload);
-        await assertModelNumberAvailable(payload.modelNumber, req.params.id);
-        const saved = await InventoryItem.findByIdAndUpdate(req.params.id, payload, {
+        const catalog = await resolveItemCatalog(req.body);
+        const details = readItemDetails(req.body);
+        await assertItemIdentityAvailable(catalog, req.params.id);
+        await assertModelNumberAvailable(catalog.modelNumber, req.params.id);
+        const saved = await InventoryItem.findByIdAndUpdate(req.params.id, {
+            ...details,
+            categoryId: catalog.categoryId,
+            subcategoryId: catalog.subcategoryId,
+            brandId: catalog.brandId,
+            itemOptionId: catalog.itemOptionId,
+            description: catalog.description,
+            modelNumber: catalog.modelNumber,
+        }, {
             new: true,
             runValidators: true,
         }).populate(ITEM_POPULATE).lean();
         if (!saved) throw httpError(404, 'Item was not found.');
+        await syncItemCopies(req.params.id, catalog);
         res.json(presentItem(saved));
     } catch (error) {
         sendError(res, error);
