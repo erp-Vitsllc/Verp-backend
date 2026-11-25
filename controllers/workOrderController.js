@@ -924,6 +924,7 @@ const ACTUAL_BOQ_FIELDS = [
 function cleanBoqTables(raw) {
     const tables = Array.isArray(raw) ? raw.slice(0, 30) : [];
     return tables.map((table) => ({
+        title: cleanText(table?.title, 120),
         rows: (Array.isArray(table?.rows) ? table.rows : []).slice(0, 400).map((row) => {
             const next = {};
             ACTUAL_BOQ_FIELDS.forEach((key) => {
