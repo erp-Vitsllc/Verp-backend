@@ -30,11 +30,19 @@ const TASK_TYPE_LABELS = new Map([
     ["work flow task", "Workflow Task"],
     ["general", "General Task"],
     ["general task", "General Task"],
+    ["project", "Project Task"],
+    ["project task", "Project Task"],
 ]);
 
 export function canonicalTaskType(value) {
     const key = String(value || "").trim().toLowerCase().replace(/\s+/g, " ");
     return TASK_TYPE_LABELS.get(key) || "";
+}
+
+/** General Task and Project Task are created in Task Manager. */
+export function isManualTaskType(value) {
+    const type = canonicalTaskType(value);
+    return type === "General Task" || type === "Project Task";
 }
 
 /** UI label. Keeps an unknown stored value so older rows still display. */
@@ -699,7 +707,7 @@ function plainCloseRequest(task) {
 
 async function taskSkipsModuleBell(task) {
     if (!task) return false;
-    if (canonicalTaskType(task.taskType) === "General Task") return true;
+    if (isManualTaskType(task.taskType)) return true;
     if (!isObjectId(task.sourceDashboardActionId)) return false;
     const action = await DashboardAction.findById(task.sourceDashboardActionId).select("requestType").lean();
     return isGeneralHubRequestType(action?.requestType);
@@ -1135,7 +1143,7 @@ async function omitGeneralTaskBellRows(rows) {
     );
     const generalIds = new Set();
     for (const task of tasks) {
-        const general = canonicalTaskType(task.taskType) === "General Task"
+        const general = isManualTaskType(task.taskType)
             || generalActionIds.has(String(task.sourceDashboardActionId || ""));
         if (!general) continue;
         generalIds.add(String(task._id));

@@ -3,13 +3,14 @@ function taskTypeLabel(value) {
     if (key === "system" || key === "system task") return "System Task";
     if (key === "workflow" || key === "workflow task" || key === "work flow task") return "Workflow Task";
     if (key === "general" || key === "general task") return "General Task";
+    if (key === "project" || key === "project task") return "Project Task";
     return "";
 }
 
 /** System Task and Workflow Task. A stored General Task stays a general task. */
 export function isSystemOrWorkflowTask(task, category = "") {
     const stored = taskTypeLabel(task?.taskType);
-    if (stored === "General Task") return false;
+    if (stored === "General Task" || stored === "Project Task") return false;
     if (stored === "System Task" || stored === "Workflow Task") return true;
     const fromCategory = taskTypeLabel(category);
     return fromCategory === "System Task" || fromCategory === "Workflow Task";

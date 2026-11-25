@@ -53,9 +53,11 @@ import {
     viewerMaySeeAllNotifications,
     collapseOpenDuplicatesOf,
 } from "./getTaskManagerNotifications.js";
+import { dismissModuleBarShares, shareReassignedModuleNotifications } from "../../utils/moduleBarShare.js";
 import {
     accessPathFor,
     canonicalTaskType,
+    isManualTaskType,
     contactCard,
     displayTaskType,
     isObjectId,
@@ -100,8 +102,8 @@ function dubaiDateKey(value) {
 }
 
 function isGeneralTask(task, action = null) {
-    if (canonicalTaskType(task?.taskType) === "General Task") return true;
-    if (String(task?.taskType || "").trim() === "General Task") return true;
+    if (isManualTaskType(task?.taskType)) return true;
+    if (String(task?.taskType || "").trim() === "General Task" || String(task?.taskType || "").trim() === "Project Task") return true;
     if (isGeneralHubRequestType(action?.requestType)) return true;
     if (action && categoryFromRequestType(action.requestType, action.extra2 || "") === "General Task") return true;
     return Boolean(task && !action && !task.sourceDashboardActionId && !String(task.taskType || "").trim());
@@ -1128,7 +1130,7 @@ async function closeFlags(task, viewer, currentAssigneeId, assigneeEmpId, action
     };
     const dateType = displayTaskType(task?.taskType) || (action ? categoryFromRequestType(action.requestType, action.extra2 || "") : "");
     flags.canChangeCompletionDate = Boolean(open)
-        && (dateType === "Workflow Task" || dateType === "General Task")
+        && (dateType === "Workflow Task" || isManualTaskType(dateType))
         && (Boolean(viewer?.superUser) || requesterViewer || viewerIsAssignee);
     flags.reviewAccepted = Boolean(saved.reviewAccepted) && !reviewPending && open;
     if (open && saved.reviewAccepted && !reviewPending) {
@@ -1628,8 +1630,8 @@ async function buildDetail(target, viewer) {
         canDelete,
         deleteBlockedByAssignee,
         accessPath: (manual
-            ? (displayTaskType(task?.taskType) || "General Task")
-            : categoryFromRequestType(action?.requestType, action?.extra2 || "")) === "General Task"
+            ? isManualTaskType(displayTaskType(task?.taskType) || "General Task")
+            : categoryFromRequestType(action?.requestType, action?.extra2 || "") === "General Task")
             ? ""
             : accessPathFor(
                 destination,
@@ -1903,8 +1905,8 @@ export const updateTaskManagerTask = async (req, res) => {
         const completionDate = parseCompletionDate(req.body?.completionDate);
         const attachments = Array.isArray(req.body?.attachments) ? req.body.attachments : [];
 
-        if (taskType !== "General Task") {
-            return res.status(400).json({ message: "Only General Task can be updated here." });
+        if (!isManualTaskType(taskType) || !isManualTaskType(target.task?.taskType)) {
+            return res.status(400).json({ message: "Only General Task or Project Task can be updated here." });
         }
         if (!PRIORITIES.has(priority)) return res.status(400).json({ message: "Choose a task priority." });
         if (!taskName) return res.status(400).json({ message: "Task name is required." });
@@ -2228,6 +2230,19 @@ export const reassignTaskManagerTask = async (req, res) => {
         } catch (noticeError) {
             console.error("Reassignment notice failed:", noticeError);
         }
+        if (target.kind !== "manual" && target.action) {
+            try {
+                await shareReassignedModuleNotifications({
+                    action: target.action,
+                    originalId: noticeTask?.closeRequest?.originalAssigneeId,
+                    originalEmpId: noticeTask?.closeRequest?.originalAssigneeEmpId || "",
+                    reassigneeId: assignee._id,
+                    reassigneeEmpId: assignee.employeeId || "",
+                });
+            } catch (shareError) {
+                console.error("Reassignment notification share failed:", shareError);
+            }
+        }
         const openPath = taskOpenPath(taskRecordKey(target, noticeTask));
         const recordId = String(target.action?._id || noticeTask?._id || "");
 
@@ -2307,6 +2322,11 @@ export const returnTaskManagerTask = async (req, res) => {
             target.action.assignedTo = original._id;
             target.action.assignedToEmpId = original.employeeId || "";
             await target.action.save();
+            try {
+                await dismissModuleBarShares(target.action.requestId);
+            } catch (shareError) {
+                console.error("Return notification share clear failed:", shareError);
+            }
         }
         task.assignee = original._id;
         task.assigneeEmpId = original.employeeId || "";
@@ -3885,8 +3905,8 @@ export const changeTaskCompletionDate = async (req, res) => {
         const action = target.action || null;
         const dateType = displayTaskType(target.task?.taskType)
             || (action ? categoryFromRequestType(action.requestType, action.extra2 || "") : "");
-        if (dateType !== "Workflow Task" && dateType !== "General Task") {
-            return res.status(400).json({ message: "Only a workflow task or a general task can change its completion date." });
+        if (dateType !== "Workflow Task" && !isManualTaskType(dateType)) {
+            return res.status(400).json({ message: "Only a workflow task, a general task, or a project task can change its completion date." });
         }
         const nextDate = parseCompletionDate(req.body?.completionDate);
         if (!nextDate) return res.status(400).json({ message: "Choose a completion date." });
@@ -4229,8 +4249,8 @@ async function buildTaskWorkflow(target, viewer) {
         moduleLabel: destination.label,
         modulePath: destination.path,
         accessPath: (manual
-            ? (displayTaskType(task?.taskType) || "General Task")
-            : categoryFromRequestType(action?.requestType, action?.extra2 || "")) === "General Task"
+            ? isManualTaskType(displayTaskType(task?.taskType) || "General Task")
+            : categoryFromRequestType(action?.requestType, action?.extra2 || "") === "General Task")
             ? ""
             : accessPathFor(
                 destination,
@@ -4273,7 +4293,7 @@ async function nextRoleAssignee(target) {
     const category = manual
         ? (displayTaskType(task?.taskType) || "General Task")
         : categoryFromRequestType(action?.requestType, action?.extra2 || "");
-    if (category === "General Task") return null;
+    if (isManualTaskType(category)) return null;
     const roleKeys = (WORKFLOW_CHAINS[destination.module] || WORKFLOW_CHAINS.general).filter((key) => ROLE_STEP[key]);
     if (!roleKeys.length) return null;
     const { assigneeId } = assigneeOf(target);

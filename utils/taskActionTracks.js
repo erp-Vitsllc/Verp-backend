@@ -91,6 +91,8 @@ export function parseReassignment(detail, actorName) {
     if (reassignedTo) return { from: "", to: named(reassignedTo[1]) };
     const fromTo = text.match(/reassigned from\s+(.+?)\s+to\s+([^.,\n]+)/i);
     if (fromTo) return { from: named(fromTo[1]), to: named(fromTo[2]) };
+    const automatic = text.match(/assigned automatically to\s+([^.,\n]+)/i);
+    if (automatic) return { from: named(actorName), to: named(automatic[1]) };
     const toOnly = text.match(/(?:assignee changed to|assigned to)\s+([^.,\n]+)/i);
     return { from: named(actorName), to: toOnly ? named(toOnly[1]) : "" };
 }

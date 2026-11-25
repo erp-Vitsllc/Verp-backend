@@ -25,7 +25,7 @@ function adminMayDeleteCategory(taskCategory) {
 /** The requester can delete a general task, a system task, or a workflow task. */
 export function requesterMayDeleteCategory(taskCategory) {
     const category = categoryKey(taskCategory);
-    return category === "general task" || adminMayDeleteCategory(taskCategory);
+    return category === "general task" || category === "project task" || adminMayDeleteCategory(taskCategory);
 }
 
 function viewerIsRequester(viewer, requestedByName, requestedByUserId) {

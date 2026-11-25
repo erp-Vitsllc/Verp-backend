@@ -157,6 +157,7 @@ const purgeNonHrExpiryTasks = async ({ requestId, requestType, hrObjectId }) => 
         requestType,
         status: "Pending",
         assignedTo: { $ne: hrObjectId },
+        comment: { $not: /^module-bar-share:/ },
         extra1: { $regex: /^Expiry follow-up required:/i },
     })
         .select("_id")

@@ -1,9 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
-    assigneeHistoryEntry,
     createdHistoryEntry,
     employeeWorkflowType,
+    handoffHistoryEntries,
+    isAutomaticWorkflowHandoff,
 } from "./employeeWorkflowTask.js";
 
 test("draft bill, fine, loan, and advance rows are employee workflow tasks", () => {
@@ -25,10 +26,21 @@ test("a new draft task records the employee it is assigned to", () => {
 });
 
 test("the next employee is recorded when the assignee changes", () => {
-    const same = assigneeHistoryEntry("Akhila Prasad", "Akhila Prasad");
-    assert.equal(same, null);
-    const next = assigneeHistoryEntry("Akhila Prasad", "Raseel Muhammad");
-    assert.equal(next.event, "Reassigned");
-    assert.equal(next.detail, "Reassigned from Akhila Prasad to Raseel Muhammad.");
-    assert.equal(next.actorName, "Akhila Prasad");
+    assert.deepEqual(handoffHistoryEntries("Akhila Prasad", "Akhila Prasad"), []);
+    const next = handoffHistoryEntries("Akhila Prasad", "Raseel Muhammad");
+    assert.equal(next[0].event, "Completed");
+    assert.equal(next[0].detail, "Task completed by Akhila Prasad.");
+    assert.equal(next[0].actorName, "Akhila Prasad");
+    assert.equal(next[1].event, "Assigned");
+    assert.equal(next[1].detail, "Assigned automatically to Raseel Muhammad.");
+    assert.equal(next[1].actorName, "Akhila Prasad");
+});
+
+test("automatic handoff history is for workflow tasks", () => {
+    assert.equal(isAutomaticWorkflowHandoff("Vehicle Service Request"), true);
+    assert.equal(isAutomaticWorkflowHandoff("Employee Leave Request"), true);
+    assert.equal(isAutomaticWorkflowHandoff("Delivery Approval"), true);
+    assert.equal(isAutomaticWorkflowHandoff("Employee Salary Request"), false);
+    assert.equal(isAutomaticWorkflowHandoff("Profile Incomplete"), false);
+    assert.equal(isAutomaticWorkflowHandoff("Task Manager"), false);
 });

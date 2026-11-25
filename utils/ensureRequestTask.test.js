@@ -36,8 +36,10 @@ test("a leave or attendance task follows the employee who now holds the request"
     assert.equal(task.assigneeName, "Nesmi");
     assert.equal(task.closeRequest.originalAssigneeName, "");
     assert.equal(task.closeRequest.returnAssigneeName, "");
-    assert.equal(task.history[0].event, "Reassigned");
-    assert.equal(task.history[0].detail, "Reassigned from Raseel Muhammad to Nesmi.");
+    assert.equal(task.history[0].event, "Completed");
+    assert.equal(task.history[0].detail, "Task completed by Raseel Muhammad.");
+    assert.equal(task.history[1].event, "Assigned");
+    assert.equal(task.history[1].detail, "Assigned automatically to Nesmi.");
     assert.equal(applyAssigneeFollow(task, { assigneeId: "nesmi", assigneeName: "Nesmi" }), false);
 });
 

@@ -14,10 +14,13 @@ import {
     isLeaveAttendanceTaskType,
 } from "./ensureRequestTask.js";
 import {
-    assigneeHistoryEntry,
     employeeWorkflowType,
     ensureEmployeeWorkflowTask,
+    handoffHistoryEntries,
+    isAutomaticWorkflowHandoff,
+    pushHandoffHistory,
     pushTaskHistory,
+    requesterNameForActor,
 } from "./employeeWorkflowTask.js";
 
 function rowMeta(extra3) {
@@ -43,7 +46,11 @@ function sharesOneTask(requestType) {
 }
 
 /** The next approval stays on the task already open for this activity. */
-async function followActivityAssignee(actionId, assignee, assigneeId, { reopen = false, requestType = "" } = {}) {
+async function followActivityAssignee(actionId, assignee, assigneeId, {
+    reopen = false,
+    requestType = "",
+    previousAssigneeId = "",
+} = {}) {
     if (!actionId || !assigneeId) return;
     const name = `${assignee?.firstName || ""} ${assignee?.lastName || ""}`.trim();
     const filter = {
@@ -51,32 +58,25 @@ async function followActivityAssignee(actionId, assignee, assigneeId, { reopen =
         status: { $nin: ["Cancelled", "Rejected"] },
     };
     if (!reopen) filter.assignee = { $ne: assigneeId };
-    const recordHistory = employeeWorkflowType(requestType) || isLeaveAttendanceTaskType(requestType);
-    if (!recordHistory) {
-        await TaskManagerTask.updateMany(filter, {
-            $set: {
-                assignee: assigneeId,
-                assigneeEmpId: assignee?.employeeId || "",
-                assigneeName: name,
-                status: "Pending",
-                "closeRequest.originalAssigneeId": null,
-                "closeRequest.originalAssigneeEmpId": "",
-                "closeRequest.originalAssigneeName": "",
-                "closeRequest.reassignmentReleased": false,
-                "closeRequest.completionRequestedAt": null,
-                "closeRequest.completionConfirmedAt": null,
-                "closeRequest.reviewPending": false,
-            },
+    const tasks = await TaskManagerTask.find(filter);
+    if (!tasks.length) {
+        await createWorkflowHandoffTask({
+            actionId,
+            assignee,
+            assigneeId,
+            assigneeName: name,
+            requestType,
+            previousAssigneeId,
         });
         return;
     }
-    const tasks = await TaskManagerTask.find(filter);
     for (const task of tasks) {
         const previousName = String(task.assigneeName || "").trim();
         const wasFinished = String(task.status || "") === "Completed";
+        const assigneeChanged = String(task.assignee || "") !== String(assigneeId);
         task.assignee = assigneeId;
         task.assigneeEmpId = assignee?.employeeId || "";
-        task.assigneeName = name;
+        if (name) task.assigneeName = name;
         task.status = "Pending";
         const close = task.closeRequest?.toObject ? task.closeRequest.toObject() : { ...(task.closeRequest || {}) };
         task.closeRequest = {
@@ -97,7 +97,10 @@ async function followActivityAssignee(actionId, assignee, assigneeId, { reopen =
                 : {}),
         };
         task.markModified("closeRequest");
-        if (wasFinished) {
+        const moved = assigneeChanged && previousName.toLowerCase() !== name.toLowerCase();
+        if (moved) {
+            pushHandoffHistory(task, previousName, name || previousName);
+        } else if (wasFinished) {
             pushTaskHistory(task, {
                 event: "Reopened",
                 detail: name ? `The task is open again with ${name}.` : "The task is open again.",
@@ -105,9 +108,41 @@ async function followActivityAssignee(actionId, assignee, assigneeId, { reopen =
                 createdAt: new Date(),
             });
         }
-        pushTaskHistory(task, assigneeHistoryEntry(previousName, name));
         await task.save();
     }
+}
+
+/** A workflow task that did not exist yet still keeps who finished and who received it. */
+async function createWorkflowHandoffTask({
+    actionId,
+    assignee,
+    assigneeId,
+    assigneeName,
+    requestType,
+    previousAssigneeId,
+}) {
+    if (!isAutomaticWorkflowHandoff(requestType)) return;
+    if (!previousAssigneeId || String(previousAssigneeId) === String(assigneeId)) return;
+    const action = await DashboardAction.findById(actionId).lean();
+    if (!action) return;
+    const previousName = await requesterNameForActor(previousAssigneeId);
+    const nextName = assigneeName || await requesterNameForActor(assigneeId);
+    const history = handoffHistoryEntries(previousName, nextName);
+    if (!history.length) return;
+    await TaskManagerTask.create({
+        sourceDashboardActionId: actionId,
+        taskType: "Workflow Task",
+        priority: "Medium",
+        taskName: action.extra1 || action.requestType || requestType || "Task",
+        description: action.extra2 || "",
+        assignee: assigneeId,
+        assigneeEmpId: assignee?.employeeId || action.assignedToEmpId || "",
+        assigneeName: nextName,
+        completionDate: action.requestedDate || new Date(),
+        requestedByName: action.requestedByName || previousName || nextName,
+        status: "Pending",
+        history,
+    });
 }
 
 /**
@@ -539,7 +574,10 @@ export const syncDashboardAction = async (data) => {
             ...(pendingExtra3 ? { extra3: pendingExtra3 } : {}),
         };
 
-        const candidates = await DashboardAction.find(identity)
+        const candidates = await DashboardAction.find({
+            ...identity,
+            comment: { $not: /^module-bar-share:/ },
+        })
             .select('_id status extra3 assignedTo updatedAt')
             .sort({ updatedAt: -1 })
             .lean();
@@ -550,11 +588,16 @@ export const syncDashboardAction = async (data) => {
         let keptId = target?._id || null;
 
         if (keptId) {
-            const assigneeChanged = String(target.assignedTo || "") !== String(actualAssignedTo);
+            const previousAssigneeId = String(target.assignedTo || "");
+            const assigneeChanged = previousAssigneeId !== String(actualAssignedTo);
             const revived = target.status !== "Pending" && target.status !== "On Hold";
             await DashboardAction.findByIdAndUpdate(keptId, { $set: updateDoc });
             if (assigneeChanged || revived) {
-                await followActivityAssignee(keptId, assignee, actualAssignedTo, { reopen: true, requestType });
+                await followActivityAssignee(keptId, assignee, actualAssignedTo, {
+                    reopen: true,
+                    requestType,
+                    previousAssigneeId: assigneeChanged ? previousAssigneeId : "",
+                });
             }
         } else {
             const created = await DashboardAction.create({
@@ -568,6 +611,7 @@ export const syncDashboardAction = async (data) => {
             ...identity,
             ...(keptId ? { _id: { $ne: keptId } } : {}),
             status: "Pending",
+            comment: { $not: /^module-bar-share:/ },
             ...(requestType === "Vehicle Service Request" && !lockedExtra3
                 ? { extra3: { $not: { $regex: '"adminOfficerServiceTrack"\\s*:\\s*true', $options: "i" } } }
                 : {}),

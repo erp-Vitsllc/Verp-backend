@@ -2,7 +2,7 @@ import mongoose from "mongoose";
 import EmployeeBasic from "../../models/EmployeeBasic.js";
 import TaskManagerTask from "../../models/TaskManagerTask.js";
 import { uploadDocumentToS3 } from "../../utils/s3Upload.js";
-import { canonicalTaskType, sendTaskActivityEmail, syncManualTaskNotification, taskOpenPath } from "../../utils/taskManagerModule.js";
+import { canonicalTaskType, isManualTaskType, sendTaskActivityEmail, syncManualTaskNotification, taskOpenPath } from "../../utils/taskManagerModule.js";
 import { emailFrontendUrl } from "../../utils/resolveFrontendBaseUrl.js";
 import { resolveEmployeeEmailWithReporteeLoaded } from "../../utils/resolveEmployeeEmail.js";
 import { viewerMaySeeAllNotifications } from "./getTaskManagerNotifications.js";
@@ -102,8 +102,8 @@ export const createTaskManagerTask = async (req, res) => {
         const completionDate = parseCompletionDate(req.body?.completionDate);
         const attachments = Array.isArray(req.body?.attachments) ? req.body.attachments : [];
 
-        if (taskType !== "General Task") {
-            return res.status(400).json({ message: "Only General Task can be created here." });
+        if (!isManualTaskType(taskType)) {
+            return res.status(400).json({ message: "Choose General Task or Project Task." });
         }
         if (!PRIORITIES.has(priority)) {
             return res.status(400).json({ message: "Choose a task priority." });

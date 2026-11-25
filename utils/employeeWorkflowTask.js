@@ -1,6 +1,7 @@
 import DashboardAction from "../models/DashboardAction.js";
 import EmployeeBasic from "../models/EmployeeBasic.js";
 import TaskManagerTask from "../models/TaskManagerTask.js";
+import { isGeneralHubRequestType } from "./employeeHubRequestTypes.js";
 import { personRequesterName } from "./vehicleServiceNotificationCopy.js";
 
 /** Draft and approval rows that stay one workflow task for the employee who started them. */
@@ -26,25 +27,48 @@ function clean(value) {
     return String(value || "").trim();
 }
 
-/** History row when the task moves from one employee to the next. */
-export function assigneeHistoryEntry(previousName, nextName) {
+/** A workflow request that moves from one employee to the next on the same task. */
+export function isAutomaticWorkflowHandoff(requestType) {
+    const type = String(requestType || "").trim();
+    if (!type || type === "Task Manager") return false;
+    if (isGeneralHubRequestType(type)) return false;
+    if (/expiry|not renew|card deleted|value missing|asset overdue|profile incomplete|payment reminder|fuel reminder|submit reminder/i.test(type)) return false;
+    return true;
+}
+
+/**
+ * History when one employee finishes and the same task is given to the next employee.
+ * The first line names who completed their part. The second names who received it.
+ */
+export function handoffHistoryEntries(previousName, nextName) {
     const from = clean(previousName);
     const to = clean(nextName);
-    if (!to || from.toLowerCase() === to.toLowerCase()) return null;
-    if (!from) {
-        return {
-            event: "Assigned",
-            detail: `Assigned to ${to}.`,
-            actorName: to,
-            createdAt: new Date(),
-        };
+    if (!to || from.toLowerCase() === to.toLowerCase()) return [];
+    const at = new Date();
+    const entries = [];
+    if (from) {
+        entries.push({
+            event: "Completed",
+            detail: `Task completed by ${from}.`,
+            actorName: from,
+            createdAt: at,
+        });
     }
-    return {
-        event: "Reassigned",
-        detail: `Reassigned from ${from} to ${to}.`,
-        actorName: from,
-        createdAt: new Date(),
-    };
+    entries.push({
+        event: "Assigned",
+        detail: `Assigned automatically to ${to}.`,
+        actorName: from || to,
+        createdAt: at,
+    });
+    return entries;
+}
+
+export function pushHandoffHistory(task, previousName, nextName) {
+    let pushed = false;
+    for (const entry of handoffHistoryEntries(previousName, nextName)) {
+        if (pushTaskHistory(task, entry)) pushed = true;
+    }
+    return pushed;
 }
 
 export function pushTaskHistory(task, entry) {
@@ -148,7 +172,7 @@ export async function ensureEmployeeWorkflowTask(action, assignee, requestedByNa
         keep.assignee = action.assignedTo;
         keep.assigneeEmpId = action.assignedToEmpId || assignee?.employeeId || keep.assigneeEmpId || "";
         if (assigneeName) keep.assigneeName = assigneeName;
-        pushTaskHistory(keep, assigneeHistoryEntry(previousName, assigneeName || previousName));
+        pushHandoffHistory(keep, previousName, assigneeName || previousName);
     }
     if (action.extra1) keep.taskName = action.extra1;
     if (action.extra2) keep.description = action.extra2;

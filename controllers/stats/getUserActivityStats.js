@@ -21,6 +21,7 @@ import { closeStaleProbationChangeTasksFromPendingRows } from "../../utils/sendP
 import { isAcceptedAssignmentOutcomeNotification } from "../../utils/isAcceptedAssignmentOutcomeNotification.js";
 import { filterAndCloseCompletedAssetDutyDashboardRows } from "../../utils/closeCompletedAssignmentNotifications.js";
 import { listDeletedNoticeKeys, noticeKeysForRecord } from "../../utils/deletedTaskNotice.js";
+import { omitDuplicateModuleBarShares } from "../../utils/moduleBarShare.js";
 import {
     buildProfileActivationApprovedMessage,
     buildProfileActivationEntityLine,
@@ -897,6 +898,7 @@ export const getUserActivityStats = async (req, res) => {
             await closeStaleProbationChangeTasksFromPendingRows(
             await filterStaleExpiryDashboardRows(
                 dedupeOwnerLinkedDocumentExpiryReminders(
+                omitDuplicateModuleBarShares(
                 dashboardPendingItemsRaw.filter((item) => {
                     if (isAcceptedAssignmentOutcomeNotification(item)) return false;
                     if (!dispositionRowVisibleToViewer(item)) return false;
@@ -917,6 +919,7 @@ export const getUserActivityStats = async (req, res) => {
                     }
                     return dashboardRowAssignedToViewer(item);
                 })
+                )
                 )
             )
             )

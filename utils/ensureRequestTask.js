@@ -1,6 +1,6 @@
 import EmployeeBasic from "../models/EmployeeBasic.js";
 import TaskManagerTask from "../models/TaskManagerTask.js";
-import { assigneeHistoryEntry } from "./employeeWorkflowTask.js";
+import { pushHandoffHistory } from "./employeeWorkflowTask.js";
 
 /** Each leave or attendance request keeps one dashboard row and one task. */
 export const LEAVE_ATTENDANCE_TASK_TYPES = new Set([
@@ -41,11 +41,7 @@ export function applyAssigneeFollow(task, { assigneeId, assigneeEmpId = "", assi
         returnAssigneeName: "",
     };
     task.markModified?.("closeRequest");
-    const entry = assigneeHistoryEntry(previousName, nextName);
-    if (entry) {
-        task.history = task.history || [];
-        task.history.push(entry);
-    }
+    pushHandoffHistory(task, previousName, nextName);
     return true;
 }
 

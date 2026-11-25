@@ -5,6 +5,7 @@ import EmployeeBasic from "../models/EmployeeBasic.js";
 import EmployeeHubRequest from "../models/EmployeeHubRequest.js";
 import { OFF_DAY_WORK_REQUEST_TYPE } from "./offDayWorkNotice.js";
 import { syncDashboardAction } from "./syncDashboard.js";
+import { isModuleBarShare } from "./moduleBarShare.js";
 import { attachMissingRequestTasks, completeOwnRequestTasks } from "./ensureRequestTask.js";
 import {
     ATTENDANCE_CHANGE_OPEN_STAGES,
@@ -447,7 +448,8 @@ async function moveLeaveAttendanceAssignees(actions = [], overlaysByAction = new
     const open = (actions || []).filter((action) => {
         const type = String(action?.requestType || "");
         return (CHANGE_TASK_TYPES.has(type) || LEAVE_TYPES.includes(type))
-            && ["Pending", "On Hold"].includes(String(action?.status || ""));
+            && ["Pending", "On Hold"].includes(String(action?.status || ""))
+            && !isModuleBarShare(action);
     });
     if (!open.length) return 0;
 

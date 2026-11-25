@@ -15,6 +15,7 @@ import {
 import {
     accessPathFor,
     displayTaskType,
+    isManualTaskType,
     isGeneralHubRequestType,
     moduleForRequestType,
     moduleForText,
@@ -31,6 +32,7 @@ import { claimTaskNumber, saveListedTaskNumbers } from "../../utils/taskNumberSt
 import { alignDecidedGeneralHubTasks } from "../../utils/alignDecidedGeneralHubTasks.js";
 import { completeFinishedSystemWorkflowTasks } from "../../utils/completeFinishedSystemWorkflowTasks.js";
 import { activityTaskKey, duplicateOverlayShouldClose, keepActivityCopy, taskMatchHints } from "../../utils/taskDuplicateKey.js";
+import { isModuleBarShare } from "../../utils/moduleBarShare.js";
 import { finishedOverlayBySource, overlayForListRow } from "../../utils/finishedTaskOverlay.js";
 import { formatTaskDisplayParts, vehicleRecordId } from "../../utils/taskDisplayName.js";
 import { composeTaskDescription } from "../../utils/taskDetailDescription.js";
@@ -402,6 +404,7 @@ export async function collapsePendingFineDashboardRows(actions = []) {
         const status = String(action?.status || "");
         if (!/^(fine|group fine request)$/i.test(type)) continue;
         if (status !== "Pending" && status !== "On Hold") continue;
+        if (isModuleBarShare(action)) continue;
         const info = fineInfo.get(String(action.requestId || ""));
         const key = info?.baseId || String(action.requestId || action._id);
         const previous = keptByBase.get(key);
@@ -541,6 +544,7 @@ export async function alignOpenFineDashboardRows(actions = [], overlaysByAction 
         const pending = (actions || []).filter((action) => (
             FINE_TASK_TYPES.test(String(action?.requestType || ""))
             && (action.status === "Pending" || action.status === "On Hold")
+            && !isModuleBarShare(action)
         ));
         if (!pending.length) return actions;
 
@@ -850,7 +854,7 @@ function closeWaitFlags(closeRequest, rawStatus) {
 }
 
 function generalLifecycleStatus(taskType, closeRequest, storedStatus) {
-    if (String(taskType || "") !== "General Task") return "";
+    if (!isManualTaskType(taskType)) return "";
     const saved = closeRequest || {};
     if (saved.closedAt && !saved.reviewPending) return "Closed";
     if (saved.reopenedAt && !saved.closedAt && storedStatus === "Pending") return "Open";
@@ -868,7 +872,7 @@ function viewerCanReturnTask(viewer, row) {
     if (!reassigned) return false;
     const status = String(row.status || "");
     if (status === "Completed" || status === "Cancelled" || status === "Rejected") return false;
-    if (String(row.taskType || "") === "General Task" && saved.closedAt && !saved.reviewPending) return false;
+    if (isManualTaskType(row.taskType) && saved.closedAt && !saved.reviewPending) return false;
     const current = assigneeIsViewer(viewer, String(row.assignee || ""), row.assigneeEmpId, row.assigneeName);
     if (!current) return false;
     return !viewerOwnsOriginal(viewer, row);
@@ -943,7 +947,7 @@ function assigneeColumns({ assigneeName, assigneeId, assigneePhoto, originalAssi
 
 function requesterSeesClosedGeneral(viewer, { row, requesterName, requestedByUserId, requestType, closed = false }) {
     if (!closed || !viewer) return false;
-    const general = String(row?.taskType || "") === "General Task" || isGeneralHubRequestType(requestType);
+    const general = isManualTaskType(row?.taskType) || isGeneralHubRequestType(requestType);
     if (!general) return false;
     if (requestedByUserId && viewer.userId && String(requestedByUserId) === String(viewer.userId)) return true;
     const viewerName = personKey(viewer.name);
@@ -1085,6 +1089,7 @@ export async function collapseDuplicateDashboardTasks(actions = [], overlays = n
         && action.requestType !== "Task Manager"
         && ["Pending", "On Hold"].includes(String(action.status || ""))
         && String(action.comment || "") !== DUPLICATE_TASK_COMMENT
+        && !isModuleBarShare(action)
     ));
     let overlayRows = Array.isArray(overlays) ? overlays : null;
     if (!overlayRows) {
@@ -1197,6 +1202,7 @@ export async function collapseDuplicateDashboardTasks(actions = [], overlays = n
         rows: (actions || []).filter((action) => (
             !drop.has(String(action?._id || ""))
             && String(action?.comment || "") !== DUPLICATE_TASK_COMMENT
+            && !isModuleBarShare(action)
         )),
         overlayByAction,
         hiddenOverlayIds,
@@ -1306,7 +1312,7 @@ export const getTaskManagerNotifications = async (req, res) => {
         const [actions, people] = await Promise.all([
             DashboardAction.find({})
                 .select(
-                    "assignedTo assignedToEmpId requestId requestType status subjectEmployeeId subjectName requestedDate requestedByName actionedDate extra1 extra2 extra3 createdAt taskNumber",
+                    "assignedTo assignedToEmpId requestId requestType status subjectEmployeeId subjectName requestedDate requestedByName actionedDate extra1 extra2 extra3 createdAt taskNumber comment",
                 )
                 .lean()
                 .maxTimeMS(20000),
@@ -1749,7 +1755,7 @@ export const getTaskManagerNotifications = async (req, res) => {
             const dueKey = dubaiDateKey(row.completionDate);
             const closedReview = Boolean(row.closeRequest?.closedAt) && !row.closeRequest?.reviewPending;
             const open = row.status !== "Completed" && row.status !== "Cancelled" && row.status !== "Rejected" && !closedReview;
-            const generalReview = String(row.taskType || "") === "General Task" && !row.sourceDashboardActionId;
+            const generalReview = isManualTaskType(row.taskType) && !row.sourceDashboardActionId;
             const life = generalLifecycleStatus(row.taskType, row.closeRequest, row.status);
             const status = row.status === "Rejected"
                 ? "Rejected"
@@ -2052,7 +2058,7 @@ function formatProfileDay(value) {
  * ownRequest is only the leave this employee asked for. Approval tasks stay on the task card.
  */
 const PROFILE_LEAVE_TYPES = new Set(["Employee Leave Request", "Attendance Leave Request"]);
-const PROFILE_ACTION_SELECT = "assignedTo assignedToEmpId requestId requestType status requestedDate requestedByName subjectEmployeeId subjectName extra1 extra2 extra3 createdAt";
+const PROFILE_ACTION_SELECT = "assignedTo assignedToEmpId requestId requestType status requestedDate requestedByName subjectEmployeeId subjectName extra1 extra2 extra3 createdAt comment";
 
 function actionMeta(extra3) {
     try {
@@ -2549,7 +2555,7 @@ export async function taskNumbersByRecordId(recordIds, { storedOnly = false } = 
 
     const [actions, manualRows] = await Promise.all([
         DashboardAction.find({})
-            .select("requestId requestType status subjectName requestedByName assignedTo assignedToEmpId subjectEmployeeId extra1 extra3 requestedDate createdAt taskNumber")
+            .select("requestId requestType status subjectName requestedByName assignedTo assignedToEmpId subjectEmployeeId extra1 extra3 requestedDate createdAt taskNumber comment")
             .lean()
             .maxTimeMS(12000),
         TaskManagerTask.find({})
@@ -2632,7 +2638,7 @@ export async function countOpenTasksForAssignee(viewer) {
             requestType: { $ne: "Task Manager" },
             $or: assigneeOr,
         })
-            .select("requestId requestType status subjectName requestedByName assignedTo assignedToEmpId extra1 requestedDate createdAt")
+            .select("requestId requestType status subjectName requestedByName assignedTo assignedToEmpId extra1 requestedDate createdAt comment")
             .lean()
             .maxTimeMS(8000)
         : [];
