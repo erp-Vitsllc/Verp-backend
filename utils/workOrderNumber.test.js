@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
-import { dubaiDateKey, formatWorkOrderNo, nextWorkOrderNo, parseWorkOrderNo } from './workOrderNumber.js';
+import { dubaiDateKey, formatWorkOrderNo, nextWorkOrderNo, parseWorkOrderNo, workOrderNoInText } from './workOrderNumber.js';
 
 const year2026 = new Date(2026, 5, 15);
 
@@ -38,5 +38,13 @@ describe('nextWorkOrderNo', () => {
         assert.equal(parseWorkOrderNo('WO-26-001')?.sequence, 1);
         assert.equal(parseWorkOrderNo('WO-2026-001')?.year, 2026);
         assert.equal(parseWorkOrderNo('TSK-26-1'), null);
+    });
+});
+
+describe('workOrderNoInText', () => {
+    it('reads the work order number out of a task sentence', () => {
+        assert.equal(workOrderNoInText('Upload attachment to the work order WO-26-012'), 'WO-26-012');
+        assert.equal(workOrderNoInText('Approve the actual BOQ on WO-2026-7'), 'WO-26-007');
+        assert.equal(workOrderNoInText('Create the MR'), '');
     });
 });

@@ -6,6 +6,7 @@ import EmployeeBasic from "../models/EmployeeBasic.js";
 import TaskManagerTask from "../models/TaskManagerTask.js";
 import EmployeeContact from "../models/EmployeeContact.js";
 import { emailFrontendUrl } from "./resolveFrontendBaseUrl.js";
+import { workOrderDetailsPath } from "./workOrderPath.js";
 import { resolveEmployeeEmailWithReporteeLoaded } from "./resolveEmployeeEmail.js";
 import { isReqUserSystemSuperUser } from "./systemSuperUser.js";
 import { buildEmployeeExpiryAccessPath, buildEmployeePathWithFocus } from "./notificationFocusNavigation.js";
@@ -492,7 +493,7 @@ export function accessPathFor(destination, requestId, subjectEmployeeId, context
         else if (moduleName === "reward" && id) path = `/HRM/Reward/${id}`;
         else if (moduleName === "vehicle" && id) path = `/HRM/Asset/Vehicle/details/${id}`;
         else if (moduleName === "tools" && id) path = `/HRM/Asset/details/${id}`;
-        else if (moduleName === "workorder" && id) path = `/production/work-order?workOrder=${id}&section=lpo`;
+        else if (moduleName === "workorder" && id) path = workOrderDetailsPath(id, "lpo");
         else {
             const followUp = String(meta.extra1 || "");
             const expiryTask = /expiry/i.test(String(meta.requestType || "")) || /^expiry follow-up required:/i.test(followUp);

@@ -8,6 +8,8 @@ import Attendance from "../../models/Attendance.js";
 import AttendanceChangeRequest from "../../models/AttendanceChangeRequest.js";
 import { attendanceFactsByActionId } from "../../utils/loadAttendanceTaskFacts.js";
 import { billItemsByRequestId } from "../inventory/stockApproval.js";
+import { isWorkOrderRequestType } from "../../utils/employeeWorkflowTask.js";
+import { workOrderNoInText } from "../../utils/workOrderNumber.js";
 import { isAttendanceTaskType } from "../../utils/attendanceTaskCopy.js";
 import { isLeaveAttendanceTaskType } from "../../utils/ensureRequestTask.js";
 import { alignOpenLeaveAttendanceAssignees } from "../../utils/ensureOpenLeaveAttendanceTasks.js";
@@ -1666,6 +1668,9 @@ async function buildDetail(target, viewer) {
     return {
         actionId: manual ? `manual-${task._id}` : String(action._id),
         taskNumber,
+        workOrderNo: isWorkOrderRequestType(action?.requestType)
+            ? workOrderNoInText(action?.extra1, action?.extra2, action?.subjectName, task?.taskName, task?.description)
+            : "",
         manual,
         workflowLocked,
         canReassign: viewerCanReassign(viewer, currentAssigneeId, assigneeEmpId),

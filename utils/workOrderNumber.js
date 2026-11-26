@@ -29,6 +29,19 @@ function fullYear(yearText) {
     return yearText.length === 2 ? 2000 + year : year;
 }
 
+const INLINE_NUMBER = /\bWO-(?:\d{2}|\d{4})-\d+\b/i;
+
+/** The work order number written inside a task title or description. */
+export function workOrderNoInText(...parts) {
+    for (const part of parts) {
+        const match = String(part || "").match(INLINE_NUMBER);
+        if (!match) continue;
+        const parsed = parseWorkOrderNo(match[0]);
+        if (parsed) return formatWorkOrderNo(parsed.year, parsed.sequence);
+    }
+    return "";
+}
+
 export function parseWorkOrderNo(value) {
     const match = String(value || '').trim().match(NUMBER_PATTERN);
     if (!match) return null;

@@ -28,7 +28,14 @@ import {
     snapshotFromEstimate,
 } from '../utils/workOrderQuotationSync.js';
 import { buildActualBoq } from '../utils/workOrderActualBoq.js';
-import { findPurchaseOfficer } from './inventory/stockApproval.js';
+import { actorIsPurchaseOfficer, findPurchaseOfficer } from './inventory/stockApproval.js';
+import {
+    assertModelNumberAvailable,
+    findSameItem,
+    nextItemCode,
+    resolveItemCatalog,
+} from './inventory/items.js';
+import { workOrderDetailsPath } from '../utils/workOrderPath.js';
 
 const TYPES = new Set(['Standalone', 'Main WO', 'Variation']);
 const STATUSES = new Set(['Draft', 'Not Started', 'Awaiting LPO', 'LPO Pending', 'Created', 'In Progress', 'Fully Invoiced', 'Completed']);
@@ -130,6 +137,7 @@ async function closeLpoNotFilledNotice(order) {
 
 const ATTACHMENT_REQUEST = 'Work Order LPO Attachment';
 const ACTUAL_BOQ_REQUEST = 'Work Order Actual BOQ';
+const ACTUAL_BOQ_UPDATE_REQUEST = 'Work Order Actual BOQ Update';
 const MATERIAL_REQUEST = 'Work Order MR';
 
 function actorKeys(req) {
@@ -329,7 +337,7 @@ async function openAttachmentRequest(order, senderName) {
             extra1: copy.extra1,
             extra2: copy.extra2,
             extra3: JSON.stringify({
-                path: `/production/work-order?workOrder=${order._id}&section=lpo`,
+                path: `${workOrderDetailsPath(order._id, 'lpo')}`,
             }),
         });
         try {
@@ -424,7 +432,7 @@ async function openSalespersonFollowUp(order, senderName) {
             extra1: notice.extra1,
             extra2: notice.extra2,
             extra3: JSON.stringify({
-                path: `/production/work-order?workOrder=${order._id}&section=lpo`,
+                path: `${workOrderDetailsPath(order._id, 'lpo')}`,
             }),
         });
         try {
@@ -488,7 +496,7 @@ async function openCoordinatorFollowUp(order, senderName) {
             extra1: notice.extra1,
             extra2: notice.extra2,
             extra3: JSON.stringify({
-                path: `/production/work-order?workOrder=${order._id}&section=lpo`,
+                path: `${workOrderDetailsPath(order._id, 'lpo')}`,
             }),
         });
         try {
@@ -543,7 +551,7 @@ async function openLpoNotFilledNotice(order, senderName) {
             requestedByName: senderName || '',
             extra1: notice.extra1,
             extra2: notice.extra2,
-            extra3: JSON.stringify({ path: `/production/work-order?workOrder=${order._id}` }),
+            extra3: JSON.stringify({ path: `${workOrderDetailsPath(order._id)}` }),
         });
     }
     return notice;
@@ -897,7 +905,7 @@ async function notifyProjectManager(order, actorName, payload) {
         requestedByName: actorName || '',
         extra1: notice.extra1,
         extra2: notice.extra2,
-        extra3: JSON.stringify({ path: `/production/work-order?workOrder=${order._id}&section=lpo` }),
+        extra3: JSON.stringify({ path: `${workOrderDetailsPath(order._id, 'lpo')}` }),
     });
     let emailed = false;
     let message = notice.message;
@@ -941,6 +949,44 @@ function cleanBoqLine(row) {
         }
     });
     return next;
+}
+
+const REQUIRED_BOQ_COLUMNS = [
+    ['category', 'Category'],
+    ['subcategory', 'Subcategory'],
+    ['item', 'Item'],
+    ['brand', 'Brand'],
+    ['modelNo', 'Model no'],
+    ['descriptionNew', 'Description (New)'],
+    ['descriptionOld', 'Description (Old)'],
+    ['quantity', 'Qty'],
+    ['unitPrice', 'Unit price'],
+    ['total', 'Total'],
+    ['vendorName', 'Vendor name'],
+    ['paymentTerms', 'Payment terms'],
+];
+
+function boqTableGaps(tables) {
+    const missing = [];
+    let lineCount = 0;
+    (Array.isArray(tables) ? tables : []).forEach((table) => {
+        (Array.isArray(table?.rows) ? table.rows : []).forEach((row, index) => {
+            const rowNo = index + 1;
+            if (row?.kind === 'header') {
+                if (!cleanText(row?.title, 120)) missing.push(`Row ${rowNo}: header`);
+                return;
+            }
+            lineCount += 1;
+            REQUIRED_BOQ_COLUMNS.forEach(([key, label]) => {
+                if (String(row?.[key] ?? '').trim() === '') missing.push(`Row ${rowNo}: ${label}`);
+            });
+        });
+    });
+    if (!lineCount) return 'Add at least one row and fill every column.';
+    if (!missing.length) return '';
+    const shown = missing.slice(0, 8);
+    const extra = missing.length - shown.length;
+    return `Every row and column must be filled. ${shown.join('; ')}${extra ? `; and ${extra} more` : ''}.`;
 }
 
 function cleanBoqTables(raw) {
@@ -1013,6 +1059,10 @@ async function saveActualBoq(req, res, order, actorName) {
     if (!actor?._id) return res.status(400).json({ message: 'Your employee record is required to save this actual BOQ' });
 
     const submitting = Boolean(req.body?.submitActualBoq);
+    if (submitting) {
+        const gaps = boqTableGaps(tables);
+        if (gaps) return res.status(400).json({ message: gaps });
+    }
     const manager = submitting ? await findProjectManager() : null;
     if (submitting && !manager?._id) {
         return res.status(400).json({ message: 'Assign an active Project Manager on the flowchart before submitting the actual BOQ.' });
@@ -1027,6 +1077,7 @@ async function saveActualBoq(req, res, order, actorName) {
         reason: '',
         decidedByName: '',
         decidedAt: null,
+        updates: Array.isArray(order.actualBoq?.updates) ? order.actualBoq.updates : [],
     };
     order.markModified('actualBoq');
     await order.save();
@@ -1054,7 +1105,7 @@ async function saveActualBoq(req, res, order, actorName) {
         requestedByName: actorName,
         extra1: notice.extra1,
         extra2: notice.extra2,
-        extra3: JSON.stringify({ path: `/production/work-order?workOrder=${order._id}&section=actual-boq` }),
+        extra3: JSON.stringify({ path: `${workOrderDetailsPath(order._id, 'actual-boq')}` }),
     });
     if (submitting) await markActualBoqProjectTask(order._id);
 
@@ -1080,6 +1131,271 @@ async function saveActualBoq(req, res, order, actorName) {
     });
 }
 
+function mrDescription(row) {
+    const written = cleanText(row?.description, 2000);
+    if (written && row?.descriptionOld == null && row?.descriptionNew == null) return written;
+    return cleanText(row?.descriptionOld, 2000) || cleanText(row?.descriptionNew, 2000) || written;
+}
+
+function cleanMrDate(value) {
+    const text = cleanText(value, 10);
+    return /^\d{4}-\d{2}-\d{2}$/.test(text) ? text : '';
+}
+
+function syncMrTotal(line) {
+    const qtyText = String(line?.quantity ?? '').trim();
+    const priceText = String(line?.unitPrice ?? '').trim();
+    const qty = Number(qtyText);
+    const price = Number(priceText);
+    const total = qtyText !== '' && priceText !== '' && Number.isFinite(qty) && Number.isFinite(price)
+        ? Math.round(qty * price * 100) / 100
+        : '';
+    return { ...line, total };
+}
+
+function mrAmount(value) {
+    if (value === '' || value == null) return '';
+    const amount = Number(value);
+    return Number.isFinite(amount) ? amount : '';
+}
+
+function mrGroupRows(tables, keyPrefix) {
+    const rows = [];
+    (Array.isArray(tables) ? tables : []).forEach((table, tableIndex) => {
+        (Array.isArray(table?.rows) ? table.rows : []).forEach((row, rowIndex) => {
+            if (row?.kind === 'header') return;
+            rows.push(syncMrTotal({
+                sourceKey: `${keyPrefix}:${tableIndex}:${rowIndex}`,
+                description: mrDescription(row),
+                quantity: mrAmount(row?.quantity),
+                unitPrice: mrAmount(row?.unitPrice),
+                requiredDate: cleanMrDate(row?.requiredDate),
+                leadTime: cleanText(row?.leadTime, 80),
+                vendorName: cleanText(row?.vendorName, 160),
+                paymentTerms: cleanText(row?.paymentTerms, 120),
+            }));
+        });
+    });
+    return rows;
+}
+
+function approvedMrGroups(order) {
+    const groups = [];
+    if (order.actualBoq?.status === 'approved') {
+        const rows = mrGroupRows(order.actualBoq?.tables, 'boq');
+        if (rows.length) groups.push({ sourceKey: 'boq', rows });
+    }
+    (Array.isArray(order.actualBoq?.updates) ? order.actualBoq.updates : []).forEach((update, updateIndex) => {
+        if (update?.status !== 'approved') return;
+        const sourceKey = `update:${updateIndex}`;
+        const rows = mrGroupRows(update?.tables, sourceKey);
+        if (rows.length) groups.push({ sourceKey, rows });
+    });
+    return groups;
+}
+
+function mrRequestType(index) {
+    const number = Number(index) + 1;
+    return number <= 1 ? MATERIAL_REQUEST : `Work Order MR ${number}`;
+}
+
+function mrDocumentNo(workOrderNo, index) {
+    const number = String(workOrderNo || '').trim() || 'WO';
+    return `MR-${number}-${String(Number(index) + 1).padStart(3, '0')}`;
+}
+
+function mrQtyNumber(value) {
+    const text = String(value ?? '').trim();
+    if (!text) return 0;
+    const amount = Number(text);
+    if (!Number.isFinite(amount)) return 0;
+    return Math.round(amount * 1000) / 1000;
+}
+
+function mrGroupKey(sourceKey) {
+    const parts = String(sourceKey || '').split(':');
+    if (parts[0] === 'update') return `update:${parts[1]}`;
+    return parts[0] || '';
+}
+
+function actualBoqQtyAllZero(order) {
+    const tables = [...(Array.isArray(order.actualBoq?.tables) ? order.actualBoq.tables : [])];
+    (Array.isArray(order.actualBoq?.updates) ? order.actualBoq.updates : []).forEach((update) => {
+        (Array.isArray(update?.tables) ? update.tables : []).forEach((table) => tables.push(table));
+    });
+    return !tables.some((table) => (Array.isArray(table?.rows) ? table.rows : []).some((row) => (
+        row?.kind !== 'header' && mrQtyNumber(row?.quantity) > 0
+    )));
+}
+
+function approvedMrLines(order) {
+    return approvedMrGroups(order).flatMap((group) => group.rows.map((row) => ({
+        ...row,
+        boqQuantity: mrAmount(row.boqQuantity ?? row.quantity),
+    })));
+}
+
+function consumedMrQty(batches, exceptSourceKey) {
+    const totals = new Map();
+    (Array.isArray(batches) ? batches : []).forEach((batch) => {
+        if (batch?.status === 'rejected') return;
+        if (exceptSourceKey && batch.sourceKey === exceptSourceKey) return;
+        (Array.isArray(batch?.rows) ? batch.rows : []).forEach((row) => {
+            const key = cleanText(row?.sourceKey, 80);
+            if (!key) return;
+            totals.set(key, mrQtyNumber(totals.get(key)) + mrQtyNumber(row?.quantity));
+        });
+    });
+    return totals;
+}
+
+function nextMaterialRequest(order, batches) {
+    const opened = new Set((batches || []).map((batch) => batch.sourceKey));
+    const nextGroup = approvedMrGroups(order).find((group) => (
+        !opened.has(group.sourceKey) && group.rows.some((row) => mrQtyNumber(row.quantity) > 0)
+    ));
+    const consumed = consumedMrQty(batches);
+    const rows = [];
+    approvedMrLines(order).forEach((row) => {
+        const balance = mrQtyNumber(row.boqQuantity) - mrQtyNumber(consumed.get(row.sourceKey));
+        if (balance <= 0) return;
+        const groupKey = mrGroupKey(row.sourceKey);
+        if (groupKey !== nextGroup?.sourceKey && !opened.has(groupKey)) return;
+        rows.push(syncMrTotal({
+            ...row,
+            quantity: balance,
+            boqQuantity: mrAmount(row.boqQuantity),
+        }));
+    });
+    return {
+        sourceKey: nextGroup?.sourceKey || `balance:${(batches || []).length + 1}`,
+        rows,
+    };
+}
+
+function applyMrBatchRows(order, batches, batch, incoming) {
+    const catalog = new Map(approvedMrLines(order).map((row) => [row.sourceKey, row]));
+    const consumed = consumedMrQty(batches, batch.sourceKey);
+    const seen = new Set();
+    const rows = [];
+    const list = Array.isArray(incoming) ? incoming : [];
+    for (let index = 0; index < list.length; index += 1) {
+        const raw = list[index];
+        const key = cleanText(raw?.sourceKey, 80);
+        const base = key ? catalog.get(key) : null;
+        if (!base || seen.has(key)) continue;
+        seen.add(key);
+        const available = mrQtyNumber(base.boqQuantity) - mrQtyNumber(consumed.get(key));
+        const quantity = Math.max(0, mrQtyNumber(raw?.quantity));
+        if (quantity > available) {
+            const name = base.description || 'A line';
+            return { error: `${name} quantity cannot be more than the pending balance of ${available}` };
+        }
+        rows.push(savedMrOnto(
+            { ...base, quantity: available, boqQuantity: base.boqQuantity },
+            { ...raw, quantity },
+            true,
+        ));
+    }
+    return { rows };
+}
+
+function savedMrLines(order) {
+    const lines = [];
+    (Array.isArray(order.materialRequest?.tables) ? order.materialRequest.tables : []).forEach((table) => {
+        (Array.isArray(table?.rows) ? table.rows : []).forEach((row) => {
+            if (row?.kind === 'header') return;
+            lines.push(row);
+        });
+    });
+    return lines;
+}
+
+function savedMrOnto(base, saved, keyed) {
+    return syncMrTotal({
+        sourceKey: base.sourceKey,
+        description: keyed ? cleanText(saved?.description, 2000) : (mrDescription(saved) || base.description),
+        quantity: mrAmount(saved?.quantity ?? base.quantity),
+        boqQuantity: mrAmount(base.boqQuantity ?? base.quantity),
+        unitPrice: mrAmount(saved?.unitPrice ?? base.unitPrice),
+        requiredDate: cleanMrDate(saved?.requiredDate),
+        leadTime: cleanText(saved?.leadTime, 80),
+        vendorName: keyed ? cleanText(saved?.vendorName, 160) : (cleanText(saved?.vendorName, 160) || base.vendorName),
+        paymentTerms: keyed ? cleanText(saved?.paymentTerms, 120) : (cleanText(saved?.paymentTerms, 120) || base.paymentTerms),
+    });
+}
+
+function overlayMrGroup(groupRows, incoming) {
+    const byKey = new Map();
+    const legacy = [];
+    (Array.isArray(incoming) ? incoming : []).forEach((row) => {
+        const key = cleanText(row?.sourceKey, 80);
+        if (key) byKey.set(key, row);
+        else legacy.push(row);
+    });
+    let legacyIndex = 0;
+    return groupRows.map((base) => {
+        if (byKey.has(base.sourceKey)) return savedMrOnto(base, byKey.get(base.sourceKey), true);
+        if (legacy[legacyIndex]) {
+            legacyIndex += 1;
+            return savedMrOnto(base, legacy[legacyIndex - 1], false);
+        }
+        return base;
+    });
+}
+
+function plainMrBatch(batch, index) {
+    return {
+        sourceKey: cleanText(batch?.sourceKey, 80) || 'boq',
+        title: cleanText(batch?.title, 80) || `MR${index + 1}`,
+        status: ['open', 'draft', 'pending', 'approved', 'rejected'].includes(batch?.status) ? batch.status : 'open',
+        approvalStage: ['', 'purchaser', 'manager'].includes(batch?.approvalStage) ? batch.approvalStage : '',
+        rows: Array.isArray(batch?.rows) ? batch.rows : [],
+        reason: cleanText(batch?.reason, 1000),
+        requestedByName: cleanText(batch?.requestedByName, 120),
+        requestedById: cleanText(batch?.requestedById, 40),
+        requestedAt: batch?.requestedAt || null,
+        decidedByName: cleanText(batch?.decidedByName, 120),
+        decidedAt: batch?.decidedAt || null,
+    };
+}
+
+function loadMrBatches(order) {
+    const stored = order.materialRequest?.batches;
+    if (Array.isArray(stored) && stored.length) {
+        return stored.map((batch, index) => {
+            const plain = plainMrBatch(batch, index);
+            plain.title = mrDocumentNo(order.workOrderNo, index);
+            return plain;
+        });
+    }
+    if (!order.materialRequest?.built) return [];
+    return [plainMrBatch({
+        sourceKey: 'boq',
+        title: mrDocumentNo(order.workOrderNo, 0),
+        status: order.materialRequest.status || 'open',
+        approvalStage: order.materialRequest.approvalStage || '',
+        rows: savedMrLines(order),
+        reason: order.materialRequest.reason,
+        requestedByName: order.materialRequest.requestedByName,
+        requestedById: order.materialRequest.requestedById,
+        requestedAt: order.materialRequest.requestedAt,
+        decidedByName: order.materialRequest.decidedByName,
+        decidedAt: order.materialRequest.decidedAt,
+    }, 0)];
+}
+
+function persistMrBatches(order, batches) {
+    if (!order.materialRequest) order.materialRequest = {};
+    order.materialRequest.batches = batches;
+    order.materialRequest.built = batches.length > 0;
+    const latest = batches[batches.length - 1];
+    order.materialRequest.status = latest?.status || order.materialRequest.status || 'open';
+    order.materialRequest.approvalStage = latest?.approvalStage || '';
+    order.materialRequest.reason = latest?.reason || '';
+    order.markModified('materialRequest');
+}
+
 async function openMaterialRequest(order, actorName) {
     const officer = await findPurchaseOfficer();
     const employee = officer?.empObjectId
@@ -1091,10 +1407,11 @@ async function openMaterialRequest(order, actorName) {
     const purchaserName = String(officer?.employeeName || [employee?.firstName, employee?.lastName].filter(Boolean).join(' ') || '').trim();
     order.materialRequest = {
         status: 'open',
+        built: false,
         createdAt: new Date(),
         purchaserName,
         purchaserId: officer?.empObjectId ? String(officer.empObjectId) : '',
-        tables: Array.isArray(order.actualBoq?.tables) ? order.actualBoq.tables : [],
+        tables: [],
     };
     order.markModified('materialRequest');
     if (!officer?.empObjectId) {
@@ -1115,7 +1432,7 @@ async function openMaterialRequest(order, actorName) {
         requestedByName: actorName,
         extra1: notice.extra1,
         extra2: notice.extra2,
-        extra3: JSON.stringify({ path: `/production/work-order?workOrder=${order._id}&section=mr` }),
+        extra3: JSON.stringify({ path: `${workOrderDetailsPath(order._id, 'mr')}` }),
     });
     const companyEmail = String(officer.companyEmail || employee?.companyEmail || '').trim();
     if (!companyEmail) {
@@ -1135,6 +1452,111 @@ async function openMaterialRequest(order, actorName) {
     }
 }
 
+function boqItemKey(row) {
+    return ['category', 'subcategory', 'item', 'brand', 'modelNo']
+        .map((key) => String(row?.[key] || '').trim().toLowerCase())
+        .join('|');
+}
+
+function plainMixed(value) {
+    if (value && typeof value.toObject === 'function') return value.toObject();
+    return value && typeof value === 'object' ? { ...value } : value;
+}
+
+async function ensureBoqInventoryItem(row, cache) {
+    const category = cleanText(row?.category, 160);
+    const subcategory = cleanText(row?.subcategory, 160);
+    const itemName = cleanText(row?.item, 160);
+    const brand = cleanText(row?.brand, 160);
+    const modelNo = cleanText(row?.modelNo, 160);
+    if (!category || !subcategory || !itemName || !brand) return { row, created: false };
+    const key = boqItemKey(row);
+    if (cache.has(key)) return { row: { ...row, ...cache.get(key) }, created: false };
+    if (row.itemId && mongoose.Types.ObjectId.isValid(String(row.itemId))) {
+        const saved = await InventoryItem.findById(row.itemId).select('_id');
+        if (saved) {
+            const linked = { itemId: String(saved._id) };
+            cache.set(key, linked);
+            return { row: { ...row, ...linked }, created: false };
+        }
+    }
+    const catalog = await resolveItemCatalog({
+        categoryId: row.categoryId,
+        categoryName: category,
+        subcategoryId: row.subcategoryId,
+        subcategoryName: subcategory,
+        itemOptionId: row.itemOptionId,
+        itemName,
+        brandId: row.brandId,
+        brandName: brand,
+        modelNumber: modelNo,
+    });
+    let existing = await findSameItem(catalog);
+    if (!existing && modelNo) await assertModelNumberAvailable(modelNo);
+    let created = false;
+    if (!existing) {
+        const price = Number(row.unitPrice);
+        existing = await InventoryItem.create({
+            categoryId: catalog.categoryId,
+            subcategoryId: catalog.subcategoryId,
+            brandId: catalog.brandId,
+            itemOptionId: catalog.itemOptionId,
+            description: cleanText(row.descriptionNew, 2000) || catalog.description,
+            moreDescription: cleanText(row.descriptionOld, 2000),
+            modelNumber: catalog.modelNumber,
+            itemCode: await nextItemCode(),
+            unitOfMeasure: 'Quantity',
+            availableQuantity: 0,
+            pendingStock: false,
+            status: 'Out of Stock',
+            lastStockPrice: Number.isFinite(price) && price > 0 ? price : 0,
+        });
+        created = true;
+    }
+    const linked = {
+        itemId: String(existing._id),
+        categoryId: String(catalog.categoryId),
+        subcategoryId: String(catalog.subcategoryId),
+        itemOptionId: String(catalog.itemOptionId || ''),
+        brandId: String(catalog.brandId),
+        category: catalog.categoryName,
+        subcategory: catalog.subcategoryName,
+        item: catalog.itemName,
+        brand: catalog.brandName,
+        modelNo: catalog.modelNumber || modelNo,
+    };
+    cache.set(key, linked);
+    return { row: { ...row, ...linked }, created };
+}
+
+async function storeApprovedBoqItems(tables) {
+    const cache = new Map();
+    let created = 0;
+    const nextTables = [];
+    for (const table of Array.isArray(tables) ? tables : []) {
+        const source = plainMixed(table) || {};
+        const rows = [];
+        for (const raw of Array.isArray(source.rows) ? source.rows : []) {
+            const row = plainMixed(raw) || {};
+            if (row.kind === 'header') {
+                rows.push(row);
+                continue;
+            }
+            const stored = await ensureBoqInventoryItem(row, cache);
+            if (stored.created) created += 1;
+            rows.push(stored.row);
+        }
+        nextTables.push({ title: source.title || '', rows });
+    }
+    return { tables: nextTables, created };
+}
+
+function storedItemNote(created) {
+    const count = Number(created) || 0;
+    if (!count) return '';
+    return `${count} new item${count === 1 ? '' : 's'} stored with the other items as Out of Stock.`;
+}
+
 async function decideActualBoq(req, res, order, actorName) {
     const manager = await isProjectManager(req) || isJwtSystemSuperUser(req.user);
     if (!manager) return res.status(403).json({ message: 'Only the project manager can approve the actual BOQ' });
@@ -1145,6 +1567,21 @@ async function decideActualBoq(req, res, order, actorName) {
     const reason = cleanText(req.body?.rejectReason, 1000);
     if (decision === 'reject' && !reason) {
         return res.status(400).json({ message: 'A description is required to reject the actual BOQ' });
+    }
+    if (decision === 'approve') {
+        const gaps = boqTableGaps(order.actualBoq?.tables);
+        if (gaps) return res.status(400).json({ message: gaps });
+    }
+    let storedNote = '';
+    if (decision === 'approve') {
+        try {
+            const stored = await storeApprovedBoqItems(order.actualBoq?.tables);
+            order.actualBoq.tables = stored.tables;
+            storedNote = storedItemNote(stored.created);
+        } catch (error) {
+            const status = error?.status || error?.statusCode || 400;
+            return res.status(status).json({ message: error?.message || 'Could not store the new item' });
+        }
     }
     order.actualBoq.status = decision === 'approve' ? 'approved' : 'rejected';
     order.actualBoq.reason = decision === 'reject' ? reason : '';
@@ -1166,8 +1603,446 @@ async function decideActualBoq(req, res, order, actorName) {
     });
     return res.status(200).json({
         workOrder: await presentedForViewer(order, req),
-        emailMessage: decision === 'approve' ? mrMessage : '',
+        emailMessage: decision === 'approve' ? [storedNote, mrMessage].filter(Boolean).join(' ') : '',
         actualBoqSaved: true,
+    });
+}
+
+function boqUpdateTitle(approvedCount) {
+    const count = Number(approvedCount) || 0;
+    return count <= 0 ? 'Updates' : `Updates ${count + 1}`;
+}
+
+function plainBoqUpdate(item) {
+    return {
+        status: item?.status || 'draft',
+        title: item?.title || 'Updates',
+        tables: Array.isArray(item?.tables) ? item.tables : [],
+        requestedByName: item?.requestedByName || '',
+        requestedById: item?.requestedById || '',
+        requestedAt: item?.requestedAt || null,
+        reason: item?.reason || '',
+        decidedByName: item?.decidedByName || '',
+        decidedAt: item?.decidedAt || null,
+    };
+}
+
+async function closeActualBoqUpdateNotice(order, status, comment) {
+    if (!order?._id) return;
+    await DashboardAction.updateMany(
+        { requestId: order._id, requestType: ACTUAL_BOQ_UPDATE_REQUEST, status: 'Pending' },
+        { $set: { status, actionedDate: new Date(), comment: comment || '' } },
+    );
+}
+
+async function saveActualBoqUpdate(req, res, order, actorName) {
+    if (order.actualBoq?.status !== 'approved') {
+        return res.status(400).json({ message: 'The actual BOQ must be approved before adding updates' });
+    }
+    const tables = cleanBoqTables(req.body?.actualBoqUpdateTables);
+    if (!tables.length) return res.status(400).json({ message: 'Add at least one row before saving this update' });
+    const actor = await findActorEmployee(req);
+    if (!actor?._id) return res.status(400).json({ message: 'Your employee record is required to save this update' });
+
+    const updates = (Array.isArray(order.actualBoq.updates) ? order.actualBoq.updates : []).map(plainBoqUpdate);
+    if (updates.some((item) => item.status === 'pending')) {
+        return res.status(400).json({ message: 'This update is waiting for the purchase officer' });
+    }
+    const last = updates[updates.length - 1];
+    const openIndex = last && last.status !== 'approved' ? updates.length - 1 : -1;
+
+    const submitting = Boolean(req.body?.submitActualBoqUpdate);
+    if (submitting) {
+        const gaps = boqTableGaps(tables);
+        if (gaps) return res.status(400).json({ message: gaps });
+    }
+    const officer = submitting ? await findPurchaseOfficer() : null;
+    if (submitting && !officer?.empObjectId) {
+        return res.status(400).json({ message: 'Assign an active Purchase Officer on the flowchart before submitting this update.' });
+    }
+    const approvedCount = updates.filter((item) => item.status === 'approved').length;
+    const current = openIndex >= 0 ? updates[openIndex] : null;
+    const entry = {
+        status: submitting ? 'pending' : 'draft',
+        title: current?.title || boqUpdateTitle(approvedCount),
+        tables,
+        requestedByName: actorName,
+        requestedById: String(actor._id),
+        requestedAt: new Date(),
+        reason: '',
+        decidedByName: '',
+        decidedAt: null,
+    };
+    if (openIndex >= 0) updates[openIndex] = entry;
+    else updates.push(entry);
+    order.actualBoq.updates = updates;
+    order.markModified('actualBoq');
+    await order.save();
+
+    const assigneeId = submitting ? officer.empObjectId : actor._id;
+    const notice = submitting
+        ? {
+            extra1: `Approve ${entry.title} on ${order.workOrderNo}`,
+            extra2: `${actorName} submitted ${entry.title} on the actual BOQ. Approve it, or reject with a description.`,
+            subject: `${order.workOrderNo}: ${entry.title} approval`,
+            message: `Approve ${entry.title} on ${order.workOrderNo}`,
+        }
+        : {
+            extra1: `${entry.title} draft on ${order.workOrderNo}`,
+            extra2: `${actorName} saved an actual BOQ update draft. Requester and assignee are the same.`,
+            subject: `${order.workOrderNo}: ${entry.title} draft`,
+            message: `${entry.title} draft on ${order.workOrderNo}`,
+        };
+    await syncDashboardAction({
+        requestId: order._id,
+        requestType: ACTUAL_BOQ_UPDATE_REQUEST,
+        assignedTo: assigneeId,
+        status: 'Pending',
+        subjectName: order.customer || '',
+        requestedByName: actorName,
+        extra1: notice.extra1,
+        extra2: notice.extra2,
+        extra3: JSON.stringify({ path: `${workOrderDetailsPath(order._id, 'actual-boq')}` }),
+    });
+
+    let emailMessage = submitting ? notice.message : 'Draft saved. The task and notification are assigned to you.';
+    if (submitting) {
+        try {
+            const employee = await EmployeeBasic.findById(officer.empObjectId)
+                .select('firstName lastName companyEmail workEmail status profileStatus employeeId primaryReportee')
+                .populate('primaryReportee', 'companyEmail workEmail status profileStatus')
+                .lean();
+            const companyEmail = String(officer.companyEmail || employee?.companyEmail || '').trim();
+            const sent = await sendWorkOrderFollowUpEmail({
+                employee: employee
+                    ? { ...employee, companyEmail, workEmail: employee.workEmail || '' }
+                    : { companyEmail, firstName: officer.employeeName || '', status: 'Active', profileStatus: 'Active' },
+                notice,
+                workOrderId: String(order._id),
+                section: 'actual-boq',
+            });
+            emailMessage = sent.message || notice.message;
+        } catch (error) {
+            console.error('Actual BOQ update approval email failed:', error);
+            emailMessage = 'Email could not be sent. The update was still saved.';
+        }
+    }
+    return res.status(200).json({
+        workOrder: await presentedForViewer(order, req),
+        emailMessage,
+        actualBoqSaved: true,
+    });
+}
+
+async function decideActualBoqUpdate(req, res, order, actorName) {
+    const officer = await findPurchaseOfficer();
+    const allowed = actorIsPurchaseOfficer(req, officer) || isJwtSystemSuperUser(req.user);
+    if (!allowed) return res.status(403).json({ message: 'Only the purchase officer can approve this update' });
+    const updates = (Array.isArray(order.actualBoq?.updates) ? order.actualBoq.updates : []).map(plainBoqUpdate);
+    const openIndex = updates.findIndex((item) => item.status === 'pending');
+    if (openIndex < 0) return res.status(400).json({ message: 'This update is not waiting for approval' });
+    const decision = req.body?.decideActualBoqUpdate === 'reject' ? 'reject' : 'approve';
+    const reason = cleanText(req.body?.rejectReason, 1000);
+    if (decision === 'reject' && !reason) {
+        return res.status(400).json({ message: 'A description is required to reject this update' });
+    }
+    let storedNote = '';
+    if (decision === 'approve') {
+        const gaps = boqTableGaps(updates[openIndex].tables);
+        if (gaps) return res.status(400).json({ message: gaps });
+        try {
+            const stored = await storeApprovedBoqItems(updates[openIndex].tables);
+            updates[openIndex].tables = stored.tables;
+            storedNote = storedItemNote(stored.created);
+        } catch (error) {
+            const status = error?.status || error?.statusCode || 400;
+            return res.status(status).json({ message: error?.message || 'Could not store the new item' });
+        }
+    }
+    const title = updates[openIndex].title || 'Updates';
+    updates[openIndex] = {
+        ...updates[openIndex],
+        status: decision === 'approve' ? 'approved' : 'rejected',
+        reason: decision === 'reject' ? reason : '',
+        decidedByName: actorName,
+        decidedAt: new Date(),
+    };
+    order.actualBoq.updates = updates;
+    order.markModified('actualBoq');
+    await order.save();
+    const closed = decision === 'approve' ? 'Approved' : 'Rejected';
+    await closeActualBoqUpdateNotice(order, closed, reason || `${title} approved`);
+    await finishEmployeeWorkflowTasks(order._id, ACTUAL_BOQ_UPDATE_REQUEST, {
+        taskStatus: decision === 'approve' ? 'Completed' : 'Rejected',
+        event: closed,
+        detail: decision === 'approve' ? `${title} approved.` : reason,
+        actorName,
+    });
+    return res.status(200).json({
+        workOrder: await presentedForViewer(order, req),
+        emailMessage: decision === 'approve' ? [storedNote, `${title} approved.`].filter(Boolean).join(' ') : '',
+        actualBoqSaved: true,
+    });
+}
+
+function mrBatchCanPrepare(batch) {
+    const status = batch?.status || '';
+    return status !== 'pending' && status !== 'approved';
+}
+
+async function closeMaterialRequestNotice(order, requestType, status, comment) {
+    if (!order?._id || !requestType) return;
+    await DashboardAction.updateMany(
+        { requestId: order._id, requestType, status: 'Pending' },
+        { $set: { status, actionedDate: new Date(), comment: comment || '' } },
+    );
+}
+
+async function purchaseOfficerEmployee() {
+    const officer = await findPurchaseOfficer();
+    if (!officer?.empObjectId) return { officer, employee: null };
+    const employee = await EmployeeBasic.findById(officer.empObjectId)
+        .select('firstName lastName companyEmail workEmail status profileStatus employeeId primaryReportee')
+        .populate('primaryReportee', 'companyEmail workEmail status profileStatus')
+        .lean();
+    const companyEmail = String(officer.companyEmail || employee?.companyEmail || '').trim();
+    const named = employee
+        ? { ...employee, companyEmail, workEmail: employee.workEmail || '' }
+        : { companyEmail, firstName: officer.employeeName || '', status: 'Active', profileStatus: 'Active', _id: officer.empObjectId };
+    return { officer, employee: named };
+}
+
+async function sendMaterialRequestNotice(order, employee, actorName, notice, requestType) {
+    await syncDashboardAction({
+        requestId: order._id,
+        requestType,
+        assignedTo: employee?._id,
+        status: 'Pending',
+        subjectName: order.customer || '',
+        requestedByName: actorName,
+        extra1: notice.extra1,
+        extra2: notice.extra2,
+        extra3: JSON.stringify({ path: `${workOrderDetailsPath(order._id, 'mr')}` }),
+    });
+    if (!employee) return 'The approval was saved. No employee is assigned.';
+    try {
+        const sent = await sendWorkOrderFollowUpEmail({
+            employee,
+            notice,
+            workOrderId: String(order._id),
+            section: 'mr',
+        });
+        return sent.message || notice.message;
+    } catch (error) {
+        console.error('Material request approval email failed:', error);
+        return 'Email could not be sent. The approval was still saved.';
+    }
+}
+
+function mrApprovalNotice(order, title, detail) {
+    return {
+        extra1: `Approve ${title} on ${order.workOrderNo}`,
+        extra2: detail,
+        subject: `${order.workOrderNo}: ${title} approval`,
+        message: `Approve ${title} on ${order.workOrderNo}`,
+    };
+}
+
+async function createMaterialRequest(req, res, order) {
+    const actor = await findActorEmployee(req);
+    if (!actor?._id) return res.status(400).json({ message: 'Your employee record is required to create the material request' });
+    if (order.actualBoq?.status !== 'approved') {
+        return res.status(400).json({ message: 'The actual BOQ must be approved before creating the material request' });
+    }
+    if (!order.materialRequest) order.materialRequest = { status: 'open', createdAt: new Date() };
+    if (actualBoqQtyAllZero(order)) {
+        return res.status(400).json({ message: 'Create MR is unavailable because every actual BOQ quantity is 0.' });
+    }
+    const batches = loadMrBatches(order);
+    if (batches.length) {
+        const last = batches[batches.length - 1];
+        if (last.status !== 'pending' && last.status !== 'approved') {
+            return res.status(400).json({ message: 'Submit or approve the current material request before creating the next one' });
+        }
+    }
+    const next = nextMaterialRequest(order, batches);
+    if (!next.rows.length) {
+        return res.status(400).json({ message: 'There is no remaining quantity for another material request' });
+    }
+    batches.push(plainMrBatch({
+        sourceKey: next.sourceKey,
+        title: mrDocumentNo(order.workOrderNo, batches.length),
+        status: 'open',
+        rows: next.rows,
+    }, batches.length));
+    if (!order.materialRequest.createdAt) order.materialRequest.createdAt = new Date();
+    persistMrBatches(order, batches);
+    await order.save();
+    return res.status(200).json({
+        workOrder: await presentedForViewer(order, req),
+        materialRequestSaved: true,
+    });
+}
+
+async function saveMaterialRequest(req, res, order, actorName) {
+    const actor = await findActorEmployee(req);
+    if (!actor?._id) return res.status(400).json({ message: 'Your employee record is required to save the material request' });
+    if (order.actualBoq?.status !== 'approved') {
+        return res.status(400).json({ message: 'The actual BOQ must be approved before editing the material request' });
+    }
+    const sourceKey = cleanText(req.body?.mrSourceKey, 80);
+    const batches = loadMrBatches(order);
+    const index = batches.findIndex((batch) => batch.sourceKey === sourceKey);
+    const batch = index >= 0 ? batches[index] : null;
+    if (!batch) return res.status(400).json({ message: 'This material request was not found' });
+    if (!mrBatchCanPrepare(batch)) {
+        return res.status(400).json({ message: 'This material request is not open for a draft or submit' });
+    }
+    const applied = applyMrBatchRows(order, batches, batch, req.body?.materialRequestRows);
+    if (applied.error) return res.status(400).json({ message: applied.error });
+    batch.rows = applied.rows;
+    const submitting = Boolean(req.body?.submitMaterialRequest);
+    if (!submitting) {
+        batch.status = 'draft';
+        batch.approvalStage = '';
+        batch.reason = '';
+        persistMrBatches(order, batches);
+        await order.save();
+        return res.status(200).json({
+            workOrder: await presentedForViewer(order, req),
+            emailMessage: 'Draft saved. No approval was sent.',
+            materialRequestSaved: true,
+        });
+    }
+
+    const officerRecord = await purchaseOfficerEmployee();
+    const submitterIsPurchaser = actorIsPurchaseOfficer(req, officerRecord.officer);
+    const stage = submitterIsPurchaser ? 'manager' : 'purchaser';
+    const manager = stage === 'manager' ? await findProjectManager() : null;
+    if (stage === 'purchaser' && !officerRecord.employee?._id) {
+        return res.status(400).json({ message: 'Assign an active Purchase Officer on the flowchart before submitting the material request.' });
+    }
+    if (stage === 'manager' && !manager?._id) {
+        return res.status(400).json({ message: 'Assign an active Project Manager on the flowchart before submitting the material request.' });
+    }
+    batch.status = 'pending';
+    batch.approvalStage = stage;
+    batch.reason = '';
+    batch.requestedByName = actorName;
+    batch.requestedById = String(actor._id);
+    batch.requestedAt = new Date();
+    batch.decidedByName = '';
+    batch.decidedAt = null;
+    persistMrBatches(order, batches);
+    await order.save();
+    const notice = mrApprovalNotice(
+        order,
+        batch.title,
+        `${actorName} submitted ${batch.title} for your approval. You can edit the lines, then approve or reject.`,
+    );
+    const emailMessage = await sendMaterialRequestNotice(
+        order,
+        stage === 'purchaser' ? officerRecord.employee : manager,
+        actorName,
+        notice,
+        mrRequestType(index),
+    );
+    return res.status(200).json({
+        workOrder: await presentedForViewer(order, req),
+        emailMessage,
+        materialRequestSaved: true,
+    });
+}
+
+async function decideMaterialRequest(req, res, order, actorName) {
+    const sourceKey = cleanText(req.body?.mrSourceKey, 80);
+    const batches = loadMrBatches(order);
+    const index = batches.findIndex((batch) => batch.sourceKey === sourceKey);
+    const batch = index >= 0 ? batches[index] : null;
+    if (!batch || batch.status !== 'pending') {
+        return res.status(400).json({ message: 'This material request is not waiting for approval' });
+    }
+    const stage = batch.approvalStage === 'manager' ? 'manager' : 'purchaser';
+    const officerRecord = await purchaseOfficerEmployee();
+    const manager = await findProjectManager();
+    const superUser = isJwtSystemSuperUser(req.user);
+    const allowed = stage === 'purchaser'
+        ? superUser || actorIsPurchaseOfficer(req, officerRecord.officer)
+        : superUser || actorMatches(req, [manager?._id, manager?.employeeId]);
+    if (!allowed) {
+        return res.status(403).json({
+            message: stage === 'purchaser'
+                ? 'Only the purchase officer can approve this material request'
+                : 'Only the project manager can approve this material request',
+        });
+    }
+    const decision = req.body?.decideMaterialRequest === 'reject' ? 'reject' : 'approve';
+    const reason = cleanText(req.body?.rejectReason, 1000);
+    if (decision === 'reject' && !reason) {
+        return res.status(400).json({ message: 'A description is required to reject the material request' });
+    }
+    const applied = applyMrBatchRows(order, batches, batch, req.body?.materialRequestRows);
+    if (applied.error) return res.status(400).json({ message: applied.error });
+    batch.rows = applied.rows;
+    batch.decidedByName = actorName;
+    batch.decidedAt = new Date();
+    const requestType = mrRequestType(index);
+    if (decision === 'reject') {
+        batch.status = 'rejected';
+        batch.approvalStage = '';
+        batch.reason = reason;
+        persistMrBatches(order, batches);
+        await order.save();
+        await closeMaterialRequestNotice(order, requestType, 'Rejected', reason);
+        await finishEmployeeWorkflowTasks(order._id, requestType, {
+            taskStatus: 'Rejected',
+            event: 'Rejected',
+            detail: reason,
+            actorName,
+        });
+        return res.status(200).json({
+            workOrder: await presentedForViewer(order, req),
+            emailMessage: '',
+            materialRequestSaved: true,
+        });
+    }
+    if (stage === 'purchaser') {
+        if (!manager?._id) {
+            return res.status(400).json({ message: 'Assign an active Project Manager on the flowchart before approving the material request.' });
+        }
+        batch.status = 'pending';
+        batch.approvalStage = 'manager';
+        batch.reason = '';
+        persistMrBatches(order, batches);
+        await order.save();
+        const notice = mrApprovalNotice(
+            order,
+            batch.title,
+            `${actorName} approved ${batch.title}. It is waiting for your approval. You can edit the lines, then approve or reject.`,
+        );
+        const emailMessage = await sendMaterialRequestNotice(order, manager, actorName, notice, requestType);
+        return res.status(200).json({
+            workOrder: await presentedForViewer(order, req),
+            emailMessage,
+            materialRequestSaved: true,
+        });
+    }
+    batch.status = 'approved';
+    batch.approvalStage = '';
+    batch.reason = '';
+    persistMrBatches(order, batches);
+    await order.save();
+    await closeMaterialRequestNotice(order, requestType, 'Approved', `${batch.title} approved`);
+    await finishEmployeeWorkflowTasks(order._id, requestType, {
+        taskStatus: 'Completed',
+        event: 'Approved',
+        detail: `${batch.title} approved.`,
+        actorName,
+    });
+    return res.status(200).json({
+        workOrder: await presentedForViewer(order, req),
+        emailMessage: `${batch.title} approved.`,
+        materialRequestSaved: true,
     });
 }
 
@@ -1175,6 +2050,11 @@ async function presentedForViewer(order, req) {
     const presented = presentWorkOrder(order, { includeFiles: true });
     presented.viewerCanCompleteLpo = Boolean(order.lpoFollowUp) && await canCompleteLpoFollowUp(req, order);
     presented.viewerIsProjectManager = await isProjectManager(req);
+    const officer = await findPurchaseOfficer();
+    presented.viewerIsPurchaseOfficer = isJwtSystemSuperUser(req.user) || actorIsPurchaseOfficer(req, officer);
+    presented.viewerSubmitsMaterialRequestToManager = actorIsPurchaseOfficer(req, officer);
+    presented.viewerCanApproveMrManager = presented.viewerIsProjectManager || isJwtSystemSuperUser(req.user);
+    presented.purchaseOfficerName = String(officer?.employeeName || '').trim();
     presented.lpoAssigneeName = await projectCoordinatorName();
     presented.projectManagerName = await projectManagerName();
     return presented;
@@ -1503,7 +2383,7 @@ export const getWorkOrderBoqCatalog = async (_req, res) => {
     try {
         const [items, vendors] = await Promise.all([
             InventoryItem.find()
-                .select('description moreDescription modelNumber categoryId subcategoryId itemOptionId brandId lastStockPrice pendingStock')
+                .select('description moreDescription modelNumber categoryId subcategoryId itemOptionId brandId lastStockPrice pendingStock availableQuantity')
                 .populate('categoryId', 'name')
                 .populate('subcategoryId', 'name')
                 .populate('itemOptionId', 'name')
@@ -1527,6 +2407,7 @@ export const getWorkOrderBoqCatalog = async (_req, res) => {
                 moreDescription: cleanText(row.moreDescription, 2000),
                 lastStockPrice: Number(row.lastStockPrice) || 0,
                 pendingStock: Boolean(row.pendingStock),
+                availableQuantity: Number(row.availableQuantity) || 0,
             })).filter((row) => row.categoryName || row.subcategoryName || row.itemName || row.brandName || row.modelNumber),
             vendors: vendors.map((row) => ({
                 id: String(row._id),
@@ -1729,6 +2610,21 @@ export const updateWorkOrder = async (req, res) => {
         }
         if (req.body?.decideActualBoq) {
             return decideActualBoq(req, res, order, actorName);
+        }
+        if (req.body?.saveActualBoqUpdateDraft || req.body?.submitActualBoqUpdate) {
+            return saveActualBoqUpdate(req, res, order, actorName);
+        }
+        if (req.body?.decideActualBoqUpdate) {
+            return decideActualBoqUpdate(req, res, order, actorName);
+        }
+        if (req.body?.createMaterialRequest) {
+            return createMaterialRequest(req, res, order);
+        }
+        if (req.body?.saveMaterialRequestDraft || req.body?.submitMaterialRequest) {
+            return saveMaterialRequest(req, res, order, actorName);
+        }
+        if (req.body?.decideMaterialRequest) {
+            return decideMaterialRequest(req, res, order, actorName);
         }
         if (req.body?.saveLpoDraft || req.body?.submitLpoUpdate || req.body?.decideLpoApproval) {
             const manager = await isProjectManager(req);

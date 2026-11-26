@@ -175,6 +175,61 @@ async function optionForIdentity(source, subcategoryId) {
     return { id: option._id, name: option.name || name };
 }
 
+async function reviseExistingItem(source, identity, quantity, price, itemName) {
+    const named = cleanName(itemName);
+    const itemOption = named
+        ? await ensureItemOption(identity.subcategoryId, named)
+        : await optionForIdentity(source, identity.subcategoryId);
+    const resolvedName = cleanName(itemOption.name) || named || cleanName(source.description);
+    const modelNumber = cleanName(identity.modelNumber);
+    const [brand, subcategory] = await Promise.all([
+        ItemBrand.findById(identity.brandId).select('name').lean(),
+        ItemSubcategory.findById(identity.subcategoryId).select('name').lean(),
+    ]);
+    const description = buildDescription({
+        brandName: brand?.name,
+        itemName: resolvedName,
+        modelNumber,
+        subcategoryName: subcategory?.name,
+    });
+    const optionId = itemOption.id || itemOption._id;
+    if (modelNumber) await assertModelNumberAvailable(modelNumber, source._id);
+    const conflict = await findSameItem({
+        categoryId: identity.categoryId,
+        subcategoryId: identity.subcategoryId,
+        brandId: identity.brandId,
+        itemOptionId: optionId,
+        modelNumber,
+    }, source._id);
+    if (conflict) {
+        throw httpError(400, 'An item with this category, sub category, item, brand, and model no already exists.');
+    }
+    await assertLinks({
+        categoryId: identity.categoryId,
+        subcategoryId: identity.subcategoryId,
+        itemOptionId: optionId,
+        brandId: identity.brandId,
+    });
+    const saved = await InventoryItem.findByIdAndUpdate(
+        source._id,
+        {
+            $set: {
+                categoryId: identity.categoryId,
+                subcategoryId: identity.subcategoryId,
+                brandId: identity.brandId,
+                itemOptionId: optionId,
+                modelNumber,
+                description,
+                lastStockPrice: price,
+            },
+            $inc: { availableQuantity: quantity },
+        },
+        { new: true, runValidators: true },
+    ).populate(STOCK_POPULATE).lean();
+    if (!saved) throw httpError(404, 'Item was not found.');
+    return saved;
+}
+
 async function finalizePendingItem(source, identity, quantity, price) {
     const itemOption = await optionForIdentity(source, identity.subcategoryId);
     const itemName = cleanName(itemOption.name) || cleanName(source.description);
@@ -330,6 +385,17 @@ export async function applyItemStock(req, itemId, body) {
                     status: stockStatus(saved.availableQuantity, saved.subcategoryId?.reservationQuantity),
                     created: true,
                     pendingStock: false,
+                },
+            };
+        }
+        if (body.keepItem && !sameIdentity(identity, source)) {
+            const saved = await reviseExistingItem(source, identity, quantity, price, body.itemName);
+            return {
+                statusCode: 200,
+                body: {
+                    ...presentStockOption(saved),
+                    status: stockStatus(saved.availableQuantity, saved.subcategoryId?.reservationQuantity),
+                    created: false,
                 },
             };
         }

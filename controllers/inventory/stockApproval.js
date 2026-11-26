@@ -56,16 +56,16 @@ async function sendStockApprovalEmail({ officer, senderName, billNo, entryId, su
         auth: { user, pass },
     });
     const bill = billNo || 'a stock bill';
-    const link = `${appOrigin()}/inventory/item-master?stockEntry=${entryId}`;
+    const link = `${appOrigin()}/inventory/bills?bill=${entryId}`;
     await transporter.sendMail({
         from: `"VERP" <${user}>`,
         to: email,
-        subject: `Stock approval: ${bill}`,
+        subject: `Bill approval: ${bill}`,
         text: [
             `Hello ${officer.employeeName || 'Purchase Officer'},`,
             '',
             summary || `${senderName || 'An employee'} submitted ${bill} and it is waiting for your approval.`,
-            'Open Item Master to accept or reject it:',
+            'Open the bill to edit it, then approve or reject it:',
             link,
             '',
             'VERP',
@@ -200,7 +200,7 @@ export async function closeDraftBill(entryId, actorEmployeeId, outcome = 'Approv
         await finishEmployeeWorkflowTasks(entryId, INVENTORY_BILL_DRAFT, {
             taskStatus: rejected ? 'Rejected' : 'Completed',
             event: rejected ? 'Rejected' : 'Completed',
-            detail: rejected ? 'The bill was rejected.' : 'The bill is no longer in draft.',
+            detail: rejected ? 'The bill was rejected.' : 'The bill was approved.',
             actorName,
         });
     } catch (error) {

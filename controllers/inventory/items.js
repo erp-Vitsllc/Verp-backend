@@ -366,6 +366,122 @@ function matchesStockFilter(rowStatus, statusQuery) {
     return rowStatus === statusQuery;
 }
 
+const SEARCH_STATUS_LABELS = ['Out of Stock', 'Low Stock', 'Stock In'];
+
+function searchTokens(search) {
+    return cleanName(search)
+        .toLowerCase()
+        .split(' ')
+        .map((token) => token.replace(/^[,.;:]+|[,.;:]+$/g, ''))
+        .filter(Boolean);
+}
+
+function textHas(value, token) {
+    return String(value ?? '').toLowerCase().includes(token);
+}
+
+function tokenMatchesEveryStatus(token, waiting) {
+    if (!SEARCH_STATUS_LABELS.every((label) => textHas(label, token))) return false;
+    for (const label of waiting.values()) {
+        if (!textHas(label, token)) return false;
+    }
+    return true;
+}
+
+function namedHits(rows, token) {
+    const hits = rows.filter((row) => textHas(row.name, token));
+    return {
+        ids: hits.map((row) => row._id),
+        keys: new Set(hits.map((row) => String(row._id))),
+    };
+}
+
+function rowHasSearchToken(row, token, ids) {
+    if (textHas(row.status, token) || textHas(row.availableQuantity, token)) return true;
+    if (textHas(row.itemCode, token) || textHas(row.modelNumber, token) || textHas(row.description, token)) return true;
+    if (textHas(row.manufacturerPartNumber, token)) return true;
+    if (ids.categories.keys.has(String(row.categoryId || ''))) return true;
+    if (ids.subcategories.keys.has(String(row.subcategoryId || ''))) return true;
+    if (ids.brands.keys.has(String(row.brandId || ''))) return true;
+    if (ids.options.keys.has(String(row.itemOptionId || ''))) return true;
+    return false;
+}
+
+function quantitySearchClause(token) {
+    if (!/^\d+$/.test(token)) return null;
+    return {
+        $expr: {
+            $regexMatch: {
+                input: {
+                    $toString: {
+                        $toLong: { $ifNull: ['$availableQuantity', 0] },
+                    },
+                },
+                regex: escapeRegex(token),
+            },
+        },
+    };
+}
+
+/**
+ * Every word must show up in item code, name, brand, model, description,
+ * category, subcategory, qty, or status. Status is derived from quantity, so
+ * those clauses only narrow the query; the row check uses the label on screen.
+ */
+async function buildItemSearchPlan(search, waiting) {
+    const active = searchTokens(search).filter((token) => !tokenMatchesEveryStatus(token, waiting));
+    if (!active.length) return { constraint: null, matches: () => true };
+
+    const nameClause = { $or: active.map((token) => ({ name: new RegExp(escapeRegex(token), 'i') })) };
+    const [categories, subcategories, brands, options] = await Promise.all([
+        ItemCategory.find(nameClause).select('_id name').lean(),
+        ItemSubcategory.find(nameClause).select('_id name').lean(),
+        ItemBrand.find(nameClause).select('_id name').lean(),
+        ItemOption.find(nameClause).select('_id name').lean(),
+    ]);
+
+    const clauses = [];
+    const checks = active.map((token) => {
+        const ids = {
+            categories: namedHits(categories, token),
+            subcategories: namedHits(subcategories, token),
+            brands: namedHits(brands, token),
+            options: namedHits(options, token),
+        };
+        const matchesOut = textHas('out of stock', token);
+        const matchesLow = textHas('low stock', token);
+        const matchesIn = textHas('stock in', token);
+        const regex = new RegExp(escapeRegex(token), 'i');
+        const or = [
+            { itemCode: regex },
+            { description: regex },
+            { modelNumber: regex },
+            { manufacturerPartNumber: regex },
+        ];
+        if (ids.categories.ids.length) or.push({ categoryId: { $in: ids.categories.ids } });
+        if (ids.subcategories.ids.length) or.push({ subcategoryId: { $in: ids.subcategories.ids } });
+        if (ids.brands.ids.length) or.push({ brandId: { $in: ids.brands.ids } });
+        if (ids.options.ids.length) or.push({ itemOptionId: { $in: ids.options.ids } });
+        const quantityClause = quantitySearchClause(token);
+        if (quantityClause) or.push(quantityClause);
+        if (matchesOut) or.push({ availableQuantity: { $in: [0, null] } });
+        if (matchesLow || matchesIn) or.push({ availableQuantity: { $gt: 0 } });
+        const waitingIds = [];
+        waiting.forEach((label, id) => {
+            if (textHas(label, token) && mongoose.isValidObjectId(id)) waitingIds.push(new mongoose.Types.ObjectId(id));
+        });
+        if (waitingIds.length) or.push({ _id: { $in: waitingIds } });
+        const coversEveryQuantity = matchesOut && matchesLow && matchesIn;
+        if (!coversEveryQuantity) clauses.push({ $or: or });
+        return (row) => rowHasSearchToken(row, token, ids);
+    });
+
+    return {
+        constraint: clauses.length === 0 ? null : clauses.length === 1 ? clauses[0] : { $and: clauses },
+        matches: (row) => checks.every((check) => check(row)),
+    };
+}
+
 function readItemDetails(body) {
     const unitOfMeasure = cleanName(body?.unitOfMeasure);
     const reservationQuantity = Number(body?.reservationQuantity ?? 0);
@@ -407,30 +523,17 @@ export async function listItems(req, res) {
         if (req.query.brandId && mongoose.isValidObjectId(req.query.brandId)) {
             constraints.push({ brandId: req.query.brandId });
         }
+        if (req.query.itemOptionId && mongoose.isValidObjectId(req.query.itemOptionId)) {
+            constraints.push({ itemOptionId: req.query.itemOptionId });
+        }
         const requestedStatus = String(req.query.status || '').trim();
         const statusQuery = requestedStatus === 'All' || DISPLAY_STATUSES.includes(requestedStatus)
             ? requestedStatus
             : '';
-        const search = cleanName(req.query.search);
-        if (search) {
-            const regex = new RegExp(escapeRegex(search), 'i');
-            const [categories, brands, options] = await Promise.all([
-                ItemCategory.find({ name: regex }).select('_id'),
-                ItemBrand.find({ name: regex }).select('_id'),
-                ItemOption.find({ name: regex }).select('_id'),
-            ]);
-            constraints.push({
-                $or: [
-                    { itemCode: regex },
-                    { description: regex },
-                    { modelNumber: regex },
-                    { manufacturerPartNumber: regex },
-                    { categoryId: { $in: categories.map((row) => row._id) } },
-                    { brandId: { $in: brands.map((row) => row._id) } },
-                    { itemOptionId: { $in: options.map((row) => row._id) } },
-                ],
-            });
-        }
+        const searchPlan = cleanName(req.query.search)
+            ? await buildItemSearchPlan(req.query.search, waiting)
+            : { constraint: null, matches: () => true };
+        if (searchPlan.constraint) constraints.push(searchPlan.constraint);
         const query = constraints.length === 1 ? constraints[0] : { $and: constraints };
         Object.assign(filter, query);
         const rows = await InventoryItem.find(filter)
@@ -446,7 +549,7 @@ export async function listItems(req, res) {
                 ...row,
                 subcategoryId: { _id: row.subcategoryId, reservationQuantity: reservationById.get(String(row.subcategoryId)) },
             }), waiting))
-            .filter((row) => matchesStockFilter(row.status, statusQuery))
+            .filter((row) => searchPlan.matches(row) && matchesStockFilter(row.status, statusQuery))
             .sort((left, right) => {
                 const statusGap = statusRank(left.status) - statusRank(right.status);
                 if (statusGap) return statusGap;

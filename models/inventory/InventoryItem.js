@@ -29,6 +29,7 @@ const inventoryItemSchema = new mongoose.Schema(
 
 inventoryItemSchema.index({ pendingStock: 1, categoryId: 1 });
 inventoryItemSchema.index({ subcategoryId: 1 });
+inventoryItemSchema.index({ itemOptionId: 1 });
 inventoryItemSchema.index({ brandId: 1 });
 inventoryItemSchema.index({ modelNumber: 1 });
 

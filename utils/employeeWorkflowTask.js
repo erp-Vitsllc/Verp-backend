@@ -14,11 +14,26 @@ export const EMPLOYEE_WORKFLOW_TYPES = new Set([
     "Work Order LPO Attachment",
     "Work Order LPO Approval",
     "Work Order Actual BOQ",
+    "Work Order Actual BOQ Update",
     "Work Order MR",
 ]);
 
 export function employeeWorkflowType(requestType) {
-    return EMPLOYEE_WORKFLOW_TYPES.has(String(requestType || "").trim());
+    const type = String(requestType || "").trim();
+    if (EMPLOYEE_WORKFLOW_TYPES.has(type)) return true;
+    return /^Work Order MR \d+$/.test(type);
+}
+
+/** A work order step belongs on the Project Task board. */
+export function isWorkOrderRequestType(requestType) {
+    return String(requestType || "").trim().startsWith("Work Order ");
+}
+
+/** Inventory bills and work orders are Project tasks in Task Manager. */
+export function workflowTaskType(requestType) {
+    const type = String(requestType || "").trim();
+    if (type === "Inventory Bill Draft" || isWorkOrderRequestType(type)) return "Project Task";
+    return "Workflow Task";
 }
 
 function personName(person) {
@@ -137,10 +152,11 @@ export async function ensureEmployeeWorkflowTask(action, assignee, requestedByNa
         );
     }
 
+    const taskType = workflowTaskType(action.requestType);
     if (!keep) {
         return TaskManagerTask.create({
             sourceDashboardActionId: action._id,
-            taskType: "Workflow Task",
+            taskType,
             priority: "Medium",
             taskName: action.extra1 || action.requestType || "Task",
             description: action.extra2 || "",
@@ -164,7 +180,7 @@ export async function ensureEmployeeWorkflowTask(action, assignee, requestedByNa
             createdAt: new Date(),
         });
     }
-    if (keep.taskType !== "Workflow Task") keep.taskType = "Workflow Task";
+    if (keep.taskType !== taskType) keep.taskType = taskType;
     if (!personRequesterName(keep.requestedByName) && (requester || assigneeName)) {
         keep.requestedByName = requester || assigneeName;
     }

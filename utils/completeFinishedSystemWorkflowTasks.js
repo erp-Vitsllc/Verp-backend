@@ -298,7 +298,7 @@ async function loadScope(options) {
     const tasks = Array.isArray(options.tasks)
         ? options.tasks
         : await TaskManagerTask.find({
-            taskType: { $in: ["System Task", "Workflow Task", "Work Flow Task"] },
+            taskType: { $in: ["System Task", "Workflow Task", "Work Flow Task", "Project Task"] },
             status: { $in: [...OPEN_TASK] },
         })
             .select("taskType status assignee assigneeEmpId assigneeName sourceDashboardActionId closeRequest")

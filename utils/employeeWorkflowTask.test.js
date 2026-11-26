@@ -5,7 +5,29 @@ import {
     employeeWorkflowType,
     handoffHistoryEntries,
     isAutomaticWorkflowHandoff,
+    isWorkOrderRequestType,
+    workflowTaskType,
 } from "./employeeWorkflowTask.js";
+
+test("an inventory bill notification is a project task", () => {
+    assert.equal(workflowTaskType("Inventory Bill Draft"), "Project Task");
+    assert.equal(workflowTaskType("Fine"), "Workflow Task");
+});
+
+test("a work order notification is a project task", () => {
+    assert.equal(isWorkOrderRequestType("Work Order LPO"), true);
+    assert.equal(isWorkOrderRequestType("Work Order LPO Approval"), true);
+    assert.equal(isWorkOrderRequestType("Work Order Actual BOQ"), true);
+    assert.equal(isWorkOrderRequestType("Work Order Actual BOQ Update"), true);
+    assert.equal(workflowTaskType("Work Order Actual BOQ Update"), "Project Task");
+    assert.equal(employeeWorkflowType("Work Order Actual BOQ Update"), true);
+    assert.equal(isWorkOrderRequestType("Work Order MR"), true);
+    assert.equal(isWorkOrderRequestType("Inventory Bill Draft"), false);
+    assert.equal(workflowTaskType("Work Order LPO Attachment"), "Project Task");
+    assert.equal(workflowTaskType("Work Order MR"), "Project Task");
+    assert.equal(employeeWorkflowType("Work Order MR 2"), true);
+    assert.equal(workflowTaskType("Work Order MR 2"), "Project Task");
+});
 
 test("draft bill, fine, loan, and advance rows are employee workflow tasks", () => {
     assert.equal(employeeWorkflowType("Inventory Bill Draft"), true);

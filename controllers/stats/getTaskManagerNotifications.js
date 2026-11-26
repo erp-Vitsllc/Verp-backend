@@ -1,6 +1,7 @@
 import mongoose from "mongoose";
 import AssetItem from "../../models/AssetItem.js";
 import DashboardAction from "../../models/DashboardAction.js";
+import Flowchart from "../../models/Flowchart.js";
 import EmployeeBasic from "../../models/EmployeeBasic.js";
 import EmployeeHubRequest from "../../models/EmployeeHubRequest.js";
 import Fine from "../../models/Fine.js";
@@ -36,6 +37,9 @@ import { isModuleBarShare } from "../../utils/moduleBarShare.js";
 import { finishedOverlayBySource, overlayForListRow } from "../../utils/finishedTaskOverlay.js";
 import { formatTaskDisplayParts, vehicleRecordId } from "../../utils/taskDisplayName.js";
 import { billItemsByRequestId } from "../inventory/stockApproval.js";
+import { viewerIsFlowchartProjectLead } from "../../utils/projectTaskVisibility.js";
+import { isWorkOrderRequestType } from "../../utils/employeeWorkflowTask.js";
+import { workOrderNoInText } from "../../utils/workOrderNumber.js";
 import { composeTaskDescription } from "../../utils/taskDetailDescription.js";
 import { attendanceFactsByActionId } from "../../utils/loadAttendanceTaskFacts.js";
 import { attachHoldSteps } from "../../utils/taskWaitingSteps.js";
@@ -831,6 +835,7 @@ function isSingleStepSystemTask(requestType) {
  * General Task: Create New Task, and Early Salary, Salary Certificate, and Assets from the dashboard.
  */
 export function taskCategory(requestType, extra = "") {
+    if (String(requestType || "").trim() === "Inventory Bill Draft" || isWorkOrderRequestType(requestType)) return "Project Task";
     if (isGeneralHubRequest(requestType, extra)) return "General Task";
     if (
         String(requestType || "").trim() === "Salary Enrollment"
@@ -1656,6 +1661,9 @@ export const getTaskManagerNotifications = async (req, res) => {
                         hasOtherAssignee: true,
                     }),
                 ...actionNumberState(action, savedByActivity, overlay),
+                workOrderNo: isWorkOrderRequestType(action.requestType)
+                    ? workOrderNoInText(action.extra1, action.extra2, action.subjectName, copy.taskName, copy.description)
+                    : "",
                 alsoOwner: overlay?._id ? { kind: "manual", id: String(overlay._id) } : undefined,
                 requestDate: requestedAt,
                 reassignedAt: latestReassignedAt(overlay),
@@ -1826,8 +1834,11 @@ export const getTaskManagerNotifications = async (req, res) => {
                 }
             }
 
+            const sourceAction = actionById.get(String(row.sourceDashboardActionId || ""));
             const destination = moduleForText(row.taskName, row.description, row.taskType);
-            const category = displayTaskType(row.taskType);
+            const category = isWorkOrderRequestType(sourceAction?.requestType)
+                ? "Project Task"
+                : displayTaskType(row.taskType);
             const access = listedTaskAccess(viewer, {
                 assigneeId,
                 assigneeEmpId: assigneeCleared ? "" : row.assigneeEmpId,
@@ -1875,6 +1886,9 @@ export const getTaskManagerNotifications = async (req, res) => {
                         hasOtherAssignee: blocksDelete,
                     }),
                 ...manualNumberState(row, actionById, savedByActivity),
+                workOrderNo: isWorkOrderRequestType(sourceAction?.requestType)
+                    ? workOrderNoInText(sourceAction?.extra1, sourceAction?.extra2, row.taskName, row.description)
+                    : "",
                 requestDate: requestedAt,
                 reassignedAt: latestReassignedAt(row),
                 reviewReceivedAt: row?.closeRequest?.completionRequestedAt || null,
@@ -1999,8 +2013,14 @@ export const getTaskManagerNotifications = async (req, res) => {
             return sequence(b) - sequence(a);
         });
 
+        const projectLeads = await Flowchart.find({
+            category: { $in: ["projectmanager", "projectcoordinator"] },
+            status: "Active",
+        }).select("empObjectId employeeId").lean();
+
         return res.status(200).json({
             canSeeAllTasks: true,
+            seesAllProjectTasks: viewerIsFlowchartProjectLead(viewer, projectLeads),
             summary: {
                 ...summary,
                 totalChange: percentChange(monthCounts.total.current, monthCounts.total.previous),

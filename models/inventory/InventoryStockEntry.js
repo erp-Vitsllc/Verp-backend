@@ -7,6 +7,7 @@ const stockEntryLineSchema = new mongoose.Schema(
         subcategoryId: { type: mongoose.Schema.Types.ObjectId, ref: 'InventoryItemSubcategory', required: true },
         brandId: { type: mongoose.Schema.Types.ObjectId, ref: 'InventoryItemBrand', required: true },
         modelNumber: { type: String, default: '', trim: true },
+        keepItem: { type: Boolean, default: false },
         itemName: { type: String, default: '', trim: true },
         description: { type: String, default: '', trim: true },
         quantity: { type: Number, default: 0, min: 0 },

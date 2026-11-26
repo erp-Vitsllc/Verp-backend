@@ -1,6 +1,7 @@
 import nodemailer from 'nodemailer';
 import EmployeeBasic from '../models/EmployeeBasic.js';
 import { resolveEmployeeEmail } from './resolveEmployeeEmail.js';
+import { workOrderDetailsPath } from './workOrderPath.js';
 
 function personName(employee) {
     return [employee?.firstName, employee?.lastName].filter(Boolean).join(' ').trim() || 'there';
@@ -90,7 +91,7 @@ export async function sendWorkOrderAttachmentRequestEmail({
         auth: { user, pass },
     });
     const name = [employee.firstName, employee.lastName].filter(Boolean).join(' ').trim() || 'Project Coordinator';
-    const link = `${appOrigin()}/production/work-order?workOrder=${workOrderId}&section=lpo`;
+    const link = `${appOrigin()}${workOrderDetailsPath(workOrderId, 'lpo')}`;
     await transporter.sendMail({
         from: `"VERP" <${user}>`,
         to: email,
@@ -136,8 +137,7 @@ export async function sendWorkOrderFollowUpEmail({ employee, notice, workOrderId
         auth: { user, pass },
     });
     const name = personName(employee);
-    const safeSection = String(section || 'lpo').replace(/[^a-z0-9-]/gi, '') || 'lpo';
-    const link = `${appOrigin()}/production/work-order?workOrder=${workOrderId}&section=${safeSection}`;
+    const link = `${appOrigin()}${workOrderDetailsPath(workOrderId, section)}`;
     await transporter.sendMail({
         from: `"VERP" <${user}>`,
         to: email,

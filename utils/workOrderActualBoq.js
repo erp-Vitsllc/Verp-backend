@@ -95,8 +95,6 @@ export async function buildActualBoq(order) {
         const vendorName = text(purchased?.name) || fallbackVendor.name;
         const paymentTerms = text(purchased?.paymentTerms) || (vendorName ? fallbackVendor.paymentTerms : '');
         const quantity = money(line?.quantity);
-        const unitPrice = money(line?.rate);
-        const total = money(line?.amount) || Math.round(quantity * unitPrice * 100) / 100;
         return {
             slNo: index + 1,
             category: catalogName(item?.categoryId),
@@ -107,8 +105,8 @@ export async function buildActualBoq(order) {
             descriptionNew: item ? [text(item.description), text(item.moreDescription)].filter(Boolean).join('\n') : '',
             descriptionOld: String(line?.description || '').trim(),
             quantity,
-            unitPrice,
-            total,
+            unitPrice: '',
+            total: '',
             vendorName,
             paymentTerms,
         };

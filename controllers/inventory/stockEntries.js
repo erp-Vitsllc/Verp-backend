@@ -23,8 +23,10 @@ function roundMoney(value) {
     return Math.round(Number(value) * 100) / 100;
 }
 
-function billListStatus(status) {
-    return status === 'draft' ? 'Draft' : 'Approved';
+function billListStatus(row) {
+    if (row?.status === 'draft') return 'Draft';
+    if (row?.status === 'pending' || row?.editPending) return 'Pending';
+    return 'Approved';
 }
 
 function escapeRegex(value) {
@@ -181,6 +183,7 @@ function presentLine(line) {
         subcategoryId: line.subcategoryId ? String(line.subcategoryId) : '',
         brandId: line.brandId ? String(line.brandId) : '',
         modelNumber: line.modelNumber || '',
+        keepItem: Boolean(line.keepItem),
         itemName: line.itemName || '',
         description: line.description || '',
         quantity: line.quantity || 0,
@@ -276,6 +279,7 @@ async function readLines(body, { posting }) {
             subcategoryId: catalog.subcategoryId,
             brandId: catalog.brandId,
             modelNumber: cleanName(line.modelNumber),
+            keepItem: Boolean(line?.keepItem) && Boolean(line?.itemId),
             itemName: catalog.itemName,
             description: cleanName(line.description) || catalog.description,
             quantity: safeQuantity,
@@ -385,9 +389,11 @@ async function postLines(req, entry, lines) {
                     subcategoryId: line.subcategoryId,
                     brandId: line.brandId,
                     modelNumber: line.modelNumber || '',
+                    itemName: line.itemName || '',
+                    keepItem: Boolean(line.keepItem),
                 });
             } catch (error) {
-                if (error?.status !== 403) throw error;
+                if (error?.status !== 403 || line.keepItem) throw error;
                 const created = await createPendingItemRecord({
                     categoryId: line.categoryId,
                     subcategoryId: line.subcategoryId,
@@ -428,6 +434,7 @@ function plainLines(lines) {
         subcategoryId: line.subcategoryId,
         brandId: line.brandId,
         modelNumber: line.modelNumber || '',
+        keepItem: Boolean(line.keepItem),
         itemName: line.itemName || '',
         description: line.description || '',
         quantity: line.quantity || 0,
@@ -460,7 +467,7 @@ export async function listInventoryBills(req, res) {
             filter.purchaseSource = 'vendor';
         }
         const rows = await InventoryStockEntry.find(filter)
-            .select('status purchaseSource vendorId purchaseDate billNo lpoNo lines attachment updatedAt createdBy editPending pendingEdit.submittedByName')
+            .select('status purchaseSource vendorId purchaseDate billNo lpoNo lines attachment updatedAt createdBy submittedByName editPending pendingEdit.submittedByName')
             .lean();
         const vendorIds = [...new Set(rows.map((row) => (row.vendorId ? String(row.vendorId) : '')).filter(Boolean))];
         const vendors = vendorIds.length
@@ -514,7 +521,10 @@ export async function listInventoryBills(req, res) {
                 const deleteReason = row.status === 'posted' ? (deleteReasons.get(String(row._id)) || '') : '';
                 return {
                     id: String(row._id),
-                    status: billListStatus(row.status),
+                    status: billListStatus(row),
+                    awaitingApproval: row.status === 'pending' || Boolean(row.editPending),
+                    submittedByName: row.submittedByName || '',
+                    updatedAt: row.updatedAt || null,
                     vendorId: row.vendorId ? String(row.vendorId) : '',
                     purchaseSource: manual ? 'manual' : 'vendor',
                     billNo: row.billNo || '',
@@ -639,6 +649,9 @@ export async function saveStockEntry(req, res) {
         if (entry?.status === 'posted') {
             const previousLines = plainLines(entry.lines);
             const previous = await billItemQuantities(entry.lines);
+            const keptEdit = entry.editPending
+                ? (entry.pendingEdit?.toObject?.() || entry.pendingEdit)
+                : null;
             const hasQuantity = previousLines.some((line) => Number(line.quantity) > 0);
             if (hasQuantity && stockDeleteBlockReason(previous)) {
                 throw httpError(400, 'This bill cannot be edited because available stock is lower than the quantity it added.');
@@ -676,6 +689,11 @@ export async function saveStockEntry(req, res) {
                 entry.status = 'posted';
                 entry.lines = previousLines;
                 entry.postedCount = previousLines.length;
+                if (keptEdit) {
+                    entry.editPending = true;
+                    entry.pendingEdit = keptEdit;
+                    entry.markModified('pendingEdit');
+                }
                 entry.markModified('lines');
                 await entry.save().catch(() => {});
                 throw error;
@@ -771,9 +789,9 @@ export async function saveStockEntry(req, res) {
             await closeDraftBill(entry._id, req.user?.employeeObjectId);
             res.status(201).json(presentEntry(entry));
         } catch (error) {
-            entry.status = 'draft';
+            entry.status = wasPending ? 'pending' : 'draft';
             await entry.save();
-            await notifyDraftBill({ entry, actorId: entry.createdBy || req.user?.id });
+            if (!wasPending) await notifyDraftBill({ entry, actorId: entry.createdBy || req.user?.id });
             throw error;
         }
     } catch (error) {
@@ -997,7 +1015,8 @@ export async function deleteStockEntry(req, res) {
                 });
                 await closeStockApproval(entry._id, 'Rejected', req.user?.employeeObjectId);
             }
-            await closeDraftBill(entry._id, req.user?.employeeObjectId);
+            const dropped = entry.status === 'pending' || entry.editPending;
+            await closeDraftBill(entry._id, req.user?.employeeObjectId, dropped ? 'Rejected' : 'Approved');
             await InventoryStockEntry.deleteOne({ _id: entry._id });
         } catch (error) {
             if (reversed) {
