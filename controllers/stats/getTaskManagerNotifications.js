@@ -38,8 +38,9 @@ import { finishedOverlayBySource, overlayForListRow } from "../../utils/finished
 import { formatTaskDisplayParts, vehicleRecordId } from "../../utils/taskDisplayName.js";
 import { billItemsByRequestId } from "../inventory/stockApproval.js";
 import { viewerIsFlowchartProjectLead } from "../../utils/projectTaskVisibility.js";
-import { isWorkOrderRequestType } from "../../utils/employeeWorkflowTask.js";
+import { activeProjectCoordinator, isWorkOrderRequestType } from "../../utils/employeeWorkflowTask.js";
 import { workOrderNoInText } from "../../utils/workOrderNumber.js";
+import { attachWorkOrderProjectNames } from "../../utils/workOrderProjectNames.js";
 import { composeTaskDescription } from "../../utils/taskDetailDescription.js";
 import { attendanceFactsByActionId } from "../../utils/loadAttendanceTaskFacts.js";
 import { attachHoldSteps } from "../../utils/taskWaitingSteps.js";
@@ -835,7 +836,7 @@ function isSingleStepSystemTask(requestType) {
  * General Task: Create New Task, and Early Salary, Salary Certificate, and Assets from the dashboard.
  */
 export function taskCategory(requestType, extra = "") {
-    if (String(requestType || "").trim() === "Inventory Bill Draft" || isWorkOrderRequestType(requestType)) return "Project Task";
+    if (isWorkOrderRequestType(requestType)) return "Project Task";
     if (isGeneralHubRequest(requestType, extra)) return "General Task";
     if (
         String(requestType || "").trim() === "Salary Enrollment"
@@ -1379,6 +1380,22 @@ export const getTaskManagerNotifications = async (req, res) => {
             if (owners.length !== 1) return "";
             return owners[0].profilePicture || "";
         };
+        const projectCoordinator = await activeProjectCoordinator().catch(() => null);
+        const projectCoordinatorName = String(projectCoordinator?.name || "").trim();
+        const requesterForTask = (requestType, name, base) => {
+            if (projectCoordinatorName && isWorkOrderRequestType(requestType)) {
+                return {
+                    name: projectCoordinatorName,
+                    base: projectCoordinatorName,
+                    photo: projectCoordinator.photo || photoForName(projectCoordinatorName),
+                };
+            }
+            return {
+                name,
+                base: cleanRequester(base),
+                photo: photoForName(base),
+            };
+        };
 
         const todayKey = dubaiDateKey(new Date());
         const todayParts = todayKey.split("-").map(Number);
@@ -1598,6 +1615,7 @@ export const getTaskManagerNotifications = async (req, res) => {
             else if (overlay?.status === "Pending" && overlay?.closeRequest?.reopenedAt) {
                 status = "Open";
             }
+            const listedRequester = requesterForTask(action.requestType, requesterName, requesterBase);
             const actionsLocked = status === "Closed" || status === "Rejected" || status === "Cancelled";
             const access = listedTaskAccess(viewer, {
                 assigneeId: assigneeCleared ? "" : assigneeId,
@@ -1664,6 +1682,7 @@ export const getTaskManagerNotifications = async (req, res) => {
                 workOrderNo: isWorkOrderRequestType(action.requestType)
                     ? workOrderNoInText(action.extra1, action.extra2, action.subjectName, copy.taskName, copy.description)
                     : "",
+                requestId: isWorkOrderRequestType(action.requestType) ? String(action.requestId || "") : "",
                 alsoOwner: overlay?._id ? { kind: "manual", id: String(overlay._id) } : undefined,
                 requestDate: requestedAt,
                 reassignedAt: latestReassignedAt(overlay),
@@ -1682,9 +1701,9 @@ export const getTaskManagerNotifications = async (req, res) => {
                 taskName: copy.taskName,
                 taskSubject: copy.taskSubject || "",
                 description: copy.description,
-                requesterName,
-                requesterBaseName: cleanRequester(requesterBase),
-                requesterPhoto: photoForName(requesterBase),
+                requesterName: listedRequester.name,
+                requesterBaseName: listedRequester.base,
+                requesterPhoto: listedRequester.photo,
                 originalAssigneeName,
                 originalAssigneeId,
                 originalAssigneeEmpId: assigneeCleared ? "" : (assigneeDisplay.originalAssigneeEmpId || String(overlay?.closeRequest?.originalAssigneeEmpId || "").trim()),
@@ -1737,8 +1756,8 @@ export const getTaskManagerNotifications = async (req, res) => {
                 extra3: action.extra3 || "",
                 targetEmployeeId: action.subjectEmployeeId || "",
                 subjectName: action.subjectName || "",
-                requestedBy: requesterName,
-                requestedByName: requesterName,
+                requestedBy: listedRequester.name,
+                requestedByName: listedRequester.name,
                 status: action.status || "Pending",
                 requestedDate: requestedAt,
             };
@@ -1836,9 +1855,13 @@ export const getTaskManagerNotifications = async (req, res) => {
 
             const sourceAction = actionById.get(String(row.sourceDashboardActionId || ""));
             const destination = moduleForText(row.taskName, row.description, row.taskType);
-            const category = isWorkOrderRequestType(sourceAction?.requestType)
+            const sourceType = String(sourceAction?.requestType || "").trim();
+            const category = isWorkOrderRequestType(sourceType)
                 ? "Project Task"
-                : displayTaskType(row.taskType);
+                : sourceType === "Inventory Bill Draft"
+                    ? "Workflow Task"
+                    : displayTaskType(row.taskType);
+            const listedRequester = requesterForTask(sourceType, requesterName, requesterBase);
             const access = listedTaskAccess(viewer, {
                 assigneeId,
                 assigneeEmpId: assigneeCleared ? "" : row.assigneeEmpId,
@@ -1886,9 +1909,10 @@ export const getTaskManagerNotifications = async (req, res) => {
                         hasOtherAssignee: blocksDelete,
                     }),
                 ...manualNumberState(row, actionById, savedByActivity),
-                workOrderNo: isWorkOrderRequestType(sourceAction?.requestType)
+                workOrderNo: isWorkOrderRequestType(sourceType)
                     ? workOrderNoInText(sourceAction?.extra1, sourceAction?.extra2, row.taskName, row.description)
                     : "",
+                requestId: isWorkOrderRequestType(sourceType) ? String(sourceAction?.requestId || "") : "",
                 requestDate: requestedAt,
                 reassignedAt: latestReassignedAt(row),
                 reviewReceivedAt: row?.closeRequest?.completionRequestedAt || null,
@@ -1897,13 +1921,13 @@ export const getTaskManagerNotifications = async (req, res) => {
                 originalCompletionDate: row.originalCompletionDate || null,
                 taskCategory: category,
                 accessPath: accessPathFor(destination, "", ""),
-                requestType: displayTaskType(row.taskType),
+                requestType: isWorkOrderRequestType(sourceType) ? sourceType : displayTaskType(row.taskType),
                 taskName: row.taskName || "Task",
                 taskSubject: "",
                 description: row.description || "",
-                requesterName,
-                requesterBaseName: cleanRequester(requesterBase),
-                requesterPhoto: photoForName(requesterBase),
+                requesterName: listedRequester.name,
+                requesterBaseName: listedRequester.base,
+                requesterPhoto: listedRequester.photo,
                 originalAssigneeName,
                 originalAssigneeId,
                 originalAssigneeEmpId: assigneeCleared ? "" : (assigneeDisplay.originalAssigneeEmpId || String(row.closeRequest?.originalAssigneeEmpId || "").trim()),
@@ -1949,8 +1973,8 @@ export const getTaskManagerNotifications = async (req, res) => {
                 extra3: "",
                 targetEmployeeId: row.assigneeEmpId || "",
                 subjectName: assigneeDisplay.assigneeLockedToOriginal ? assigneeDisplay.listedAssigneeName : assigneeName,
-                requestedBy: requesterName,
-                requestedByName: requesterName,
+                requestedBy: listedRequester.name,
+                requestedByName: listedRequester.name,
                 status: row.status || "Pending",
                 requestedDate: requestedAt,
             });
@@ -2017,6 +2041,11 @@ export const getTaskManagerNotifications = async (req, res) => {
             category: { $in: ["projectmanager", "projectcoordinator"] },
             status: "Active",
         }).select("empObjectId employeeId").lean();
+        try {
+            await attachWorkOrderProjectNames(tasks);
+        } catch (projectNameError) {
+            console.error("Work order project names failed:", projectNameError);
+        }
 
         return res.status(200).json({
             canSeeAllTasks: true,

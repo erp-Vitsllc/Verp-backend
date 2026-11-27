@@ -8,8 +8,10 @@ import Attendance from "../../models/Attendance.js";
 import AttendanceChangeRequest from "../../models/AttendanceChangeRequest.js";
 import { attendanceFactsByActionId } from "../../utils/loadAttendanceTaskFacts.js";
 import { billItemsByRequestId } from "../inventory/stockApproval.js";
-import { isWorkOrderRequestType } from "../../utils/employeeWorkflowTask.js";
+import { activeProjectCoordinator, isWorkOrderRequestType } from "../../utils/employeeWorkflowTask.js";
+import { projectTaskCompletionMessage } from "../../utils/workOrderProjectCompletion.js";
 import { workOrderNoInText } from "../../utils/workOrderNumber.js";
+import { projectNameForWorkOrder } from "../../utils/workOrderProjectNames.js";
 import { isAttendanceTaskType } from "../../utils/attendanceTaskCopy.js";
 import { isLeaveAttendanceTaskType } from "../../utils/ensureRequestTask.js";
 import { alignOpenLeaveAttendanceAssignees } from "../../utils/ensureOpenLeaveAttendanceTasks.js";
@@ -819,6 +821,13 @@ async function blockUntilSourceFinished(res, target, action = null) {
     return true;
 }
 
+async function blockOpenWorkOrderProject(res, action) {
+    const message = await projectTaskCompletionMessage(action);
+    if (!message) return false;
+    res.status(400).json({ message });
+    return true;
+}
+
 async function keepReassignmentVisible(task, target, { previous, newAssignee, reassigneeName, taskName, moduleName, noticeText = "" }) {
     if (!task) return;
     const watchers = [];
@@ -1180,7 +1189,8 @@ async function closeFlags(task, viewer, currentAssigneeId, assigneeEmpId, action
         flags.closeMessage = "There is no assignee. Reassign the task, or close it.";
     }
     const needsRequesterReview = general;
-    if (!needsRequesterReview) return flags;
+    let result = flags;
+    if (needsRequesterReview) {
     if (reviewPending) {
         flags.closeMessage = `${saved.completionRequestedByName || saved.returnAssigneeName || "The assignee"} completed this task. Approve it, or reject it with a reason. After you approve, you can close it.`;
     } else if (saved.reviewAccepted && open) {
@@ -1189,7 +1199,7 @@ async function closeFlags(task, viewer, currentAssigneeId, assigneeEmpId, action
     } else if (saved.reviewReturned && open) {
         flags.closeMessage = "This task was rejected and is open again for the assignee.";
     }
-    return {
+    result = {
         ...flags,
         canSubmitCompletion: false,
         canApproveCompletion: false,
@@ -1206,6 +1216,21 @@ async function closeFlags(task, viewer, currentAssigneeId, assigneeEmpId, action
         canCompleteGeneral: open && (viewerIsAssignee || viewer?.superUser) && !reviewPending && !saved.reviewAccepted,
         canApproveGeneral: reviewPending && (requesterViewer || viewer?.superUser),
         canRejectGeneral: reviewPending && (requesterViewer || viewer?.superUser),
+    };
+    }
+    let blockMessage = "";
+    try {
+        blockMessage = await projectTaskCompletionMessage(action);
+    } catch (blockError) {
+        console.error("Work order project completion check failed:", blockError);
+    }
+    if (!blockMessage) return result;
+    return {
+        ...result,
+        canCompleteGeneral: false,
+        canCloseUnassigned: false,
+        canCloseNow: false,
+        closeMessage: reviewPending ? result.closeMessage : blockMessage,
     };
 }
 
@@ -1412,12 +1437,19 @@ async function buildDetail(target, viewer) {
     const { byId, byCode } = peopleIndex(people);
     const assigneeEmp = byId.get(String(assigneeId || "")) || byCode.get(String(assigneeCode || "")) || null;
     const sourceRequesters = await sourceRequesterNameMap(action ? [action] : []);
-    const requesterName = displayRequesterName(
+    let requesterName = displayRequesterName(
         preferRequesterName(task?.requestedByName, action?.requestedByName),
         action,
         sourceRequesters,
     ) || "System";
-    const requester = await resolveTaskRequesterEmployee(task, personBaseName(requesterName) || requesterName);
+    let requester = await resolveTaskRequesterEmployee(task, personBaseName(requesterName) || requesterName);
+    if (!manual && isWorkOrderRequestType(action?.requestType)) {
+        const coordinator = await activeProjectCoordinator().catch(() => null);
+        if (coordinator?.name) {
+            requesterName = coordinator.name;
+            if (coordinator.employee) requester = coordinator.employee;
+        }
+    }
     let destination = manual
         ? moduleForText(task.taskName, task.description, task.taskType)
         : moduleForRequestType(action.requestType, `${action.extra1 || ""} ${action.extra2 || ""}`);
@@ -1665,12 +1697,16 @@ async function buildDetail(target, viewer) {
         console.error("Task waiting steps failed:", holdError);
     }
 
+    const workOrderNo = isWorkOrderRequestType(action?.requestType)
+        ? workOrderNoInText(action?.extra1, action?.extra2, action?.subjectName, task?.taskName, task?.description)
+        : "";
+    const projectName = await projectNameForWorkOrder(workOrderNo);
+
     return {
         actionId: manual ? `manual-${task._id}` : String(action._id),
         taskNumber,
-        workOrderNo: isWorkOrderRequestType(action?.requestType)
-            ? workOrderNoInText(action?.extra1, action?.extra2, action?.subjectName, task?.taskName, task?.description)
-            : "",
+        workOrderNo,
+        projectName,
         manual,
         workflowLocked,
         canReassign: viewerCanReassign(viewer, currentAssigneeId, assigneeEmpId),
@@ -2448,6 +2484,7 @@ async function closeTaskForRequester(res, target, viewer, noteText, taskKey) {
         res.status(400).json({ message: "This task is already closed." });
         return true;
     }
+    if (await blockOpenWorkOrderProject(res, target.action)) return true;
     if (await blockUntilSourceFinished(res, target)) return true;
     const stage = captureStageBeforeClose(task);
     const note = String(noteText || "").trim();
@@ -2608,6 +2645,7 @@ export const submitTaskCompletion = async (req, res) => {
             if (!viewer?.superUser && !viewerIsCurrentAssignee(viewer, current)) {
                 return res.status(403).json({ message: "Only the assignee can complete this task." });
             }
+            if (await blockOpenWorkOrderProject(res, target.action)) return;
             const requester = await resolveTaskRequesterEmployee(task);
             if (!requester?._id) {
                 return res.status(400).json({ message: "The original requester could not be found." });
@@ -2783,6 +2821,7 @@ export const reviewGeneralTask = async (req, res) => {
             if ((!saved.assigneeCleared && !keepAssignee) || task.status === "Completed") {
                 return res.status(400).json({ message: "Close is available after this task is approved, or when it has no assignee." });
             }
+            if (await blockOpenWorkOrderProject(res, target.action)) return;
             if (await blockUntilSourceFinished(res, target)) return;
             task.status = "Completed";
             task.closeRequest = {

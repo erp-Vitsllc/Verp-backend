@@ -187,11 +187,20 @@ test("a submitted inventory bill tells the next employee what to do", () => {
 test("a draft inventory bill tells the creator to submit it", () => {
     const description = composeTaskDescription({
         requestType: "Inventory Bill Draft",
-        extra1: "ABV123",
+        extra1: "Draft B",
         extra2: "Bill you created is on draft. Submit it.",
-        taskName: "ABV123",
+        taskName: "Bill drafted pending",
+        source: {
+            items: [
+                { name: "Cable Tray", code: "ITM-0012" },
+                { name: "Switch", code: "ITM-2" },
+            ],
+        },
     });
     assert.match(description, /What to do: Bill you created is on draft\. Submit it\./);
+    assert.match(description, /Bill: Draft B/);
+    assert.match(description, /Items:\nCable Tray — ITM-0012\nSwitch — ITM-2/);
+    assert.doesNotMatch(description, /Bill drafted pending/);
 });
 
 test("a handwritten task keeps its own description", () => {

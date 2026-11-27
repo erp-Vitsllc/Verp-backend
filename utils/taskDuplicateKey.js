@@ -96,6 +96,10 @@ export function activityLane(requestType, extra3) {
     if (type === "Vehicle Disposition Request" || type === "Vehicle Inspection") {
         return String(extra3 || "").trim();
     }
+    if (type === "Work Order Checklist") {
+        const id = String(meta?.checklistId || "").trim();
+        return id ? `checklist:${id}` : "";
+    }
     return "";
 }
 
@@ -105,6 +109,7 @@ export function activityExtra3Lock(requestType, extra3) {
     if (!raw) return "";
     const type = String(requestType || "");
     if (type === "Vehicle Disposition Request" || type === "Vehicle Inspection") return raw;
+    if (type === "Work Order Checklist" && activityLane(type, raw)) return raw;
     if (type === "Vehicle Service Request" && activityLane(type, raw)) return raw;
     return "";
 }

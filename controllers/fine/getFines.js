@@ -42,6 +42,8 @@ const FINE_LIST_SELECT = [
     'assetName',
     'projectId',
     'projectName',
+    'submittedTo',
+    'workflow',
 ].join(' ');
 
 function fillCompanyNameFromPopulate(fine) {
@@ -225,6 +227,8 @@ export const getFines = async (req, res) => {
             Fine.find(query)
                 .select(FINE_LIST_SELECT)
                 .populate('company', 'companyId _id name nickName')
+                .populate('submittedTo', 'name firstName lastName')
+                .populate('workflow.assignedTo', 'name firstName lastName')
                 .sort({ createdAt: -1 })
                 .skip(skip)
                 .limit(limitNum)

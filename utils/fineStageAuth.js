@@ -415,6 +415,77 @@ function viewerMatchesFlowchartHod(ctx, hod) {
 }
 
 /**
+ * Draft stays with the employee who created it until they submit.
+ * That opens one workflow task. Later stage syncs move the same task.
+ */
+export async function syncDraftFineSubmitTask(fines, { creatorId, requesterName } = {}) {
+    const list = (Array.isArray(fines) ? fines : [fines]).filter(Boolean);
+    if (!list.length) return;
+    const kind = fineDashboardRequest(list);
+    const primary = kind.primary || list[0];
+    if (String(primary?.fineStatus || '').trim() !== 'Draft') return;
+    const assignedTo = creatorId || primary.createdBy?._id || primary.createdBy;
+    if (!assignedTo) return;
+    const { syncDashboardAction } = await import('./syncDashboard.js');
+    const { requesterNameForActor } = await import('./employeeWorkflowTask.js');
+    const requester = String(requesterName || '').trim() || (await requesterNameForActor(assignedTo)) || '';
+    const fineNo = fineBaseId(primary.fineId) || primary.fineId || 'fine';
+    await syncDashboardAction({
+        requestId: primary._id,
+        requestType: kind.requestType,
+        assignedTo,
+        status: 'Pending',
+        subjectName: kind.isGroup ? kind.subjectName : undefined,
+        requestedByName: requester,
+        extra1: `Submit fine ${fineNo}`,
+        extra2: 'Fine you created is on draft. Submit it.',
+    });
+}
+
+/** Creator bell + workflow task for draft fines that never opened one. */
+export async function restoreMissingDraftFineNotifications(ctx) {
+    if (!ctx?.ok) return;
+    const creatorIds = [
+        ctx.portalUser?._id,
+        ctx.employee?._id,
+        ...(ctx.relevantIds || []),
+    ]
+        .map((id) => String(id || '').trim())
+        .filter((id) => /^[a-f\d]{24}$/i.test(id));
+    const unique = [...new Set(creatorIds)];
+    if (!unique.length) return;
+
+    const Fine = (await import('../models/Fine.js')).default;
+    const drafts = await Fine.find({
+        fineStatus: 'Draft',
+        createdBy: { $in: unique },
+    })
+        .select('_id fineId fineType fineStatus createdBy assignedEmployees')
+        .limit(80)
+        .lean();
+
+    const byBase = new Map();
+    for (const fine of drafts) {
+        const base = fineBaseId(fine.fineId) || String(fine._id);
+        const group = byBase.get(base) || [];
+        group.push(fine);
+        byBase.set(base, group);
+    }
+
+    for (const group of byBase.values()) {
+        try {
+            await syncDraftFineSubmitTask(group);
+        } catch (error) {
+            console.error(
+                '[restoreMissingDraftFineNotifications] Draft fine task failed:',
+                group[0]?.fineId,
+                error?.message || error,
+            );
+        }
+    }
+}
+
+/**
  * Repair missing / stale Fine inbox rows for the current viewer.
  * Includes flowchart HODs (Accounts especially) who can approve but are not
  * stored on workflow.assignedTo / DashboardAction.assignedTo.

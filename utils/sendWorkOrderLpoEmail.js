@@ -1,11 +1,6 @@
-import nodemailer from 'nodemailer';
 import EmployeeBasic from '../models/EmployeeBasic.js';
-import { resolveEmployeeEmail } from './resolveEmployeeEmail.js';
-import { workOrderDetailsPath } from './workOrderPath.js';
-
-function personName(employee) {
-    return [employee?.firstName, employee?.lastName].filter(Boolean).join(' ').trim() || 'there';
-}
+import { sendWorkOrderNoticeEmail } from './sendProjectTaskEmail.js';
+import { workOrderNoInText } from './workOrderNumber.js';
 
 export function lpoNotFilledNotice({ senderName, workOrderNo, customer }) {
     const who = senderName || 'An employee';
@@ -52,10 +47,6 @@ export function lpoAttachmentNotice(workOrderNo) {
     };
 }
 
-function appOrigin() {
-    return String(process.env.FRONTEND_URL || process.env.CLIENT_URL || 'http://localhost:3000').replace(/\/$/, '');
-}
-
 export async function sendWorkOrderAttachmentRequestEmail({
     employee,
     workOrderNo,
@@ -65,98 +56,37 @@ export async function sendWorkOrderAttachmentRequestEmail({
     if (!employee) {
         return { emailed: false, email: '', message: notice.message, notice };
     }
-    const { email } = resolveEmployeeEmail(employee);
-    if (!email) {
-        return {
-            emailed: false,
-            email: '',
-            message: 'Project coordinator has no company email. The notification was still saved.',
-            notice,
-        };
-    }
-    const user = process.env.EMAIL_USER;
-    const pass = process.env.EMAIL_PASS;
-    if (!user || !pass) {
-        return {
-            emailed: false,
-            email,
-            message: 'Email is not configured. The notification was still saved.',
-            notice,
-        };
-    }
-    const transporter = nodemailer.createTransport({
-        host: process.env.SMTP_HOST || 'smtp.office365.com',
-        port: Number(process.env.SMTP_PORT || 587),
-        secure: false,
-        auth: { user, pass },
+    const sent = await sendWorkOrderNoticeEmail({
+        employee,
+        workOrderId,
+        workOrderNo,
+        notificationTitle: notice.extra1,
+        taskName: notice.extra1,
+        taskDescription: notice.extra2,
+        remarks: notice.message,
+        section: 'lpo',
+        missingEmailMessage: 'Project coordinator has no company email. The notification was still saved.',
     });
-    const name = [employee.firstName, employee.lastName].filter(Boolean).join(' ').trim() || 'Project Coordinator';
-    const link = `${appOrigin()}${workOrderDetailsPath(workOrderId, 'lpo')}`;
-    await transporter.sendMail({
-        from: `"VERP" <${user}>`,
-        to: email,
-        subject: notice.subject,
-        text: [
-            `Hello ${name},`,
-            '',
-            notice.message,
-            'Open the work order and upload the attachment in LPO Details:',
-            link,
-            '',
-            'VERP',
-        ].join('\n'),
-    });
-    return { emailed: true, email, message: `Email sent to ${email}.`, notice };
+    return { ...sent, notice };
 }
 
 export async function sendWorkOrderFollowUpEmail({ employee, notice, workOrderId, section = 'lpo' }) {
-    if (!employee) {
-        return { emailed: false, email: '', message: notice?.message || 'No employee is set for this notice.' };
-    }
-    const { email } = resolveEmployeeEmail(employee);
-    if (!email) {
-        return {
-            emailed: false,
-            email: '',
-            message: 'The employee has no company email. The notification was still saved.',
-        };
-    }
-    const user = process.env.EMAIL_USER;
-    const pass = process.env.EMAIL_PASS;
-    if (!user || !pass) {
-        return {
-            emailed: false,
-            email,
-            message: 'Email is not configured. The notification was still saved.',
-        };
-    }
-    const transporter = nodemailer.createTransport({
-        host: process.env.SMTP_HOST || 'smtp.office365.com',
-        port: Number(process.env.SMTP_PORT || 587),
-        secure: false,
-        auth: { user, pass },
+    const workOrderNo = workOrderNoInText(notice?.extra1, notice?.extra2, notice?.message, notice?.subject);
+    return sendWorkOrderNoticeEmail({
+        employee,
+        workOrderId,
+        workOrderNo,
+        notificationTitle: notice?.extra1 || notice?.subject || notice?.message,
+        taskName: notice?.extra1 || notice?.message,
+        taskDescription: notice?.extra2 || notice?.message,
+        remarks: notice?.message,
+        section,
     });
-    const name = personName(employee);
-    const link = `${appOrigin()}${workOrderDetailsPath(workOrderId, section)}`;
-    await transporter.sendMail({
-        from: `"VERP" <${user}>`,
-        to: email,
-        subject: notice.subject,
-        text: [
-            `Hello ${name},`,
-            '',
-            notice.message,
-            notice.extra2,
-            link,
-            '',
-            'VERP',
-        ].join('\n'),
-    });
-    return { emailed: true, email, message: `Email sent to ${email}.` };
 }
 
 export async function sendWorkOrderLpoNotFilledEmail({
     salespersonId,
+    workOrderId,
     workOrderNo,
     customer,
     senderName,
@@ -175,46 +105,17 @@ export async function sendWorkOrderLpoNotFilledEmail({
         return { emailed: false, email: '', message: 'Salesperson was not found.' };
     }
 
-    const { email } = resolveEmployeeEmail(employee);
-    if (!email) {
-        return {
-            emailed: false,
-            email: '',
-            message: 'Salesperson has no company email. The notification was still saved.',
-        };
-    }
-
-    const user = process.env.EMAIL_USER;
-    const pass = process.env.EMAIL_PASS;
-    if (!user || !pass) {
-        return {
-            emailed: false,
-            email,
-            message: 'Email is not configured. The notification was still saved.',
-        };
-    }
-
-    const transporter = nodemailer.createTransport({
-        host: process.env.SMTP_HOST || 'smtp.office365.com',
-        port: Number(process.env.SMTP_PORT || 587),
-        secure: false,
-        auth: { user, pass },
-    });
-
-    const name = personName(employee);
     const notice = lpoNotFilledNotice({ senderName, workOrderNo, customer });
-    await transporter.sendMail({
-        from: `"VERP" <${user}>`,
-        to: email,
-        subject: notice.subject,
-        text: [
-            `Hello ${name},`,
-            '',
-            notice.message,
-            'LPO was marked Not required. The attachment is included with this email.',
-            '',
-            'VERP',
-        ].join('\n'),
+    return sendWorkOrderNoticeEmail({
+        employee,
+        workOrderId,
+        workOrderNo,
+        notificationTitle: notice.extra1,
+        taskName: notice.extra1,
+        taskDescription: notice.extra2,
+        remarks: `${notice.message} The attachment is included with this email.`,
+        assignedBy: senderName,
+        section: 'lpo',
         attachments: attachment?.buffer
             ? [{
                 filename: attachment.name || 'attachment',
@@ -222,7 +123,6 @@ export async function sendWorkOrderLpoNotFilledEmail({
                 contentType: attachment.mime || 'application/octet-stream',
             }]
             : [],
+        missingEmailMessage: 'Salesperson has no company email. The notification was still saved.',
     });
-
-    return { emailed: true, email, message: `Email sent to ${email}.` };
 }

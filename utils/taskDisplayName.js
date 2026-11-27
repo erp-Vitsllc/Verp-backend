@@ -284,28 +284,27 @@ function vehicleLines({ vehicleNo, assetNo, assetName, subjectEmployeeId, extra2
     return [name, code];
 }
 
-function inventoryBillTitle(body, stored, subjectName) {
-    const raw = text(body).replace(/^bill edit\s*[·•-]\s*/i, "")
-        || text(subjectName)
-        || text(stored).replace(/^bill edit\s*[·•-]\s*/i, "");
-    return raw || "Draft bill";
+function inventoryBillNumber(body, stored, subjectName) {
+    return text(body).replace(/^(bill edit|delivery edit|delivery approval)\s*[·•-]\s*/i, "")
+        || text(subjectName).replace(/^(bill edit|delivery edit|delivery approval)\s*[·•-]\s*/i, "")
+        || text(stored).replace(/^(bill edit|delivery edit|delivery approval)\s*[·•-]\s*/i, "");
 }
 
-function inventoryItemLines(source) {
-    const rows = (Array.isArray(source?.items) ? source.items : [])
-        .map((row) => ({ name: text(row?.name), code: text(row?.code) }))
-        .filter((row) => row.name || row.code);
-    if (!rows.length) return [];
-    if (rows.length === 1) {
-        const { name, code } = rows[0];
-        if (name && code && name.toLowerCase() !== code.toLowerCase()) return [name, code];
-        return [name || code];
-    }
-    return rows.map((row) => (
-        row.name && row.code && row.name.toLowerCase() !== row.code.toLowerCase()
-            ? `${row.name} — ${row.code}`
-            : (row.name || row.code)
-    ));
+function inventoryBillTitle(body, stored, subjectName, extra2) {
+    if (/on draft/i.test(text(extra2))) return "Bill drafted pending";
+    return inventoryBillNumber(body, stored, subjectName) || "Draft bill";
+}
+
+/** Item lines for the task description. One line per bill line. */
+export function inventoryBillItemLines(source) {
+    return (Array.isArray(source?.items) ? source.items : [])
+        .map((row) => {
+            const name = text(row?.name);
+            const code = text(row?.code);
+            if (name && code && name.toLowerCase() !== code.toLowerCase()) return `${name} — ${code}`;
+            return name || code;
+        })
+        .filter(Boolean);
 }
 
 function joinedTitle(parts) {
@@ -473,7 +472,7 @@ export function formatTaskDisplayParts({
     }
 
     if (typeKey === "inventory bill draft") {
-        return uniqueLines(inventoryBillTitle(body, stored, subjectName), inventoryItemLines(source));
+        return uniqueLines(inventoryBillTitle(body, stored, subjectName, secondary));
     }
 
     if (typeKey === "payment approval") {

@@ -312,7 +312,7 @@ test("a task typed by hand keeps the name that was entered", () => {
     );
 });
 
-test("a draft inventory bill is named by its bill number", () => {
+test("a draft inventory bill is named Bill drafted pending", () => {
     assert.deepEqual(
         formatTaskDisplayParts({
             requestType: "Inventory Bill Draft",
@@ -320,19 +320,20 @@ test("a draft inventory bill is named by its bill number", () => {
             extra2: "Bill you created is on draft. Submit it.",
             subjectName: "ABV123",
         }),
-        { title: "ABV123", subject: "" },
+        { title: "Bill drafted pending", subject: "" },
     );
 });
 
-test("a draft inventory bill shows the item name and item code under the bill number", () => {
+test("a draft inventory bill keeps the item list out of the task name", () => {
     assert.deepEqual(
         formatTaskDisplayParts({
             requestType: "Inventory Bill Draft",
             extra1: "Draft B",
+            extra2: "Bill you created is on draft. Submit it.",
             subjectName: "Draft B",
             source: { items: [{ name: "Cable Tray", code: "ITM-0012" }] },
         }),
-        { title: "Draft B", subject: "Cable Tray\nITM-0012" },
+        { title: "Bill drafted pending", subject: "" },
     );
     assert.deepEqual(
         formatTaskDisplayParts({
@@ -345,7 +346,7 @@ test("a draft inventory bill shows the item name and item code under the bill nu
                 ],
             },
         }),
-        { title: "123456", subject: "Cable — ITM-1\nSwitch — ITM-2" },
+        { title: "123456", subject: "" },
     );
 });
 

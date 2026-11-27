@@ -1,5 +1,6 @@
 import DashboardAction from "../models/DashboardAction.js";
 import EmployeeBasic from "../models/EmployeeBasic.js";
+import Flowchart from "../models/Flowchart.js";
 import TaskManagerTask from "../models/TaskManagerTask.js";
 import { isGeneralHubRequestType } from "./employeeHubRequestTypes.js";
 import { personRequesterName } from "./vehicleServiceNotificationCopy.js";
@@ -10,6 +11,8 @@ export const EMPLOYEE_WORKFLOW_TYPES = new Set([
     "Fine",
     "Group Fine Request",
     "Loan",
+    "Work Order Project",
+    "Work Order Checklist",
     "Work Order LPO",
     "Work Order LPO Attachment",
     "Work Order LPO Approval",
@@ -29,10 +32,9 @@ export function isWorkOrderRequestType(requestType) {
     return String(requestType || "").trim().startsWith("Work Order ");
 }
 
-/** Inventory bills and work orders are Project tasks in Task Manager. */
+/** Work-order steps are Project tasks. Bills stay workflow tasks. */
 export function workflowTaskType(requestType) {
-    const type = String(requestType || "").trim();
-    if (type === "Inventory Bill Draft" || isWorkOrderRequestType(type)) return "Project Task";
+    if (isWorkOrderRequestType(requestType)) return "Project Task";
     return "Workflow Task";
 }
 
@@ -132,9 +134,10 @@ export async function requesterNameForActor(actorId) {
  * The requester stays the employee who started it.
  * A later assignee change is written on the task history.
  */
-export async function ensureEmployeeWorkflowTask(action, assignee, requestedByName) {
+export async function ensureEmployeeWorkflowTask(action, assignee, requestedByName, options = {}) {
     if (!action?._id || !action.assignedTo) return null;
-    if (!employeeWorkflowType(action.requestType)) return null;
+    const forceWorkflow = Boolean(options?.forceWorkflow);
+    if (!forceWorkflow && !employeeWorkflowType(action.requestType)) return null;
 
     const assigneeName = personName(assignee);
     const requester = personRequesterName(requestedByName)
@@ -152,7 +155,7 @@ export async function ensureEmployeeWorkflowTask(action, assignee, requestedByNa
         );
     }
 
-    const taskType = workflowTaskType(action.requestType);
+    const taskType = forceWorkflow ? "Workflow Task" : workflowTaskType(action.requestType);
     if (!keep) {
         return TaskManagerTask.create({
             sourceDashboardActionId: action._id,
@@ -198,6 +201,31 @@ export async function ensureEmployeeWorkflowTask(action, assignee, requestedByNa
     return keep;
 }
 
+export async function finishWorkflowTasksForActions(actionIds, {
+    taskStatus = "Completed",
+    event = "Completed",
+    detail = "",
+    actorName = "",
+} = {}) {
+    const ids = (Array.isArray(actionIds) ? actionIds : []).filter(Boolean);
+    if (!ids.length) return;
+    const tasks = await TaskManagerTask.find({
+        sourceDashboardActionId: { $in: ids },
+        status: { $nin: ["Completed", "Cancelled", "Rejected"] },
+    });
+    const actor = clean(actorName) || "Employee";
+    for (const task of tasks) {
+        task.status = taskStatus;
+        pushTaskHistory(task, {
+            event,
+            detail: clean(detail) || (taskStatus === "Rejected" ? "The request was rejected." : "The request is completed."),
+            actorName: actor,
+            createdAt: new Date(),
+        });
+        await task.save();
+    }
+}
+
 export async function finishEmployeeWorkflowTasks(requestId, requestType, {
     taskStatus = "Completed",
     event = "Completed",
@@ -223,4 +251,28 @@ export async function finishEmployeeWorkflowTasks(requestId, requestType, {
         });
         await task.save();
     }
+}
+
+/** The active flowchart project coordinator, used as the requester on every project task. */
+export async function activeProjectCoordinator() {
+    const row = await Flowchart.findOne({ category: "projectcoordinator", status: "Active" })
+        .sort({ updatedAt: -1 })
+        .select("empObjectId employeeId employeeName")
+        .lean();
+    if (!row) return null;
+    const id = String(row.empObjectId || "").trim();
+    let employee = null;
+    if (/^[a-f\d]{24}$/i.test(id)) {
+        employee = await EmployeeBasic.findById(id)
+            .select("firstName lastName profilePicture employeeId designation companyEmail workEmail phone")
+            .lean();
+    }
+    if (!employee && row.employeeId) {
+        employee = await EmployeeBasic.findOne({ employeeId: row.employeeId })
+            .select("firstName lastName profilePicture employeeId designation companyEmail workEmail phone")
+            .lean();
+    }
+    const name = personName(employee) || String(row.employeeName || "").trim();
+    if (!name) return null;
+    return { name, photo: employee?.profilePicture || "", employee };
 }

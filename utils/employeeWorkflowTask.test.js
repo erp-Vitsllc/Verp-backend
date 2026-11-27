@@ -9,8 +9,8 @@ import {
     workflowTaskType,
 } from "./employeeWorkflowTask.js";
 
-test("an inventory bill notification is a project task", () => {
-    assert.equal(workflowTaskType("Inventory Bill Draft"), "Project Task");
+test("an inventory bill notification stays a workflow task", () => {
+    assert.equal(workflowTaskType("Inventory Bill Draft"), "Workflow Task");
     assert.equal(workflowTaskType("Fine"), "Workflow Task");
 });
 
@@ -27,6 +27,8 @@ test("a work order notification is a project task", () => {
     assert.equal(workflowTaskType("Work Order MR"), "Project Task");
     assert.equal(employeeWorkflowType("Work Order MR 2"), true);
     assert.equal(workflowTaskType("Work Order MR 2"), "Project Task");
+    assert.equal(workflowTaskType("Work Order Project"), "Project Task");
+    assert.equal(employeeWorkflowType("Work Order Project"), true);
 });
 
 test("draft bill, fine, loan, and advance rows are employee workflow tasks", () => {

@@ -8,6 +8,11 @@ import {
     personRequesterName,
     requesterNameFromService,
 } from './vehicleServiceNotificationCopy.js';
+import {
+    ensureEmployeeWorkflowTask,
+    finishWorkflowTasksForActions,
+} from './employeeWorkflowTask.js';
+import { isPendingVehicleService } from './vehicleServicePendingStatus.js';
 
 function parseDashboardMeta(extra3) {
     if (!extra3) return null;
@@ -183,7 +188,7 @@ export async function refreshAdminOfficerServiceTrack({
         || personRequesterName(requestedByName)
         || 'System';
 
-    await DashboardAction.findOneAndUpdate(
+    const savedTrack = await DashboardAction.findOneAndUpdate(
         trackFilter,
         {
             $set: {
@@ -205,6 +210,7 @@ export async function refreshAdminOfficerServiceTrack({
         },
         { upsert: true, new: true, setDefaultsOnInsert: true },
     );
+    await keepAdminOfficerWorkflowTask(savedTrack, adminOfficer);
 
     await closeDuplicateAdminVehicleServicePendingRows(asset._id, serviceRecordId);
 
@@ -257,6 +263,71 @@ export async function healDuplicateAdminVehicleServiceInboxRows() {
     }
 
     await healAdminMisroutedAccountsBillingNotifications();
+}
+
+/**
+ * Open the Admin Officer bell for every fleet service the vehicle list still calls Pending.
+ * Create/initiate already does this once; this covers services whose track was never saved.
+ * No email — opening the bell must not send a new message for an old service.
+ */
+export async function restoreMissingAdminOfficerServiceTracks() {
+    const adminOfficer = await getDepartmentHOD('admincontroller');
+    if (!adminOfficer?._id) return;
+
+    const [assets, openTracks] = await Promise.all([
+        AssetItem.find({
+            plateNumber: { $exists: true, $nin: [null, ''] },
+            'services.0': { $exists: true },
+        })
+            .select('_id plateNumber services activeServiceWorkflow assignedTo')
+            .populate('assignedTo', 'firstName lastName employeeId')
+            .lean(),
+        DashboardAction.find({
+            requestType: 'Vehicle Service Request',
+            status: 'Pending',
+            extra3: { $regex: '"adminOfficerServiceTrack"\\s*:\\s*true', $options: 'i' },
+        })
+            .select('requestId extra3')
+            .lean(),
+    ]);
+
+    const openKeys = new Set();
+    openTracks.forEach((row) => {
+        const meta = parseDashboardMeta(row.extra3);
+        const serviceId = String(meta?.serviceRecordId || '').trim();
+        const requestId = String(row.requestId || '').trim();
+        if (serviceId && requestId) openKeys.add(`${requestId}:${serviceId}`);
+    });
+
+    for (const asset of assets) {
+        const services = Array.isArray(asset.services) ? asset.services : [];
+        for (const service of services) {
+            const serviceType = String(service?.serviceType || '').trim();
+            if (!serviceType || serviceType === 'Car Wash' || !service?._id) continue;
+            if (!isPendingVehicleService(asset, service)) continue;
+            const key = `${asset._id}:${service._id}`;
+            if (openKeys.has(key)) continue;
+            openKeys.add(key);
+            let initiated = false;
+            try {
+                const remark = typeof service.remark === 'string' ? JSON.parse(service.remark) : service.remark;
+                initiated = Boolean(String(remark?.oilServiceInitiatedAt || remark?.assignmentSubmittedAt || '').trim())
+                    || String(remark?.requestStatus || '').toLowerCase() === 'submitted';
+            } catch {
+                initiated = false;
+            }
+            await notifyAdminOfficerOnVehicleServiceCreated({
+                asset,
+                serviceRecordId: service._id,
+                serviceType,
+                requestedByName: requesterNameFromService(service) || 'System',
+                sendEmail: false,
+                notifyAssignee: false,
+                event: initiated ? 'initiated' : 'created',
+                serviceReqNo: service.serviceReqNo || '',
+            });
+        }
+    }
 }
 
 /** Close Make Payment / Zoho bells wrongly assigned to Admin Officer (Accounts-only). */
@@ -375,7 +446,7 @@ export async function notifyAdminOfficerOnVehicleServiceCreated({
             }
         })();
 
-    await DashboardAction.findOneAndUpdate(
+    const savedTrack = await DashboardAction.findOneAndUpdate(
         {
             requestId: asset._id,
             assignedTo: adminOfficer._id,
@@ -403,6 +474,7 @@ export async function notifyAdminOfficerOnVehicleServiceCreated({
         },
         { upsert: true, new: true, setDefaultsOnInsert: true },
     );
+    await keepAdminOfficerWorkflowTask(savedTrack, adminOfficer);
 
     await closeDuplicateAdminVehicleServicePendingRows(asset._id, serviceRecordId);
 
@@ -504,4 +576,19 @@ export async function closeAdminOfficerServiceTrackNotification({
             ...(requestedByName ? { requestedByName } : {}),
         },
     );
+    await finishWorkflowTasksForActions(idsToClose, {
+        taskStatus: 'Completed',
+        event: 'Completed',
+        detail: comment || 'Service completed',
+        actorName: requestedByName || 'Admin Officer',
+    });
+}
+
+async function keepAdminOfficerWorkflowTask(action, adminOfficer) {
+    if (!action?._id || !adminOfficer?._id) return;
+    try {
+        await ensureEmployeeWorkflowTask(action, adminOfficer, action.requestedByName, { forceWorkflow: true });
+    } catch (error) {
+        console.error('[VehicleService] Admin workflow task failed:', error);
+    }
 }

@@ -5,6 +5,11 @@ import Flowchart from '../models/Flowchart.js';
 import CrmCustomer from '../models/crm/CrmCustomer.js';
 import InventoryVendor from '../models/inventory/InventoryVendor.js';
 import InventoryItem from '../models/inventory/InventoryItem.js';
+import ItemCategory from '../models/inventory/ItemCategory.js';
+import ItemSubcategory from '../models/inventory/ItemSubcategory.js';
+import ItemBrand from '../models/inventory/ItemBrand.js';
+import ItemOption from '../models/inventory/ItemOption.js';
+import { httpError, nameKey } from './inventory/http.js';
 import { dubaiDateKey, formatWorkOrderNo, nextSequenceForYear, workOrderYear } from '../utils/workOrderNumber.js';
 import {
     coordinatorFollowUpNotice,
@@ -16,9 +21,17 @@ import {
     sendWorkOrderLpoNotFilledEmail,
 } from '../utils/sendWorkOrderLpoEmail.js';
 import { syncDashboardAction } from '../utils/syncDashboard.js';
+import { listedProjectTaskNumber, sendProjectCoordinatorTaskEmail } from '../utils/sendProjectTaskEmail.js';
+import { oneTaskNumber } from '../utils/taskNumberStore.js';
 import DashboardAction from '../models/DashboardAction.js';
 import TaskManagerTask from '../models/TaskManagerTask.js';
 import { finishEmployeeWorkflowTasks } from '../utils/employeeWorkflowTask.js';
+import {
+    pendingTaskLabel,
+    pendingTaskLine,
+    taskIsFinished,
+    workOrderStepIsOpen,
+} from '../utils/workOrderProjectCompletion.js';
 import { isJwtSystemSuperUser } from '../utils/systemSuperUser.js';
 import { fetchZohoEstimateByNumber, fetchZohoEstimatePdf } from '../services/zohoService.js';
 import {
@@ -99,7 +112,14 @@ function cleanMoney(value) {
     return Math.round(amount * 100) / 100;
 }
 
-function readAttachment(file, { required = false } = {}) {
+const LPO_PDF_MAX_BYTES = 5 * 1024 * 1024;
+
+function isPdfAttachment(name, mime) {
+    if (!/\.pdf$/i.test(name)) return false;
+    return !mime || mime === 'application/octet-stream' || mime === 'application/pdf' || mime === 'application/x-pdf';
+}
+
+function readAttachment(file, { required = false, pdfOnly = false, maxBytes = 4 * 1024 * 1024 } = {}) {
     if (!file || typeof file !== 'object') {
         return required ? { error: 'Attachment is required' } : null;
     }
@@ -110,15 +130,21 @@ function readAttachment(file, { required = false } = {}) {
     if (!name || !payload) {
         return required ? { error: 'Attachment is required' } : null;
     }
-    if (!ATTACHMENT_EXT.test(name) && !ATTACHMENT_MIME.has(mime)) {
+    if (pdfOnly) {
+        if (!isPdfAttachment(name, mime)) return { error: 'Attachment must be a PDF' };
+    } else if (!ATTACHMENT_EXT.test(name) && !ATTACHMENT_MIME.has(mime)) {
         return { error: 'Attach a PDF, image, Word, or Excel file' };
     }
     if (!/^[A-Za-z0-9+/=]+$/.test(payload)) {
         return { error: 'Attachment could not be read' };
     }
     const buffer = Buffer.from(payload, 'base64');
-    if (!buffer.length || buffer.length > 4 * 1024 * 1024) {
-        return { error: 'Attachment must be 4 MB or smaller' };
+    if (pdfOnly && !buffer.subarray(0, Math.min(buffer.length, 1024)).includes(Buffer.from('%PDF'))) {
+        return { error: 'Attachment must be a PDF' };
+    }
+    if (!buffer.length || buffer.length > maxBytes) {
+        const limitMb = Math.round(maxBytes / (1024 * 1024));
+        return { error: `Attachment must be ${limitMb} MB or smaller` };
     }
     return { name, mime, data: payload, bytes: buffer.length, buffer };
 }
@@ -135,6 +161,20 @@ async function closeLpoNotFilledNotice(order) {
     }
 }
 
+const PROJECT_TASK_REQUEST = 'Work Order Project';
+const CHECKLIST_REQUEST = 'Work Order Checklist';
+const WORK_ORDER_CHECKLIST = [
+    { id: 'create', label: 'Work order create' },
+    { id: 'sales', label: 'Sales kick off' },
+    { id: 'mom', label: 'MOM' },
+    { id: 'boq', label: 'Actual BOQ' },
+    { id: 'budget', label: 'Budget' },
+    { id: 'lpo', label: 'LPO to vendor' },
+    { id: 'delivery', label: 'Delivery' },
+    { id: 'bill', label: 'Bill entry' },
+    { id: 'review', label: 'Budget review' },
+    { id: 'completion', label: 'Completion' },
+];
 const ATTACHMENT_REQUEST = 'Work Order LPO Attachment';
 const ACTUAL_BOQ_REQUEST = 'Work Order Actual BOQ';
 const ACTUAL_BOQ_UPDATE_REQUEST = 'Work Order Actual BOQ Update';
@@ -456,6 +496,84 @@ async function openSalespersonFollowUp(order, senderName) {
     return { emailed, email, message };
 }
 
+async function ensureCoordinatorProjectTask(order) {
+    const coordinator = await findProjectCoordinator();
+    if (!coordinator?._id || !order?._id) return;
+    const coordinatorName = [coordinator.firstName, coordinator.lastName].filter(Boolean).join(' ').trim()
+        || await projectCoordinatorName();
+    const number = order.workOrderNo || '';
+    await syncDashboardAction({
+        requestId: order._id,
+        requestType: PROJECT_TASK_REQUEST,
+        assignedTo: coordinator._id,
+        status: 'Pending',
+        subjectName: order.customer || '',
+        requestedByName: coordinatorName,
+        extra1: 'New work order created — Work order create',
+        extra2: number,
+        extra3: JSON.stringify({ path: workOrderDetailsPath(order._id, 'overview') }),
+    });
+    const action = await DashboardAction.findOne({
+        requestId: order._id,
+        requestType: PROJECT_TASK_REQUEST,
+        status: 'Pending',
+    }).sort({ updatedAt: -1 });
+    if (!action) return;
+    const workflow = await TaskManagerTask.findOne({
+        sourceDashboardActionId: action._id,
+        status: { $nin: ['Cancelled'] },
+    }).sort({ updatedAt: -1 });
+    const storedNumber = await oneTaskNumber({
+        actionId: String(action._id),
+        requestDate: action.requestedDate || new Date(),
+    });
+    if (workflow) {
+        if (storedNumber && !String(workflow.taskNumber || '').trim()) workflow.taskNumber = storedNumber;
+        if (workflow.taskType !== 'Project Task') workflow.taskType = 'Project Task';
+        await workflow.save();
+    }
+    try {
+        await sendProjectCoordinatorTaskEmail({
+            employee: coordinator,
+            order,
+            taskNumber: listedProjectTaskNumber(order.workOrderNo, storedNumber),
+            taskName: 'New work order created — Work order create',
+            taskStatus: 'Pending',
+            assignedBy: coordinatorName,
+            assignedTo: coordinatorName,
+            actionId: String(action._id),
+            remarks: `Created and assigned to ${coordinatorName}.`,
+        });
+    } catch (error) {
+        console.error('Project coordinator task email failed:', error);
+    }
+}
+
+async function ensureChecklistTasks(order) {
+    const coordinator = await findProjectCoordinator();
+    if (!coordinator?._id || !order?._id) return;
+    const coordinatorName = [coordinator.firstName, coordinator.lastName].filter(Boolean).join(' ').trim()
+        || await projectCoordinatorName();
+    const number = order.workOrderNo || '';
+    for (const item of WORK_ORDER_CHECKLIST) {
+        if (item.id === 'create') continue;
+        await syncDashboardAction({
+            requestId: order._id,
+            requestType: CHECKLIST_REQUEST,
+            assignedTo: coordinator._id,
+            status: 'Pending',
+            subjectName: order.customer || '',
+            requestedByName: coordinatorName,
+            extra1: item.label,
+            extra2: number,
+            extra3: JSON.stringify({
+                checklistId: item.id,
+                path: workOrderDetailsPath(order._id, 'check-list'),
+            }),
+        });
+    }
+}
+
 async function openCoordinatorFollowUp(order, senderName) {
     const notice = coordinatorFollowUpNotice(order.workOrderNo);
     const coordinator = await findProjectCoordinator();
@@ -747,9 +865,9 @@ function storedApprovalFile(order) {
     };
 }
 
-function readOptionalFile(raw) {
+function readOptionalFile(raw, options = {}) {
     if (!raw) return null;
-    const file = readAttachment(raw, { required: false });
+    const file = readAttachment(raw, { required: false, ...options });
     if (!file) return null;
     if (file.error) return file;
     return file;
@@ -780,7 +898,7 @@ function readLpoUpdate(body, order, { draft = false } = {}) {
     }
     if (lpoDate && lpoDate > dubaiDateKey()) return { error: 'LPO date cannot be after today' };
     if (lpoDate && !/^\d{4}-\d{2}-\d{2}$/.test(lpoDate)) return { error: 'LPO date is not valid' };
-    const uploaded = readOptionalFile(body?.lpo?.attachment);
+    const uploaded = readOptionalFile(body?.lpo?.attachment, { pdfOnly: true, maxBytes: LPO_PDF_MAX_BYTES });
     if (uploaded?.error) return { error: uploaded.error };
     const file = uploaded || storedApprovalFile(order);
     if (!draft && (!lpoNo || !/^\d{4}-\d{2}-\d{2}$/.test(lpoDate) || !(lpoValue > 0) || !file?.data)) {
@@ -1059,18 +1177,35 @@ async function saveActualBoq(req, res, order, actorName) {
     if (!actor?._id) return res.status(400).json({ message: 'Your employee record is required to save this actual BOQ' });
 
     const submitting = Boolean(req.body?.submitActualBoq);
+    let savedTables = tables;
     if (submitting) {
         const gaps = boqTableGaps(tables);
         if (gaps) return res.status(400).json({ message: gaps });
+        try {
+            savedTables = await lockExistingBoqGroups(tables);
+        } catch (error) {
+            return res.status(error?.status || 400).json({ message: error?.message || 'Choose an existing category and subcategory.' });
+        }
     }
-    const manager = submitting ? await findProjectManager() : null;
-    if (submitting && !manager?._id) {
+    let storedTables = savedTables;
+    let pendingNewItems = 0;
+    if (submitting) {
+        const marked = await markPurchaserNewItems(savedTables);
+        storedTables = marked.tables;
+        pendingNewItems = marked.pending;
+    }
+    const purchaser = submitting && pendingNewItems ? await purchaseOfficerRecord() : null;
+    const manager = submitting && !pendingNewItems ? await findProjectManager() : null;
+    if (submitting && pendingNewItems && !purchaser?.employee?._id) {
+        return res.status(400).json({ message: 'Assign an active Purchase Officer on the flowchart before submitting a new item.' });
+    }
+    if (submitting && !pendingNewItems && !manager?._id) {
         return res.status(400).json({ message: 'Assign an active Project Manager on the flowchart before submitting the actual BOQ.' });
     }
 
     order.actualBoq = {
         status: submitting ? 'pending' : 'draft',
-        tables,
+        tables: storedTables,
         requestedByName: actorName,
         requestedById: String(actor._id),
         requestedAt: new Date(),
@@ -1082,14 +1217,26 @@ async function saveActualBoq(req, res, order, actorName) {
     order.markModified('actualBoq');
     await order.save();
 
-    const assignee = submitting ? manager : actor;
+    const assignee = submitting ? (pendingNewItems ? purchaser.employee : manager) : actor;
+    const purchaserName = String(
+        purchaser?.officer?.employeeName
+        || [purchaser?.employee?.firstName, purchaser?.employee?.lastName].filter(Boolean).join(' ')
+        || 'the purchaser',
+    ).trim();
     const notice = submitting
-        ? {
-            extra1: `Approve the actual BOQ on ${order.workOrderNo}`,
-            extra2: `${actorName} submitted the actual BOQ. Approve it, or reject with a description.`,
-            subject: `${order.workOrderNo}: actual BOQ approval`,
-            message: `Approve the actual BOQ on ${order.workOrderNo}`,
-        }
+        ? (pendingNewItems
+            ? {
+                extra1: `Approve the actual BOQ on ${order.workOrderNo}`,
+                extra2: `${actorName} added a new item. Approve that item on Item Master first, then approve the actual BOQ.`,
+                subject: `${order.workOrderNo}: actual BOQ approval`,
+                message: `New items are pending for ${purchaserName}. Approve them on Item Master before the actual BOQ.`,
+            }
+            : {
+                extra1: `Approve the actual BOQ on ${order.workOrderNo}`,
+                extra2: `${actorName} submitted the actual BOQ. Approve it, or reject with a description.`,
+                subject: `${order.workOrderNo}: actual BOQ approval`,
+                message: `Approve the actual BOQ on ${order.workOrderNo}`,
+            })
         : {
             extra1: `Actual BOQ draft on ${order.workOrderNo}`,
             extra2: `${actorName} saved an actual BOQ draft. Requester and assignee are the same.`,
@@ -1113,7 +1260,7 @@ async function saveActualBoq(req, res, order, actorName) {
     if (submitting) {
         try {
             const sent = await sendWorkOrderFollowUpEmail({
-                employee: manager,
+                employee: assignee,
                 notice,
                 workOrderId: String(order._id),
                 section: 'actual-boq',
@@ -1121,7 +1268,9 @@ async function saveActualBoq(req, res, order, actorName) {
             emailMessage = sent.message || notice.message;
         } catch (error) {
             console.error('Actual BOQ approval email failed:', error);
-            emailMessage = 'Email could not be sent. The approval was still saved.';
+            emailMessage = pendingNewItems
+                ? notice.message
+                : 'Email could not be sent. The approval was still saved.';
         }
     }
     return res.status(200).json({
@@ -1458,9 +1607,159 @@ function boqItemKey(row) {
         .join('|');
 }
 
+const PURCHASER_NEW_ITEM_MESSAGE = 'purchasor have a task on itemmaster new item is added approve that first';
+
+function boqLines(tables) {
+    const lines = [];
+    (Array.isArray(tables) ? tables : []).forEach((table) => {
+        const plain = plainMixed(table) || {};
+        (Array.isArray(plain.rows) ? plain.rows : []).forEach((row) => {
+            const line = plainMixed(row) || {};
+            if (line?.kind !== 'header') lines.push(line);
+        });
+    });
+    return lines;
+}
+
+function boqTablesHavePurchaserItems(tables) {
+    return boqLines(tables).some((row) => row.purchaserItemStatus);
+}
+
+function boqPurchaserItemsOpen(tables) {
+    return boqLines(tables).some((row) => row.purchaserItemStatus && row.purchaserItemStatus !== 'approved');
+}
+
+async function namedCatalog(Model, id, name, extra) {
+    const label = cleanText(name, 160);
+    const key = label ? nameKey(label) : '';
+    if (id && mongoose.Types.ObjectId.isValid(String(id))) {
+        const row = await Model.findById(id).select('_id nameKey').lean();
+        if (row && (!key || row.nameKey === key)) return row;
+    }
+    if (!key) return null;
+    return Model.findOne({ nameKey: key, ...(extra || {}) }).select('_id nameKey').lean();
+}
+
+/** A line is new when Item Master has no matching item. This lookup does not create one. */
+async function boqLineIsNewItem(row) {
+    if (row?.itemId && mongoose.Types.ObjectId.isValid(String(row.itemId))) {
+        const saved = await InventoryItem.findById(row.itemId).select('_id').lean();
+        if (saved) return false;
+    }
+    const category = await namedCatalog(ItemCategory, row?.categoryId, row?.category);
+    if (!category) return true;
+    const subcategory = await namedCatalog(ItemSubcategory, row?.subcategoryId, row?.subcategory, { categoryId: category._id });
+    if (!subcategory) return true;
+    const brand = await namedCatalog(ItemBrand, row?.brandId, row?.brand);
+    if (!brand) return true;
+    const option = await namedCatalog(ItemOption, row?.itemOptionId, row?.item, { subcategoryId: subcategory._id });
+    if (!option) return true;
+    const existing = await findSameItem({
+        categoryId: category._id,
+        subcategoryId: subcategory._id,
+        brandId: brand._id,
+        itemOptionId: option._id,
+        modelNumber: cleanText(row?.modelNo, 160),
+    });
+    return !existing;
+}
+
+async function markPurchaserNewItems(tables) {
+    const next = [];
+    let pending = 0;
+    for (const table of Array.isArray(tables) ? tables : []) {
+        const source = plainMixed(table) || {};
+        const rows = [];
+        for (const raw of Array.isArray(source.rows) ? source.rows : []) {
+            const row = plainMixed(raw) || {};
+            if (row.kind === 'header') {
+                rows.push(row);
+                continue;
+            }
+            const isNew = await boqLineIsNewItem(row);
+            if (!isNew) {
+                const rest = { ...row };
+                delete rest.purchaserItemStatus;
+                delete rest.newItemKey;
+                rows.push(rest);
+                continue;
+            }
+            pending += 1;
+            rows.push({
+                ...row,
+                purchaserItemStatus: 'pending',
+                newItemKey: boqItemKey(row),
+            });
+        }
+        next.push({ ...source, rows });
+    }
+    return { tables: next, pending };
+}
+
+async function purchaseOfficerRecord() {
+    const officer = await findPurchaseOfficer();
+    if (!officer?.empObjectId || !mongoose.Types.ObjectId.isValid(String(officer.empObjectId))) {
+        return { officer, employee: null };
+    }
+    const employee = await EmployeeBasic.findById(officer.empObjectId)
+        .select('firstName lastName companyEmail workEmail status profileStatus employeeId primaryReportee')
+        .populate('primaryReportee', 'companyEmail workEmail status profileStatus')
+        .lean();
+    return { officer, employee };
+}
+
 function plainMixed(value) {
     if (value && typeof value.toObject === 'function') return value.toObject();
     return value && typeof value === 'object' ? { ...value } : value;
+}
+
+function namedCatalogRow(rowsById, rowsByKey, id, name) {
+    const key = nameKey(name);
+    if (id && mongoose.Types.ObjectId.isValid(String(id)) && rowsById.has(String(id))) {
+        const row = rowsById.get(String(id));
+        if (!key || row.nameKey === key) return row;
+    }
+    return key ? rowsByKey.get(key) || null : null;
+}
+
+/** Category and subcategory on a BOQ line must already exist. Item, brand, and model can be new. */
+async function lockExistingBoqGroups(tables) {
+    const source = (Array.isArray(tables) ? tables : []).map((table) => {
+        const plain = plainMixed(table) || {};
+        return {
+            ...plain,
+            rows: (Array.isArray(plain.rows) ? plain.rows : []).map((row) => plainMixed(row) || row),
+        };
+    });
+    const lines = source.flatMap((table) => (Array.isArray(table?.rows) ? table.rows : []).filter((row) => row?.kind !== 'header'));
+    if (!lines.length) return source;
+    const [categories, subcategories] = await Promise.all([
+        ItemCategory.find().select('name nameKey').lean(),
+        ItemSubcategory.find().select('name nameKey categoryId').lean(),
+    ]);
+    const categoryById = new Map(categories.map((row) => [String(row._id), row]));
+    const categoryByKey = new Map(categories.map((row) => [row.nameKey, row]));
+    const subcategoryById = new Map(subcategories.map((row) => [String(row._id), row]));
+    const subcategoryByKey = new Map(subcategories.map((row) => [row.nameKey, row]));
+    return source.map((table) => ({
+        ...table,
+        rows: (Array.isArray(table?.rows) ? table.rows : []).map((row) => {
+            if (row?.kind === 'header') return row;
+            const category = namedCatalogRow(categoryById, categoryByKey, row.categoryId, row.category);
+            if (!category) throw httpError(400, 'Choose an existing category.');
+            const subcategory = namedCatalogRow(subcategoryById, subcategoryByKey, row.subcategoryId, row.subcategory);
+            if (!subcategory || String(subcategory.categoryId) !== String(category._id)) {
+                throw httpError(400, 'Choose an existing subcategory for this category.');
+            }
+            return {
+                ...row,
+                categoryId: String(category._id),
+                category: category.name,
+                subcategoryId: String(subcategory._id),
+                subcategory: subcategory.name,
+            };
+        }),
+    }));
 }
 
 async function ensureBoqInventoryItem(row, cache) {
@@ -1530,10 +1829,11 @@ async function ensureBoqInventoryItem(row, cache) {
 }
 
 async function storeApprovedBoqItems(tables) {
+    const locked = await lockExistingBoqGroups(tables);
     const cache = new Map();
     let created = 0;
     const nextTables = [];
-    for (const table of Array.isArray(tables) ? tables : []) {
+    for (const table of locked) {
         const source = plainMixed(table) || {};
         const rows = [];
         for (const raw of Array.isArray(source.rows) ? source.rows : []) {
@@ -1558,8 +1858,15 @@ function storedItemNote(created) {
 }
 
 async function decideActualBoq(req, res, order, actorName) {
-    const manager = await isProjectManager(req) || isJwtSystemSuperUser(req.user);
-    if (!manager) return res.status(403).json({ message: 'Only the project manager can approve the actual BOQ' });
+    const gated = boqTablesHavePurchaserItems(order.actualBoq?.tables);
+    if (gated) {
+        const officer = await findPurchaseOfficer();
+        const allowed = isJwtSystemSuperUser(req.user) || actorIsPurchaseOfficer(req, officer);
+        if (!allowed) return res.status(403).json({ message: 'Only the purchaser can approve this actual BOQ' });
+    } else {
+        const manager = await isProjectManager(req) || isJwtSystemSuperUser(req.user);
+        if (!manager) return res.status(403).json({ message: 'Only the project manager can approve the actual BOQ' });
+    }
     if (order.actualBoq?.status !== 'pending') {
         return res.status(400).json({ message: 'This actual BOQ is not waiting for approval' });
     }
@@ -1567,6 +1874,9 @@ async function decideActualBoq(req, res, order, actorName) {
     const reason = cleanText(req.body?.rejectReason, 1000);
     if (decision === 'reject' && !reason) {
         return res.status(400).json({ message: 'A description is required to reject the actual BOQ' });
+    }
+    if (decision === 'approve' && boqPurchaserItemsOpen(order.actualBoq?.tables)) {
+        return res.status(400).json({ message: PURCHASER_NEW_ITEM_MESSAGE });
     }
     if (decision === 'approve') {
         const gaps = boqTableGaps(order.actualBoq?.tables);
@@ -1607,6 +1917,110 @@ async function decideActualBoq(req, res, order, actorName) {
         actualBoqSaved: true,
     });
 }
+
+export const listBoqNewItems = async (req, res) => {
+    try {
+        const officer = await findPurchaseOfficer();
+        const isOfficer = isJwtSystemSuperUser(req.user) || actorIsPurchaseOfficer(req, officer);
+        if (!isOfficer) return res.status(200).json({ isPurchaseOfficer: false, items: [] });
+        const orders = await WorkOrder.find({ 'actualBoq.status': 'pending' })
+            .select('workOrderNo actualBoq.tables')
+            .lean();
+        const items = [];
+        const seen = new Set();
+        orders.forEach((order) => {
+            boqLines(order.actualBoq?.tables).forEach((row) => {
+                if (row.purchaserItemStatus !== 'pending' && row.purchaserItemStatus !== 'rejected') return;
+                const itemKey = String(row.newItemKey || boqItemKey(row));
+                const id = `${order._id}:${itemKey}`;
+                if (seen.has(id)) return;
+                seen.add(id);
+                items.push({
+                    id,
+                    workOrderId: String(order._id),
+                    workOrderNo: order.workOrderNo || '',
+                    itemKey,
+                    status: row.purchaserItemStatus,
+                    category: row.category || '',
+                    subcategory: row.subcategory || '',
+                    item: row.item || '',
+                    brand: row.brand || '',
+                    modelNo: row.modelNo || '',
+                    description: row.descriptionNew || row.descriptionOld || '',
+                    unitPrice: row.unitPrice ?? '',
+                });
+            });
+        });
+        return res.status(200).json({ isPurchaseOfficer: true, items });
+    } catch (error) {
+        console.error('BOQ new items failed:', error);
+        return res.status(500).json({ message: 'Could not load new items' });
+    }
+};
+
+export const decideBoqNewItem = async (req, res) => {
+    try {
+        const officer = await findPurchaseOfficer();
+        if (!isJwtSystemSuperUser(req.user) && !actorIsPurchaseOfficer(req, officer)) {
+            return res.status(403).json({ message: 'Only the purchaser can approve this item' });
+        }
+        const workOrderId = cleanText(req.body?.workOrderId, 40);
+        const itemKey = cleanText(req.body?.itemKey, 2000);
+        const decision = req.body?.decision === 'reject' ? 'reject' : 'approve';
+        if (!mongoose.Types.ObjectId.isValid(workOrderId) || !itemKey) {
+            return res.status(400).json({ message: 'This new item was not found' });
+        }
+        const order = await WorkOrder.findById(workOrderId);
+        if (!order || order.actualBoq?.status !== 'pending') {
+            return res.status(400).json({ message: 'This actual BOQ is not waiting for approval' });
+        }
+        const tables = (Array.isArray(order.actualBoq.tables) ? order.actualBoq.tables : []).map((table) => plainMixed(table) || {});
+        const matches = [];
+        tables.forEach((table) => {
+            (Array.isArray(table.rows) ? table.rows : []).forEach((raw) => {
+                const row = plainMixed(raw) || {};
+                if (row.kind !== 'header' && String(row.newItemKey || '') === itemKey) matches.push(row);
+            });
+        });
+        if (!matches.length) return res.status(404).json({ message: 'This new item was not found' });
+        if (matches.every((row) => row.purchaserItemStatus === 'approved')) {
+            return res.status(200).json({ message: 'Item approved', status: 'approved' });
+        }
+        let linked = null;
+        if (decision === 'approve') {
+            try {
+                const stored = await ensureBoqInventoryItem(matches[0], new Map());
+                linked = stored.row;
+            } catch (error) {
+                const status = error?.status || error?.statusCode || 400;
+                return res.status(status).json({ message: error?.message || 'Could not store the new item' });
+            }
+        }
+        order.actualBoq.tables = tables.map((table) => ({
+            title: table.title || '',
+            rows: (Array.isArray(table.rows) ? table.rows : []).map((raw) => {
+                const row = plainMixed(raw) || {};
+                if (row.kind === 'header' || String(row.newItemKey || '') !== itemKey) return row;
+                if (decision === 'reject') return { ...row, purchaserItemStatus: 'rejected' };
+                return {
+                    ...row,
+                    ...linked,
+                    purchaserItemStatus: 'approved',
+                    newItemKey: itemKey,
+                };
+            }),
+        }));
+        order.markModified('actualBoq');
+        await order.save();
+        return res.status(200).json({
+            message: decision === 'approve' ? 'Item approved' : 'Item rejected',
+            status: decision === 'approve' ? 'approved' : 'rejected',
+        });
+    } catch (error) {
+        console.error('BOQ new item decision failed:', error);
+        return res.status(500).json({ message: 'Could not update this item' });
+    }
+};
 
 function boqUpdateTitle(approvedCount) {
     const count = Number(approvedCount) || 0;
@@ -1652,9 +2066,15 @@ async function saveActualBoqUpdate(req, res, order, actorName) {
     const openIndex = last && last.status !== 'approved' ? updates.length - 1 : -1;
 
     const submitting = Boolean(req.body?.submitActualBoqUpdate);
+    let savedTables = tables;
     if (submitting) {
         const gaps = boqTableGaps(tables);
         if (gaps) return res.status(400).json({ message: gaps });
+        try {
+            savedTables = await lockExistingBoqGroups(tables);
+        } catch (error) {
+            return res.status(error?.status || 400).json({ message: error?.message || 'Choose an existing category and subcategory.' });
+        }
     }
     const officer = submitting ? await findPurchaseOfficer() : null;
     if (submitting && !officer?.empObjectId) {
@@ -1665,7 +2085,7 @@ async function saveActualBoqUpdate(req, res, order, actorName) {
     const entry = {
         status: submitting ? 'pending' : 'draft',
         title: current?.title || boqUpdateTitle(approvedCount),
-        tables,
+        tables: savedTables,
         requestedByName: actorName,
         requestedById: String(actor._id),
         requestedAt: new Date(),
@@ -2046,6 +2466,82 @@ async function decideMaterialRequest(req, res, order, actorName) {
     });
 }
 
+async function pendingWorkOrderTasks(order) {
+    if (!order?._id) return [];
+    const actions = await DashboardAction.find({
+        requestId: order._id,
+        requestType: /^Work Order /,
+    })
+        .sort({ createdAt: 1, _id: 1 })
+        .select('requestType status extra1 assignedTo createdAt requestedDate taskNumber')
+        .lean();
+    if (!actions.length) return [];
+    const tasks = await TaskManagerTask.find({
+        sourceDashboardActionId: { $in: actions.map((item) => item._id) },
+    })
+        .select('sourceDashboardActionId status taskName assigneeName taskNumber createdAt updatedAt closeRequest.closedAt closeRequest.reviewPending')
+        .lean();
+    const grouped = new Map();
+    for (const task of tasks) {
+        const key = String(task.sourceDashboardActionId || '');
+        const list = grouped.get(key) || [];
+        list.push(task);
+        grouped.set(key, list);
+    }
+    const rows = [];
+    const missingIds = [];
+    for (const action of actions) {
+        const linked = grouped.get(String(action._id)) || [];
+        if (!workOrderStepIsOpen(action, linked)) continue;
+        const open = linked.filter((task) => !taskIsFinished(task));
+        const task = [...open].sort((left, right) => {
+            const later = Date.parse(right.updatedAt || right.createdAt || 0) || 0;
+            const earlier = Date.parse(left.updatedAt || left.createdAt || 0) || 0;
+            return later - earlier;
+        })[0] || null;
+        const fallback = String(action.requestType || '').replace(/^Work Order\s+/i, '');
+        const label = pendingTaskLabel(task?.taskName || action.extra1 || fallback, order.workOrderNo);
+        const assigneeName = String(task?.assigneeName || '').trim();
+        const assignedToId = assigneeName ? '' : String(action.assignedTo || '');
+        if (assignedToId) missingIds.push(action.assignedTo);
+        const storedNumber = String(task?.taskNumber || action.taskNumber || '').trim();
+        rows.push({
+            id: String(action._id),
+            actionId: String(action._id),
+            taskNumber: listedProjectTaskNumber(order.workOrderNo, storedNumber),
+            label,
+            assigneeName,
+            assignedToId,
+            at: action.createdAt || action.requestedDate || task?.createdAt || null,
+        });
+    }
+    if (missingIds.length) {
+        const people = await EmployeeBasic.find({ _id: { $in: missingIds } })
+            .select('firstName lastName')
+            .lean();
+        const names = new Map(people.map((person) => [
+            String(person._id),
+            [person.firstName, person.lastName].filter(Boolean).join(' ').trim(),
+        ]));
+        for (const row of rows) {
+            if (!row.assigneeName && row.assignedToId) row.assigneeName = names.get(row.assignedToId) || '';
+        }
+    }
+    rows.sort((left, right) => {
+        const earlier = Date.parse(left.at) || 0;
+        const later = Date.parse(right.at) || 0;
+        if (earlier !== later) return earlier - later;
+        return String(left.id).localeCompare(String(right.id));
+    });
+    return rows.map((row) => ({
+        id: row.id,
+        actionId: row.actionId,
+        taskNumber: row.taskNumber,
+        line: pendingTaskLine(row.label, row.assigneeName),
+        at: row.at,
+    }));
+}
+
 async function presentedForViewer(order, req) {
     const presented = presentWorkOrder(order, { includeFiles: true });
     presented.viewerCanCompleteLpo = Boolean(order.lpoFollowUp) && await canCompleteLpoFollowUp(req, order);
@@ -2057,7 +2553,33 @@ async function presentedForViewer(order, req) {
     presented.purchaseOfficerName = String(officer?.employeeName || '').trim();
     presented.lpoAssigneeName = await projectCoordinatorName();
     presented.projectManagerName = await projectManagerName();
+    presented.projectTask = await projectTaskNotice(order);
+    presented.pendingTasks = await pendingWorkOrderTasks(order);
     return presented;
+}
+
+async function projectTaskNotice(order) {
+    if (!order?._id) return null;
+    const action = await DashboardAction.findOne({
+        requestId: order._id,
+        requestType: PROJECT_TASK_REQUEST,
+        status: { $ne: 'Dismissed' },
+    }).sort({ createdAt: -1 }).select('taskNumber extra1 status requestedByName').lean();
+    if (!action) return null;
+    const task = await TaskManagerTask.findOne({ sourceDashboardActionId: action._id })
+        .sort({ updatedAt: -1 })
+        .select('taskNumber taskName taskType status assigneeName requestedByName')
+        .lean();
+    const stored = String(task?.taskNumber || action.taskNumber || '').trim();
+    return {
+        actionId: String(action._id),
+        taskNumber: listedProjectTaskNumber(order.workOrderNo, stored),
+        taskName: task?.taskName || action.extra1 || 'New work order created',
+        taskType: task?.taskType || 'Project Task',
+        status: task?.status || action.status || 'Pending',
+        assignedBy: task?.requestedByName || action.requestedByName || '',
+        assignedTo: task?.assigneeName || '',
+    };
 }
 
 async function allocateWorkOrderNo() {
@@ -2184,7 +2706,7 @@ export const createWorkOrder = async (req, res) => {
             const lpoDate = cleanText(req.body?.lpoDate, 10);
             let lpoValue = cleanMoney(req.body?.lpoValue);
             if (!(lpoValue > 0) && value > 0) lpoValue = value;
-            const file = readAttachment(req.body?.attachment, { required: !intentDraft });
+            const file = readAttachment(req.body?.attachment, { required: !intentDraft, pdfOnly: true, maxBytes: LPO_PDF_MAX_BYTES });
             if (file?.error) return res.status(400).json({ message: file.error });
             if (!intentDraft && value > 0 && lpoValue && Math.abs(lpoValue - value) > 0.009) {
                 return res.status(400).json({ message: 'LPO value must match the quotation total' });
@@ -2314,12 +2836,21 @@ export const createWorkOrder = async (req, res) => {
             createdOn: dubaiDateKey(),
             createdBy: req.user?.id ? String(req.user.id) : '',
             createdByName: senderName,
+            checklist: WORK_ORDER_CHECKLIST.map((item) => ({ id: item.id, label: item.label })),
         };
 
         for (let attempt = 0; attempt < 5; attempt += 1) {
             const allocated = await allocateWorkOrderNo();
             try {
                 const workOrder = await WorkOrder.create({ ...payload, ...allocated });
+                if (!intentDraft) {
+                    try {
+                        await ensureCoordinatorProjectTask(workOrder);
+                        await ensureChecklistTasks(workOrder);
+                    } catch (error) {
+                        console.error('Project task was not created:', error);
+                    }
+                }
                 let emailSent = false;
                 let emailMessage = '';
                 if (!intentDraft && lpoMode === 'not_required') {
@@ -2542,7 +3073,7 @@ export const updateWorkOrderBudget = async (req, res) => {
         }
         order.markModified('budgets');
         await order.save();
-        return res.status(200).json({ workOrder: presentWorkOrder(order, { includeFiles: true }) });
+        return res.status(200).json({ workOrder: await presentedForViewer(order, req) });
     } catch (error) {
         console.error('Error updating the work order budget:', error);
         const message = error?.message || 'Could not update the budget from Zoho';
@@ -2585,7 +3116,7 @@ export const applyWorkOrderQuotationChanges = async (req, res) => {
         }
         await order.save();
         return res.status(200).json({
-            workOrder: presentWorkOrder(order, { includeFiles: true }),
+            workOrder: await presentedForViewer(order, req),
             changes,
             lpoAdjusted,
         });
@@ -2815,7 +3346,7 @@ export const updateWorkOrder = async (req, res) => {
                 if (order.lpos.length >= 1) {
                     return res.status(400).json({ message: 'This work order already has one LPO' });
                 }
-                const file = readAttachment(req.body?.lpo?.attachment, { required: true });
+                const file = readAttachment(req.body?.lpo?.attachment, { required: true, pdfOnly: true, maxBytes: LPO_PDF_MAX_BYTES });
                 if (file?.error) return res.status(400).json({ message: file.error });
                 order.lpos.push({
                     lpoNo,
@@ -2843,7 +3374,7 @@ export const updateWorkOrder = async (req, res) => {
                     : 'LPO received. Work order created.';
             await order.save();
             await closeLpoFollowUps(order, actorName, detail);
-            const presented = presentWorkOrder(order, { includeFiles: true });
+            const presented = await presentedForViewer(order, req);
             presented.viewerCanCompleteLpo = false;
             return res.status(200).json({ workOrder: presented });
         }
@@ -2899,7 +3430,7 @@ export const updateWorkOrder = async (req, res) => {
             await closeAttachmentRequest(order, senderName);
             await order.save();
             return res.status(200).json({
-                workOrder: presentWorkOrder(order, { includeFiles: true }),
+                workOrder: await presentedForViewer(order, req),
             });
         }
 
@@ -2924,7 +3455,7 @@ export const updateWorkOrder = async (req, res) => {
             if (order.lpos.length >= 1) {
                 return res.status(400).json({ message: 'This work order already has one LPO' });
             }
-            const file = readAttachment(req.body.lpo.attachment, { required: true });
+            const file = readAttachment(req.body.lpo.attachment, { required: true, pdfOnly: true, maxBytes: LPO_PDF_MAX_BYTES });
             if (file?.error) return res.status(400).json({ message: file.error });
             order.lpos.push({
                 lpoNo,
@@ -2994,6 +3525,7 @@ export const updateWorkOrder = async (req, res) => {
             try {
                 emailResult = await sendWorkOrderLpoNotFilledEmail({
                     salespersonId: order.salespersonId,
+                    workOrderId: String(order._id),
                     workOrderNo: order.workOrderNo,
                     customer: order.customer,
                     senderName,
@@ -3037,7 +3569,7 @@ export const updateWorkOrder = async (req, res) => {
 
         await order.save();
         return res.status(200).json({
-            workOrder: presentWorkOrder(order, { includeFiles: true }),
+            workOrder: await presentedForViewer(order, req),
             emailSent: Boolean(emailResult?.emailed),
             emailMessage: emailResult?.message || '',
         });

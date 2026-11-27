@@ -3,6 +3,7 @@ import Fine from '../../models/Fine.js';
 import { purgeOrphanDashboardActionRows } from '../../utils/clearDashboardActionsForRequest.js';
 import {
     backfillFineApprovalInboxForViewer,
+    restoreMissingDraftFineNotifications,
     fineInboxIsGroup,
     fineNeedsAccountsPaymentInbox,
     fineStillNeedsApprovalInbox,
@@ -108,6 +109,14 @@ export const getPendingFineDashboardInbox = async (req, res) => {
         }
 
         const assigneeClauses = buildAssigneeClauses(ctx.relevantIds, ctx.employeeIdCode);
+        try {
+            await restoreMissingDraftFineNotifications(ctx);
+        } catch (draftErr) {
+            console.error(
+                '[getPendingFineDashboardInbox] Draft fine notice failed:',
+                draftErr?.message || draftErr,
+            );
+        }
 
         // Repairs stay. They must not hold the Fine bell — the saved inbox is returned first.
         void (async () => {

@@ -6,6 +6,7 @@ const SECTION_PATH = {
     'vendor-lpo': 'quotation/vendor-lpo',
     quotation: 'quotation',
     overview: 'overview',
+    'check-list': 'check-list',
 };
 
 /** Address for a work order and the tab that should still be open after refresh or Back. */

@@ -172,6 +172,15 @@ const workOrderSchema = new mongoose.Schema(
         projectName: { type: String, default: '', trim: true },
         createdBy: { type: String, default: '' },
         createdByName: { type: String, default: '' },
+        checklist: {
+            type: [
+                {
+                    id: { type: String, default: '' },
+                    label: { type: String, default: '' },
+                },
+            ],
+            default: [],
+        },
         oldDocuments: {
             type: [
                 {

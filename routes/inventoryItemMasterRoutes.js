@@ -12,6 +12,7 @@ import { createVendor, deleteVendor, getVendor, listVendorBills, listVendors, ne
 import { createVendorContact, deleteVendorContact, markVendorContactPrimary, updateVendorContact } from '../controllers/inventory/vendorContacts.js';
 import { approveDelivery, createDelivery, deleteDelivery, listDeliveries, listItemDeliveryHistory, rejectDelivery, updateDelivery } from '../controllers/inventory/deliveries.js';
 import { getInventoryDashboard } from '../controllers/inventory/dashboard.js';
+import { decideBoqNewItem, listBoqNewItems } from '../controllers/workOrderController.js';
 import { hasPermission } from '../services/permissionService.js';
 
 const router = express.Router();
@@ -98,6 +99,8 @@ router.post('/deliveries/:id/reject', protect, viewDelivery, rejectDelivery);
 router.delete('/deliveries/:id', protect, viewDelivery, deleteDelivery);
 
 const stockWriters = checkPermissionAny('inventory_item_master', ['edit', 'create']);
+router.get('/boq-new-items', protect, viewItems, listBoqNewItems);
+router.post('/boq-new-items/decide', protect, viewItems, decideBoqNewItem);
 router.get('/stock-entries/approval-context', protect, viewItems, stockApprovalContext);
 router.get('/stock-entries', protect, viewItems, listStockEntries);
 router.post('/stock-entries', protect, stockWriters, saveStockEntry);

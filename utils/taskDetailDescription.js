@@ -10,6 +10,7 @@ import {
     isAttendanceTaskType,
     resolveAttendanceFacts,
 } from "./attendanceTaskCopy.js";
+import { inventoryBillItemLines } from "./taskDisplayName.js";
 
 function text(value) {
     return String(value ?? "").replace(/\s+/g, " ").trim();
@@ -310,6 +311,13 @@ export function composeTaskDescription({
     add("Status", facts.status);
     add("Requested by", facts.requestedBy);
     add("Reason", facts.reason);
+    if (typeKey === "inventory bill draft") {
+        const billNo = text(extra1).replace(/^(bill edit|delivery edit|delivery approval)\s*[·•-]\s*/i, "")
+            || text(subjectName);
+        add("Bill", billNo);
+        const itemLines = inventoryBillItemLines(source);
+        if (itemLines.length) lines.push(["Items:", ...itemLines].join("\n"));
+    }
 
     const leftover = attendanceTask ? "" : [extra2, extra1, source.note].map(text).find((value) => {
         if (!value || value.length < 12) return false;

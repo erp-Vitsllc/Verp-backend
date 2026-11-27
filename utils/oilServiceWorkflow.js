@@ -22,6 +22,7 @@ import {
     applyServiceActiveState,
     applyPostServiceOperationalState,
 } from './assetOperationalFlags.js';
+import { isPendingVehicleService } from './vehicleServicePendingStatus.js';
 import { mergeWorkflowServiceRecord } from '../controllers/vehicleServiceWorkflowController.js';
 import { isReqUserSystemSuperUser } from './systemSuperUser.js';
 import { allocateNextServiceReqNo } from './assetServiceReqNo.js';
@@ -397,9 +398,10 @@ export async function healStaleOilServicePendingDashboardActions({ assetIds = nu
                     .trim(),
             );
 
-        // Admin Officer create-track: clear once service work is complete (not while still in progress).
+        // Admin Officer create-track stays while the fleet list still shows this service as Pending.
         // Accounts Make Payment / Zoho billing remains Accounts-only.
         if (meta?.adminOfficerServiceTrack) {
+            if (service && isPendingVehicleService(asset, service)) continue;
             if (serviceWorkDone) staleIds.push(row._id);
             continue;
         }

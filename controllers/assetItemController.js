@@ -311,6 +311,7 @@ import {
     notifyAdminOfficerOnVehicleServiceCreated,
     healDuplicateAdminVehicleServiceInboxRows,
     isVehicleServiceAccountsBillingNotification,
+    restoreMissingAdminOfficerServiceTracks,
 } from '../utils/vehicleServiceAdminOfficerNotification.js';
 import {
     isPendingVehicleService,
@@ -20785,6 +20786,11 @@ export const getPendingAssetDashboardInbox = async (req, res) => {
         }
         if (scope !== 'tools') {
             await scheduleInboxMaintenance(() => syncVehicleAccessFuelReminder());
+        }
+        // Admin Officer bell: one notice per service the fleet list still shows as Pending,
+        // from create/initiate until that service is completed.
+        if (isAdminOfficerHolder && scope !== 'tools') {
+            await restoreMissingAdminOfficerServiceTracks();
         }
         // Accounts bell (including skipSync sidebar loads): put Make Payment tasks back
         // before the inbox query, so open Make Payment cards show for the current Accounts person.
