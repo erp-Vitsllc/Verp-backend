@@ -306,6 +306,33 @@ function quantityRows(map) {
         .sort((left, right) => right.value - left.value || left.name.localeCompare(right.name));
 }
 
+function graphCategories(model) {
+    const names = new Set();
+    (model?.categoryNames || []).forEach((name) => {
+        const label = String(name || '').trim();
+        if (label) names.add(label);
+    });
+    (model?.items || []).forEach((item) => {
+        names.add(String(item.categoryName || '').trim() || 'Uncategorized');
+    });
+    return [...names];
+}
+
+function amountRows(map, names) {
+    const totals = new Map();
+    names.forEach((name) => {
+        const label = String(name || '').trim() || 'Uncategorized';
+        if (!totals.has(label)) totals.set(label, 0);
+    });
+    map.forEach((value, name) => {
+        const label = String(name || '').trim() || 'Uncategorized';
+        totals.set(label, roundMoney(value));
+    });
+    return [...totals.entries()]
+        .map(([name, value]) => ({ name, value }))
+        .sort((left, right) => right.value - left.value || left.name.localeCompare(right.name));
+}
+
 function itemLabel(item) {
     return item.description || item.itemCode || 'Item';
 }
@@ -354,6 +381,8 @@ export function buildInventoryDashboard(model, scope, asOfInput) {
     const itemCategory = new Map(items.map((item) => [item.id, item.categoryName || 'Uncategorized']));
     const purchaseQty = new Map();
     const deliveryQty = new Map();
+    const purchaseValueByCategory = new Map();
+    const deliveryValueByCategory = new Map();
     let purchasedValue = 0;
     const vendorTotals = new Map();
     const monthly = chartBuckets(scope).map((bucket) => ({ ...bucket, value: 0 }));
@@ -389,6 +418,7 @@ export function buildInventoryDashboard(model, scope, asOfInput) {
                 billed.add(line.itemId);
                 const category = itemCategory.get(line.itemId) || 'Uncategorized';
                 purchaseQty.set(category, (purchaseQty.get(category) || 0) + quantity);
+                purchaseValueByCategory.set(category, roundMoney((purchaseValueByCategory.get(category) || 0) + lineAmount(line)));
             }
         });
         if (!approved || !inScope) return;
@@ -418,7 +448,9 @@ export function buildInventoryDashboard(model, scope, asOfInput) {
             const category = itemCategory.get(line.itemId) || 'Uncategorized';
             deliveryQty.set(category, (deliveryQty.get(category) || 0) + quantity);
             const cost = unitCost(books, line.itemId, day, 0);
-            deliveredValue = roundMoney(deliveredValue + roundMoney(quantity * cost));
+            const lineValue = roundMoney(quantity * cost);
+            deliveryValueByCategory.set(category, roundMoney((deliveryValueByCategory.get(category) || 0) + lineValue));
+            deliveredValue = roundMoney(deliveredValue + lineValue);
         });
     });
 
@@ -571,9 +603,9 @@ export function buildInventoryDashboard(model, scope, asOfInput) {
             .map((row) => ({ ...row, product: names.get(row.itemId) || 'Item' }))
             .sort((left, right) => right.date.localeCompare(left.date) || left.product.localeCompare(right.product))
             .slice(0, 5),
-        stockGraph: quantityRows(categoryQty),
-        purchaseGraph: quantityRows(purchaseQty),
-        deliveryGraph: quantityRows(deliveryQty),
+        stockGraph: amountRows(categoryValue, graphCategories(model)),
+        purchaseGraph: amountRows(purchaseValueByCategory, graphCategories(model)),
+        deliveryGraph: amountRows(deliveryValueByCategory, graphCategories(model)),
         nonMoving: {
             quantity: nonMovingQuantity,
             value: nonMovingValue,

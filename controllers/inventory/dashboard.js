@@ -82,6 +82,7 @@ async function loadModel() {
                 lines: purchaseLines(row.lines),
             };
         }),
+        categoryNames: [...new Set([...categoryNames.values()].map((name) => String(name || '').trim()).filter(Boolean))],
         deliveries: deliveries.map((row) => ({
             id: String(row._id),
             date: (/^\d{4}-\d{2}-\d{2}$/.test(row.doDate || '') ? row.doDate : '') || dateKey(row.createdAt),

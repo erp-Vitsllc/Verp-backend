@@ -161,11 +161,20 @@ test('2026 totals follow purchases, deliveries, and stock still on hand at year 
     assert.equal(result.monthly.find((row) => row.month === 'May').value, 0);
     assert.deepEqual(result.vendors, [{ id: 'vendor-a', name: 'Vendor A', value: 30 }]);
     assert.deepEqual(result.stockGraph, [
-        { name: 'Cabling', value: 10 },
-        { name: 'Other', value: 3 },
+        { name: 'Cabling', value: 150 },
+        { name: 'Other', value: 30 },
+        { name: 'CCTV', value: 0 },
     ]);
-    assert.deepEqual(result.purchaseGraph, [{ name: 'Cabling', value: 7 }]);
-    assert.deepEqual(result.deliveryGraph, [{ name: 'Cabling', value: 4 }]);
+    assert.deepEqual(result.purchaseGraph, [
+        { name: 'Cabling', value: 45 },
+        { name: 'CCTV', value: 0 },
+        { name: 'Other', value: 0 },
+    ]);
+    assert.deepEqual(result.deliveryGraph, [
+        { name: 'Cabling', value: 20 },
+        { name: 'CCTV', value: 0 },
+        { name: 'Other', value: 0 },
+    ]);
     assert.deepEqual(result.billStatus, [
         { name: 'Pending', value: 1 },
         { name: 'Approved', value: 2 },
