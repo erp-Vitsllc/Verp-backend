@@ -2863,6 +2863,44 @@ function estimatesAuthError(error) {
     return null;
 }
 
+export const QUOTE_NOT_APPROVED = 'This quote is not approved.';
+export const QUOTE_OLDER_THAN_THREE_MONTHS = 'This quote is more than 3 months.';
+
+function dubaiTodayKey() {
+    return new Intl.DateTimeFormat('en-CA', {
+        timeZone: 'Asia/Dubai',
+        year: 'numeric',
+        month: '2-digit',
+        day: '2-digit',
+    }).format(new Date());
+}
+
+function shiftCalendarMonths(dateKey, months) {
+    const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(dateKey || ''));
+    if (!match) return '';
+    const year = Number(match[1]);
+    const month = Number(match[2]);
+    const day = Number(match[3]);
+    const shifted = new Date(Date.UTC(year, month - 1 + months, 1));
+    const lastDay = new Date(Date.UTC(shifted.getUTCFullYear(), shifted.getUTCMonth() + 1, 0)).getUTCDate();
+    const clamped = Math.min(day, lastDay);
+    const result = new Date(Date.UTC(shifted.getUTCFullYear(), shifted.getUTCMonth(), clamped));
+    const y = result.getUTCFullYear();
+    const m = String(result.getUTCMonth() + 1).padStart(2, '0');
+    const d = String(result.getUTCDate()).padStart(2, '0');
+    return `${y}-${m}-${d}`;
+}
+
+/** Empty when the Zoho quote can be added. Otherwise the message to show. */
+export function quoteImportBlockReason(estimate, todayKey = dubaiTodayKey()) {
+    const status = String(estimate?.status || '').trim().toLowerCase();
+    if (status !== 'approved') return QUOTE_NOT_APPROVED;
+    const date = String(estimate?.date || '').slice(0, 10);
+    const oldest = shiftCalendarMonths(todayKey, -3);
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(date) || !oldest || date < oldest) return QUOTE_OLDER_THAN_THREE_MONTHS;
+    return '';
+}
+
 function pickZohoEstimate(rows, number) {
     const wanted = normalizeQuoteNumber(number);
     const exact = (Array.isArray(rows) ? rows : []).filter(
@@ -2921,6 +2959,10 @@ export async function fetchZohoEstimateByNumber(number, options = {}) {
     const mapped = mapZohoEstimate(match);
     if (!mapped.id || !mapped.number) {
         throw quoteLookupError('No Zoho quotation found for that number.', 404);
+    }
+    if (!allowClosed) {
+        const blocked = quoteImportBlockReason(mapped);
+        if (blocked) throw quoteLookupError(blocked, 400);
     }
     return mapped;
 }

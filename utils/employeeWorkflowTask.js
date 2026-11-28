@@ -19,6 +19,7 @@ export const EMPLOYEE_WORKFLOW_TYPES = new Set([
     "Work Order Actual BOQ",
     "Work Order Actual BOQ Update",
     "Work Order MR",
+    "Work Order MOM",
 ]);
 
 export function employeeWorkflowType(requestType) {
@@ -51,7 +52,7 @@ export function isAutomaticWorkflowHandoff(requestType) {
     const type = String(requestType || "").trim();
     if (!type || type === "Task Manager") return false;
     if (isGeneralHubRequestType(type)) return false;
-    if (/expiry|not renew|card deleted|value missing|asset overdue|profile incomplete|payment reminder|fuel reminder|submit reminder/i.test(type)) return false;
+    if (/expiry|not renew|card deleted|value missing|asset overdue|profile incomplete|payment reminder|fuel reminder|images missing|submit reminder/i.test(type)) return false;
     return true;
 }
 
@@ -129,6 +130,32 @@ export async function requesterNameForActor(actorId) {
     return personRequesterName(user?.name) || "";
 }
 
+/** Names for user ids and employee ids. Skips System. */
+export async function requesterNamesByActorIds(ids = []) {
+    const wanted = [...new Set((ids || []).map((id) => String(id?._id || id || "")).filter((id) => /^[a-f\d]{24}$/i.test(id)))];
+    const names = new Map();
+    if (!wanted.length) return names;
+    const employees = await EmployeeBasic.find({ _id: { $in: wanted } }).select("firstName lastName").lean();
+    for (const employee of employees) {
+        const name = personName(employee);
+        if (name) names.set(String(employee._id), name);
+    }
+    const missing = wanted.filter((id) => !names.has(id));
+    if (!missing.length) return names;
+    const User = (await import("../models/User.js")).default;
+    const users = await User.find({ _id: { $in: missing } }).select("name employeeId").lean();
+    const codes = [...new Set(users.map((user) => String(user.employeeId || "").trim()).filter(Boolean))];
+    const linked = codes.length
+        ? await EmployeeBasic.find({ employeeId: { $in: codes } }).select("employeeId firstName lastName").lean()
+        : [];
+    const byCode = new Map(linked.map((employee) => [String(employee.employeeId), personName(employee)]));
+    for (const user of users) {
+        const name = byCode.get(String(user.employeeId || "")) || personRequesterName(user?.name) || "";
+        if (name) names.set(String(user._id), name);
+    }
+    return names;
+}
+
 /**
  * One workflow task for this dashboard row.
  * The requester stays the employee who started it.
@@ -184,7 +211,9 @@ export async function ensureEmployeeWorkflowTask(action, assignee, requestedByNa
         });
     }
     if (keep.taskType !== taskType) keep.taskType = taskType;
-    if (!personRequesterName(keep.requestedByName) && (requester || assigneeName)) {
+    if (options.lockRequester && requester) {
+        if (keep.requestedByName !== requester) keep.requestedByName = requester;
+    } else if (!personRequesterName(keep.requestedByName) && (requester || assigneeName)) {
         keep.requestedByName = requester || assigneeName;
     }
     const previousName = clean(keep.assigneeName);

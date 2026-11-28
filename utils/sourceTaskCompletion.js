@@ -246,8 +246,12 @@ async function loadRecordStatus(action) {
         return "";
     }
     if (type === "Fine" || type === "Group Fine Request") {
-        const fine = await Fine.findById(id).select("fineStatus").lean();
-        return fine?.fineStatus || "";
+        const fine = await Fine.findById(id)
+            .select("fineStatus workflow accountsPaymentPath zohoBillId zohoBillNumber zohoJournalId zohoJournalNumber vendorBillStatus")
+            .lean();
+        if (!fine) return "";
+        const { fineWorkflowSourceStatus } = await import("./fineStageAuth.js");
+        return fineWorkflowSourceStatus(fine);
     }
     if (type === "Loan" || type === "Employee Loan Request" || type === "Employee Advance Request" || type === "Advance") {
         const loan = await Loan.findById(id).select("status").lean();

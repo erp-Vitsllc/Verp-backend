@@ -71,6 +71,23 @@ export function fineStillNeedsInbox(fine) {
     return fineStillNeedsApprovalInbox(fine) || fineNeedsAccountsPaymentInbox(fine);
 }
 
+/**
+ * Task Manager source status for a fine.
+ * Approved only means Management signed it. Make Payment is still an open task
+ * until Accounts settles it, so that must stay Pending.
+ */
+export function fineWorkflowSourceStatus(fine) {
+    if (!fine) return "";
+    if (fineStillNeedsInbox(fine)) return "Pending";
+    const status = String(fine.fineStatus || "").trim();
+    if (status === "Draft") return "Draft";
+    if (status === "Rejected" || status === "Cancelled" || status === "Withdrawn") return status;
+    if (status === "Approved" || status === "Active" || status === "Paid" || status === "Completed") {
+        return "Completed";
+    }
+    return status || "Pending";
+}
+
 const COMPANY_FINE_EMPLOYEE_IDS = new Set(['VEGA-HR-0000', 'VEGA_INTERNAL']);
 
 export function realFineEmployeeIds(fines = []) {

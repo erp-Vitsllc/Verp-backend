@@ -7,6 +7,15 @@ const admin = { superUser: true, userId: "admin-1", name: "Admin", employeeId: "
 const requester = { superUser: false, userId: "user-9", name: "Raseel Khan", employeeId: "VITS009" };
 const other = { superUser: false, userId: "user-2", name: "Other Person", employeeId: "VITS002" };
 
+test("a project task cannot be deleted", () => {
+    assert.equal(viewerMayDeleteTask(admin, { taskCategory: "Project Task" }), false);
+    assert.equal(viewerMayDeleteTask(admin, { taskCategory: "Project Task", status: "Completed" }), false);
+    assert.equal(viewerMayDeleteTask(requester, {
+        taskCategory: "Project Task",
+        requestedByUserId: "user-9",
+    }), false);
+});
+
 test("admin super user can delete system and workflow tasks", () => {
     assert.equal(viewerMayDeleteTask(admin, { taskCategory: "Workflow Task" }), true);
     assert.equal(viewerMayDeleteTask(admin, { taskCategory: "Work Flow Task" }), true);

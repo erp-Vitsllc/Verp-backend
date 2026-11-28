@@ -3,6 +3,7 @@ import Flowchart from '../../models/Flowchart.js';
 import EmployeeBasic from '../../models/EmployeeBasic.js';
 import InventoryItem from '../../models/inventory/InventoryItem.js';
 import InventoryStockEntry from '../../models/inventory/InventoryStockEntry.js';
+import InventoryVendor from '../../models/inventory/InventoryVendor.js';
 import { syncDashboardAction } from '../../utils/syncDashboard.js';
 import { finishEmployeeWorkflowTasks, requesterNameForActor } from '../../utils/employeeWorkflowTask.js';
 
@@ -102,6 +103,18 @@ export function presentBillItems(entry, codeByItemId = new Map()) {
     return { items };
 }
 
+function billPurchase(entry) {
+    const pending = entry?.editPending ? entry.pendingEdit : null;
+    const pendingSource = pending?.purchaseSource === 'manual' || pending?.purchaseSource === 'vendor'
+        ? pending.purchaseSource
+        : '';
+    const purchaseSource = pendingSource || (entry?.purchaseSource === 'manual' ? 'manual' : 'vendor');
+    const vendorId = purchaseSource === 'manual'
+        ? ''
+        : String((pendingSource ? pending?.vendorId : '') || entry?.vendorId || '');
+    return { purchaseSource, vendorId };
+}
+
 /** Items on each Inventory Bill Draft, keyed by the stock entry id. */
 export async function billItemsByRequestId(actions = []) {
     const ids = [...new Set(
@@ -113,16 +126,26 @@ export async function billItemsByRequestId(actions = []) {
     const map = new Map();
     if (!ids.length) return map;
     const entries = await InventoryStockEntry.find({ _id: { $in: ids } })
-        .select('editPending pendingEdit.lines.itemId pendingEdit.lines.itemName pendingEdit.lines.description pendingEdit.lines.modelNumber lines.itemId lines.itemName lines.description lines.modelNumber')
+        .select('purchaseSource vendorId editPending pendingEdit.purchaseSource pendingEdit.vendorId pendingEdit.lines.itemId pendingEdit.lines.itemName pendingEdit.lines.description pendingEdit.lines.modelNumber lines.itemId lines.itemName lines.description lines.modelNumber')
         .lean();
     const itemIds = [...new Set(entries.flatMap((entry) => (
         billLines(entry).map((line) => String(line?.itemId || '')).filter(isRecordId)
     )))];
-    const catalog = itemIds.length
-        ? await InventoryItem.find({ _id: { $in: itemIds } }).select('itemCode').lean()
-        : [];
+    const vendorIds = [...new Set(entries.map((entry) => billPurchase(entry).vendorId).filter(isRecordId))];
+    const [catalog, vendors] = await Promise.all([
+        itemIds.length ? InventoryItem.find({ _id: { $in: itemIds } }).select('itemCode').lean() : [],
+        vendorIds.length ? InventoryVendor.find({ _id: { $in: vendorIds } }).select('name').lean() : [],
+    ]);
     const codeByItemId = new Map(catalog.map((row) => [String(row._id), String(row.itemCode || '').trim()]));
-    for (const entry of entries) map.set(String(entry._id), presentBillItems(entry, codeByItemId));
+    const vendorNameById = new Map(vendors.map((row) => [String(row._id), String(row.name || '').trim()]));
+    for (const entry of entries) {
+        const purchase = billPurchase(entry);
+        map.set(String(entry._id), {
+            ...presentBillItems(entry, codeByItemId),
+            purchaseSource: purchase.purchaseSource,
+            vendorName: purchase.purchaseSource === 'vendor' ? (vendorNameById.get(purchase.vendorId) || '') : '',
+        });
+    }
     return map;
 }
 

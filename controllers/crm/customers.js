@@ -747,6 +747,34 @@ function sameText(left, right) {
     return text(left).toLowerCase() === text(right).toLowerCase();
 }
 
+function customerColumnValue(row, key) {
+    if (key === 'code') return row.code || '';
+    if (key === 'name') return row.name || '';
+    if (key === 'location') return row.location || '';
+    if (key === 'contact') return row.contact || '';
+    if (key === 'brands') return (row.listBrands || []).join(', ');
+    if (key === 'products') return row.products == null ? '' : Number(row.products) || 0;
+    if (key === 'outstanding') return Number(row.outstandingPayment) || 0;
+    if (key === 'status') return row.status || '';
+    return '';
+}
+
+function sortCustomerRows(rows, sortKey, sortDir) {
+    const key = String(sortKey || '').trim();
+    const allowed = new Set(['code', 'name', 'location', 'contact', 'brands', 'products', 'outstanding', 'status']);
+    if (!allowed.has(key)) return rows;
+    const dir = String(sortDir || '').toLowerCase() === 'desc' ? -1 : 1;
+    return rows.slice().sort((left, right) => {
+        const a = customerColumnValue(left, key);
+        const b = customerColumnValue(right, key);
+        if (a === '' && b === '') return 0;
+        if (a === '') return 1;
+        if (b === '') return -1;
+        if (typeof a === 'number' && typeof b === 'number') return (a - b) * dir;
+        return String(a).localeCompare(String(b), undefined, { numeric: true, sensitivity: 'base' }) * dir;
+    });
+}
+
 export async function listCustomers(req, res) {
     try {
         const page = Math.max(1, Number(req.query.page) || 1);
@@ -805,7 +833,8 @@ export async function listCustomers(req, res) {
             ].join(' ').toLowerCase().includes(search);
         });
         const total = rows.length;
-        const customers = limit > 0 ? rows.slice((page - 1) * limit, (page - 1) * limit + limit) : rows;
+        const ordered = sortCustomerRows(rows, req.query.sort, req.query.dir);
+        const customers = limit > 0 ? ordered.slice((page - 1) * limit, (page - 1) * limit + limit) : ordered;
         res.json({ customers, total, page, limit, filters });
     } catch (error) {
         sendError(res, error);

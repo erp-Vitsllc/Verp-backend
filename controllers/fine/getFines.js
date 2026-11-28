@@ -2,6 +2,7 @@ import Fine from "../../models/Fine.js";
 import AssetItem from "../../models/AssetItem.js";
 import mongoose from "mongoose";
 import { isUserAdministrator } from "../../services/permissionService.js";
+import { fineAccountsSettlementDone } from "../../utils/fineStageAuth.js";
 
 /** List views don't need attachments, workflow, or approval PDFs. */
 const FINE_LIST_SELECT = [
@@ -54,6 +55,28 @@ function fillCompanyNameFromPopulate(fine) {
         fine.companyName = populatedName;
     }
     if (shortName) fine.companyShortName = shortName;
+}
+
+function fineNeedsMakePaymentHolder(fine) {
+    const status = String(fine?.fineStatus || '').trim();
+    if (status !== 'Approved' && status !== 'Active') return false;
+    return !fineAccountsSettlementDone(fine);
+}
+
+/** Live Accounts holder for Make Payment. One flowchart lookup for the whole list. */
+async function attachMakePaymentHolderName(fines) {
+    if (!Array.isArray(fines) || !fines.some(fineNeedsMakePaymentHolder)) return;
+
+    const { getDepartmentHOD } = await import('../../utils/getDepartmentHOD.js');
+    const hod = await getDepartmentHOD('finance');
+    const name = `${hod?.firstName || ''} ${hod?.lastName || ''}`.trim();
+    if (!name || /^unknown$/i.test(name)) return;
+
+    for (const fine of fines) {
+        if (fineNeedsMakePaymentHolder(fine) && !String(fine.accountsHODName || '').trim()) {
+            fine.accountsHODName = name;
+        }
+    }
 }
 
 function formatVehiclePlate(asset) {
@@ -303,6 +326,15 @@ export const getFines = async (req, res) => {
             console.warn(
                 '[getFines] Vendor bill Paid/Not Paid sync skipped:',
                 vendorListSyncErr?.message || vendorListSyncErr,
+            );
+        }
+
+        try {
+            await attachMakePaymentHolderName(fines);
+        } catch (holderErr) {
+            console.warn(
+                '[getFines] Make Payment holder name skipped:',
+                holderErr?.message || holderErr,
             );
         }
 

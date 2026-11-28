@@ -1214,6 +1214,7 @@ export const getUserActivityStats = async (req, res) => {
                 type: item.requestType,
                 requestedBy: item.requestedByName || item.subjectName || 'Unknown',
                 requestedDate: item.requestedDate,
+                createdAt: item.createdAt || null,
                 actionedDate: null,
                 status: 'Pending',
                 extra1: item.extra1,

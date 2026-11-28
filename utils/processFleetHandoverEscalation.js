@@ -104,7 +104,7 @@ export const processFleetHandoverEscalation = async () => {
                 const item = await AssetItem.findById(lean._id);
                 if (!item) continue;
                 const result = await autoAcceptFleetHandoverTargetStage(item);
-                if (!result.ok) {
+                if (!result.ok && result.reason !== 'images_missing') {
                     console.warn(
                         `[processFleetHandoverEscalation] auto-accept skipped for ${lean.assetId || lean._id}: ${result.reason}`,
                     );

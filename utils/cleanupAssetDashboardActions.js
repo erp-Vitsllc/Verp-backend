@@ -27,6 +27,7 @@ export const ASSET_DASHBOARD_INBOX_TYPES = [
     'Vehicle Profile Edit',
     'Vehicle Inspection',
     'Vehicle Assignment Photo Review',
+    'Vehicle Handover Images Missing',
     'Vehicle Mortgage Close',
     'Vehicle Disposition Request',
     'Vehicle Delete Request',
@@ -43,6 +44,7 @@ export const VEHICLE_DASHBOARD_INBOX_TYPES = [
     'Vehicle Profile Edit',
     'Vehicle Inspection',
     'Vehicle Assignment Photo Review',
+    'Vehicle Handover Images Missing',
     'Vehicle Mortgage Close',
     'Vehicle Disposition Request',
     'Vehicle Delete Request',
@@ -160,6 +162,7 @@ function parseDashboardExtra3(extra3) {
 const HANDOVER_HISTORY_LINKED_INBOX_TYPES = new Set([
     'Vehicle Inspection',
     'Vehicle Assignment Photo Review',
+    'Vehicle Handover Images Missing',
     'Asset Assignment',
 ]);
 

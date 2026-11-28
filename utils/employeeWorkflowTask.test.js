@@ -29,6 +29,8 @@ test("a work order notification is a project task", () => {
     assert.equal(workflowTaskType("Work Order MR 2"), "Project Task");
     assert.equal(workflowTaskType("Work Order Project"), "Project Task");
     assert.equal(employeeWorkflowType("Work Order Project"), true);
+    assert.equal(employeeWorkflowType("Work Order MOM"), true);
+    assert.equal(workflowTaskType("Work Order MOM"), "Project Task");
 });
 
 test("draft bill, fine, loan, and advance rows are employee workflow tasks", () => {

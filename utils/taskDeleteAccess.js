@@ -22,10 +22,10 @@ function adminMayDeleteCategory(taskCategory) {
     return category === "system task" || category === "workflow task" || category === "work flow task";
 }
 
-/** The requester can delete a general task, a system task, or a workflow task. */
+/** The requester can delete a general task, a system task, or a workflow task. A project task stays. */
 export function requesterMayDeleteCategory(taskCategory) {
     const category = categoryKey(taskCategory);
-    return category === "general task" || category === "project task" || adminMayDeleteCategory(taskCategory);
+    return category === "general task" || adminMayDeleteCategory(taskCategory);
 }
 
 function viewerIsRequester(viewer, requestedByName, requestedByUserId) {
@@ -96,6 +96,7 @@ export function viewerMayDeleteTask(viewer, {
     finished = false,
     status = "",
 } = {}) {
+    if (categoryKey(taskCategory) === "project task") return false;
     if (finished || statusAllowsOnlyAdminDelete(status)) return Boolean(viewer?.superUser);
     if (closed) return false;
     if (viewer?.superUser) return true;

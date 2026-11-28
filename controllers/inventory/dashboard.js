@@ -40,7 +40,7 @@ function purchaseLines(lines) {
 async function loadModel() {
     const [items, categories, subcategories, vendors, entries, deliveries] = await Promise.all([
         InventoryItem.find()
-            .select('description itemCode unitOfMeasure categoryId subcategoryId availableQuantity lastStockPrice createdAt')
+            .select('description itemCode modelNumber unitOfMeasure categoryId subcategoryId availableQuantity lastStockPrice createdAt')
             .lean(),
         ItemCategory.find().select('name').lean(),
         ItemSubcategory.find().select('reservationQuantity').lean(),
@@ -60,8 +60,10 @@ async function loadModel() {
             id: String(row._id),
             description: row.description || '',
             itemCode: row.itemCode || '',
+            modelNumber: row.modelNumber || '',
             unit: row.unitOfMeasure || '',
             categoryName: categoryNames.get(String(row.categoryId || '')) || 'Uncategorized',
+            subcategoryId: row.subcategoryId ? String(row.subcategoryId) : '',
             reservation: reservationOf(reservations.get(String(row.subcategoryId || ''))),
             available: Number(row.availableQuantity) || 0,
             lastPrice: Number(row.lastStockPrice) || 0,
@@ -102,8 +104,9 @@ export async function getInventoryDashboard(req, res) {
             throw httpError(400, error.message);
         }
         const model = await loadModel();
-        const current = buildInventoryDashboard(model, scope);
-        const previous = buildInventoryDashboard(model, scope.previous);
+        const asOf = (window) => (today < window.end ? today : window.end);
+        const current = buildInventoryDashboard(model, scope, asOf(scope));
+        const previous = buildInventoryDashboard(model, scope.previous, asOf(scope.previous));
         res.json({
             range: {
                 mode: scope.mode,
@@ -122,6 +125,10 @@ export async function getInventoryDashboard(req, res) {
             lowStock: current.lowStock,
             purchases: current.purchases,
             priceChanges: current.priceChanges,
+            stockGraph: current.stockGraph,
+            purchaseGraph: current.purchaseGraph,
+            deliveryGraph: current.deliveryGraph,
+            nonMoving: current.nonMoving,
             stockByCategory: current.stockByCategory,
             stockStatus: current.stockStatus,
             billStatus: current.billStatus,

@@ -47,6 +47,14 @@ function inboxMeta(fine, fines = []) {
     };
 }
 
+async function fineCreatorName(fine) {
+    const stored = `${fine?.createdBy?.firstName || ''} ${fine?.createdBy?.lastName || ''}`.trim()
+        || String(fine?.createdBy?.name || '').trim();
+    if (stored && stored.toLowerCase() !== 'system') return stored;
+    const { requesterNameForActor } = await import('./employeeWorkflowTask.js');
+    return requesterNameForActor(fine?.createdBy?._id || fine?.createdBy);
+}
+
 export async function openAccountsPaymentInbox(fine, fines = []) {
     const { accountsHOD, accountsUser } = await resolveFineAccountsActor(fine);
     if (!accountsUser?._id) {
@@ -67,9 +75,11 @@ export async function openAccountsPaymentInbox(fine, fines = []) {
     const subjectEmp = realEmp?.employeeId
         ? await EmployeeBasic.findOne({ employeeId: realEmp.employeeId })
         : null;
+    const requestedByName = await fineCreatorName(fine);
 
     await syncDashboardAction({
         ...inboxMeta(fine, fines),
+        requestedByName,
         assignedTo: accountsUser._id,
         status: 'Pending',
         subjectEmployee: subjectEmp,

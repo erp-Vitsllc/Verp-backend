@@ -121,6 +121,9 @@ function whatToDo(typeKey, facts) {
     if (typeKey.includes("attendance")) return "Review this attendance request.";
     if (typeKey === "asset assignment") return facts.vehicleNo ? "Complete the vehicle handover." : "Complete the asset assignment.";
     if (typeKey.startsWith("asset ")) return `Complete this asset ${typeKey.replace(/^asset\s+/, "")}.`;
+    if (typeKey === "vehicle handover images missing") {
+        return "Add the body condition images. This handover cannot go to the next step without images.";
+    }
     if (typeKey.startsWith("vehicle ")) return `Complete this vehicle ${typeKey.replace(/^vehicle\s+/, "")}.`;
     if (typeKey.includes("profile activation")) return "Review this profile activation.";
     if (typeKey.includes("salary")) return "Review this salary request.";

@@ -21,11 +21,12 @@ import {
     sendWorkOrderLpoNotFilledEmail,
 } from '../utils/sendWorkOrderLpoEmail.js';
 import { syncDashboardAction } from '../utils/syncDashboard.js';
+import { getDepartmentHOD } from '../utils/getDepartmentHOD.js';
 import { listedProjectTaskNumber, sendProjectCoordinatorTaskEmail } from '../utils/sendProjectTaskEmail.js';
 import { oneTaskNumber } from '../utils/taskNumberStore.js';
 import DashboardAction from '../models/DashboardAction.js';
 import TaskManagerTask from '../models/TaskManagerTask.js';
-import { finishEmployeeWorkflowTasks } from '../utils/employeeWorkflowTask.js';
+import { finishEmployeeWorkflowTasks, finishWorkflowTasksForActions } from '../utils/employeeWorkflowTask.js';
 import {
     pendingTaskLabel,
     pendingTaskLine,
@@ -73,6 +74,20 @@ function cleanText(value, max) {
         .replace(/<[^>]*>/g, '')
         .trim()
         .slice(0, max);
+}
+
+function cleanMomRows(rows) {
+    if (!Array.isArray(rows)) return [];
+    return rows.slice(0, 100).map((row, index) => {
+        const date = cleanText(row?.completionDate, 10);
+        return {
+            id: cleanText(row?.id, 40) || `mom-${index + 1}`,
+            taskName: cleanText(row?.taskName, 200),
+            assigneeId: cleanText(row?.assigneeId, 40),
+            assigneeName: cleanText(row?.assigneeName, 160),
+            completionDate: /^\d{4}-\d{2}-\d{2}$/.test(date) ? date : '',
+        };
+    });
 }
 
 function samePartyName(left, right) {
@@ -179,6 +194,7 @@ const ATTACHMENT_REQUEST = 'Work Order LPO Attachment';
 const ACTUAL_BOQ_REQUEST = 'Work Order Actual BOQ';
 const ACTUAL_BOQ_UPDATE_REQUEST = 'Work Order Actual BOQ Update';
 const MATERIAL_REQUEST = 'Work Order MR';
+const MOM_REQUEST = 'Work Order MOM';
 
 function actorKeys(req) {
     return [
@@ -549,28 +565,48 @@ async function ensureCoordinatorProjectTask(order) {
     }
 }
 
-async function ensureChecklistTasks(order) {
-    const coordinator = await findProjectCoordinator();
-    if (!coordinator?._id || !order?._id) return;
-    const coordinatorName = [coordinator.firstName, coordinator.lastName].filter(Boolean).join(' ').trim()
-        || await projectCoordinatorName();
-    const number = order.workOrderNo || '';
-    for (const item of WORK_ORDER_CHECKLIST) {
-        if (item.id === 'create') continue;
-        await syncDashboardAction({
-            requestId: order._id,
-            requestType: CHECKLIST_REQUEST,
-            assignedTo: coordinator._id,
-            status: 'Pending',
-            subjectName: order.customer || '',
-            requestedByName: coordinatorName,
-            extra1: item.label,
-            extra2: number,
-            extra3: JSON.stringify({
-                checklistId: item.id,
-                path: workOrderDetailsPath(order._id, 'check-list'),
-            }),
+async function ensureSalesKickOffTask(order, senderName) {
+    if (!order?._id) return { emailed: false, message: '' };
+    const officer = await getDepartmentHOD('admincontroller');
+    const officerName = [officer?.firstName, officer?.lastName].filter(Boolean).join(' ').trim();
+    if (!officer?._id) {
+        return {
+            emailed: false,
+            message: 'Sales kick off was not assigned. No active Admin Officer is set on the flowchart.',
+        };
+    }
+    const number = order.workOrderNo || 'this work order';
+    await syncDashboardAction({
+        requestId: order._id,
+        requestType: CHECKLIST_REQUEST,
+        assignedTo: officer._id,
+        status: 'Pending',
+        subjectName: order.customer || '',
+        requestedByName: senderName || '',
+        extra1: 'Sales kick off',
+        extra2: number,
+        extra3: JSON.stringify({
+            checklistId: 'sales',
+            path: workOrderDetailsPath(order._id, 'workflow'),
+        }),
+    });
+    const notice = {
+        extra1: 'Sales kick off',
+        extra2: `Sales kick off for ${number} is assigned to ${officerName || 'the admin officer'}.`,
+        subject: `${number}: sales kick off`,
+        message: `Sales kick off for ${number} is assigned to ${officerName || 'the admin officer'}.`,
+    };
+    try {
+        const sent = await sendWorkOrderFollowUpEmail({
+            employee: officer,
+            notice,
+            workOrderId: String(order._id),
+            section: 'workflow',
         });
+        return { emailed: Boolean(sent.emailed), message: sent.message || notice.message };
+    } catch (error) {
+        console.error('Sales kick off email failed:', error);
+        return { emailed: false, message: 'Email could not be sent. The sales kick off task was still saved.' };
     }
 }
 
@@ -1066,6 +1102,19 @@ function cleanBoqLine(row) {
             next[key] = cleanText(value, 2000);
         }
     });
+    const purchaserStatus = cleanText(row?.purchaserItemStatus, 20);
+    if (purchaserStatus === 'pending' || purchaserStatus === 'approved' || purchaserStatus === 'rejected') {
+        next.purchaserItemStatus = purchaserStatus;
+    }
+    const itemKey = cleanText(row?.newItemKey, 2000);
+    if (itemKey) next.newItemKey = itemKey;
+    const unit = cleanText(row?.unitOfMeasure, 40);
+    if (unit === 'Box' || unit === 'Metre' || unit === 'Quantity') next.unitOfMeasure = unit;
+    next.manufacturerPartNumber = cleanText(row?.manufacturerPartNumber, 160);
+    next.hsCode = cleanText(row?.hsCode, 80);
+    next.countryOfOrigin = cleanText(row?.countryOfOrigin, 120);
+    const reservation = Number(row?.reservationQuantity);
+    if (Number.isFinite(reservation) && reservation >= 0) next.reservationQuantity = reservation;
     return next;
 }
 
@@ -1075,8 +1124,7 @@ const REQUIRED_BOQ_COLUMNS = [
     ['item', 'Item'],
     ['brand', 'Brand'],
     ['modelNo', 'Model no'],
-    ['descriptionNew', 'Description (New)'],
-    ['descriptionOld', 'Description (Old)'],
+    ['descriptionNew', 'Description'],
     ['quantity', 'Qty'],
     ['unitPrice', 'Unit price'],
     ['total', 'Total'],
@@ -1795,16 +1843,22 @@ async function ensureBoqInventoryItem(row, cache) {
     let created = false;
     if (!existing) {
         const price = Number(row.unitPrice);
+        const unit = cleanText(row.unitOfMeasure, 40);
+        const reservation = Number(row.reservationQuantity);
         existing = await InventoryItem.create({
             categoryId: catalog.categoryId,
             subcategoryId: catalog.subcategoryId,
             brandId: catalog.brandId,
             itemOptionId: catalog.itemOptionId,
-            description: cleanText(row.descriptionNew, 2000) || catalog.description,
+            description: catalog.description,
             moreDescription: cleanText(row.descriptionOld, 2000),
             modelNumber: catalog.modelNumber,
             itemCode: await nextItemCode(),
-            unitOfMeasure: 'Quantity',
+            unitOfMeasure: unit === 'Box' || unit === 'Metre' || unit === 'Quantity' ? unit : 'Quantity',
+            manufacturerPartNumber: cleanText(row.manufacturerPartNumber, 160),
+            reservationQuantity: Number.isFinite(reservation) && reservation > 0 ? reservation : 0,
+            hsCode: cleanText(row.hsCode, 80),
+            countryOfOrigin: cleanText(row.countryOfOrigin, 120),
             availableQuantity: 0,
             pendingStock: false,
             status: 'Out of Stock',
@@ -1823,6 +1877,13 @@ async function ensureBoqInventoryItem(row, cache) {
         item: catalog.itemName,
         brand: catalog.brandName,
         modelNo: catalog.modelNumber || modelNo,
+        descriptionNew: catalog.description,
+        descriptionOld: cleanText(row.descriptionOld, 2000) || catalog.description,
+        unitOfMeasure: existing.unitOfMeasure || 'Quantity',
+        manufacturerPartNumber: existing.manufacturerPartNumber || '',
+        hsCode: existing.hsCode || '',
+        countryOfOrigin: existing.countryOfOrigin || '',
+        reservationQuantity: Number(existing.reservationQuantity) || 0,
     };
     cache.set(key, linked);
     return { row: { ...row, ...linked }, created };
@@ -1918,6 +1979,78 @@ async function decideActualBoq(req, res, order, actorName) {
     });
 }
 
+function boqRowItemKey(row) {
+    return String(row?.newItemKey || boqItemKey(row));
+}
+
+function optionalCatalogId(value) {
+    const id = cleanText(value, 40);
+    return mongoose.Types.ObjectId.isValid(id) ? id : '';
+}
+
+function purchaserItemDraft(body) {
+    const category = cleanText(body?.categoryName, 160);
+    const subcategory = cleanText(body?.subcategoryName, 160);
+    const item = cleanText(body?.itemName, 160);
+    const brand = cleanText(body?.brandName, 160);
+    const modelNo = cleanText(body?.modelNumber, 160);
+    const unit = cleanText(body?.unitOfMeasure, 40);
+    if (!category || !subcategory || !item || !brand) {
+        throw httpError(400, 'Category, sub category, item, and brand are required.');
+    }
+    if (unit !== 'Box' && unit !== 'Metre' && unit !== 'Quantity') {
+        throw httpError(400, 'Choose a unit of measure.');
+    }
+    const reservation = Number(body?.reservationQuantity ?? 0);
+    if (!Number.isFinite(reservation) || reservation < 0) {
+        throw httpError(400, 'Reservation quantity must be zero or more.');
+    }
+    const descriptionNew = [brand, item, modelNo, subcategory].filter(Boolean).join(' ');
+    return {
+        categoryId: optionalCatalogId(body?.categoryId),
+        subcategoryId: optionalCatalogId(body?.subcategoryId),
+        itemOptionId: optionalCatalogId(body?.itemOptionId),
+        brandId: optionalCatalogId(body?.brandId),
+        category,
+        subcategory,
+        item,
+        brand,
+        modelNo,
+        descriptionNew,
+        unitOfMeasure: unit,
+        manufacturerPartNumber: cleanText(body?.manufacturerPartNumber, 160),
+        reservationQuantity: reservation,
+        hsCode: cleanText(body?.hsCode, 80),
+        countryOfOrigin: cleanText(body?.countryOfOrigin, 120),
+    };
+}
+
+function presentBoqNewItem(order, row, itemKey) {
+    return {
+        id: `${order._id}:${itemKey}`,
+        workOrderId: String(order._id),
+        workOrderNo: order.workOrderNo || '',
+        itemKey,
+        status: row.purchaserItemStatus || '',
+        categoryId: row.categoryId || '',
+        subcategoryId: row.subcategoryId || '',
+        itemOptionId: row.itemOptionId || '',
+        brandId: row.brandId || '',
+        category: row.category || '',
+        subcategory: row.subcategory || '',
+        item: row.item || '',
+        brand: row.brand || '',
+        modelNo: row.modelNo || '',
+        description: row.descriptionNew || row.descriptionOld || '',
+        unitOfMeasure: row.unitOfMeasure || '',
+        manufacturerPartNumber: row.manufacturerPartNumber || '',
+        hsCode: row.hsCode || '',
+        countryOfOrigin: row.countryOfOrigin || '',
+        reservationQuantity: Number(row.reservationQuantity) || 0,
+        unitPrice: row.unitPrice ?? '',
+    };
+}
+
 export const listBoqNewItems = async (req, res) => {
     try {
         const officer = await findPurchaseOfficer();
@@ -1931,24 +2064,11 @@ export const listBoqNewItems = async (req, res) => {
         orders.forEach((order) => {
             boqLines(order.actualBoq?.tables).forEach((row) => {
                 if (row.purchaserItemStatus !== 'pending' && row.purchaserItemStatus !== 'rejected') return;
-                const itemKey = String(row.newItemKey || boqItemKey(row));
+                const itemKey = boqRowItemKey(row);
                 const id = `${order._id}:${itemKey}`;
                 if (seen.has(id)) return;
                 seen.add(id);
-                items.push({
-                    id,
-                    workOrderId: String(order._id),
-                    workOrderNo: order.workOrderNo || '',
-                    itemKey,
-                    status: row.purchaserItemStatus,
-                    category: row.category || '',
-                    subcategory: row.subcategory || '',
-                    item: row.item || '',
-                    brand: row.brand || '',
-                    modelNo: row.modelNo || '',
-                    description: row.descriptionNew || row.descriptionOld || '',
-                    unitPrice: row.unitPrice ?? '',
-                });
+                items.push(presentBoqNewItem(order, row, itemKey));
             });
         });
         return res.status(200).json({ isPurchaseOfficer: true, items });
@@ -1966,7 +2086,7 @@ export const decideBoqNewItem = async (req, res) => {
         }
         const workOrderId = cleanText(req.body?.workOrderId, 40);
         const itemKey = cleanText(req.body?.itemKey, 2000);
-        const decision = req.body?.decision === 'reject' ? 'reject' : 'approve';
+        const decision = req.body?.decision === 'reject' ? 'reject' : req.body?.decision === 'save' ? 'save' : 'approve';
         if (!mongoose.Types.ObjectId.isValid(workOrderId) || !itemKey) {
             return res.status(400).json({ message: 'This new item was not found' });
         }
@@ -1979,42 +2099,77 @@ export const decideBoqNewItem = async (req, res) => {
         tables.forEach((table) => {
             (Array.isArray(table.rows) ? table.rows : []).forEach((raw) => {
                 const row = plainMixed(raw) || {};
-                if (row.kind !== 'header' && String(row.newItemKey || '') === itemKey) matches.push(row);
+                if (row.kind !== 'header' && boqRowItemKey(row) === itemKey) matches.push(row);
             });
         });
         if (!matches.length) return res.status(404).json({ message: 'This new item was not found' });
-        if (matches.every((row) => row.purchaserItemStatus === 'approved')) {
+        if (decision !== 'reject' && matches.every((row) => row.purchaserItemStatus === 'approved')) {
             return res.status(200).json({ message: 'Item approved', status: 'approved' });
+        }
+        if (decision === 'reject') {
+            const reason = cleanText(req.body?.reason, 1000);
+            if (!reason) return res.status(400).json({ message: 'A reason is required to reject this item.' });
+            order.actualBoq.tables = tables.map((table) => ({
+                title: table.title || '',
+                rows: (Array.isArray(table.rows) ? table.rows : []).filter((raw) => {
+                    const row = plainMixed(raw) || {};
+                    if (row.kind === 'header') return true;
+                    return boqRowItemKey(row) !== itemKey;
+                }),
+            })).filter((table) => (table.rows || []).some((row) => row?.kind !== 'header'));
+            order.markModified('actualBoq');
+            await order.save();
+            return res.status(200).json({ message: 'Item rejected', status: 'rejected' });
+        }
+        let draft = null;
+        if (req.body?.item) {
+            try {
+                draft = purchaserItemDraft(req.body.item);
+            } catch (error) {
+                const status = error?.status || error?.statusCode || 400;
+                return res.status(status).json({ message: error?.message || 'Check the item and try again.' });
+            }
+        }
+        if (decision === 'save' && !draft) {
+            return res.status(400).json({ message: 'Category, sub category, item, and brand are required.' });
+        }
+        let source = { ...matches[0], newItemKey: itemKey };
+        if (draft) {
+            source = {
+                ...source,
+                ...draft,
+                descriptionOld: cleanText(source.descriptionOld, 2000) || draft.descriptionNew,
+                purchaserItemStatus: 'pending',
+                newItemKey: itemKey,
+            };
         }
         let linked = null;
         if (decision === 'approve') {
             try {
-                const stored = await ensureBoqInventoryItem(matches[0], new Map());
+                const stored = await ensureBoqInventoryItem(source, new Map());
                 linked = stored.row;
             } catch (error) {
                 const status = error?.status || error?.statusCode || 400;
                 return res.status(status).json({ message: error?.message || 'Could not store the new item' });
             }
         }
+        const savedRow = decision === 'approve'
+            ? { ...source, ...linked, purchaserItemStatus: 'approved', newItemKey: itemKey }
+            : source;
         order.actualBoq.tables = tables.map((table) => ({
             title: table.title || '',
             rows: (Array.isArray(table.rows) ? table.rows : []).map((raw) => {
                 const row = plainMixed(raw) || {};
-                if (row.kind === 'header' || String(row.newItemKey || '') !== itemKey) return row;
-                if (decision === 'reject') return { ...row, purchaserItemStatus: 'rejected' };
-                return {
-                    ...row,
-                    ...linked,
-                    purchaserItemStatus: 'approved',
-                    newItemKey: itemKey,
-                };
+                if (row.kind === 'header' || boqRowItemKey(row) !== itemKey) return row;
+                return { ...row, ...savedRow, newItemKey: itemKey };
             }),
         }));
         order.markModified('actualBoq');
         await order.save();
         return res.status(200).json({
-            message: decision === 'approve' ? 'Item approved' : 'Item rejected',
-            status: decision === 'approve' ? 'approved' : 'rejected',
+            message: decision === 'approve' ? 'Item approved' : 'BOQ updated',
+            status: decision === 'approve' ? 'approved' : 'pending',
+            item: presentBoqNewItem(order, savedRow, itemKey),
         });
     } catch (error) {
         console.error('BOQ new item decision failed:', error);
@@ -2542,6 +2697,80 @@ async function pendingWorkOrderTasks(order) {
     }));
 }
 
+function salesChecklistId(action) {
+    try {
+        return String(JSON.parse(action?.extra3 || '{}')?.checklistId || '').trim();
+    } catch {
+        return '';
+    }
+}
+
+async function salesKickOffAction(order) {
+    if (!order?._id) return null;
+    const actions = await DashboardAction.find({
+        requestId: order._id,
+        requestType: CHECKLIST_REQUEST,
+    })
+        .select('status extra1 extra3 assignedTo actionedDate')
+        .sort({ createdAt: -1 })
+        .lean();
+    const matches = actions.filter((row) => (
+        salesChecklistId(row) === 'sales' || String(row.extra1 || '').trim() === 'Sales kick off'
+    ));
+    return matches.find((row) => row.status === 'Pending') || matches[0] || null;
+}
+
+async function presentSalesKickOff(order) {
+    const momApproved = order?.momStatus === 'approved';
+    const action = await salesKickOffAction(order);
+    if (!action) {
+        return { status: 'unassigned', pendingWith: '', completedAt: null, momApproved };
+    }
+    const task = await TaskManagerTask.findOne({ sourceDashboardActionId: action._id })
+        .sort({ updatedAt: -1 })
+        .select('status assigneeName closeRequest.closedAt closeRequest.reviewPending')
+        .lean();
+    const done = taskIsFinished(task) || (action.status !== 'Pending' && action.status !== 'On Hold');
+    let pendingWith = String(task?.assigneeName || '').trim();
+    if (!pendingWith && action.assignedTo) {
+        const person = await EmployeeBasic.findById(action.assignedTo).select('firstName lastName').lean();
+        pendingWith = [person?.firstName, person?.lastName].filter(Boolean).join(' ').trim();
+    }
+    return {
+        status: done ? 'completed' : 'pending',
+        pendingWith,
+        completedAt: done ? (action.actionedDate || null) : null,
+        momApproved,
+    };
+}
+
+async function completeSalesKickOff(req, res, order, actorName) {
+    if (order.momStatus !== 'approved') {
+        return res.status(400).json({
+            message: 'Complete sales kick off after the MOM is submitted and the project manager approves it.',
+        });
+    }
+    const action = await salesKickOffAction(order);
+    if (!action) return res.status(400).json({ message: 'Sales kick off was not assigned.' });
+    if (action.status !== 'Pending' && action.status !== 'On Hold') {
+        return res.status(400).json({ message: 'Sales kick off is already complete.' });
+    }
+    await DashboardAction.updateOne(
+        { _id: action._id },
+        { $set: { status: 'Approved', actionedDate: new Date(), comment: 'Sales kick off completed' } },
+    );
+    await finishWorkflowTasksForActions([action._id], {
+        taskStatus: 'Completed',
+        event: 'Completed',
+        detail: 'Sales kick off completed.',
+        actorName,
+    });
+    return res.status(200).json({
+        workOrder: await presentedForViewer(order, req),
+        emailMessage: 'Sales kick off completed.',
+    });
+}
+
 async function presentedForViewer(order, req) {
     const presented = presentWorkOrder(order, { includeFiles: true });
     presented.viewerCanCompleteLpo = Boolean(order.lpoFollowUp) && await canCompleteLpoFollowUp(req, order);
@@ -2550,11 +2779,13 @@ async function presentedForViewer(order, req) {
     presented.viewerIsPurchaseOfficer = isJwtSystemSuperUser(req.user) || actorIsPurchaseOfficer(req, officer);
     presented.viewerSubmitsMaterialRequestToManager = actorIsPurchaseOfficer(req, officer);
     presented.viewerCanApproveMrManager = presented.viewerIsProjectManager || isJwtSystemSuperUser(req.user);
+    presented.viewerCanApproveMom = presented.viewerCanApproveMrManager;
     presented.purchaseOfficerName = String(officer?.employeeName || '').trim();
     presented.lpoAssigneeName = await projectCoordinatorName();
     presented.projectManagerName = await projectManagerName();
     presented.projectTask = await projectTaskNotice(order);
     presented.pendingTasks = await pendingWorkOrderTasks(order);
+    presented.salesKickOff = await presentSalesKickOff(order);
     return presented;
 }
 
@@ -2779,13 +3010,19 @@ export const createWorkOrder = async (req, res) => {
         };
         let quotationSnapshot = null;
         if (quotationRef) {
+            let estimate;
             try {
-                const estimate = await loadQuotationEstimate(quotationRef);
-                quotationSnapshot = snapshotFromEstimate(estimate, quoteFallback);
+                estimate = await fetchZohoEstimateByNumber(quotationRef);
             } catch (error) {
-                console.error('Quotation snapshot was not loaded from Zoho:', error?.message || error);
-                quotationSnapshot = snapshotFromEstimate(null, quoteFallback);
+                const status = Number(error?.statusCode) || 400;
+                return res.status(status >= 400 && status < 600 ? status : 400).json({
+                    message: error?.message || 'Zoho quotation could not be imported.',
+                });
             }
+            if (!samePartyName(estimate?.customerName, customer)) {
+                return res.status(400).json({ message: 'Customer not matching for this quote, please verify your details.' });
+            }
+            quotationSnapshot = snapshotFromEstimate(estimate, quoteFallback);
         }
         let quotationFile = null;
         if (quotationRef || quotationId) {
@@ -2846,30 +3083,39 @@ export const createWorkOrder = async (req, res) => {
                 if (!intentDraft) {
                     try {
                         await ensureCoordinatorProjectTask(workOrder);
-                        await ensureChecklistTasks(workOrder);
                     } catch (error) {
                         console.error('Project task was not created:', error);
                     }
                 }
                 let emailSent = false;
                 let emailMessage = '';
+                if (!intentDraft) {
+                    try {
+                        const kickoff = await ensureSalesKickOffTask(workOrder, senderName);
+                        emailSent = Boolean(kickoff.emailed);
+                        emailMessage = kickoff.message || '';
+                    } catch (error) {
+                        console.error('Sales kick off task was not created:', error);
+                        emailMessage = 'The work order was created. The sales kick off task could not be assigned.';
+                    }
+                }
                 if (!intentDraft && lpoMode === 'not_required') {
                     try {
                         const notice = await openSalespersonFollowUp(workOrder, senderName);
-                        emailSent = Boolean(notice.emailed);
-                        emailMessage = notice.message || '';
+                        emailSent = emailSent || Boolean(notice.emailed);
+                        emailMessage = [emailMessage, notice.message].filter(Boolean).join(' ');
                     } catch (error) {
                         console.error('Work order salesperson follow-up failed:', error);
-                        emailMessage = 'The work order was created. The salesperson notice could not be sent.';
+                        emailMessage = [emailMessage, 'The work order was created. The salesperson notice could not be sent.'].filter(Boolean).join(' ');
                     }
                 } else if (!intentDraft && lpoMode === 'required') {
                     try {
                         const notice = await openCoordinatorFollowUp(workOrder, senderName);
-                        emailSent = Boolean(notice.emailed);
-                        emailMessage = notice.message || '';
+                        emailSent = emailSent || Boolean(notice.emailed);
+                        emailMessage = [emailMessage, notice.message].filter(Boolean).join(' ');
                     } catch (error) {
                         console.error('Work order coordinator follow-up failed:', error);
-                        emailMessage = 'The work order was created. The project coordinator notice could not be sent.';
+                        emailMessage = [emailMessage, 'The work order was created. The project coordinator notice could not be sent.'].filter(Boolean).join(' ');
                     }
                 }
                 return res.status(201).json({
@@ -3127,6 +3373,147 @@ export const applyWorkOrderQuotationChanges = async (req, res) => {
     }
 };
 
+async function closeMomNotice(order, status, comment) {
+    if (!order?._id) return;
+    await DashboardAction.updateMany(
+        { requestId: order._id, requestType: MOM_REQUEST, status: 'Pending' },
+        { $set: { status, actionedDate: new Date(), comment: comment || '' } },
+    );
+}
+
+async function markMomProjectTask(orderId) {
+    const action = await DashboardAction.findOne({
+        requestId: orderId,
+        requestType: MOM_REQUEST,
+        status: 'Pending',
+    }).select('_id').lean();
+    if (!action?._id) return;
+    const task = await TaskManagerTask.findOne({
+        sourceDashboardActionId: action._id,
+        status: { $nin: ['Cancelled'] },
+    }).sort({ updatedAt: -1 });
+    if (!task) return;
+    task.taskType = 'Project Task';
+    await task.save();
+}
+
+function storeMomRows(order, raw) {
+    order.mom = cleanMomRows(raw);
+    order.momReady = true;
+    order.markModified('mom');
+}
+
+async function submitMom(req, res, order, actorName) {
+    const rows = cleanMomRows(req.body?.mom);
+    if (!rows.some((row) => row.taskName)) {
+        return res.status(400).json({ message: 'Add at least one MOM task before submitting' });
+    }
+    const manager = await findProjectManager();
+    if (!manager?._id) {
+        return res.status(400).json({ message: 'Assign an active Project Manager on the flowchart before submitting the MOM.' });
+    }
+    const actor = await findActorEmployee(req);
+    storeMomRows(order, rows);
+    order.momRequestedByName = actorName;
+    order.momRequestedById = actor?._id ? String(actor._id) : '';
+    order.momRequestedAt = new Date();
+    const direct = await isProjectManager(req);
+    if (direct) {
+        order.momStatus = 'approved';
+        order.momDecidedByName = actorName;
+        order.momDecidedAt = new Date();
+        order.momReason = '';
+        await order.save();
+        await closeMomNotice(order, 'Approved', 'MOM approved by the project manager');
+        await finishEmployeeWorkflowTasks(order._id, MOM_REQUEST, {
+            taskStatus: 'Completed',
+            event: 'Approved',
+            detail: 'MOM approved.',
+            actorName,
+        });
+        return res.status(200).json({
+            workOrder: await presentedForViewer(order, req),
+            emailMessage: 'MOM approved.',
+            momSaved: true,
+        });
+    }
+    order.momStatus = 'pending';
+    order.momDecidedByName = '';
+    order.momDecidedAt = null;
+    order.momReason = '';
+    await order.save();
+    const managerName = [manager.firstName, manager.lastName].filter(Boolean).join(' ').trim() || 'the project manager';
+    const number = order.workOrderNo || 'this work order';
+    const notice = {
+        extra1: `Approve the MOM on ${number}`,
+        extra2: `${actorName} submitted the MOM on ${number} for your approval.`,
+        subject: `${number}: MOM approval`,
+        message: `Approve the MOM on ${number}`,
+    };
+    await syncDashboardAction({
+        requestId: order._id,
+        requestType: MOM_REQUEST,
+        assignedTo: manager._id,
+        status: 'Pending',
+        subjectName: order.customer || '',
+        requestedByName: actorName,
+        extra1: notice.extra1,
+        extra2: notice.extra2,
+        extra3: JSON.stringify({ path: workOrderDetailsPath(order._id, 'mom') }),
+    });
+    await markMomProjectTask(order._id);
+    let emailMessage = `MOM submitted. It is waiting for ${managerName}.`;
+    try {
+        const sent = await sendWorkOrderFollowUpEmail({
+            employee: manager,
+            notice,
+            workOrderId: String(order._id),
+            section: 'mom',
+        });
+        emailMessage = sent.message || emailMessage;
+    } catch (error) {
+        console.error('MOM approval email failed:', error);
+        emailMessage = 'Email could not be sent. The approval was still saved.';
+    }
+    return res.status(200).json({
+        workOrder: await presentedForViewer(order, req),
+        emailMessage,
+        momSaved: true,
+    });
+}
+
+async function decideMom(req, res, order, actorName) {
+    const allowed = await isProjectManager(req) || isJwtSystemSuperUser(req.user);
+    if (!allowed) return res.status(403).json({ message: 'Only the project manager can approve the MOM' });
+    if (order.momStatus !== 'pending') {
+        return res.status(400).json({ message: 'This MOM is not waiting for approval' });
+    }
+    const decision = req.body?.decideMom === 'reject' ? 'reject' : 'approve';
+    const reason = cleanText(req.body?.rejectReason, 1000);
+    if (decision === 'reject' && !reason) {
+        return res.status(400).json({ message: 'A description is required to reject the MOM' });
+    }
+    if (Object.prototype.hasOwnProperty.call(req.body || {}, 'mom')) storeMomRows(order, req.body.mom);
+    order.momStatus = decision === 'approve' ? 'approved' : 'rejected';
+    order.momReason = decision === 'reject' ? reason : '';
+    order.momDecidedByName = actorName;
+    order.momDecidedAt = new Date();
+    await order.save();
+    const closed = decision === 'approve' ? 'Approved' : 'Rejected';
+    await closeMomNotice(order, closed, reason || 'MOM approved');
+    await finishEmployeeWorkflowTasks(order._id, MOM_REQUEST, {
+        taskStatus: decision === 'approve' ? 'Completed' : 'Rejected',
+        event: closed,
+        detail: decision === 'approve' ? 'MOM approved.' : reason,
+        actorName,
+    });
+    return res.status(200).json({
+        workOrder: await presentedForViewer(order, req),
+        emailMessage: decision === 'approve' ? 'MOM approved.' : '',
+        momSaved: true,
+    });
+}
+
 export const updateWorkOrder = async (req, res) => {
     try {
         const { id } = req.params;
@@ -3147,6 +3534,16 @@ export const updateWorkOrder = async (req, res) => {
         }
         if (req.body?.decideActualBoqUpdate) {
             return decideActualBoqUpdate(req, res, order, actorName);
+        }
+        if (req.body?.completeSalesKickOff) return completeSalesKickOff(req, res, order, actorName);
+        if (req.body?.submitMom) return submitMom(req, res, order, actorName);
+        if (req.body?.decideMom) return decideMom(req, res, order, actorName);
+        if (Object.prototype.hasOwnProperty.call(req.body || {}, 'mom')) {
+            order.mom = cleanMomRows(req.body.mom);
+            order.momReady = true;
+            order.markModified('mom');
+            await order.save();
+            return res.status(200).json({ workOrder: await presentedForViewer(order, req) });
         }
         if (req.body?.createMaterialRequest) {
             return createMaterialRequest(req, res, order);

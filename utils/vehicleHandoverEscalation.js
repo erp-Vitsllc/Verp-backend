@@ -1,22 +1,73 @@
 import AssetHistory from '../models/AssetHistory.js';
 import EmployeeBasic from '../models/EmployeeBasic.js';
 import DashboardAction from '../models/DashboardAction.js';
+import TaskManagerTask from '../models/TaskManagerTask.js';
 import {
     advanceFleetHandoverOnAccept,
+    buildHandoverAssignDetailsPath,
     formatEmployeeDisplayName,
     getVehicleHandoverFlow,
+    isBodyConditionReportComplete,
     isHandoverReportsComplete,
+    isReceiverAssessmentComplete,
     resolveAdminOfficerEmployee,
     upsertHandoverAdminOfficerDashboardAction,
     upsertHandoverDashboardAction,
 } from './vehicleHandoverApprovalFlow.js';
 import {
     sendFleetHandoverAutoAcceptedEmail,
+    sendFleetHandoverImagesMissingEmail,
     sendFleetHandoverReminderEmail,
 } from './sendFleetHandoverEscalationEmails.js';
 
 export const FLEET_HANDOVER_REMINDER_START_DAY = 5;
 export const FLEET_HANDOVER_AUTO_ACCEPT_DAY = 10;
+export const HANDOVER_IMAGES_MISSING_REQUEST_TYPE = 'Vehicle Handover Images Missing';
+
+function bodyPhotoValue(photo) {
+    if (!photo) return false;
+    if (typeof photo === 'string') return Boolean(String(photo).trim());
+    if (typeof photo === 'object') {
+        return Boolean(photo.url || photo.publicId || photo.data || photo.path);
+    }
+    return false;
+}
+
+/** Any saved body-condition photo, including a partial previous handover. */
+export function bodyConditionReportHasAnyPhoto(report) {
+    if (!report || typeof report !== 'object') return false;
+    return Object.values(report).some((row) => {
+        if (!row || typeof row !== 'object') return false;
+        return bodyPhotoValue(row.photo ?? row.image ?? row.attachment);
+    });
+}
+
+/** True when this handover already has the body-condition images. */
+export function currentHandoverBodyPhotosAdded(details = {}) {
+    if (!details || typeof details !== 'object') return false;
+    if (details.bodyConditionCompleted === true) return true;
+    return isBodyConditionReportComplete(details);
+}
+
+/**
+ * Day 10 must not copy old pictures or advance when the current handover
+ * has no body-condition images. A missing previous image is the same stop.
+ */
+export function handoverMissingImagesDecision(currentDetails = {}, previousBodyReport = null) {
+    const photosAdded = currentHandoverBodyPhotosAdded(currentDetails);
+    const noPreviousPhoto = !bodyConditionReportHasAnyPhoto(previousBodyReport);
+    if (photosAdded) {
+        return { block: false, photosAdded: true, noPreviousPhoto };
+    }
+    return { block: true, photosAdded: false, noPreviousPhoto };
+}
+
+export function handoverImagesMissingMessage({ noPreviousPhoto = false } = {}) {
+    if (noPreviousPhoto) {
+        return 'Images were not added and there is no previous image. This handover cannot go to the next step. Do not update without images.';
+    }
+    return 'Images were not added. This handover cannot go to the next step. Do not update without images.';
+}
 
 const startOfDay = (d) => {
     const x = new Date(d);
@@ -256,14 +307,36 @@ export function cloneHandoverReportFields(prevDetails = {}) {
     return out;
 }
 
-export async function applyPreviousHandoverReportsToHistory({ historyId, assetId, assigneeDoc }) {
+export async function applyPreviousHandoverReportsToHistory({
+    historyId,
+    assetId,
+    assigneeDoc,
+    preserveCompleteBody = false,
+}) {
     const record = await AssetHistory.findById(historyId);
     if (!record) return { applied: false, reason: 'history_not_found' };
 
     const prevDetails = await findPreviousCompletedHandoverDetails(assetId, historyId);
     if (!prevDetails) return { applied: false, reason: 'no_previous_reports' };
 
+    const existingPreview =
+        record.details && typeof record.details === 'object' ? record.details : {};
     const cloned = cloneHandoverReportFields(prevDetails);
+    if (preserveCompleteBody && currentHandoverBodyPhotosAdded(existingPreview)) {
+        const copiedAssessment = Boolean(cloned.receiverAssessment);
+        delete cloned.bodyConditionReport;
+        cloned.bodyConditionCompleted = true;
+        if (!copiedAssessment) {
+            if (
+                existingPreview.receiverAssessmentCompleted === true ||
+                isReceiverAssessmentComplete(existingPreview)
+            ) {
+                cloned.receiverAssessmentCompleted = true;
+            } else {
+                delete cloned.receiverAssessmentCompleted;
+            }
+        }
+    }
     if (!Object.keys(cloned).length) return { applied: false, reason: 'empty_previous_reports' };
 
     const existing =
@@ -360,6 +433,51 @@ export async function autoAcceptFleetHandoverTargetStage(item) {
     const historyId = flow.historyId;
     if (!historyId) return { ok: false, reason: 'missing_history' };
 
+    const historyBeforeCopy = await AssetHistory.findById(historyId).select('details').lean();
+    if (!historyBeforeCopy) return { ok: false, reason: 'history_not_found' };
+
+    const previousSeed = await findPreviousHandoverDetailsForSeed(item._id, historyId);
+    const previousBody = previousSeed?.bodyConditionReport || previousSeed?.bodyCondition || null;
+    const imageDecision = handoverMissingImagesDecision(historyBeforeCopy.details || {}, previousBody);
+    if (imageDecision.block) {
+        const adminOfficer = await resolveAdminOfficerEmployee();
+        const alreadyNotified = Boolean(flow.escalation?.imagesMissingNotifiedAt);
+        if (adminOfficer?._id && !alreadyNotified) {
+            item.pendingActionDetails = {
+                ...(item.pendingActionDetails || {}),
+                vehicleHandoverFlow: {
+                    ...flow,
+                    escalation: {
+                        ...(flow.escalation || {}),
+                        imagesMissingNotifiedAt: new Date(),
+                        imagesMissingReason: imageDecision.noPreviousPhoto
+                            ? 'no_previous_photo'
+                            : 'photos_not_added',
+                    },
+                },
+            };
+            item.markModified('pendingActionDetails');
+            await item.save();
+        }
+        const assigneeId = item.assignedTo?._id || item.assignedTo;
+        const assigneeDoc = assigneeId
+            ? await EmployeeBasic.findById(assigneeId)
+                  .select('firstName lastName employeeId')
+                  .lean()
+            : null;
+        if (adminOfficer?._id) {
+            await notifyAdminOfficerHandoverImagesMissing({
+                asset: item,
+                historyId,
+                adminOfficer,
+                assigneeDoc,
+                noPreviousPhoto: imageDecision.noPreviousPhoto,
+                sendEmail: !alreadyNotified,
+            });
+        }
+        return { ok: false, reason: 'images_missing' };
+    }
+
     const assigneeId = item.assignedTo?._id || item.assignedTo;
     const assigneeDoc = assigneeId
         ? await EmployeeBasic.findById(assigneeId)
@@ -374,6 +492,7 @@ export async function autoAcceptFleetHandoverTargetStage(item) {
         historyId,
         assetId: item._id,
         assigneeDoc,
+        preserveCompleteBody: true,
     });
 
     let historyRecord = await AssetHistory.findById(historyId).lean();
@@ -433,7 +552,7 @@ export async function autoAcceptFleetHandoverTargetStage(item) {
         action: 'Comment',
         performedBy: null,
         comments:
-            'Vehicle handover auto-accepted after 10 days with no response. Assessment and body condition data were carried forward from the previous assignment where available.',
+            'Vehicle handover auto-accepted after 10 days. Body condition images already on this handover were kept and it moved to the next step.',
         date: new Date(),
         details: {
             auto: true,
@@ -443,7 +562,165 @@ export async function autoAcceptFleetHandoverTargetStage(item) {
         },
     }).catch(() => null);
 
+    await closeHandoverImagesMissingNotice(
+        item._id,
+        'Body condition images are on the handover',
+    ).catch(() => null);
+
     return { ok: true, advanced: !!advance.advanced, finalized: !!advance.finalize };
+}
+
+async function ensureHandoverImagesMissingTask(action, adminOfficer, message) {
+    if (!action?._id || !adminOfficer?._id) return null;
+    const assigneeName = formatEmployeeDisplayName(adminOfficer);
+    const existing = await TaskManagerTask.findOne({
+        sourceDashboardActionId: action._id,
+        status: { $ne: 'Cancelled' },
+    }).sort({ updatedAt: -1 });
+
+    if (existing) {
+        existing.taskType = 'System Task';
+        existing.priority = 'High';
+        existing.taskName = 'Handover Images Missing';
+        existing.description = message;
+        existing.assignee = adminOfficer._id;
+        existing.assigneeEmpId = adminOfficer.employeeId || existing.assigneeEmpId || '';
+        if (assigneeName) existing.assigneeName = assigneeName;
+        existing.requestedByName = existing.requestedByName || 'System';
+        if (['Completed', 'Rejected'].includes(String(existing.status || ''))) {
+            existing.status = 'Pending';
+        }
+        await existing.save();
+        return existing;
+    }
+
+    return TaskManagerTask.create({
+        sourceDashboardActionId: action._id,
+        taskType: 'System Task',
+        priority: 'High',
+        taskName: 'Handover Images Missing',
+        description: message,
+        assignee: adminOfficer._id,
+        assigneeEmpId: adminOfficer.employeeId || '',
+        assigneeName,
+        completionDate: new Date(),
+        requestedByName: 'System',
+        status: 'Pending',
+        history: [
+            {
+                event: 'Created',
+                detail: message,
+                actorName: 'System',
+                createdAt: new Date(),
+            },
+        ],
+    });
+}
+
+export async function notifyAdminOfficerHandoverImagesMissing({
+    asset,
+    historyId,
+    adminOfficer,
+    assigneeDoc = null,
+    noPreviousPhoto = false,
+    sendEmail = false,
+}) {
+    if (!adminOfficer?._id || !asset?._id || !historyId) return null;
+    const message = handoverImagesMissingMessage({ noPreviousPhoto });
+    const vehicleLabel = `${asset.assetId || 'Vehicle'}${asset.name ? ` — ${asset.name}` : ''}`;
+    const assigneeName = formatEmployeeDisplayName(assigneeDoc);
+    const extra3 = JSON.stringify({
+        isFleetVehicle: true,
+        vehicleMongoId: String(asset._id),
+        vehicleId: String(asset._id),
+        historyId: String(historyId),
+        detailsPath: buildHandoverAssignDetailsPath(asset._id, historyId),
+        handoverImagesMissing: true,
+        noPreviousPhoto: Boolean(noPreviousPhoto),
+    });
+
+    const action = await DashboardAction.findOneAndUpdate(
+        {
+            requestId: asset._id,
+            requestType: HANDOVER_IMAGES_MISSING_REQUEST_TYPE,
+            status: 'Pending',
+        },
+        {
+            $set: {
+                assignedTo: adminOfficer._id,
+                assignedToEmpId: adminOfficer.employeeId || '',
+                requestId: asset._id,
+                requestType: HANDOVER_IMAGES_MISSING_REQUEST_TYPE,
+                status: 'Pending',
+                subjectEmployeeId: assigneeDoc?.employeeId || '',
+                subjectName: assigneeName || asset.name || 'Vehicle',
+                requestedByName: 'System',
+                extra1: vehicleLabel,
+                extra2: message,
+                extra3,
+                comment: message,
+            },
+        },
+        { upsert: true, new: true, setDefaultsOnInsert: true },
+    );
+
+    await ensureHandoverImagesMissingTask(action, adminOfficer, message);
+
+    if (sendEmail) {
+        await sendFleetHandoverImagesMissingEmail({
+            asset,
+            historyId,
+            adminOfficer,
+            assigneeDoc,
+            message,
+        });
+        await AssetHistory.create({
+            assetId: asset._id,
+            action: 'Comment',
+            performedBy: null,
+            comments: message,
+            date: new Date(),
+            details: {
+                auto: true,
+                reason: 'FleetHandoverImagesMissing',
+                historyId: String(historyId),
+                noPreviousPhoto: Boolean(noPreviousPhoto),
+                adminOfficerEmployeeId: adminOfficer.employeeId || '',
+            },
+        }).catch(() => null);
+    }
+
+    return action;
+}
+
+export async function closeHandoverImagesMissingNotice(assetId, comment = 'Body condition images were added') {
+    if (!assetId) return;
+    const rows = await DashboardAction.find({
+        requestId: assetId,
+        requestType: HANDOVER_IMAGES_MISSING_REQUEST_TYPE,
+        status: 'Pending',
+    })
+        .select('_id')
+        .lean();
+    if (!rows.length) return;
+    const ids = rows.map((row) => row._id);
+    await DashboardAction.updateMany(
+        { _id: { $in: ids } },
+        {
+            $set: {
+                status: 'Approved',
+                actionedDate: new Date(),
+                comment,
+            },
+        },
+    );
+    await TaskManagerTask.updateMany(
+        {
+            sourceDashboardActionId: { $in: ids },
+            status: { $nin: ['Completed', 'Cancelled', 'Rejected'] },
+        },
+        { $set: { status: 'Completed' } },
+    );
 }
 
 export function buildInitialHandoverEscalationMeta(requestedAt = new Date()) {

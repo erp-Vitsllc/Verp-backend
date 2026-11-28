@@ -324,6 +324,49 @@ test("a draft inventory bill is named Bill drafted pending", () => {
     );
 });
 
+test("a vendor bill task is named with the vendor", () => {
+    assert.deepEqual(
+        formatTaskDisplayParts({
+            requestType: "Inventory Bill Draft",
+            extra1: "ABV123",
+            extra2: "Bill you created is on draft. Submit it.",
+            subjectName: "ABV123",
+            source: { purchaseSource: "vendor", vendorName: "APKR" },
+        }),
+        { title: "APKR bill draft pending", subject: "" },
+    );
+    assert.deepEqual(
+        formatTaskDisplayParts({
+            requestType: "Inventory Bill Draft",
+            extra1: "Bill edit · 123456",
+            extra2: "Raseel edited this bill and it is waiting for your approval.",
+            source: { purchaseSource: "vendor", vendorName: "APKR" },
+        }),
+        { title: "APKR bill draft pending", subject: "" },
+    );
+});
+
+test("a manual bill task is named manual bill pending", () => {
+    assert.deepEqual(
+        formatTaskDisplayParts({
+            requestType: "Inventory Bill Draft",
+            extra1: "Draft B",
+            extra2: "Bill you created is on draft. Submit it.",
+            source: { purchaseSource: "manual", vendorName: "" },
+        }),
+        { title: "manual bill pending", subject: "" },
+    );
+    assert.deepEqual(
+        formatTaskDisplayParts({
+            requestType: "Inventory Bill Draft",
+            extra1: "Bill edit · 123456",
+            extra2: "Raseel edited this bill and it is waiting for your approval.",
+            source: { purchaseSource: "manual" },
+        }),
+        { title: "manual bill pending", subject: "" },
+    );
+});
+
 test("a draft inventory bill keeps the item list out of the task name", () => {
     assert.deepEqual(
         formatTaskDisplayParts({

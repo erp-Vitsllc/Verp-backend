@@ -37,6 +37,7 @@ const VEHICLE_LABELS = {
     "vehicle value missing": "Vehicle Value Missing",
     "vehicle inspection": "Vehicle Inspection",
     "vehicle assignment photo review": "Assignment Photo Review",
+    "vehicle handover images missing": "Handover Images Missing",
     "vehicle mortgage close": "Mortgage Close",
     "vehicle disposition request": "Vehicle Disposition",
     "vehicle delete request": "Vehicle Delete Request",
@@ -290,7 +291,10 @@ function inventoryBillNumber(body, stored, subjectName) {
         || text(stored).replace(/^(bill edit|delivery edit|delivery approval)\s*[·•-]\s*/i, "");
 }
 
-function inventoryBillTitle(body, stored, subjectName, extra2) {
+function inventoryBillTitle(body, stored, subjectName, extra2, source) {
+    if (source?.purchaseSource === "manual") return "manual bill pending";
+    const vendor = text(source?.vendorName);
+    if (source?.purchaseSource === "vendor" && vendor) return `${vendor} bill draft pending`;
     if (/on draft/i.test(text(extra2))) return "Bill drafted pending";
     return inventoryBillNumber(body, stored, subjectName) || "Draft bill";
 }
@@ -472,7 +476,7 @@ export function formatTaskDisplayParts({
     }
 
     if (typeKey === "inventory bill draft") {
-        return uniqueLines(inventoryBillTitle(body, stored, subjectName, secondary));
+        return uniqueLines(inventoryBillTitle(body, stored, subjectName, secondary, source));
     }
 
     if (typeKey === "payment approval") {

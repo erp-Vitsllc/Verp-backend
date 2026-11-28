@@ -16,6 +16,8 @@ function presentBrand(row, stats) {
         subcategoryIds,
         subcategoryCount: subcategoryIds.length,
         itemCount: stats?.itemCount || 0,
+        stockQuantity: Number(stats?.stockQuantity) || 0,
+        inStock: Number(stats?.inStockCount) > 0,
     };
 }
 
@@ -39,6 +41,12 @@ export async function listBrands(_req, res) {
                         itemCount: { $sum: 1 },
                         categoryIds: { $addToSet: '$categoryId' },
                         subcategoryIds: { $addToSet: '$subcategoryId' },
+                        inStockCount: {
+                            $sum: {
+                                $cond: [{ $gt: [{ $ifNull: ['$availableQuantity', 0] }, 0] }, 1, 0],
+                            },
+                        },
+                        stockQuantity: { $sum: { $ifNull: ['$availableQuantity', 0] } },
                     },
                 },
             ]),

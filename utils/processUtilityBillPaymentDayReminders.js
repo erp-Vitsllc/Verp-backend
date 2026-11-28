@@ -253,11 +253,54 @@ export function unpaidMonthsSinceSimCreated(createdYm, year, month) {
     return dueUnpaidBillMonths(start, year, month);
 }
 
+/**
+ * One Accounts notice per utility type and unpaid month.
+ * A paid later month does not hide an older month that still has no bill.
+ */
+export function collectUnpaidUtilityTypeMonths(checks = []) {
+    const byType = new Map();
+    for (const check of checks) {
+        const type = String(check?.utilityType || 'Utility').trim() || 'Utility';
+        const typeKey = type.toLowerCase();
+        if (!byType.has(typeKey)) {
+            byType.set(typeKey, { utilityType: type, unpaid: new Set(), checked: new Set() });
+        }
+        const bucket = byType.get(typeKey);
+        const settled = check?.settledMonths instanceof Set
+            ? check.settledMonths
+            : new Set(check?.settledMonths || []);
+        for (const ym of check?.months || []) {
+            const key = normalizeUtilityBillMonth(ym);
+            if (!key) continue;
+            bucket.checked.add(key);
+            if (!settled.has(key)) bucket.unpaid.add(key);
+        }
+    }
+    return [...byType.values()].map((bucket) => ({
+        utilityType: bucket.utilityType,
+        unpaid: [...bucket.unpaid].sort(),
+        checked: [...bucket.checked].sort(),
+    }));
+}
+
 function entryEligibleForBillMonth(entry, billMonth) {
     const ym = normalizeUtilityBillMonth(billMonth);
     if (!entry || !ym) return false;
     if (String(entry.status || '') === 'Inactive') return false;
     return simCreatedBeforeBillMonth(entryCreatedMonth(entry), ym);
+}
+
+/**
+ * Previous Bill Pending includes the month the account was added.
+ * Months before that are not due.
+ */
+function entryAvailableForPendingMonth(entry, billMonth) {
+    const ym = normalizeUtilityBillMonth(billMonth);
+    if (!entry || !ym) return false;
+    if (String(entry.status || '') === 'Inactive') return false;
+    const created = entryCreatedMonth(entry);
+    if (!created) return false;
+    return created <= ym;
 }
 
 function zohoStatusIsPaid(bill) {
@@ -266,6 +309,20 @@ function zohoStatusIsPaid(bill) {
         .toLowerCase()
         .replace(/\s+/g, '_');
     return status === 'paid' || status === 'fully_paid';
+}
+
+/**
+ * A saved bill still needs payment when it is not Paid and not prepaid in Zoho.
+ * No bill means the month was not updated, so it is not taken.
+ */
+export function entryMonthHasUnpaidBill(bills = []) {
+    const rows = (Array.isArray(bills) ? bills : []).filter(
+        (bill) => String(bill?.status || '') !== 'Rejected',
+    );
+    if (!rows.length) return false;
+    return rows.some(
+        (bill) => String(bill.status || '') !== 'Paid' && !zohoStatusIsPaid(bill),
+    );
 }
 
 /**
@@ -583,6 +640,47 @@ async function clearPerAccountUtilityReminders() {
     return result?.modifiedCount || 0;
 }
 
+/** Close a type-level month notice that is no longer in the unpaid set. */
+async function clearStaleUtilityTypeMonthNotices(stillUnpaid) {
+    const pending = await DashboardAction.find({
+        requestType: REQUEST_TYPE,
+        status: 'Pending',
+    })
+        .select('_id extra3')
+        .lean();
+    const staleIds = [];
+    for (const row of pending) {
+        let meta = {};
+        try {
+            meta = JSON.parse(row.extra3 || '{}');
+        } catch {
+            meta = {};
+        }
+        const entryId = String(meta.entryId || '').trim();
+        if (!entryId.startsWith('utility-type:')) continue;
+        const ym = normalizeUtilityBillMonth(meta.yearMonth || meta.billMonth);
+        const type = String(meta.utilityType || entryId.slice('utility-type:'.length) || '')
+            .trim()
+            .toLowerCase();
+        if (!ym || !type) continue;
+        if (stillUnpaid.has(`${type}|${ym}`)) continue;
+        staleIds.push(row._id);
+    }
+    if (!staleIds.length) return 0;
+    const result = await DashboardAction.updateMany(
+        { _id: { $in: staleIds }, status: 'Pending' },
+        {
+            $set: {
+                status: 'Approved',
+                actionedDate: new Date(),
+                comment: 'Utility month is no longer pending',
+            },
+        },
+    );
+    if (result?.modifiedCount) await completeUtilityReminderTasks(staleIds);
+    return result?.modifiedCount || 0;
+}
+
 async function createUtilityTypeBell({ utilityType, dueDate, accounts, yearMonth }) {
     if (!accounts?._id || !yearMonth) return;
     const noticeId = utilityTypeNoticeId(utilityType);
@@ -653,11 +751,12 @@ export async function notifyAccountsAfterUtilityZohoUpdate(billDoc) {
 /**
  * Daily, and when Accounts opens Utility Bills:
  * 1) Clear a reminder only when that month's bill is Paid.
- * 2) A missing bill counts as unpaid only for months after the SIM was created.
- *    A SIM added now is not checked for older months. A zero amount is not paid.
+ * 2) A month is taken only when a bill exists and is not paid or prepaid,
+ *    and the number was created in that month or earlier.
+ *    Not Updated (no bill) and months before the number existed are not taken.
  * 3) The current month is not notified yet.
- * 4) On the 1st, one email and one notification per utility for the previous month.
- *    Not one message per SIM or account. It stays until that utility's previous month is paid.
+ * 4) One email, one Accounts notification, and one Task Manager task per utility
+ *    for every taken month through the previous month. Not one message per SIM.
  */
 let utilityReminderRun = null;
 let utilityReminderFinishedAt = 0;
@@ -731,58 +830,106 @@ async function runUtilityBillPaymentDayReminders() {
                 reminderTz(),
             ),
         );
-        const unpaidTypes = new Map();
-        const seenTypes = new Map();
+
+        const checks = [];
+        const monthsToLoad = new Set();
         for (const record of records) {
-            const type = String(record.utilityType || 'Utility').trim() || 'Utility';
-            const typeKey = type.toLowerCase();
-            if (!seenTypes.has(typeKey)) seenTypes.set(typeKey, type);
-            const entry = entryById.get(String(record.entryId || ''));
-            if (!entryEligibleForBillMonth(entry, previousBillMonth)) continue;
-            if (await isUtilityMonthBillSettled(record.entryId, previousBillMonth)) continue;
-            unpaidTypes.set(typeKey, type);
+            const entryId = String(record.entryId || '').trim();
+            const entry = entryById.get(entryId);
+            const months = dueUnpaidBillMonths(
+                entryCreatedMonth(entry),
+                dubaiParts.year,
+                dubaiParts.month,
+            ).filter((ym) => entryAvailableForPendingMonth(entry, ym));
+            months.forEach((ym) => monthsToLoad.add(ym));
+            checks.push({
+                entryId,
+                utilityType: String(record.utilityType || 'Utility').trim() || 'Utility',
+                months,
+            });
         }
 
-        for (const [typeKey, typeLabel] of seenTypes) {
-            const noticeId = utilityTypeNoticeId(typeLabel);
-            if (!unpaidTypes.has(typeKey)) {
-                await clearUtilityBillPaymentDayReminderForMonth(
-                    noticeId,
-                    previousBillMonth,
-                    'Previous month bills for this utility are paid',
-                );
-                continue;
-            }
-            if (!accounts) continue;
-            await createUtilityTypeBell({
-                utilityType: typeLabel,
-                dueDate,
-                accounts,
-                yearMonth: previousBillMonth,
-            });
-            const alreadySent = await wasSent(noticeId, previousBillMonth, DUE_TODAY_STAGE);
-            if (alreadySent) continue;
-            const dueDateLabel = dueDate.toLocaleDateString('en-GB', {
-                timeZone: reminderTz(),
-            });
-            await sendUtilityBillPaymentDayEmail({
-                recipient: accounts,
-                record: {
-                    entryId: noticeId,
-                    utilityType: typeLabel,
-                    accountNo: '',
-                    provider: '',
-                    paymentDay: 1,
-                },
-                dueDateLabel,
-                yearMonth: previousBillMonth,
-                message: utilityTypePaymentMessage(typeLabel, previousBillMonth),
-            });
-            await markSent(noticeId, previousBillMonth, DUE_TODAY_STAGE, dueDate);
-            console.log(
-                `[UtilityBillPaymentDayReminders] previous-month notice for ${typeLabel} (${previousBillMonth})`,
-            );
+        const bills = entryIds.length && monthsToLoad.size
+            ? await UtilityBillPayment.find({
+                entryId: { $in: entryIds },
+                billMonth: { $in: [...monthsToLoad] },
+                status: { $ne: 'Rejected' },
+            })
+                .select(
+                    'entryId billMonth status amount zohoBillId zohoBillIds zohoBillNumber zohoBillStatus zohoLineItems zohoSyncedAt',
+                )
+                .lean()
+            : [];
+        const billsByEntryMonth = new Map();
+        for (const bill of bills) {
+            const key = `${String(bill.entryId || '').trim()}|${normalizeUtilityBillMonth(bill.billMonth)}`;
+            const list = billsByEntryMonth.get(key) || [];
+            list.push(bill);
+            billsByEntryMonth.set(key, list);
         }
+
+        const typeMonths = collectUnpaidUtilityTypeMonths(checks.map((check) => {
+            const settledMonths = new Set();
+            for (const ym of check.months) {
+                const rows = billsByEntryMonth.get(`${check.entryId}|${ym}`) || [];
+                if (!entryMonthHasUnpaidBill(rows)) settledMonths.add(ym);
+            }
+            return { ...check, settledMonths };
+        }));
+        const stillUnpaid = new Set();
+
+        for (const bucket of typeMonths) {
+            const noticeId = utilityTypeNoticeId(bucket.utilityType);
+            for (const ym of bucket.checked) {
+                if (!bucket.unpaid.includes(ym)) {
+                    await clearUtilityBillPaymentDayReminderForMonth(
+                        noticeId,
+                        ym,
+                        'Bills for this utility month are paid',
+                    );
+                    continue;
+                }
+                stillUnpaid.add(`${bucket.utilityType.toLowerCase()}|${ym}`);
+                if (!accounts) continue;
+                await createUtilityTypeBell({
+                    utilityType: bucket.utilityType,
+                    dueDate,
+                    accounts,
+                    yearMonth: ym,
+                });
+                const alreadySent = await wasSent(noticeId, ym, DUE_TODAY_STAGE);
+                if (alreadySent) continue;
+                try {
+                    const dueDateLabel = dueDate.toLocaleDateString('en-GB', {
+                        timeZone: reminderTz(),
+                    });
+                    await sendUtilityBillPaymentDayEmail({
+                        recipient: accounts,
+                        record: {
+                            entryId: noticeId,
+                            utilityType: bucket.utilityType,
+                            accountNo: '',
+                            provider: '',
+                            paymentDay: 1,
+                        },
+                        dueDateLabel,
+                        yearMonth: ym,
+                        message: utilityTypePaymentMessage(bucket.utilityType, ym),
+                    });
+                    await markSent(noticeId, ym, DUE_TODAY_STAGE, dueDate);
+                    console.log(
+                        `[UtilityBillPaymentDayReminders] unpaid-month notice for ${bucket.utilityType} (${ym})`,
+                    );
+                } catch (mailErr) {
+                    console.error(
+                        `[UtilityBillPaymentDayReminders] email failed for ${bucket.utilityType} (${ym}):`,
+                        mailErr?.message || mailErr,
+                    );
+                }
+            }
+        }
+
+        await clearStaleUtilityTypeMonthNotices(stillUnpaid);
     } catch (err) {
         console.error('[processUtilityBillPaymentDayReminders] Non-fatal error:', err?.message || err);
     }

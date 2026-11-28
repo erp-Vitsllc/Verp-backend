@@ -25,13 +25,12 @@ const DETAIL_POPULATE = [
 ];
 
 const DISPLAY_STATUSES = ['Stock In', 'Low Stock', 'Out of Stock'];
-const STATUS_ORDER = {
-    'Out of Stock': 0,
-    'Low Stock': 1,
-    'Stock In': 2,
-};
 
-/** Status comes from on-hand stock and the subcategory reservation rule. */
+/**
+ * Status for every item in a subcategory.
+ * onHand is the sum of available quantity for all items in that subcategory.
+ * Sum 0 is Out of Stock. Reservation above that sum is Low Stock. Reservation at or below the sum is Stock In.
+ */
 export function stockStatus(availableQuantity, reservationQuantity) {
     const stock = Number(availableQuantity);
     const onHand = Number.isFinite(stock) ? stock : 0;
@@ -39,8 +38,23 @@ export function stockStatus(availableQuantity, reservationQuantity) {
     if (reservationQuantity == null || reservationQuantity === '') return 'Stock In';
     const reserve = Number(reservationQuantity);
     if (!Number.isFinite(reserve)) return 'Stock In';
-    if (onHand < reserve) return 'Low Stock';
+    if (reserve > onHand) return 'Low Stock';
     return 'Stock In';
+}
+
+export async function subcategoryOnHandMap(subcategoryIds) {
+    const ids = [...new Set((subcategoryIds || []).map((id) => String(id || '')).filter((id) => mongoose.isValidObjectId(id)))];
+    if (!ids.length) return new Map();
+    const rows = await InventoryItem.aggregate([
+        { $match: { subcategoryId: { $in: ids.map((id) => new mongoose.Types.ObjectId(id)) } } },
+        { $group: { _id: '$subcategoryId', total: { $sum: { $ifNull: ['$availableQuantity', 0] } } } },
+    ]);
+    return new Map(rows.map((row) => [String(row._id), Number(row.total) || 0]));
+}
+
+export async function subcategoryStockStatus(subcategoryId, reservationQuantity) {
+    const totals = await subcategoryOnHandMap([subcategoryId]);
+    return stockStatus(totals.get(String(subcategoryId || '')) ?? 0, reservationQuantity);
 }
 
 function refId(value) {
@@ -49,7 +63,9 @@ function refId(value) {
     return String(value);
 }
 
-function presentItem(row) {
+function presentItem(row, onHandBySubcategory) {
+    const subcategoryId = refId(row.subcategoryId);
+    const summed = onHandBySubcategory instanceof Map ? onHandBySubcategory.get(subcategoryId) : undefined;
     return {
         _id: row._id,
         itemCode: row.itemCode,
@@ -62,7 +78,7 @@ function presentItem(row) {
         reservationQuantity: row.reservationQuantity || 0,
         hsCode: row.hsCode || '',
         countryOfOrigin: row.countryOfOrigin || '',
-        status: stockStatus(row.availableQuantity, row.subcategoryId?.reservationQuantity),
+        status: stockStatus(summed == null ? row.availableQuantity : summed, row.subcategoryId?.reservationQuantity),
         availableQuantity: row.availableQuantity || 0,
         lastStockPrice: Number(row.lastStockPrice) || 0,
         categoryId: refId(row.categoryId),
@@ -330,11 +346,6 @@ function isWaitingStatus(status) {
     return String(status || '').startsWith('Waiting for ');
 }
 
-function statusRank(status) {
-    if (isWaitingStatus(status)) return -1;
-    return STATUS_ORDER[status] ?? 9;
-}
-
 async function waitingItemMap() {
     const entries = await InventoryStockEntry.find({ status: 'pending' })
         .select('lines.itemId approverName')
@@ -502,6 +513,47 @@ function readItemDetails(body) {
     };
 }
 
+const ITEM_NAME_SORT = {
+    itemName: { field: 'itemOptionId', model: ItemOption },
+    brandName: { field: 'brandId', model: ItemBrand },
+    categoryName: { field: 'categoryId', model: ItemCategory },
+    subcategoryName: { field: 'subcategoryId', model: ItemSubcategory },
+};
+
+const ITEM_SORT_KEYS = new Set([
+    'itemCode', 'itemName', 'brandName', 'modelNumber', 'description',
+    'categoryName', 'subcategoryName', 'availableQuantity', 'status',
+]);
+
+function itemColumnValue(row, sortKey, names) {
+    if (sortKey === 'availableQuantity') return Number(row.availableQuantity) || 0;
+    const named = ITEM_NAME_SORT[sortKey];
+    if (named) return names.get(String(row[named.field] || '')) || '';
+    return row[sortKey] || '';
+}
+
+async function sortItemRows(rows, sortKey, sortDir) {
+    const key = String(sortKey || '').trim();
+    if (!ITEM_SORT_KEYS.has(key)) return rows;
+    const spec = ITEM_NAME_SORT[key];
+    let names = new Map();
+    if (spec) {
+        const ids = [...new Set(rows.map((row) => String(row[spec.field] || '')).filter((id) => mongoose.isValidObjectId(id)))];
+        const found = ids.length ? await spec.model.find({ _id: { $in: ids } }).select('name').lean() : [];
+        names = new Map(found.map((row) => [String(row._id), row.name || '']));
+    }
+    const dir = String(sortDir || '').toLowerCase() === 'desc' ? -1 : 1;
+    return rows.slice().sort((left, right) => {
+        const a = itemColumnValue(left, key, names);
+        const b = itemColumnValue(right, key, names);
+        if (a === '' && b === '') return 0;
+        if (a === '') return 1;
+        if (b === '') return -1;
+        if (typeof a === 'number' && typeof b === 'number') return (a - b) * dir;
+        return String(a).localeCompare(String(b), undefined, { numeric: true, sensitivity: 'base' }) * dir;
+    });
+}
+
 export async function listItems(req, res) {
     try {
         const page = Math.max(1, Number(req.query.page) || 1);
@@ -540,23 +592,27 @@ export async function listItems(req, res) {
             .select('itemCode description moreDescription copyToDescription modelNumber unitOfMeasure manufacturerPartNumber reservationQuantity hsCode countryOfOrigin availableQuantity lastStockPrice categoryId subcategoryId itemOptionId brandId')
             .lean();
         const subcategoryIds = [...new Set(rows.map((row) => String(row.subcategoryId || '')).filter((id) => mongoose.isValidObjectId(id)))];
-        const reservationRows = subcategoryIds.length
-            ? await ItemSubcategory.find({ _id: { $in: subcategoryIds } }).select('reservationQuantity').lean()
-            : [];
+        const [reservationRows, onHandBySubcategory] = await Promise.all([
+            subcategoryIds.length
+                ? ItemSubcategory.find({ _id: { $in: subcategoryIds } }).select('reservationQuantity').lean()
+                : [],
+            subcategoryOnHandMap(subcategoryIds),
+        ]);
         const reservationById = new Map(reservationRows.map((row) => [String(row._id), row.reservationQuantity]));
         const matched = rows
             .map((row) => withWaitingStatus(presentItem({
                 ...row,
                 subcategoryId: { _id: row.subcategoryId, reservationQuantity: reservationById.get(String(row.subcategoryId)) },
-            }), waiting))
+            }, onHandBySubcategory), waiting))
             .filter((row) => searchPlan.matches(row) && matchesStockFilter(row.status, statusQuery))
             .sort((left, right) => {
-                const statusGap = statusRank(left.status) - statusRank(right.status);
-                if (statusGap) return statusGap;
+                const stockGap = (Number(right.availableQuantity) || 0) - (Number(left.availableQuantity) || 0);
+                if (stockGap) return stockGap;
                 return String(left.itemCode || '').localeCompare(String(right.itemCode || ''));
             });
+        const ordered = await sortItemRows(matched, req.query.sort, req.query.dir);
         const start = limit > 0 ? (page - 1) * limit : 0;
-        const pageRows = limit > 0 ? matched.slice(start, start + limit) : matched;
+        const pageRows = limit > 0 ? ordered.slice(start, start + limit) : ordered;
         const idsOf = (key) => [...new Set(pageRows.map((row) => row[key]).filter((id) => mongoose.isValidObjectId(id)))];
         const [categories, subcategories, options, brands] = await Promise.all([
             idsOf('categoryId').length ? ItemCategory.find({ _id: { $in: idsOf('categoryId') } }).select('name').lean() : [],
@@ -577,7 +633,7 @@ export async function listItems(req, res) {
                 itemName: optionNames.get(row.itemOptionId) || '',
                 brandName: brandNames.get(row.brandId) || '',
             })),
-            total: matched.length,
+            total: ordered.length,
             page,
             limit,
         });
@@ -614,11 +670,12 @@ export async function getItem(req, res) {
         if (!mongoose.isValidObjectId(req.params.id)) throw httpError(404, 'Item was not found.');
         const row = await InventoryItem.findById(req.params.id).populate(DETAIL_POPULATE).lean();
         if (!row) throw httpError(404, 'Item was not found.');
-        const [waiting, movement] = await Promise.all([
+        const [waiting, movement, onHandBySubcategory] = await Promise.all([
             waitingItemMap(),
             itemMovement(row._id),
+            subcategoryOnHandMap([refId(row.subcategoryId)]),
         ]);
-        res.json({ ...withWaitingStatus(presentItem(row), waiting), ...movement });
+        res.json({ ...withWaitingStatus(presentItem(row, onHandBySubcategory), waiting), ...movement });
     } catch (error) {
         sendError(res, error);
     }
@@ -642,7 +699,8 @@ export async function createItem(req, res) {
             status: details.status || 'Active',
         });
         const saved = await InventoryItem.findById(item._id).populate(ITEM_POPULATE).lean();
-        res.status(201).json(presentItem(saved));
+        const onHandBySubcategory = await subcategoryOnHandMap([refId(saved.subcategoryId)]);
+        res.status(201).json(presentItem(saved, onHandBySubcategory));
     } catch (error) {
         sendError(res, error);
     }
@@ -669,7 +727,8 @@ export async function updateItem(req, res) {
         }).populate(ITEM_POPULATE).lean();
         if (!saved) throw httpError(404, 'Item was not found.');
         await syncItemCopies(req.params.id, catalog);
-        res.json(presentItem(saved));
+        const onHandBySubcategory = await subcategoryOnHandMap([refId(saved.subcategoryId)]);
+        res.json(presentItem(saved, onHandBySubcategory));
     } catch (error) {
         sendError(res, error);
     }

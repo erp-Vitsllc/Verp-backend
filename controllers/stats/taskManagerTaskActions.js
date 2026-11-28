@@ -5480,6 +5480,9 @@ export const deleteTaskManagerTask = async (req, res) => {
         if (!target) return res.status(404).json({ message: "Task not found." });
         const viewer = await resolveTaskViewer(req);
         const deleteCategory = categoryOfTarget(target);
+        if (deleteCategory === "Project Task" || String(target.task?.taskType || "").trim() === "Project Task") {
+            return res.status(400).json({ message: "A project task cannot be deleted." });
+        }
         const finished = recordIsFinishedForDelete(target.task, target.action);
         const deleteSealed = ["Cancelled", "Rejected"].includes(String(target.task?.status || ""))
             || ["Rejected", "Dismissed", "Cancelled"].includes(String(target.action?.status || ""));

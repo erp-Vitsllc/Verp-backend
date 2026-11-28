@@ -67,6 +67,7 @@ import { canLoginThroughAnyChannel, loadLoginThroughForCheck } from '../utils/lo
 import { assignmentInboxFieldsForActor } from '../utils/assignmentRequestNotice.js';
 import {
     buildInitialHandoverEscalationMeta,
+    closeHandoverImagesMissingNotice,
     markHandoverEscalationResolved,
     resolveHandoverEscalationRequestedAt,
     seedPreviousHandoverReportsOnHistory,
@@ -8903,6 +8904,10 @@ export const respondToAssignment = async (req, res) => {
                         };
                     }
                     await item.save();
+                    await closeHandoverImagesMissingNotice(
+                        item._id,
+                        'Handover moved to the next step',
+                    ).catch(() => null);
                     const stagedItem = await AssetItem.findById(id)
                         .populate('assignedCompany')
                         .populate({
@@ -9490,6 +9495,10 @@ export const respondToAssignment = async (req, res) => {
                 };
                 await item.save();
             }
+            await closeHandoverImagesMissingNotice(
+                item._id,
+                action === 'Reject' ? 'Handover rejected' : 'Handover accepted',
+            ).catch(() => null);
         }
 
         // Update Dashboard Actions
@@ -13775,6 +13784,15 @@ export const updateHistoryBodyCondition = async (req, res) => {
         record.details = detailsBase;
         record.markModified('details');
         await record.save();
+
+        if (bodyConditionCompleted === true && record.assetId) {
+            await closeHandoverImagesMissingNotice(
+                record.assetId,
+                'Body condition images were added',
+            ).catch((err) => {
+                console.error('[HandoverImagesMissing] close after photos:', err?.message || err);
+            });
+        }
 
         let inspectionSubmitResult = null;
         if (submitInspectionForHr === true) {

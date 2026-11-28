@@ -181,6 +181,26 @@ const workOrderSchema = new mongoose.Schema(
             ],
             default: [],
         },
+        momReady: { type: Boolean, default: false },
+        momStatus: { type: String, enum: ['', 'pending', 'approved', 'rejected'], default: '' },
+        momRequestedByName: { type: String, default: '', trim: true },
+        momRequestedById: { type: String, default: '' },
+        momRequestedAt: { type: Date, default: null },
+        momDecidedByName: { type: String, default: '', trim: true },
+        momDecidedAt: { type: Date, default: null },
+        momReason: { type: String, default: '', trim: true },
+        mom: {
+            type: [
+                {
+                    id: { type: String, default: '' },
+                    taskName: { type: String, default: '', trim: true },
+                    assigneeId: { type: String, default: '' },
+                    assigneeName: { type: String, default: '', trim: true },
+                    completionDate: { type: String, default: '' },
+                },
+            ],
+            default: [],
+        },
         oldDocuments: {
             type: [
                 {

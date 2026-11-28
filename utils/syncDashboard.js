@@ -40,7 +40,7 @@ function isAdminTrack(row) {
 
 /** Reminders can have several open tasks on one record, one per document or bill. */
 function sharesOneTask(requestType) {
-    return !/expiry|not renew|card deleted|value missing|asset overdue|profile incomplete|payment reminder|fuel reminder|submit reminder/i.test(
+    return !/expiry|not renew|card deleted|value missing|asset overdue|profile incomplete|payment reminder|fuel reminder|images missing|submit reminder/i.test(
         String(requestType || ""),
     );
 }
@@ -538,7 +538,9 @@ export const syncDashboardAction = async (data) => {
                 await ensureOwnRequestTask(separateSaved, assignee);
             }
             if (employeeWorkflowType(requestType)) {
-                await ensureEmployeeWorkflowTask(separateSaved, assignee, requestedByName);
+                await ensureEmployeeWorkflowTask(separateSaved, assignee, requestedByName, {
+                    lockRequester: fineInboxType,
+                });
             }
             return;
         }
@@ -642,7 +644,9 @@ export const syncDashboardAction = async (data) => {
         if (keptId && employeeWorkflowType(requestType)) {
             const fresh = await DashboardAction.findById(keptId);
             if (fresh && String(fresh.status || "") === "Pending") {
-                await ensureEmployeeWorkflowTask(fresh, assignee, requestedByName);
+                await ensureEmployeeWorkflowTask(fresh, assignee, requestedByName, {
+                    lockRequester: fineInboxType,
+                });
             }
         }
 

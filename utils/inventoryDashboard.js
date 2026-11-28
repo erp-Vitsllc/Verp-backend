@@ -41,6 +41,22 @@ function spanDays(start, end) {
     return Math.round((endUtc - startUtc) / 86400000) + 1;
 }
 
+function dayGap(start, end) {
+    const from = dateParts(start);
+    const to = dateParts(end);
+    if (!from || !to) return null;
+    const startUtc = Date.UTC(from.year, from.month - 1, from.day);
+    const endUtc = Date.UTC(to.year, to.month - 1, to.day);
+    return Math.round((endUtc - startUtc) / 86400000);
+}
+
+function nonMovingBand(days) {
+    if (days <= 28) return '';
+    if (days <= 56) return 'nonMoving';
+    if (days <= 84) return 'slow';
+    return 'critical';
+}
+
 function prettyDate(value) {
     const parts = dateParts(value);
     if (!parts) return '';
@@ -154,15 +170,15 @@ export function parseDashboardScope(query, todayKey) {
     return withIncludes(scope, withIncludes(previousOf(scope)));
 }
 
-/** Same rule as item master: on hand against the subcategory reservation quantity. */
+/** Same rule as item master: subcategory stock total against that subcategory's reservation quantity. */
 export function stockPosition(availableQuantity, reservationQuantity) {
     const stock = Number(availableQuantity);
     const onHand = Number.isFinite(stock) ? stock : 0;
-    if (onHand <= 0) return 'Out of Stock';
+    if (onHand === 0) return 'Out of Stock';
     if (reservationQuantity == null || reservationQuantity === '') return 'Stock In';
     const reserve = Number(reservationQuantity);
     if (!Number.isFinite(reserve)) return 'Stock In';
-    if (onHand < reserve) return 'Low Stock';
+    if (reserve > onHand) return 'Low Stock';
     return 'Stock In';
 }
 
@@ -283,6 +299,13 @@ function packCategories(rows) {
     return [...head, { name: 'Others', value: others }];
 }
 
+function quantityRows(map) {
+    return [...map.entries()]
+        .map(([name, value]) => ({ name, value: Math.round(Number(value) || 0) }))
+        .filter((row) => row.value > 0)
+        .sort((left, right) => right.value - left.value || left.name.localeCompare(right.name));
+}
+
 function itemLabel(item) {
     return item.description || item.itemCode || 'Item';
 }
@@ -303,21 +326,34 @@ export function collectYears(model, extraYears = []) {
     return [...years].sort((left, right) => left - right);
 }
 
-export function buildInventoryDashboard(model, scope) {
+export function buildInventoryDashboard(model, scope, asOfInput) {
     const items = Array.isArray(model?.items) ? model.items : [];
     const purchases = Array.isArray(model?.purchases) ? model.purchases : [];
     const deliveries = Array.isArray(model?.deliveries) ? model.deliveries : [];
     const books = priceBooks(model);
     const end = scope.end;
+    const asOf = dateParts(asOfInput) && String(asOfInput) <= end ? String(asOfInput) : end;
     const billed = new Set();
     const delivered = new Set();
     const inboundAfter = new Map();
     const outboundAfter = new Map();
+    const inboundAfterAsOf = new Map();
+    const outboundAfterAsOf = new Map();
+    const lastDeliveryOn = new Map();
+    const lastReceiptOn = new Map();
     const addQty = (map, id, quantity) => {
         if (!id || !quantity) return;
         map.set(id, (map.get(id) || 0) + quantity);
     };
+    const rememberDay = (map, id, day) => {
+        if (!id || !day) return;
+        const current = map.get(id);
+        if (!current || day > current) map.set(id, day);
+    };
 
+    const itemCategory = new Map(items.map((item) => [item.id, item.categoryName || 'Uncategorized']));
+    const purchaseQty = new Map();
+    const deliveryQty = new Map();
     let purchasedValue = 0;
     const vendorTotals = new Map();
     const monthly = chartBuckets(scope).map((bucket) => ({ ...bucket, value: 0 }));
@@ -344,8 +380,16 @@ export function buildInventoryDashboard(model, scope) {
         (purchase.lines || []).forEach((line) => {
             const quantity = Number(line.quantity) || 0;
             if (approved && day && day > end) addQty(inboundAfter, line.itemId, quantity);
+            if (approved && day && quantity && line.itemId) {
+                if (day > asOf) addQty(inboundAfterAsOf, line.itemId, quantity);
+                else rememberDay(lastReceiptOn, line.itemId, day);
+            }
             if (!approved || !inScope) return;
-            if (line.itemId) billed.add(line.itemId);
+            if (line.itemId) {
+                billed.add(line.itemId);
+                const category = itemCategory.get(line.itemId) || 'Uncategorized';
+                purchaseQty.set(category, (purchaseQty.get(category) || 0) + quantity);
+            }
         });
         if (!approved || !inScope) return;
         purchasedValue = roundMoney(purchasedValue + amount);
@@ -367,8 +411,12 @@ export function buildInventoryDashboard(model, scope) {
             const quantity = Number(line.quantity) || 0;
             if (!quantity || !line.itemId) return;
             if (day > end) addQty(outboundAfter, line.itemId, quantity);
+            if (day > asOf) addQty(outboundAfterAsOf, line.itemId, quantity);
+            else rememberDay(lastDeliveryOn, line.itemId, day);
             if (!scope.includes(day)) return;
             delivered.add(line.itemId);
+            const category = itemCategory.get(line.itemId) || 'Uncategorized';
+            deliveryQty.set(category, (deliveryQty.get(category) || 0) + quantity);
             const cost = unitCost(books, line.itemId, day, 0);
             deliveredValue = roundMoney(deliveredValue + roundMoney(quantity * cost));
         });
@@ -391,6 +439,12 @@ export function buildInventoryDashboard(model, scope) {
     const stockCounts = new Map(STOCK_STATUS_ORDER.map((name) => [name, 0]));
     const lowRows = [];
     const changes = new Map();
+    const stockBySubcategory = new Map();
+    items.forEach((item) => {
+        if (!existedBy(item, end)) return;
+        const key = item.subcategoryId ? String(item.subcategoryId) : `item:${item.id}`;
+        stockBySubcategory.set(key, (stockBySubcategory.get(key) || 0) + (quantityAtEnd.get(item.id) || 0));
+    });
 
     items.forEach((item) => {
         if (addedIn(item, scope)) itemsAdded += 1;
@@ -403,7 +457,8 @@ export function buildInventoryDashboard(model, scope) {
         const category = item.categoryName || 'Uncategorized';
         categoryValue.set(category, roundMoney((categoryValue.get(category) || 0) + value));
         categoryQty.set(category, (categoryQty.get(category) || 0) + quantity);
-        const status = stockPosition(quantity, item.reservation);
+        const groupKey = item.subcategoryId ? String(item.subcategoryId) : `item:${item.id}`;
+        const status = stockPosition(stockBySubcategory.get(groupKey) || 0, item.reservation);
         stockCounts.set(status, (stockCounts.get(status) || 0) + 1);
         if (status === 'Low Stock') lowStock += 1;
         if (status === 'Low Stock' || status === 'Out of Stock') {
@@ -454,6 +509,38 @@ export function buildInventoryDashboard(model, scope) {
         previousEvent = event;
     });
 
+    const nonMovingItems = [];
+    const nonMovingQty = new Map();
+    let nonMovingQuantity = 0;
+    let nonMovingValue = 0;
+    items.forEach((item) => {
+        if (!existedBy(item, asOf)) return;
+        const quantity = Math.round(Math.max(0, (Number(item.available) || 0) - (inboundAfterAsOf.get(item.id) || 0) + (outboundAfterAsOf.get(item.id) || 0)));
+        if (quantity <= 0) return;
+        const lastDelivery = lastDeliveryOn.get(item.id) || '';
+        const anchor = lastDelivery || lastReceiptOn.get(item.id) || item.createdOn || '';
+        const idleDays = dayGap(anchor, asOf);
+        const band = idleDays == null ? '' : nonMovingBand(idleDays);
+        if (!band) return;
+        const cost = unitCost(books, item.id, asOf, item.lastPrice);
+        const value = roundMoney(quantity * cost);
+        const category = item.categoryName || 'Uncategorized';
+        nonMovingQuantity += quantity;
+        nonMovingValue = roundMoney(nonMovingValue + value);
+        nonMovingQty.set(category, (nonMovingQty.get(category) || 0) + quantity);
+        nonMovingItems.push({
+            id: item.id,
+            model: item.modelNumber || item.itemCode || itemLabel(item),
+            category,
+            quantity,
+            lastDelivery,
+            idleDays,
+            value,
+            band,
+        });
+    });
+    nonMovingItems.sort((left, right) => right.idleDays - left.idleDays || left.model.localeCompare(right.model) || String(left.id).localeCompare(String(right.id)));
+
     const names = new Map(items.map((item) => [item.id, itemLabel(item)]));
     lowRows.sort((left, right) => {
         const rank = (status) => (status === 'Out of Stock' ? 0 : 1);
@@ -484,6 +571,15 @@ export function buildInventoryDashboard(model, scope) {
             .map((row) => ({ ...row, product: names.get(row.itemId) || 'Item' }))
             .sort((left, right) => right.date.localeCompare(left.date) || left.product.localeCompare(right.product))
             .slice(0, 5),
+        stockGraph: quantityRows(categoryQty),
+        purchaseGraph: quantityRows(purchaseQty),
+        deliveryGraph: quantityRows(deliveryQty),
+        nonMoving: {
+            quantity: nonMovingQuantity,
+            value: nonMovingValue,
+            categories: quantityRows(nonMovingQty),
+            items: nonMovingItems,
+        },
         stockByCategory: [...categoryQty.entries()]
             .map(([name, value]) => ({ name, value }))
             .filter((row) => row.value > 0)

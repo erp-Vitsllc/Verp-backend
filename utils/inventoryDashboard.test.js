@@ -160,6 +160,12 @@ test('2026 totals follow purchases, deliveries, and stock still on hand at year 
     assert.equal(result.monthly.find((row) => row.month === 'Jul').value, 15);
     assert.equal(result.monthly.find((row) => row.month === 'May').value, 0);
     assert.deepEqual(result.vendors, [{ id: 'vendor-a', name: 'Vendor A', value: 30 }]);
+    assert.deepEqual(result.stockGraph, [
+        { name: 'Cabling', value: 10 },
+        { name: 'Other', value: 3 },
+    ]);
+    assert.deepEqual(result.purchaseGraph, [{ name: 'Cabling', value: 7 }]);
+    assert.deepEqual(result.deliveryGraph, [{ name: 'Cabling', value: 4 }]);
     assert.deepEqual(result.billStatus, [
         { name: 'Pending', value: 1 },
         { name: 'Approved', value: 2 },
@@ -295,4 +301,80 @@ test('more than eight categories collapse the tail into Others', () => {
 
 test('years come from the records that fall on the timeline', () => {
     assert.deepEqual(collectYears(MODEL, [2026]), [2024, 2025, 2026]);
+});
+
+test('non-moving stock is on-hand quantity idle for more than 28 days', () => {
+    const asOf = '2026-11-28';
+    const result = buildInventoryDashboard({
+        items: [
+            item({ id: 'fresh', modelNumber: 'NEW-1', categoryName: 'CCTV', available: 10, lastPrice: 100, createdOn: '2026-01-01' }),
+            item({ id: 'idle', modelNumber: 'CAM-001', categoryName: 'CCTV', available: 35, lastPrice: 250, createdOn: '2026-01-01' }),
+            item({ id: 'critical', modelNumber: 'NVR-001', categoryName: 'CCTV', available: 10, lastPrice: 850, createdOn: '2025-01-01' }),
+            item({ id: 'gone', modelNumber: 'OLD-1', categoryName: 'CCTV', available: 0, lastPrice: 10, createdOn: '2025-01-01' }),
+            item({ id: 'net', modelNumber: 'SW-1', categoryName: 'Active Network', available: 4, lastPrice: 100, createdOn: '2026-06-01' }),
+            item({ id: 'both', modelNumber: 'BOTH-1', categoryName: 'CCTV', available: 2, lastPrice: 10, createdOn: '2026-01-01' }),
+            item({ id: 'edge28', modelNumber: 'E28', categoryName: 'Audio', available: 1, lastPrice: 10, createdOn: '2026-10-31' }),
+            item({ id: 'edge29', modelNumber: 'E29', categoryName: 'Audio', available: 1, lastPrice: 10, createdOn: '2026-10-30' }),
+            item({ id: 'rolled', modelNumber: 'ROLL-1', categoryName: 'Automation', available: 20, lastPrice: 10, createdOn: '2026-09-01' }),
+            item({ id: 'received', modelNumber: 'RCV-1', categoryName: 'Display', available: 4, lastPrice: 50, createdOn: '2024-01-01' }),
+            item({ id: 'pendingOnly', modelNumber: 'P-1', categoryName: 'Printers', available: 2, lastPrice: 10, createdOn: '2026-01-01' }),
+            item({ id: 'drafted', modelNumber: 'D-1', categoryName: 'Printers', available: 5, lastPrice: 10, createdOn: '2026-01-01' }),
+        ],
+        purchases: [
+            { id: 'future-buy', billNo: 'F', vendorId: 'v', vendorName: 'V', date: '2026-12-15', status: 'Approved', lines: [{ itemId: 'rolled', quantity: 6, unitPrice: 10, total: 60 }] },
+            { id: 'receipt', billNo: 'R', vendorId: 'v', vendorName: 'V', date: '2026-10-01', status: 'Approved', lines: [{ itemId: 'received', quantity: 4, unitPrice: 80, total: 320 }] },
+            { id: 'pending-buy', billNo: 'P', vendorId: 'v', vendorName: 'V', date: '2026-11-20', status: 'Pending', lines: [{ itemId: 'pendingOnly', quantity: 2, unitPrice: 10, total: 20 }] },
+        ],
+        deliveries: [
+            { id: 'd-fresh', date: '2026-11-20', status: 'Confirmed', lines: [{ itemId: 'fresh', quantity: 1 }] },
+            { id: 'd-idle', date: '2026-09-20', status: 'Confirmed', lines: [{ itemId: 'idle', quantity: 1 }] },
+            { id: 'd-critical', date: '2026-08-01', status: 'Confirmed', lines: [{ itemId: 'critical', quantity: 1 }] },
+            { id: 'd-gone', date: '2026-08-01', status: 'Confirmed', lines: [{ itemId: 'gone', quantity: 1 }] },
+            { id: 'd-net', date: '2026-10-20', status: 'Confirmed', lines: [{ itemId: 'net', quantity: 1 }] },
+            { id: 'd-old', date: '2026-08-01', status: 'Confirmed', lines: [{ itemId: 'both', quantity: 1 }] },
+            { id: 'd-new', date: '2026-11-10', status: 'Confirmed', lines: [{ itemId: 'both', quantity: 1 }] },
+            { id: 'd-future', date: '2026-12-01', status: 'Confirmed', lines: [{ itemId: 'rolled', quantity: 3 }] },
+            { id: 'd-draft', date: '2026-11-27', status: 'Submitted', lines: [{ itemId: 'drafted', quantity: 1 }] },
+        ],
+    }, year(2026), asOf);
+
+    assert.equal(result.nonMoving.quantity, 78);
+    assert.equal(result.nonMoving.value, 18220);
+    assert.deepEqual(result.nonMoving.categories, [
+        { name: 'CCTV', value: 45 },
+        { name: 'Automation', value: 17 },
+        { name: 'Printers', value: 7 },
+        { name: 'Active Network', value: 4 },
+        { name: 'Display', value: 4 },
+        { name: 'Audio', value: 1 },
+    ]);
+    const byId = new Map(result.nonMoving.items.map((row) => [row.id, row]));
+    assert.equal(byId.has('fresh'), false);
+    assert.equal(byId.has('gone'), false);
+    assert.equal(byId.has('both'), false);
+    assert.equal(byId.has('edge28'), false);
+    assert.deepEqual(byId.get('idle'), {
+        id: 'idle',
+        model: 'CAM-001',
+        category: 'CCTV',
+        quantity: 35,
+        lastDelivery: '2026-09-20',
+        idleDays: 69,
+        value: 8750,
+        band: 'slow',
+    });
+    assert.equal(byId.get('net').idleDays, 39);
+    assert.equal(byId.get('net').band, 'nonMoving');
+    assert.equal(byId.get('critical').band, 'critical');
+    assert.equal(byId.get('edge29').idleDays, 29);
+    assert.equal(byId.get('edge29').band, 'nonMoving');
+    assert.equal(byId.get('rolled').quantity, 17);
+    assert.equal(byId.get('rolled').lastDelivery, '');
+    assert.equal(byId.get('rolled').idleDays, 88);
+    assert.equal(byId.get('received').lastDelivery, '');
+    assert.equal(byId.get('received').idleDays, 58);
+    assert.equal(byId.get('received').value, 320);
+    assert.equal(byId.get('pendingOnly').idleDays, 331);
+    assert.equal(byId.get('drafted').lastDelivery, '');
+    assert.deepEqual(result.nonMoving.items.slice(0, 2).map((row) => row.id), ['drafted', 'pendingOnly']);
 });

@@ -2,7 +2,9 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { isUtilityTypePaymentNotice } from './utilityReminderTask.js';
 import {
+    collectUnpaidUtilityTypeMonths,
     dueUnpaidBillMonths,
+    entryMonthHasUnpaidBill,
     simCreatedBeforeBillMonth,
     unpaidMonthsSinceSimCreated,
     utilityTypeNoticeId,
@@ -15,6 +17,24 @@ import {
 
 test('a month with no bill is not settled', () => {
     assert.equal(utilityMonthBillIsSettled([]), false);
+});
+
+test('not updated or prepaid months are not taken', () => {
+    assert.equal(entryMonthHasUnpaidBill([]), false);
+    assert.equal(entryMonthHasUnpaidBill([{ status: 'Paid', amount: 50 }]), false);
+    assert.equal(
+        entryMonthHasUnpaidBill([{ status: 'Approved', amount: 50, zohoBillStatus: 'paid' }]),
+        false,
+    );
+    assert.equal(entryMonthHasUnpaidBill([{ status: 'Approved', amount: 50 }]), true);
+    const rows = collectUnpaidUtilityTypeMonths([
+        {
+            utilityType: 'SIM cards',
+            months: ['2026-07', '2026-08', '2026-09'],
+            settledMonths: ['2026-07', '2026-08', '2026-09'],
+        },
+    ]);
+    assert.deepEqual(rows[0].unpaid, []);
 });
 
 test('a saved bill of 0 is not paid, so the reminder stays open', () => {
@@ -62,6 +82,40 @@ test('the 1st notice is one per utility, not one per SIM number', () => {
     );
     assert.match(utilityTypePaymentMessage('SIM cards', '2026-10'), /October/);
     assert.doesNotMatch(utilityTypePaymentMessage('SIM cards', '2026-10'), /050/);
+});
+
+test('a paid later month does not hide an older unpaid month', () => {
+    const rows = collectUnpaidUtilityTypeMonths([
+        {
+            utilityType: 'SIM cards',
+            months: ['2026-07', '2026-08', '2026-09', '2026-10'],
+            settledMonths: new Set(['2026-10']),
+        },
+    ]);
+    assert.deepEqual(rows, [
+        {
+            utilityType: 'SIM cards',
+            unpaid: ['2026-07', '2026-08', '2026-09'],
+            checked: ['2026-07', '2026-08', '2026-09', '2026-10'],
+        },
+    ]);
+});
+
+test('one notice per utility type even when several SIMs share the month', () => {
+    const rows = collectUnpaidUtilityTypeMonths([
+        {
+            utilityType: 'SIM cards',
+            months: ['2026-09'],
+            settledMonths: ['2026-09'],
+        },
+        {
+            utilityType: 'sim cards',
+            months: ['2026-08', '2026-09'],
+            settledMonths: [],
+        },
+    ]);
+    assert.equal(rows.length, 1);
+    assert.deepEqual(rows[0].unpaid, ['2026-08', '2026-09']);
 });
 
 test('a newly added SIM is not checked for months before it existed', () => {

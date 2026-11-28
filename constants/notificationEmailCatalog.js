@@ -553,6 +553,14 @@ export const NOTIFICATION_EMAIL_CATALOG = [
                         emailTypes: ['VehicleAssignmentPhotoReview'],
                     }),
                     row({
+                        key: 'hrm.vehicle.handover_images_missing',
+                        label: 'Vehicle handover images missing',
+                        hint: 'Day 10 handover has no body condition images.',
+                        detail: detail('Vehicle Handover Images Missing'),
+                        types: ['Vehicle Handover Images Missing'],
+                        emailTypes: ['VehicleHandoverImagesMissing'],
+                    }),
+                    row({
                         key: 'hrm.vehicle.handover',
                         label: 'Vehicle handover',
                         hint: 'Company email gets the handover PDF. WhatsApp is used only when there is no company email.',

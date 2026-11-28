@@ -541,6 +541,89 @@ function markFineOverlayClosed(overlay) {
     overlay.status = "Completed";
 }
 
+function personLabel(person) {
+    return [person?.firstName, person?.lastName].filter(Boolean).join(" ").trim();
+}
+
+async function employeesForAssigneeIds(ids) {
+    const wanted = [...new Set(ids.map((id) => String(id || "")).filter((id) => mongoose.Types.ObjectId.isValid(id)))];
+    const map = new Map();
+    if (!wanted.length) return map;
+    const employees = await EmployeeBasic.find({ _id: { $in: wanted } })
+        .select("firstName lastName employeeId")
+        .lean();
+    for (const employee of employees) map.set(String(employee._id), employee);
+    const missing = wanted.filter((id) => !map.has(id));
+    if (!missing.length) return map;
+    const users = await User.find({ _id: { $in: missing } }).select("employeeId").lean();
+    const codes = [...new Set(users.map((user) => String(user.employeeId || "").trim()).filter(Boolean))];
+    const linked = codes.length
+        ? await EmployeeBasic.find({ employeeId: { $in: codes } }).select("firstName lastName employeeId").lean()
+        : [];
+    const byCode = new Map(linked.map((employee) => [String(employee.employeeId), employee]));
+    for (const user of users) {
+        const employee = byCode.get(String(user.employeeId || ""));
+        if (employee) map.set(String(user._id), employee);
+    }
+    return map;
+}
+
+async function creatorNamesById(ids) {
+    const { requesterNamesByActorIds } = await import("../../utils/employeeWorkflowTask.js");
+    return requesterNamesByActorIds(ids);
+}
+
+/**
+ * One workflow task for each fine that is still on the notification bar.
+ * Requester stays the employee who created the fine.
+ * Assignee is the employee the fine is pending with now.
+ * A task closed at Management approval is opened again for Make Payment.
+ */
+async function ensureListedFineWorkflowTasks(rows, overlaysByAction) {
+    const open = (rows || []).filter((row) => row?.action?._id && row?.fine);
+    if (!open.length) return;
+    const { ensureEmployeeWorkflowTask } = await import("../../utils/employeeWorkflowTask.js");
+    const [creators, employees] = await Promise.all([
+        creatorNamesById(open.map((row) => row.fine.createdBy)),
+        employeesForAssigneeIds(open.map((row) => row.action.assignedTo)),
+    ]);
+    for (const { action, fine } of open) {
+        const employee = employees.get(String(action.assignedTo || ""));
+        const requester = creators.get(String(fine.createdBy?._id || fine.createdBy || ""))
+            || personRequesterName(action.requestedByName)
+            || "";
+        if (requester) action.requestedByName = requester;
+        if (!employee) {
+            const overlay = overlaysByAction.get(String(action._id));
+            if (overlay && ["Completed", "Rejected"].includes(String(overlay.status || ""))) {
+                overlay.status = "Pending";
+            }
+            continue;
+        }
+        if (String(action.assignedTo || "") !== String(employee._id)) {
+            action.assignedTo = employee._id;
+            action.assignedToEmpId = employee.employeeId || action.assignedToEmpId || "";
+            await DashboardAction.updateOne(
+                { _id: action._id },
+                { $set: { assignedTo: employee._id, assignedToEmpId: employee.employeeId || "" } },
+            );
+        }
+        const task = await ensureEmployeeWorkflowTask(action, employee, requester, { lockRequester: Boolean(requester) });
+        const overlay = overlaysByAction.get(String(action._id));
+        const name = personLabel(employee);
+        if (overlay) {
+            if (["Completed", "Rejected", "Cancelled"].includes(String(overlay.status || ""))) overlay.status = "Pending";
+            overlay.assignee = employee._id;
+            overlay.assigneeEmpId = employee.employeeId || overlay.assigneeEmpId || "";
+            if (name) overlay.assigneeName = name;
+            if (requester) overlay.requestedByName = requester;
+        } else if (task) {
+            const plain = typeof task.toObject === "function" ? task.toObject() : task;
+            overlaysByAction.set(String(action._id), plain);
+        }
+    }
+}
+
 /**
  * Pending fine tasks follow the fine itself.
  * A finished fine leaves the pending list. An open fine shows the current stage assignee.
@@ -555,7 +638,7 @@ export async function alignOpenFineDashboardRows(actions = [], overlaysByAction 
         if (!pending.length) return actions;
 
         const ids = [...new Set(pending.map((action) => String(action.requestId || "")).filter(isObjectId))];
-        const fineSelect = "fineId fineStatus workflow accountsPaymentPath zohoBillId zohoBillNumber vendorBillStatus";
+        const fineSelect = "fineId fineStatus workflow accountsPaymentPath zohoBillId zohoBillNumber vendorBillStatus createdBy";
         const missingOverlayIds = pending
             .map((action) => action._id)
             .filter((id) => id && !overlaysByAction.has(String(id)));
@@ -597,6 +680,7 @@ export async function alignOpenFineDashboardRows(actions = [], overlaysByAction 
         const closeByStatus = new Map();
         const dismissIds = [];
         const assigneeWrites = [];
+        const openTaskRows = [];
         for (const action of pending) {
             const seed = seedById.get(String(action.requestId || ""));
             const overlay = overlaysByAction.get(String(action._id || ""));
@@ -607,7 +691,10 @@ export async function alignOpenFineDashboardRows(actions = [], overlaysByAction 
                 markFineOverlayClosed(overlay);
                 continue;
             }
-            if (String(seed.fineStatus || "") === "Draft") continue;
+            if (String(seed.fineStatus || "") === "Draft") {
+                openTaskRows.push({ action, fine: seed });
+                continue;
+            }
             const members = byBase.get(fineBaseId(seed.fineId)) || [seed];
             const openFine = members.find((fine) => String(fine._id) === String(action.requestId) && fineStillNeedsInbox(fine))
                 || members.find((fine) => fineStillNeedsInbox(fine));
@@ -623,6 +710,7 @@ export async function alignOpenFineDashboardRows(actions = [], overlaysByAction 
                 markFineOverlayClosed(overlay);
                 continue;
             }
+            openTaskRows.push({ action, fine: openFine });
             const person = fineStagePerson(openFine, hods);
             if (!person?.employeeObjectId || sameFineAssignee(action, person)) continue;
             const previousName = String(overlay?.assigneeName || "").trim();
@@ -717,6 +805,7 @@ export async function alignOpenFineDashboardRows(actions = [], overlaysByAction 
             ));
         }
         if (writes.length) await Promise.all(writes);
+        await ensureListedFineWorkflowTasks(openTaskRows, overlaysByAction);
         return actions;
     } catch (error) {
         console.error("Align fine tasks failed:", error);
@@ -827,7 +916,7 @@ function isGeneralHubRequest(requestType) {
 /** One step, created by the system (expiry and the same kind of reminder). */
 function isSingleStepSystemTask(requestType) {
     const type = String(requestType || "");
-    return /expiry|not renew|card deleted|value missing|asset overdue|profile incomplete|payment reminder|fuel reminder/i.test(type);
+    return /expiry|not renew|card deleted|value missing|asset overdue|profile incomplete|payment reminder|fuel reminder|images missing/i.test(type);
 }
 
 /**

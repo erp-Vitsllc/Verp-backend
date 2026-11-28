@@ -6,7 +6,7 @@ import ItemBrand from '../../models/inventory/ItemBrand.js';
 import { hasPermission } from '../../services/permissionService.js';
 import { isReqUserSystemSuperUser } from '../../utils/systemSuperUser.js';
 import { cleanName, httpError, nameKey, requireName, sendError } from './http.js';
-import { assertLinks, assertModelNumberAvailable, findSameItem, nextItemCode, stockStatus } from './items.js';
+import { assertLinks, assertModelNumberAvailable, findSameItem, nextItemCode, subcategoryStockStatus } from './items.js';
 
 const STOCK_POPULATE = [
     { path: 'categoryId', select: 'name' },
@@ -382,7 +382,7 @@ export async function applyItemStock(req, itemId, body) {
                 statusCode: 200,
                 body: {
                     ...presentStockOption(saved),
-                    status: stockStatus(saved.availableQuantity, saved.subcategoryId?.reservationQuantity),
+                    status: await subcategoryStockStatus(refId(saved.subcategoryId), saved.subcategoryId?.reservationQuantity),
                     created: true,
                     pendingStock: false,
                 },
@@ -394,7 +394,7 @@ export async function applyItemStock(req, itemId, body) {
                 statusCode: 200,
                 body: {
                     ...presentStockOption(saved),
-                    status: stockStatus(saved.availableQuantity, saved.subcategoryId?.reservationQuantity),
+                    status: await subcategoryStockStatus(refId(saved.subcategoryId), saved.subcategoryId?.reservationQuantity),
                     created: false,
                 },
             };
@@ -410,7 +410,7 @@ export async function applyItemStock(req, itemId, body) {
                 statusCode: 200,
                 body: {
                     ...presentStockOption(saved),
-                    status: stockStatus(saved.availableQuantity, saved.subcategoryId?.reservationQuantity),
+                    status: await subcategoryStockStatus(refId(saved.subcategoryId), saved.subcategoryId?.reservationQuantity),
                     created: false,
                 },
             };
@@ -425,7 +425,7 @@ export async function applyItemStock(req, itemId, body) {
             statusCode: 201,
             body: {
                 ...presentStockOption(saved),
-                status: stockStatus(saved.availableQuantity, saved.subcategoryId?.reservationQuantity),
+                status: await subcategoryStockStatus(refId(saved.subcategoryId), saved.subcategoryId?.reservationQuantity),
                 created: true,
             },
         };

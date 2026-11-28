@@ -809,7 +809,18 @@ export async function listVendors(req, res) {
             ];
         }
 
-        const vendorQuery = InventoryVendor.find(filter).sort({ vendorCode: 1 });
+        const vendorSortFields = {
+            code: 'vendorCode',
+            name: 'name',
+            location: 'location',
+            contact: 'primaryContact',
+            status: 'status',
+        };
+        const vendorSortField = vendorSortFields[String(req.query.sort || '').trim()];
+        const vendorSortDir = String(req.query.dir || '').toLowerCase() === 'desc' ? -1 : 1;
+        const vendorQuery = InventoryVendor.find(filter).sort(
+            vendorSortField ? { [vendorSortField]: vendorSortDir } : { vendorCode: 1 },
+        );
         if (limit > 0) vendorQuery.skip((page - 1) * limit).limit(limit);
         const [rows, total, products, brands, contactBrands, terms] = await Promise.all([
             vendorQuery.lean(),
